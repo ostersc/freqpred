@@ -35,7 +35,6 @@ freqpred is to prediction markets what [freqtrade](https://github.com/freqtrade/
 - **No backtesting engine** — LLM training data contamination makes historical backtests unreliable; paper trading is the validation approach
 - **No non-US markets** — Polymarket is geo-blocked for US users; Kalshi is the only regulated platform in scope
 - **No portfolio optimization** — Kelly sizing per market is sufficient; no cross-market correlation modeling
-- **No social/sentiment scraping** — No Twitter/Reddit scraping; signal comes from structured news sources only
 - **No options/spreads** — Binary yes/no positions only in v1
 
 ---
@@ -148,6 +147,7 @@ class Signal:
     direction: str                   # "YES" | "NO" | "SKIP"
     reasoning: str                   # LLM explanation (logged, not traded on)
     sources: list[str]               # URLs used in RAG context
+    social_sentiment_summary: str | None  # pre-summarized social signal (nullable)
     model_used: str                  # e.g. "claude-3-5-sonnet-20241022"
     created_at: datetime
     raw_context: str                 # full retrieved context (for debugging)
@@ -300,14 +300,61 @@ Market question
 └─────────────────┘
 ```
 
-### News Retrieval Sources
+### Retrieval Sources
 
+#### Structured News
 | Source | Use Case | Priority |
 |---|---|---|
 | **Tavily Search API** | Fresh web search per market question | Primary |
 | **NewsAPI** | Structured article archive for less-breaking topics | Secondary |
 | **Kalshi market metadata** | Market description + linked sources from the exchange | Always included |
 | **GDELT** | High-volume event archive, especially for politics | Supplementary |
+
+#### Social & Community Signals
+| Source | Use Case | Notes |
+|---|---|---|
+| **Reddit API** | Subreddit sentiment for relevant communities | Free with OAuth; target subs per category (see below) |
+| **Twitter/X API** | Real-time public sentiment on market topics | Expensive ($100–$5000/mo tier); treat as optional enrichment |
+| **Kalshi market comments** | Crowd reasoning directly on the market in question | Already fetched with market metadata |
+| **Manifold Markets** | Community probability estimates on overlapping questions | Free API; useful as an independent signal cross-check |
+
+**Reddit subreddit targets by category:**
+
+| Category | Subreddits |
+|---|---|
+| US Politics | r/politics, r/PoliticalDiscussion, r/neutralpolitics |
+| Technology | r/technology, r/MachineLearning, r/singularity |
+| Fintech | r/investing, r/wallstreetbets, r/stocks, r/fintech |
+| Prediction markets | r/predictionmarkets, r/Kalshi |
+
+#### Social Signal Handling
+
+Social content is noisier than structured news and requires preprocessing before it reaches the LLM:
+
+```
+Raw posts (Reddit/Twitter)
+         │
+         ▼
+┌─────────────────┐
+│  Aggregator     │  Filter by recency, upvotes/engagement,
+│                 │  deduplicate, remove low-signal content
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Pre-summarizer │  Lightweight LLM pass to compress 50 posts
+│  (cheap model)  │  into a structured sentiment summary:
+│                 │  {sentiment, key_claims, notable_threads}
+└────────┬────────┘
+         │
+         ▼
+  Included as one context block in main LLM analysis
+  (alongside news articles and Kalshi metadata)
+```
+
+This two-pass approach keeps social signal cost-efficient: a cheap summarization pass (haiku/mini) collapses noisy social data before it hits the primary reasoning model. The main LLM sees a structured social summary, not raw posts.
+
+**Social signal weight:** The LLM prompt explicitly instructs the model to treat social sentiment as weak/corroborating evidence, not primary evidence. Crowd sentiment without corroborating news should not be sufficient to cross a trade threshold alone.
 
 ### LLM Configuration
 
@@ -430,6 +477,8 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 
 - [ ] Kalshi API client (market fetch, no trading yet)
 - [ ] Tavily + NewsAPI retrieval layer
+- [ ] Reddit social signal fetcher + pre-summarizer (two-pass LLM)
+- [ ] Twitter/X signal fetcher (optional — gated on API cost decision)
 - [ ] LLM signal pipeline (Claude, structured output)
 - [ ] Signal scoring and logging to Postgres
 - [ ] Basic CLI: `freqpred run --strategy ConservativeDefault --mode signal-only`
@@ -499,6 +548,7 @@ freqpred/
 │   ├── signal/
 │   │   ├── pipeline.py          # orchestrates retrieval + LLM analysis
 │   │   ├── retrieval.py         # Tavily, NewsAPI, GDELT fetchers
+│   │   ├── social.py            # Reddit, Twitter/X, Manifold fetchers + pre-summarizer
 │   │   ├── llm.py               # Claude client, structured output
 │   │   ├── cache.py             # signal result caching
 │   │   └── models.py            # Signal dataclass
