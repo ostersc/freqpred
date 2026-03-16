@@ -15,6 +15,7 @@ dependencies = [
     "voyageai>=0.2.0",
     "praw>=7.7.0",
     "tavily-python>=0.3.0",
+    "newsapi-python>=0.2.7",
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
     "structlog>=24.2.0",

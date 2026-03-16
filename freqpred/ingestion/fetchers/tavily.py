@@ -1,4 +1,85 @@
 """Tavily Search API fetcher."""
 from __future__ import annotations
 
-# TODO: implement Tavily fetcher
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+import structlog
+from tavily import TavilyClient
+
+from freqpred.ingestion.store import RawDocument
+
+log = structlog.get_logger()
+
+
+async def fetch(
+    api_key: str,
+    query: str,
+    max_results: int = 20,
+) -> list[RawDocument]:
+    """Fetch news articles from Tavily Search API.
+
+    Runs the synchronous Tavily client in a thread to avoid blocking.
+    Skips results missing url or body content.
+
+    Args:
+        api_key:     Tavily API key.
+        query:       Search query string.
+        max_results: Maximum number of results to request (default 20).
+
+    Returns:
+        List of RawDocument objects with source_type="news".
+    """
+    client = TavilyClient(api_key=api_key)
+    now = datetime.now(timezone.utc)
+
+    try:
+        response: dict[str, Any] = await asyncio.to_thread(
+            client.search,
+            query=query,
+            max_results=max_results,
+            search_depth="advanced",
+            include_raw_content=True,
+        )
+    except Exception:
+        log.warning("tavily.fetch.error", query=query, exc_info=True)
+        return []
+
+    results = response.get("results", [])
+    docs: list[RawDocument] = []
+
+    for item in results:
+        url = item.get("url", "").strip()
+        body = (item.get("raw_content") or item.get("content") or "").strip()
+        title = (item.get("title") or "").strip()
+        published_str = item.get("published_date")
+
+        if not url or not body:
+            log.warning("tavily.fetch.skip", reason="missing_url_or_body", url=url)
+            continue
+
+        try:
+            published_at = (
+                datetime.fromisoformat(published_str) if published_str else now
+            )
+            if published_at.tzinfo is None:
+                published_at = published_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            published_at = now
+
+        docs.append(
+            RawDocument(
+                source_url=url,
+                title=title,
+                body=body,
+                source_type="news",
+                source_name="Tavily",
+                category="",
+                tags=[],
+                published_at=published_at,
+                fetched_at=now,
+            )
+        )
+
+    return docs
