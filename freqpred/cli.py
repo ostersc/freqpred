@@ -1,6 +1,8 @@
 """freqpred CLI entry point."""
 from __future__ import annotations
 
+import asyncio
+
 import click
 
 from freqpred.config import load_config
@@ -38,10 +40,65 @@ def markets() -> None:
 
 
 @markets.command(name="list")
+@click.option(
+    "--category",
+    default=None,
+    help="Filter by category (e.g. politics, technology).",
+)
+@click.option(
+    "--no-db",
+    is_flag=True,
+    default=False,
+    help="Skip writing results to the database.",
+)
 @click.pass_context
-def markets_list(ctx: click.Context) -> None:
-    """List active Kalshi markets."""
-    click.echo("(Not yet implemented — scaffold only)")
+def markets_list(ctx: click.Context, category: str | None, no_db: bool) -> None:
+    """Fetch active Kalshi markets and write them to the database."""
+    config = ctx.obj["config"]
+    asyncio.run(_markets_list(config, category=category, skip_db=no_db))
+
+
+async def _markets_list(config: object, category: str | None, skip_db: bool) -> None:
+    from freqpred.db import make_engine, make_session_factory
+    from freqpred.markets.kalshi import KalshiClient
+    from freqpred.markets.repository import upsert_markets
+
+    async with KalshiClient(
+        api_key=config.kalshi.api_key,
+        base_url=config.kalshi.base_url,
+        private_key_path=config.kalshi.private_key_path,
+    ) as client:
+        click.echo(
+            f"Fetching markets from Kalshi"
+            + (f" [category={category}]" if category else "")
+            + " ..."
+        )
+        market_list = await client.list_markets(category=category)
+
+    if not market_list:
+        click.echo("No markets found.")
+        return
+
+    # Write to DB
+    if not skip_db and config.database.url:
+        engine = make_engine(config.database.url)
+        session_factory = make_session_factory(engine)
+        async with session_factory() as session:
+            written = await upsert_markets(session, market_list)
+        await engine.dispose()
+        click.echo(f"Wrote {written} market(s) to database.")
+
+    # Print table to stdout
+    header = f"{'TICKER':<30} {'CATEGORY':<14} {'BID':>6} {'ASK':>6} {'MID':>6}  QUESTION"
+    click.echo(header)
+    click.echo("-" * min(120, len(header) + 40))
+    for m in market_list:
+        question_preview = m.question[:60] + "…" if len(m.question) > 60 else m.question
+        click.echo(
+            f"{m.id:<30} {m.category:<14} "
+            f"{m.yes_bid:>6.3f} {m.yes_ask:>6.3f} {m.mid_price:>6.3f}  {question_preview}"
+        )
+    click.echo(f"\nTotal: {len(market_list)} market(s)")
 
 
 @main.group()

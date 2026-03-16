@@ -1,10 +1,14 @@
-"""Market, Order, and Position dataclasses and SQLAlchemy ORM models."""
+"""Market, Order, and Position dataclasses and SQLAlchemy ORM models.
+
+Also contains Pydantic schemas for validating raw Kalshi API responses.
+"""
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import (
     JSON,
     VARCHAR,
@@ -172,6 +176,86 @@ class Market:
     current_signal_id: str | None = None
 
     metadata: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas — Kalshi API response validation
+# ---------------------------------------------------------------------------
+
+
+class KalshiMarketSchema(BaseModel):
+    """Pydantic schema for a single market object from the Kalshi REST API.
+
+    Used to validate raw API payloads before converting to the Market dataclass.
+    Dollar-denominated price fields use Kalshi's fixed-point string format
+    (e.g. "0.5600"). The validator normalises them to float.
+
+    The Kalshi v2 API uses ``_fp`` (fixed-point) suffix for volume/OI fields.
+    ``populate_by_name=True`` lets tests pass plain field names too.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    ticker: str
+    event_ticker: str = ""
+    title: str = ""
+    subtitle: str = ""
+    status: str = ""
+    close_time: str  # ISO-8601 string; converted downstream
+    yes_bid_dollars: str = "0.0000"
+    yes_ask_dollars: str = "0.0000"
+    no_bid_dollars: str = "0.0000"
+    no_ask_dollars: str = "0.0000"
+    volume_24h: float = Field(default=0.0, alias="volume_24h_fp")
+    open_interest: float = Field(default=0.0, alias="open_interest_fp")
+
+    @field_validator("yes_bid_dollars", "yes_ask_dollars", "no_bid_dollars", "no_ask_dollars", mode="before")
+    @classmethod
+    def coerce_dollar_string(cls, v: object) -> str:
+        """Accept numeric values as well as strings."""
+        if v is None:
+            return "0.0000"
+        return str(v)
+
+    @property
+    def yes_bid(self) -> float:
+        return float(self.yes_bid_dollars)
+
+    @property
+    def yes_ask(self) -> float:
+        return float(self.yes_ask_dollars)
+
+    @property
+    def mid_price(self) -> float:
+        b, a = self.yes_bid, self.yes_ask
+        return (b + a) / 2.0 if (b + a) > 0 else 0.0
+
+
+class KalshiMarketsResponse(BaseModel):
+    """Pydantic schema for GET /markets response envelope."""
+
+    markets: list[KalshiMarketSchema] = Field(default_factory=list)
+    cursor: str = ""
+
+
+class KalshiSingleMarketResponse(BaseModel):
+    """Pydantic schema for GET /markets/{ticker} response envelope."""
+
+    market: KalshiMarketSchema
+
+
+class KalshiSeriesSchema(BaseModel):
+    """Pydantic schema for a single series object from GET /series."""
+
+    ticker: str
+    category: str = ""
+    title: str = ""
+
+
+class KalshiSeriesResponse(BaseModel):
+    """Pydantic schema for GET /series response envelope."""
+
+    series: list[KalshiSeriesSchema] = Field(default_factory=list)
 
 
 @dataclass

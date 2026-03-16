@@ -12,13 +12,25 @@ class IMarketClient(ABC):
     """Abstract interface over a prediction market exchange (e.g. Kalshi)."""
 
     @abstractmethod
-    async def get_active_markets(self) -> list[Market]:
-        """Fetch all currently active markets."""
+    async def list_markets(self, category: str | None = None) -> list[Market]:
+        """Fetch active markets, optionally filtered by category."""
         ...
+
+    async def get_active_markets(self) -> list[Market]:
+        """Fetch all currently active markets. Delegates to list_markets()."""
+        return await self.list_markets()
 
     @abstractmethod
     async def get_market(self, market_id: str) -> Market:
         """Fetch a single market by ID."""
+        ...
+
+    @abstractmethod
+    async def get_orderbook(self, market_id: str) -> dict[str, float]:
+        """Fetch best bid/ask for a market.
+
+        Returns a dict with keys ``yes_bid`` and ``yes_ask`` (floats in [0, 1]).
+        """
         ...
 
     @abstractmethod

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 from typing import Any
 
 import yaml
@@ -26,7 +28,8 @@ class RedisConfig(BaseModel):
 
 class KalshiConfig(BaseModel):
     api_key: str = Field(default="")
-    base_url: str = Field(default="https://trading-api.kalshi.com/trade-api/v2")
+    private_key_path: str = Field(default="")
+    base_url: str = Field(default="https://api.elections.kalshi.com/trade-api/v2")
     polling_interval_seconds: int = Field(default=300)
 
 
@@ -119,6 +122,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "DATABASE_URL": ("database", "url"),
     "REDIS_URL": ("redis", "url"),
     "KALSHI_API_KEY": ("kalshi", "api_key"),
+    "KALSHI_PRIVATE_KEY_PATH": ("kalshi", "private_key_path"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
     "VOYAGE_API_KEY": ("voyage", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
@@ -144,6 +148,9 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
 def load_config(config_path: Path | None = None) -> Settings:
     """Load config from YAML file, then apply env var overrides.
 
+    Loads .env from the current working directory (or any parent) before
+    applying env var overrides, so local .env files work out of the box.
+
     Args:
         config_path: Path to config YAML. Defaults to config/config.yaml
                      relative to the current working directory.
@@ -151,6 +158,8 @@ def load_config(config_path: Path | None = None) -> Settings:
     Returns:
         Validated Settings instance.
     """
+    load_dotenv()  # no-op if no .env present
+
     if config_path is None:
         config_path = Path("config/config.yaml")
 

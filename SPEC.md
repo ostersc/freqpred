@@ -108,12 +108,65 @@ Other categories (macro/Fed, geopolitics, sports) are supported by the architect
 | Component | Responsibility |
 |---|---|
 | **Market Watcher** | Polls Kalshi for active markets, filters by category, enqueues for analysis |
+| **Position Watcher** | Streams live price updates via Kalshi WebSocket for markets with open positions |
 | **Signal Pipeline** | Retrieves news context, runs LLM analysis, returns probability estimate |
 | **Strategy Engine** | Applies `IPredictionStrategy` plugins to signal output, decides trade/size/skip |
 | **IMarketClient** | Abstract interface over Kalshi (and future platforms); handles orders, positions, balance |
 | **Order Manager** | Executes paper or live trades; enforces hard risk caps before any order |
 | **Ledger** | Immutable trade log; records every signal, position, and resolution outcome |
 | **Dashboard** | Web UI for monitoring; Telegram/Discord for push alerts |
+
+---
+
+## 6a. Position Watcher — WebSocket Price Tracking
+
+Markets with open positions need tighter price monitoring than the 5-minute REST poll:
+- A price move of ±5 cents on a held position can materially change the exit decision.
+- Resolution events (market settled, determined) need to be caught quickly so P&L can be recorded.
+
+The **Position Watcher** maintains a persistent Kalshi WebSocket connection and subscribes to the `ticker` channel for every market where freqpred holds at least one open position (`status = "open"`).
+
+### WebSocket channels used
+
+| Channel | Payload | Action |
+|---|---|---|
+| `ticker` | Real-time best bid/ask update | Update `MarketRow` price fields + `price_updated_at`; emit `price_moved` signal trigger if Δmid ≥ threshold |
+| `market_lifecycle` | Status change (active → determined → settled) | Mark position for resolution; trigger P&L calculation |
+
+### Connection lifecycle
+
+```
+On startup / position opened:
+  - Build subscription set: {market_id for position in open_positions}
+  - Connect to wss://trading-api.kalshi.com/trade-api/v2/ws/v2
+  - Authenticate (same RSA-PSS headers as REST, passed in connect message)
+  - Subscribe to ticker + market_lifecycle for each market in the set
+
+While connected:
+  - On ticker update: upsert price in DB; emit price_moved event if threshold crossed
+  - On market_lifecycle → settled: resolve position, record P&L, unsubscribe ticker
+
+On position closed / market resolved:
+  - Remove market from subscription set
+
+On disconnect:
+  - Exponential backoff reconnect (1s → 2s → 4s → … → 60s max)
+  - Re-subscribe to current open-position set on reconnect
+```
+
+### Relationship to REST polling
+
+REST polling (Market Watcher, every 5 min) continues for **all** markets regardless of whether WebSocket is active. This provides a fallback: if the WebSocket drops and reconnect is in progress, the REST poll ensures prices don't go stale beyond the polling interval × 3 staleness threshold.
+
+Markets **without** open positions are REST-only. The WebSocket subscription set is strictly scoped to open positions to minimise connection overhead.
+
+### Implementation notes
+
+- Lives in `freqpred/markets/watcher.py` alongside the REST polling loop, as an independent async task.
+- Shares the same `AsyncSession` factory and `MarketRow` upsert logic as the REST watcher.
+- Auth token for the WebSocket handshake uses the same RSA-PSS signing as REST (`KalshiClient._make_auth_headers`).
+- Requires `websockets` or `httpx-ws` dependency (to be added when implemented — Phase 3).
+- In paper mode, the WebSocket is still useful for accurate price tracking even though no real orders are submitted.
 
 ---
 
@@ -153,6 +206,7 @@ class Market:
 - **Metadata** (question, `close_time`, category): refresh once on creation, then daily. These rarely change; `metadata_fetched_at` tracks staleness.
 - **`price_updated_at`** is set only when price actually changes, not on every poll. This lets us detect when a market has gone stale (no price movement in 24h+ = potentially illiquid, flag it).
 - A market is considered **stale** and skipped for signal analysis if `last_fetched_at` is older than the configured polling interval × 3.
+- **Markets with open positions** bypass the polling interval and receive real-time price updates via the Kalshi WebSocket `ticker` channel (see §6a below). `last_fetched_at` and `price_updated_at` are still updated on each WebSocket tick so the DB stays current.
 
 ### Signal
 
@@ -741,6 +795,7 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 
 - [ ] Kalshi order execution (real API)
 - [ ] Hard cap enforcement in Order Manager
+- [ ] Position Watcher: Kalshi WebSocket `ticker` + `market_lifecycle` subscription for markets with open positions (see §6a)
 - [ ] Production AWS deployment (ECS, RDS, Secrets Manager)
 - [ ] GitHub Actions CI/CD pipeline
 - [ ] Full dashboard (all pages)

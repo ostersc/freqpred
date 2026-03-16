@@ -13,7 +13,10 @@ redis:
 kalshi:
   # Overridden by KALSHI_API_KEY env var
   api_key: ""
-  base_url: "https://trading-api.kalshi.com/trade-api/v2"
+  # Path to your RSA private key (.key file downloaded from Kalshi account settings)
+  # Overridden by KALSHI_PRIVATE_KEY_PATH env var
+  private_key_path: ""
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
   polling_interval_seconds: 300
 
 anthropic:
