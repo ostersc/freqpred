@@ -1,0 +1,74 @@
+# freqpred configuration template
+# Copy to config/config.yaml and fill in values.
+# Secrets (API keys) must come from environment variables — never put them here.
+
+database:
+  # Overridden by DATABASE_URL env var
+  url: ""
+
+redis:
+  # Overridden by REDIS_URL env var
+  url: ""
+
+kalshi:
+  # Overridden by KALSHI_API_KEY env var
+  api_key: ""
+  base_url: "https://trading-api.kalshi.com/trade-api/v2"
+  polling_interval_seconds: 300
+
+anthropic:
+  # Overridden by ANTHROPIC_API_KEY env var
+  api_key: ""
+  primary_model: "claude-sonnet-4-6"
+  cheap_model: "claude-haiku-4-5-20251001"
+
+voyage:
+  # Overridden by VOYAGE_API_KEY env var
+  api_key: ""
+  model: "voyage-3"
+  embedding_dim: 1024
+
+tavily:
+  # Overridden by TAVILY_API_KEY env var
+  api_key: ""
+
+newsapi:
+  # Overridden by NEWSAPI_KEY env var
+  api_key: ""
+
+reddit:
+  # Overridden by REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET env vars
+  client_id: ""
+  client_secret: ""
+  user_agent: "freqpred/0.1"
+
+ingestion:
+  schedule_interval_seconds: 1800  # 30 minutes
+  categories:
+    - politics
+    - technology
+
+signal:
+  top_k_documents: 10
+  staleness_multiplier: 3  # polling_interval × 3 before market is considered stale
+
+risk:
+  max_position_pct: 0.05         # 5% of bankroll per market
+  max_daily_loss_pct: 0.15       # 15% daily loss circuit breaker
+  max_total_exposure_pct: 0.40   # 40% max simultaneous exposure
+  min_edge_floor: 0.10           # absolute minimum edge to place any trade
+  max_open_positions: 20
+  max_daily_llm_spend_usd: 10.0  # LLM budget circuit breaker
+
+trading:
+  mode: "paper"  # "paper" | "live"  (live also requires LIVE_TRADING_ENABLED=true)
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8000
+
+alerts:
+  # Overridden by TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / DISCORD_WEBHOOK_URL env vars
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  discord_webhook_url: ""
