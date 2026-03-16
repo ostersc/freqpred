@@ -163,6 +163,27 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 
 ---
 
+## Definition of done
+
+Before declaring any task complete, verify every acceptance criterion listed in the GitHub issue was actually met — not just that the code was written.
+
+**For any task that touches the database or migrations:**
+- Run `docker-compose up -d db` if not already running
+- Run migration verification against `freqpred_test` (never `freqpred`) so local dev data is not destroyed:
+  ```bash
+  DATABASE_URL="postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test" uv run alembic upgrade head
+  DATABASE_URL="postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test" uv run alembic downgrade base
+  ```
+- Run `uv run pytest tests/unit/` and confirm all tests pass
+
+**For any task that adds code:**
+- Run `uv run pytest tests/unit/` and confirm all tests pass
+- If the task has integration tests, run `uv run pytest tests/integration/`
+
+**Never say a task is done based on code compiling or unit tests alone when the acceptance criteria include runtime behavior** (e.g. "runs cleanly against a fresh DB").
+
+---
+
 ## Code style
 
 - Type hints everywhere — no untyped functions
