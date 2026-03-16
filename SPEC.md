@@ -198,21 +198,43 @@ class Signal:
 @dataclass
 class Position:
     id: str
-    market_id: str
-    signal_id: str
+    market_id: str                   # FK → Market
+    signal_id: str                   # FK → Signal that triggered this position
+
+    # --- Strategy attribution ---
+    strategy_name: str               # e.g. "PoliticsEdgeStrategy"
+    strategy_version: str            # e.g. "1.2.0" — for P&L attribution across versions
+
+    # --- Signal snapshot at time of trade ---
+    # These are snapshotted from the Signal at entry time because the signal
+    # may be superseded by a newer one before the market resolves.
+    signal_confidence: float         # confidence score that drove the trade decision
+    signal_edge: float               # edge at time of trade
+    signal_estimated_prob: float     # LLM probability estimate at time of trade
+
+    # --- Order details ---
     direction: str                   # "YES" | "NO"
     contracts: int
     entry_price: float
     entry_time: datetime
     mode: str                        # "paper" | "live"
 
-    # Filled after resolution
+    # --- Lifecycle ---
+    status: str                      # "pending" | "open" | "closed" | "cancelled"
+    # pending:   order submitted, awaiting fill confirmation from Kalshi
+    # open:      position filled and active
+    # closed:    market resolved or manually exited
+    # cancelled: order submitted but cancelled before fill
+
+    # --- Filled after resolution ---
     exit_price: float | None
     exit_time: datetime | None
     resolution: int | None           # 1 = YES won, 0 = NO won
     pnl: float | None
     pnl_pct: float | None
 ```
+
+**On snapshotting signal fields into Position:** The signal that triggered a trade may be superseded before the market resolves — a `price_moved` trigger could create a new Signal with a different estimate. Snapshotting `confidence`, `edge`, and `estimated_prob` at entry time means the Position record is a self-contained record of *why* the trade was placed, independent of subsequent re-evaluations. This is essential for honest P&L attribution: did the trades placed at high confidence actually outperform low confidence trades?
 
 ### StrategyConfig
 ```python
@@ -228,6 +250,72 @@ class StrategyConfig:
     max_days_to_close: int           # don't trade markets closing too soon/late
     min_days_to_close: int
 ```
+
+### LLMQuery (Audit Log)
+
+Every call to any LLM is recorded here — both the primary reasoning model and the cheap pre-summarizer pass. This serves two purposes: cost tracking and full auditability of every decision the system made.
+
+```python
+@dataclass
+class LLMQuery:
+    id: int                          # auto-increment PK
+
+    # --- When & why ---
+    timestamp: datetime              # when the query was made
+    strategy: str                    # which strategy triggered it (or "system" for non-strategy calls)
+    query_type: str                  # see query types below
+    market_id: str | None            # market being analyzed (null for non-market queries)
+    signal_id: str | None            # FK → Signal if this query produced one
+
+    # --- Full request/response (immutable audit record) ---
+    model_used: str                  # e.g. "claude-3-5-sonnet-20241022"
+    prompt_version: str              # versioned prompt template identifier
+    prompt: str                      # full prompt sent to LLM
+    response: str                    # full raw LLM response
+
+    # --- Cost ---
+    tokens_input: int                # input (prompt) token count
+    tokens_output: int               # output (completion) token count
+    tokens_total: int                # tokens_input + tokens_output
+    cost_usd: float                  # dollar cost of this query
+
+    # --- Extracted outputs ---
+    confidence_extracted: float | None   # confidence score parsed from response
+    decision_extracted: str | None       # "BUY" | "SELL" | "SKIP" parsed from response
+    latency_ms: int                      # wall-clock response time in milliseconds
+
+    # --- Error handling ---
+    success: bool                    # False if LLM call failed or response was unparseable
+    error_message: str | None        # populated if success=False
+```
+
+**Query types:**
+
+| `query_type` | Description | Model tier |
+|---|---|---|
+| `market_analysis` | Primary signal generation for a market | Primary (Sonnet) |
+| `social_summarization` | Pre-summarizer pass on raw Reddit/Twitter posts | Cheap (Haiku) |
+| `movement_prediction` | Optional: predict short-term price movement | Primary (Sonnet) |
+| `daily_digest` | Generate natural language daily summary for alerts | Cheap (Haiku) |
+
+**Cost tracking views (to be implemented as DB views or dashboard queries):**
+
+```sql
+-- Daily LLM spend
+SELECT DATE(timestamp), SUM(cost_usd), COUNT(*) FROM llm_queries GROUP BY DATE(timestamp);
+
+-- Cost by query type
+SELECT query_type, SUM(cost_usd), AVG(cost_usd), COUNT(*) FROM llm_queries GROUP BY query_type;
+
+-- Cost by strategy
+SELECT strategy, SUM(cost_usd) FROM llm_queries GROUP BY strategy;
+
+-- Most expensive markets (to identify if certain categories cost more to analyze)
+SELECT market_id, SUM(cost_usd) FROM llm_queries WHERE market_id IS NOT NULL
+GROUP BY market_id ORDER BY SUM(cost_usd) DESC LIMIT 20;
+```
+
+A **cost budget circuit breaker** enforces a configurable daily LLM spend cap (default: $10/day). If crossed, the signal pipeline halts and alerts via Telegram before incurring further cost.
 
 ---
 
@@ -492,11 +580,12 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 **Pages:**
 
 1. **Signal Feed** — live stream of new signals with market question, our probability, market price, edge, direction
-2. **Open Positions** — current paper/live positions with unrealized P&L
-3. **Ledger** — resolved positions, actual P&L, running totals
+2. **Open Positions** — current paper/live positions with unrealized P&L, filterable by strategy
+3. **Ledger** — resolved positions, actual P&L, running totals, filterable by strategy/confidence tier
 4. **Calibration** — scatter plot of estimated probability vs. resolution rate; Brier score trend
-5. **Strategy Config** — view/edit active strategy parameters (no code changes needed for threshold tuning)
-6. **System Health** — API status, error rates, circuit breaker state
+5. **LLM Cost & Audit** — daily/weekly spend charts, cost by query type and strategy, query log with full prompt/response drilldown, budget burn rate vs. daily cap
+6. **Strategy Config** — view/edit active strategy parameters (no code changes needed for threshold tuning)
+7. **System Health** — API status, error rates, circuit breaker state, LLM budget circuit breaker status
 
 ### Telegram / Discord Alerts
 
@@ -520,6 +609,8 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 - [ ] Reddit social signal fetcher + pre-summarizer (two-pass LLM)
 - [ ] Twitter/X signal fetcher (optional — gated on API cost decision)
 - [ ] LLM signal pipeline (Claude, structured output)
+- [ ] LLM audit logging (LLMQuery table — every call logged with cost)
+- [ ] LLM budget circuit breaker (configurable daily spend cap)
 - [ ] Signal scoring and logging to Postgres
 - [ ] Basic CLI: `freqpred run --strategy ConservativeDefault --mode signal-only`
 - [ ] Docker + local dev setup
@@ -604,6 +695,10 @@ freqpred/
 │   │   ├── order_manager.py     # paper + live order execution
 │   │   ├── risk.py              # hard cap enforcement, circuit breakers
 │   │   └── ledger.py            # position tracking, P&L calc
+│   ├── llm/
+│   │   ├── client.py            # LLM API wrapper (Claude)
+│   │   ├── audit.py             # LLMQuery logging, cost tracking, budget circuit breaker
+│   │   └── models.py            # LLMQuery dataclass
 │   ├── metrics/
 │   │   ├── calibration.py       # Brier score, calibration curve
 │   │   └── reporting.py         # daily digest generation
