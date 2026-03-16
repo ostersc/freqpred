@@ -123,35 +123,75 @@ Other categories (macro/Fed, geopolitics, sports) are supported by the architect
 ```python
 @dataclass
 class Market:
+    # --- Identity (never changes after creation) ---
     id: str                          # Kalshi market ID
     platform: str                    # "kalshi"
     question: str                    # "Will X happen by Y?"
     category: str                    # "politics" | "technology" | ...
     close_time: datetime             # when market resolves
+
+    # --- Price snapshot (changes frequently) ---
     yes_bid: float                   # current best bid for YES (0.0-1.0)
     yes_ask: float                   # current best ask for YES (0.0-1.0)
     mid_price: float                 # (bid + ask) / 2
     volume_24h: float                # liquidity proxy
     open_interest: float
+
+    # --- Cache control ---
+    last_fetched_at: datetime        # last time we polled Kalshi for this market
+    price_updated_at: datetime       # last time price data actually changed
+    metadata_fetched_at: datetime    # last time we refreshed metadata (question, close_time, etc.)
+
+    # --- Signal linkage ---
+    current_signal_id: str | None    # FK → latest Signal for this market
+
     metadata: dict                   # raw platform data
 ```
 
+**Cache refresh rules:**
+- **Price data** (`yes_bid`, `yes_ask`, `mid_price`, `volume_24h`): refresh every polling interval (default: 5 minutes). A market watcher loop updates these fields and sets `last_fetched_at`.
+- **Metadata** (question, `close_time`, category): refresh once on creation, then daily. These rarely change; `metadata_fetched_at` tracks staleness.
+- **`price_updated_at`** is set only when price actually changes, not on every poll. This lets us detect when a market has gone stale (no price movement in 24h+ = potentially illiquid, flag it).
+- A market is considered **stale** and skipped for signal analysis if `last_fetched_at` is older than the configured polling interval × 3.
+
 ### Signal
+
+**Signals are immutable and append-only.** Every re-evaluation of a market creates a new Signal record — existing signals are never updated. `Market.current_signal_id` is updated to point to the latest. This preserves the full history of how estimates evolved as evidence accumulated, which is valuable for calibration analysis (e.g., do early signals or late signals predict resolution better?).
+
 ```python
 @dataclass
 class Signal:
-    market_id: str
+    id: str
+    market_id: str                   # FK → Market
+
+    # --- Estimate ---
     estimated_probability: float     # LLM's estimate (0.0-1.0)
     confidence: float                # LLM self-reported confidence (0.0-1.0)
-    edge: float                      # estimated_probability - market.mid_price
+    edge: float                      # estimated_probability - market.mid_price at signal time
+    market_mid_at_signal: float      # snapshot of market price when signal was created
     direction: str                   # "YES" | "NO" | "SKIP"
+
+    # --- Context ---
     reasoning: str                   # LLM explanation (logged, not traded on)
     sources: list[str]               # URLs used in RAG context
     social_sentiment_summary: str | None  # pre-summarized social signal (nullable)
+    retrieval_hash: str              # hash of retrieved context — same hash = no new evidence
+
+    # --- Provenance ---
     model_used: str                  # e.g. "claude-3-5-sonnet-20241022"
+    prompt_version: str              # e.g. "politics-v2" — for tracking prompt changes
+    trigger: str                     # "scheduled" | "price_moved" | "new_evidence" | "manual"
     created_at: datetime
     raw_context: str                 # full retrieved context (for debugging)
 ```
+
+**Signal refresh triggers** (any of these causes a new Signal to be created):
+1. **Scheduled** — re-analyze every N hours (configurable per strategy, e.g. every 12h for markets closing in >7 days, every 2h for markets closing in <48h)
+2. **Price moved** — market mid-price shifted by more than a configurable threshold (e.g. ±5 cents) since the last signal; our edge may have changed materially
+3. **New evidence detected** — retrieval hash differs from the last signal's hash, meaning new articles/posts were found
+4. **Manual** — operator triggers re-analysis via CLI or dashboard
+
+**What does NOT trigger a new signal:** a scheduled poll that returns the same retrieval hash as the last signal. If nothing new was retrieved, the LLM would produce the same output — no point calling the API.
 
 ### Position
 ```python
@@ -544,6 +584,7 @@ freqpred/
 │   ├── markets/
 │   │   ├── base.py              # IMarketClient abstract interface
 │   │   ├── kalshi.py            # Kalshi adapter
+│   │   ├── watcher.py           # polling loop: price refresh, staleness detection
 │   │   └── models.py            # Market, Order, Position dataclasses
 │   ├── signal/
 │   │   ├── pipeline.py          # orchestrates retrieval + LLM analysis
