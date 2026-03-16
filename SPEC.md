@@ -175,7 +175,7 @@ class Signal:
     reasoning: str                   # LLM explanation (logged, not traded on)
     sources: list[str]               # URLs used in RAG context
     social_sentiment_summary: str | None  # pre-summarized social signal (nullable)
-    retrieval_hash: str              # hash of retrieved context — same hash = no new evidence
+    retrieval_hash: str              # hash of retrieved Document IDs — same hash = no new evidence in store
 
     # --- Provenance ---
     model_used: str                  # e.g. "claude-3-5-sonnet-20241022"
@@ -249,6 +249,57 @@ class StrategyConfig:
     min_volume_24h: float            # liquidity filter
     max_days_to_close: int           # don't trade markets closing too soon/late
     min_days_to_close: int
+```
+
+### Document (RAG Store)
+
+Every fetched news article and social post is stored here. Documents are the persistent foundation of the RAG system — fetched once, reused across many market analyses. A document fetched while analyzing one market may be highly relevant to another market in the same category days later.
+
+```python
+@dataclass
+class Document:
+    id: str                          # UUID, generated on insert
+
+    # --- Identity & deduplication ---
+    source_url: str                  # canonical URL (unique — prevents duplicate storage)
+    content_hash: str                # hash of cleaned content body — detect if article updated
+
+    # --- Content ---
+    title: str
+    body: str                        # cleaned full text (HTML stripped)
+    summary: str | None              # LLM-generated summary (populated lazily on first use)
+    source_type: str                 # "news" | "reddit" | "twitter" | "kalshi_comment" | "manifold"
+    source_name: str                 # e.g. "Reuters", "r/politics", "Kalshi"
+
+    # --- Classification ---
+    category: str                    # "politics" | "technology" | "fintech" | ...
+    tags: list[str]                  # extracted keywords/entities for coarse filtering
+
+    # --- Temporal ---
+    published_at: datetime           # when the article/post was published (source timestamp)
+    fetched_at: datetime             # when we first stored it
+
+    # --- Vector search ---
+    embedding: list[float]           # dense vector (pgvector) — generated on insert
+    embedding_model: str             # e.g. "voyage-3" — track model version for re-embedding
+```
+
+**Deduplication:** Documents are inserted with `ON CONFLICT (source_url) DO UPDATE` — if a URL is fetched again, we update `content_hash` and `fetched_at` only if the content changed. The embedding is regenerated only when content changes.
+
+**Embedding model:** [Voyage AI](https://www.voyageai.com/) (`voyage-3`) — Anthropic's recommended embedding partner, purpose-built for retrieval tasks. Stored via the **pgvector** extension on RDS Postgres. No separate vector database needed.
+
+### DocumentMarketLink (join table)
+
+Tracks which documents were retrieved for which market analysis, enabling retroactive analysis of what evidence was available when a signal was created.
+
+```python
+@dataclass
+class DocumentMarketLink:
+    document_id: str                 # FK → Document
+    market_id: str                   # FK → Market
+    signal_id: str | None            # FK → Signal this retrieval contributed to
+    relevance_score: float           # cosine similarity score from vector search
+    linked_at: datetime
 ```
 
 ### LLMQuery (Audit Log)
@@ -399,24 +450,67 @@ class IPredictionStrategy(ABC):
 
 ## 9. LLM Signal Pipeline
 
-### Flow
+The pipeline has two distinct phases that run on different schedules: **ingestion** (continuous, cheap) and **analysis** (triggered, expensive).
+
+### Phase 1: Document Ingestion (continuous background job)
+
+Runs on a schedule independent of signal generation. Fetches new content and stores it — no LLM involved except the cheap social pre-summarizer.
 
 ```
-Market question
+Fetch schedule fires (per category, e.g. every 30 min)
       │
       ▼
 ┌─────────────────┐
-│  Context        │  Retrieve relevant news articles, Kalshi market
-│  Retrieval      │  description, recent resolution history for
-│  (RAG)          │  similar markets
+│  Fetch          │  Query Tavily, NewsAPI, Reddit, etc.
+│  Sources        │  for category keywords + active market questions
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  LLM Analysis   │  Structured prompt asking for:
-│  (Claude)       │  - Probability estimate (0.0-1.0)
+│  Dedup &        │  Check source_url against Document store.
+│  Store          │  Skip if URL known + content_hash unchanged.
+│                 │  New/changed docs: clean, generate embedding
+│                 │  (Voyage AI), insert into Document store.
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Social         │  For Reddit/Twitter only: cheap LLM pass
+│  Pre-summarizer │  (Haiku) compresses raw posts into structured
+│  (if social)    │  sentiment summary before storing.
+└─────────────────┘
+```
+
+### Phase 2: Signal Analysis (triggered)
+
+Runs when a signal refresh trigger fires (scheduled, price moved, new evidence, manual). This is where the expensive LLM call happens.
+
+```
+Signal trigger fires for a market
+      │
+      ▼
+┌─────────────────┐
+│  Vector Search  │  Embed the market question (Voyage AI).
+│  (RAG retrieval)│  Semantic search against Document store:
+│                 │  - Filter: category match + published_at recency
+│                 │  - Rank: cosine similarity to market question
+│                 │  - Select: top-K documents (default K=10)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Retrieval Hash │  Hash the IDs of top-K retrieved documents.
+│  Check          │  If hash == last Signal's retrieval_hash:
+│                 │  no new evidence → skip, no LLM call needed.
+└────────┬────────┘
+         │ (hash changed — new evidence exists)
+         ▼
+┌─────────────────┐
+│  LLM Analysis   │  Structured prompt with retrieved docs as context.
+│  (Claude Sonnet)│  Asks for:
+│                 │  - Probability estimate (0.0-1.0)
 │                 │  - Confidence score (0.0-1.0)
-│                 │  - Key supporting evidence
+│                 │  - Key supporting evidence (with doc citations)
 │                 │  - Key counter-evidence
 │                 │  - Reasoning summary
 └────────┬────────┘
@@ -424,7 +518,8 @@ Market question
          ▼
 ┌─────────────────┐
 │  Signal         │  Validate output, compute edge vs market price,
-│  Validation     │  cache result, emit Signal object
+│  Creation       │  write Signal + DocumentMarketLinks, update
+│                 │  Market.current_signal_id.
 └─────────────────┘
 ```
 
@@ -548,8 +643,8 @@ Where `config.kelly_multiplier` defaults to `0.25` (quarter-Kelly). Full Kelly i
 | Service | Use |
 |---|---|
 | **ECS Fargate** | Runs the main freqpred service (containerized, always-on) |
-| **RDS (Postgres)** | Ledger, positions, signals, market history |
-| **ElastiCache (Redis)** | Signal cache, rate limiting |
+| **RDS (Postgres + pgvector)** | Ledger, positions, signals, market history, Document store + embeddings |
+| **ElastiCache (Redis)** | Signal cache, rate limiting, ingestion job dedup |
 | **CloudWatch** | Logs, metrics, alarms |
 | **Secrets Manager** | API keys (Kalshi, LLM providers, news APIs) |
 | **ECR** | Docker image registry |
@@ -605,10 +700,12 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 *Goal: produce scored signals for active Kalshi markets*
 
 - [ ] Kalshi API client (market fetch, no trading yet)
-- [ ] Tavily + NewsAPI retrieval layer
-- [ ] Reddit social signal fetcher + pre-summarizer (two-pass LLM)
-- [ ] Twitter/X signal fetcher (optional — gated on API cost decision)
-- [ ] LLM signal pipeline (Claude, structured output)
+- [ ] Document store schema (Postgres + pgvector extension)
+- [ ] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (Voyage AI) → store
+- [ ] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
+- [ ] Twitter/X fetcher (optional — gated on API cost decision)
+- [ ] RAG retriever: vector search against Document store for a given market question
+- [ ] LLM signal pipeline: retrieve docs → hash check → Claude analysis → Signal creation
 - [ ] LLM audit logging (LLMQuery table — every call logged with cost)
 - [ ] LLM budget circuit breaker (configurable daily spend cap)
 - [ ] Signal scoring and logging to Postgres
@@ -677,12 +774,24 @@ freqpred/
 │   │   ├── kalshi.py            # Kalshi adapter
 │   │   ├── watcher.py           # polling loop: price refresh, staleness detection
 │   │   └── models.py            # Market, Order, Position dataclasses
+│   ├── ingestion/
+│   │   ├── scheduler.py         # background ingestion job (runs every 30 min per category)
+│   │   ├── fetchers/
+│   │   │   ├── tavily.py        # Tavily Search API fetcher
+│   │   │   ├── newsapi.py       # NewsAPI fetcher
+│   │   │   ├── gdelt.py         # GDELT fetcher
+│   │   │   ├── reddit.py        # Reddit API fetcher
+│   │   │   └── twitter.py       # Twitter/X API fetcher (optional)
+│   │   ├── store.py             # dedup, embed (Voyage AI), insert into Document store
+│   │   └── social_summarizer.py # cheap LLM pre-summarizer for raw social posts
+│   ├── rag/
+│   │   ├── embedder.py          # Voyage AI embedding client
+│   │   ├── retriever.py         # vector search against Document store (pgvector)
+│   │   └── models.py            # Document, DocumentMarketLink dataclasses
 │   ├── signal/
-│   │   ├── pipeline.py          # orchestrates retrieval + LLM analysis
-│   │   ├── retrieval.py         # Tavily, NewsAPI, GDELT fetchers
-│   │   ├── social.py            # Reddit, Twitter/X, Manifold fetchers + pre-summarizer
+│   │   ├── pipeline.py          # orchestrates retrieval + LLM analysis (Phase 2)
 │   │   ├── llm.py               # Claude client, structured output
-│   │   ├── cache.py             # signal result caching
+│   │   ├── cache.py             # retrieval hash check, signal dedup
 │   │   └── models.py            # Signal dataclass
 │   ├── strategy/
 │   │   ├── base.py              # IPredictionStrategy interface
