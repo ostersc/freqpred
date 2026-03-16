@@ -14,9 +14,18 @@ from datetime import datetime, timedelta, timezone
 import click
 
 from freqpred.config import load_config
-from freqpred.ingestion.fetchers import newsapi, tavily
+from freqpred.ingestion.fetchers import newsapi, reddit, tavily
 from freqpred.ingestion.store import RawDocument
 from freqpred.markets.kalshi import KalshiClient
+
+# From SPEC.md §9 — subreddit targets by category
+_CATEGORY_SUBREDDITS: dict[str, list[str]] = {
+    "politics": ["politics", "PoliticalDiscussion", "neutralpolitics"],
+    "technology": ["technology", "MachineLearning", "singularity"],
+    "fintech": ["investing", "wallstreetbets", "stocks", "fintech"],
+    "economics": ["economics", "investing", "stocks"],
+    "sports": ["sports"],
+}
 
 
 def _print_docs(docs: list[RawDocument], max_body: int = 200) -> None:
@@ -85,6 +94,19 @@ async def _run(category: str | None, max_results: int) -> None:
     )
     click.echo(f"[NewsAPI] {len(newsapi_docs)} result(s)\n")
     _print_docs(newsapi_docs)
+
+    # ── 4. Reddit ─────────────────────────────────────────────────────────────
+    subreddits = _CATEGORY_SUBREDDITS.get(market.category, ["news", "worldnews"])
+    subs_display = ", ".join(f"r/{s}" for s in subreddits)
+    click.echo(f'[Reddit] Searching: "{query}" across {subs_display}...')
+    reddit_docs = await reddit.fetch(
+        subreddits=subreddits,
+        query=query,
+        user_agent=cfg.reddit.user_agent,
+        limit=max_results,
+    )
+    click.echo(f"[Reddit] {len(reddit_docs)} result(s) (filtered: score≥10, age≤7d)\n")
+    _print_docs(reddit_docs)
 
 
 if __name__ == "__main__":

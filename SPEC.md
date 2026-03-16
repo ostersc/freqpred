@@ -590,7 +590,7 @@ Signal trigger fires for a market
 #### Social & Community Signals
 | Source | Use Case | Notes |
 |---|---|---|
-| **Reddit API** | Subreddit sentiment for relevant communities | Free with OAuth; target subs per category (see below) |
+| **Reddit** | Subreddit sentiment for relevant communities | No credentials required — uses public JSON API (`reddit.com/r/{sub}/search.json`); target subs per category (see below) |
 | **Twitter/X API** | Real-time public sentiment on market topics | Expensive ($100–$5000/mo tier); treat as optional enrichment |
 | **Kalshi market comments** | Crowd reasoning directly on the market in question | Already fetched with market metadata |
 | **Manifold Markets** | Community probability estimates on overlapping questions | Free API; useful as an independent signal cross-check |

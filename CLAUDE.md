@@ -85,8 +85,7 @@ ANTHROPIC_API_KEY=
 VOYAGE_API_KEY=
 TAVILY_API_KEY=
 NEWSAPI_KEY=
-REDDIT_CLIENT_ID=
-REDDIT_CLIENT_SECRET=
+# Reddit uses the public JSON API — no credentials required
 DATABASE_URL=postgresql+asyncpg://...
 REDIS_URL=redis://...
 ```
