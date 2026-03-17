@@ -48,6 +48,8 @@ def test_all_tables_registered():
         "documents",
         "document_market_links",
         "llm_queries",
+        "catalyst_runs",
+        "catalyst_queries",
     }
     registered = set(Base.metadata.tables.keys())
     assert expected == registered

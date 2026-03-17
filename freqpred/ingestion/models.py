@@ -1,0 +1,98 @@
+"""Catalyst data models: CatalystRun and CatalystQuery — ORM + dataclasses."""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+
+from sqlalchemy import Boolean, ForeignKey, Integer, Text, VARCHAR
+from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from freqpred.db import Base
+
+# ---------------------------------------------------------------------------
+# SQLAlchemy ORM models
+# ---------------------------------------------------------------------------
+
+
+class CatalystRunRow(Base):
+    """ORM model for the ``catalyst_runs`` table.
+
+    One row per generation event per market. The ingestion scheduler always
+    reads catalyst queries from the latest run where ``is_active=True``.
+    """
+
+    __tablename__ = "catalyst_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    market_id: Mapped[str] = mapped_column(
+        VARCHAR(255), ForeignKey("markets.id"), nullable=False, index=True
+    )
+    # Monotonically increasing per market: 1 = first run, 2 = first re-run, etc.
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    # FK to the LLMQuery that produced this run — audit trail.
+    # Nullable because we set it after the LLM response is logged.
+    llm_query_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("llm_queries.id"), nullable=True
+    )
+    # Set to False when market closes or no strategy is interested.
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
+
+    queries: Mapped[list["CatalystQueryRow"]] = relationship(
+        "CatalystQueryRow", back_populates="run", lazy="raise"
+    )
+
+
+class CatalystQueryRow(Base):
+    """ORM model for the ``catalyst_queries`` table.
+
+    Each row is one search string derived by the Catalyst Generator for a
+    specific market generation. The ingestion scheduler runs fetchers against
+    these strings.
+    """
+
+    __tablename__ = "catalyst_queries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("catalyst_runs.id"), nullable=False, index=True
+    )
+    query_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
+
+    run: Mapped["CatalystRunRow"] = relationship(
+        "CatalystRunRow", back_populates="queries"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses (domain models)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CatalystRun:
+    id: str
+    market_id: str
+    generation: int
+    is_active: bool
+    created_at: datetime
+    llm_query_id: int | None = None
+
+
+@dataclass
+class CatalystQuery:
+    id: str
+    run_id: str
+    query_text: str
+    created_at: datetime
