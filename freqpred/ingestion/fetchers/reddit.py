@@ -56,6 +56,25 @@ async def fetch(
                 )
                 response.raise_for_status()
                 data = response.json()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in (403, 404, 429):
+                    # 403: subreddit restricted/private or rate-limited
+                    # 404: subreddit doesn't exist
+                    # 429: rate limited
+                    log.debug(
+                        "reddit.fetch.skip",
+                        subreddit=subreddit_name,
+                        status=status,
+                    )
+                else:
+                    log.warning(
+                        "reddit.fetch.error",
+                        subreddit=subreddit_name,
+                        query=query,
+                        status=status,
+                    )
+                continue
             except Exception:
                 log.warning(
                     "reddit.fetch.error",

@@ -258,10 +258,11 @@ class TestBuildPrompt:
         prompt = build_prompt(market, [])
         assert market.question in prompt
 
-    def test_includes_mid_price(self) -> None:
+    def test_does_not_include_mid_price(self) -> None:
         market = _make_market(mid_price=0.65)
         prompt = build_prompt(market, [])
-        assert "0.6500" in prompt
+        assert "0.6500" not in prompt
+        assert "0.65" not in prompt
 
     def test_no_docs_shows_no_evidence(self) -> None:
         market = _make_market()

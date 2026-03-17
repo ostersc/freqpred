@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import random
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import anthropic
@@ -191,30 +191,38 @@ async def _run_signal_analysis(
 
 
 @click.command()
-@click.option("--category", default=None, help="Kalshi category to filter markets.")
+@click.option("--market-id", default=None, help="Specific Kalshi market ID to analyze (e.g. kxpresmention-djt26mar17c).")
+@click.option("--category", default=None, help="Kalshi category to filter when picking a random market.")
 @click.option("--max-results", default=5, show_default=True, help="Results per source per catalyst.")
 @click.option("--dry-run", is_flag=True, default=False, help="Generate catalysts only, skip fetching and signal.")
-def main(category: str | None, max_results: int, dry_run: bool) -> None:
-    asyncio.run(_run(category=category, max_results=max_results, dry_run=dry_run))
+def main(market_id: str | None, category: str | None, max_results: int, dry_run: bool) -> None:
+    asyncio.run(_run(market_id=market_id, category=category, max_results=max_results, dry_run=dry_run))
 
 
-async def _run(category: str | None, max_results: int, dry_run: bool) -> None:
+async def _run(market_id: str | None, category: str | None, max_results: int, dry_run: bool) -> None:
     cfg = load_config()
 
-    # ── 1. Pull a random market from Kalshi ──────────────────────────────────
-    click.echo("Fetching markets from Kalshi…")
+    # ── 1. Resolve market ────────────────────────────────────────────────────
     async with KalshiClient(
         api_key=cfg.kalshi.api_key,
         base_url=cfg.kalshi.base_url,
         private_key_path=cfg.kalshi.private_key_path,
     ) as client:
-        markets = await client.list_markets(category=category)
-
-    if not markets:
-        click.echo("No markets found — check your Kalshi API key or category filter.")
-        return
-
-    market = random.choice(markets)
+        if market_id:
+            market_id = market_id.upper()
+            click.echo(f"Fetching market {market_id}…")
+            try:
+                market = await client.get_market(market_id)
+            except Exception as exc:
+                click.echo(f"Market '{market_id}' not found: {exc}", err=True)
+                return
+        else:
+            click.echo("Fetching markets from Kalshi…")
+            markets = await client.list_markets(category=category)
+            if not markets:
+                click.echo("No markets found — check your Kalshi API key or category filter.")
+                return
+            market = random.choice(markets)
     click.echo(f"\n{'═' * 70}")
     click.echo(f"  MARKET   {market.id}")
     click.echo(f"  {'─' * 66}")
@@ -256,7 +264,6 @@ async def _run(category: str | None, max_results: int, dry_run: bool) -> None:
     # ── 3. Fetch news against each catalyst query ────────────────────────────
     subreddits = _CATEGORY_SUBREDDITS.get(market.category, ["news", "worldnews"])
     subs_display = ", ".join(f"r/{s}" for s in subreddits)
-    from_date = datetime.now(timezone.utc) - timedelta(days=7)
 
     all_raw_docs: list[RawDocument] = []
 
@@ -272,10 +279,10 @@ async def _run(category: str | None, max_results: int, dry_run: bool) -> None:
         _print_docs(tavily_docs)
         all_raw_docs.extend(tavily_docs)
 
-        # NewsAPI
+        # NewsAPI — omit from_date on free tier (restricts to past 24h regardless)
         click.echo("[NewsAPI]")
         newsapi_docs = await newsapi.fetch(
-            cfg.newsapi.api_key, query, from_date=from_date, max_results=max_results
+            cfg.newsapi.api_key, query, max_results=max_results
         )
         click.echo(f"{len(newsapi_docs)} result(s)\n")
         _print_docs(newsapi_docs)

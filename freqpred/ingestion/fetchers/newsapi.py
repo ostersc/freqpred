@@ -17,7 +17,7 @@ _RATE_LIMIT_SLEEP = 1.0  # max 1 req/sec
 async def fetch(
     api_key: str,
     query: str,
-    from_date: datetime,
+    from_date: datetime | None = None,
     max_results: int = 20,
 ) -> list[RawDocument]:
     """Fetch news articles from NewsAPI.
@@ -25,10 +25,15 @@ async def fetch(
     Enforces max 1 req/sec via a fixed sleep before the call.
     Skips articles missing url or content.
 
+    Note: the NewsAPI free tier restricts ``/everything`` to the past 24 hours
+    regardless of ``from_date``.  Omitting ``from_date`` (or passing None) lets
+    the API return whatever it can within its allowed window.  On paid plans,
+    passing a ``from_date`` extends coverage back up to 30 days.
+
     Args:
         api_key:     NewsAPI API key.
         query:       Search query string.
-        from_date:   Earliest article date to include.
+        from_date:   Earliest article date (paid plans only; None = API default).
         max_results: Maximum number of results (capped at 100 by NewsAPI).
 
     Returns:
@@ -36,18 +41,22 @@ async def fetch(
     """
     client = NewsApiClient(api_key=api_key)
     now = datetime.now(timezone.utc)
-    from_str = from_date.strftime("%Y-%m-%dT%H:%M:%S")
+
+    kwargs: dict = dict(
+        q=query,
+        page_size=min(max_results, 100),
+        sort_by="relevancy",
+        language="en",
+    )
+    if from_date is not None:
+        kwargs["from_param"] = from_date.strftime("%Y-%m-%dT%H:%M:%S")
 
     await asyncio.sleep(_RATE_LIMIT_SLEEP)
 
     try:
         response = await asyncio.to_thread(
             client.get_everything,
-            q=query,
-            from_param=from_str,
-            page_size=min(max_results, 100),
-            sort_by="publishedAt",
-            language="en",
+            **kwargs,
         )
     except Exception:
         log.warning("newsapi.fetch.error", query=query, exc_info=True)

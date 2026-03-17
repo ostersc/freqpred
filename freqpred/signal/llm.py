@@ -16,8 +16,8 @@ SYSTEM_PROMPT = """\
 You are a prediction market probability analyst. Your task is to estimate the \
 probability that a given market question resolves YES, based on the provided evidence.
 
-You must respond ONLY with a valid JSON object. No markdown, no explanation outside \
-the JSON."""
+Your response must be a single valid JSON object and nothing else — no prose, no \
+reasoning, no markdown. Start your response with { and end with }."""
 
 
 def build_prompt(market: Market, docs: list[Document]) -> str:
@@ -29,7 +29,6 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
     lines: list[str] = [
         f"Market Question: {market.question}",
         f"Category: {market.category}",
-        f"Market Mid Price (implied probability): {market.mid_price:.4f}",
         f"Market Closes: {market.close_time.isoformat()}",
         "",
         "=== EVIDENCE ===",
@@ -54,9 +53,9 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
 
     lines += [
         "=== TASK ===",
-        "Estimate the probability this market resolves YES.",
-        "Set direction to YES if your estimate is meaningfully above the market mid,",
-        "NO if meaningfully below, or SKIP if you lack sufficient evidence.",
+        "Estimate the probability this market resolves YES based solely on the evidence above.",
+        "Set direction to YES if you believe the event is more likely than not,",
+        "NO if less likely than not, or SKIP if the evidence is insufficient to form a view.",
         "",
         "Respond with ONLY this JSON object (no markdown fences):",
         "{",
@@ -81,11 +80,17 @@ def parse_signal_response(content: str) -> dict | None:
     text = content.strip()
 
     # Strip markdown code fences if present
-    if text.startswith("```"):
+    if "```" in text:
         lines = text.splitlines()
-        # Drop the opening fence line; drop closing fence if present
-        inner = lines[1:-1] if lines[-1].strip().startswith("```") else lines[1:]
-        text = "\n".join(inner)
+        inner = [
+            line for line in lines
+            if not line.strip().startswith("```")
+        ]
+        text = "\n".join(inner).strip()
+
+    # Extract JSON object from prose preamble/postamble (model may reason before answering)
+    if not text.startswith("{") and "{" in text and "}" in text:
+        text = text[text.index("{") : text.rindex("}") + 1]
 
     try:
         data = json.loads(text)

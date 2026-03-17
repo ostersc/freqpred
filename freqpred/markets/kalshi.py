@@ -243,7 +243,11 @@ class KalshiClient(IMarketClient):
         return Market(
             id=s.ticker,
             platform="kalshi",
-            question=s.title,
+            question="\n".join(filter(None, [
+                f"{s.title} — {s.yes_sub_title}" if s.yes_sub_title else s.title,
+                s.rules_primary or None,
+                s.rules_secondary or None,
+            ])),
             category=category,
             close_time=close_time,
             yes_bid=s.yes_bid,

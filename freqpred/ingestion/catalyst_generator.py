@@ -226,8 +226,14 @@ def _build_prompt(market: Market, rag_docs: list[Document]) -> str:
     lines = [
         "You are a prediction market research assistant.",
         "",
-        "Identify 3 to 5 specific events, data releases, or developments that would",
-        "most significantly shift the probability of this market resolving YES or NO.",
+        "This market has NOT resolved yet. Your job is to generate 3 to 5 web search",
+        "queries that find PREDICTIVE evidence — information that helps estimate the",
+        "probability of the market resolving YES before it closes.",
+        "",
+        "Read the resolution criteria carefully. Think about what background signals,",
+        "behavioral patterns, contextual factors, or recent developments would make the",
+        "YES outcome more or less likely. Do NOT search for transcripts, results, or",
+        "outcomes of the event itself — the event hasn't happened yet.",
         "",
         f"Market: {market.question}",
         f"Category: {market.category}",
@@ -245,9 +251,12 @@ def _build_prompt(market: Market, rag_docs: list[Document]) -> str:
 
     lines += [
         "",
-        "Return a JSON array of search query strings only. Each query should be",
-        "specific enough to find targeted news (not broad category keywords).",
-        'Example: ["February CPI release 2026", "Fed Chair Powell Senate testimony"]',
+        "Return a JSON array of search query strings only. Queries must target",
+        "PREDICTIVE signals — base rates, recent behavior, context, and conditions",
+        "that inform the probability. Not transcripts or outcomes.",
+        'Example for a word-mention market: ["how often does Trump mention golf in speeches", "Trump golf references public remarks history"]',
+        'Example for a price market: ["Bitcoin price forecast March 2026", "BTC ETF inflows trend"]',
+        'Example for a policy market: ["Fed interest rate cut probability 2026", "inflation data Fed decision"]',
         "",
         "Return the JSON array and nothing else.",
     ]

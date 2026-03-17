@@ -200,6 +200,9 @@ class KalshiMarketSchema(BaseModel):
     event_ticker: str = ""
     title: str = ""
     subtitle: str = ""
+    yes_sub_title: str = ""
+    rules_primary: str = ""
+    rules_secondary: str = ""
     status: str = ""
     close_time: str  # ISO-8601 string; converted downstream
     yes_bid_dollars: str = "0.0000"

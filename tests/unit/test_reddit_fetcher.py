@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from freqpred.ingestion.fetchers.reddit import _MAX_AGE_DAYS, _MIN_SCORE, fetch
@@ -276,3 +277,57 @@ async def test_fetch_empty_posts_returns_empty(mock_httpx):
     docs = await fetch(_SUBREDDITS, _QUERY)
 
     assert docs == []
+
+
+def _make_http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://www.reddit.com/r/test/search.json")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError("error", request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_fetch_403_returns_empty_silently(mock_httpx):
+    """403s should be swallowed quietly (subreddit restricted/rate-limited)."""
+    resp = _make_http_response([])
+    resp.raise_for_status.side_effect = _make_http_status_error(403)
+    mock_httpx.get.return_value = resp
+
+    docs = await fetch(_SUBREDDITS, _QUERY)
+
+    assert docs == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_404_returns_empty_silently(mock_httpx):
+    resp = _make_http_response([])
+    resp.raise_for_status.side_effect = _make_http_status_error(404)
+    mock_httpx.get.return_value = resp
+
+    docs = await fetch(_SUBREDDITS, _QUERY)
+
+    assert docs == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_429_returns_empty_silently(mock_httpx):
+    resp = _make_http_response([])
+    resp.raise_for_status.side_effect = _make_http_status_error(429)
+    mock_httpx.get.return_value = resp
+
+    docs = await fetch(_SUBREDDITS, _QUERY)
+
+    assert docs == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_continues_after_403(mock_httpx):
+    """403 on first subreddit should not prevent fetching from the second."""
+    bad_resp = _make_http_response([])
+    bad_resp.raise_for_status.side_effect = _make_http_status_error(403)
+    good_resp = _make_http_response([_make_post(permalink="/r/b/comments/1/")])
+
+    mock_httpx.get.side_effect = [bad_resp, good_resp]
+
+    docs = await fetch(["restricted", "b"], _QUERY)
+
+    assert len(docs) == 1
