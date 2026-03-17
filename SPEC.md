@@ -57,9 +57,19 @@ All market interactions go through an abstract `IMarketClient` interface. Kalshi
 
 ---
 
-## 5. Market Categories (v1)
+## 5. Market Selection
 
-Initial focus:
+Rather than fetching news for broad categories, freqpred focuses ingestion on the specific markets that registered strategies care about. This produces a tighter, higher-quality document store.
+
+### Strategy-driven market selection
+
+The `IPredictionStrategy` interface exposes an `is_market_interesting(market) → bool` method. The **Market Selector** (a component between the market watcher and the catalyst generator) queries all active markets from the DB and calls every registered strategy's `is_market_interesting()`. A market is included if *any* strategy returns `True`. Markets not selected by any strategy are excluded from catalyst generation and ingestion.
+
+This means the ingestion pipeline adapts automatically as strategies are added, removed, or reconfigured — no separate category config list is needed.
+
+### Default strategy focus (v1)
+
+The bundled strategies cover:
 
 1. **US Politics & Elections** — High news coverage, strong LLM training signal, structured event cycle (primaries, votes, appointments)
 2. **Technology & Fintech** — Product launches, earnings beats, regulatory approvals, M&A deals
@@ -107,9 +117,12 @@ Other categories (macro/Fed, geopolitics, sports) are supported by the architect
 
 | Component | Responsibility |
 |---|---|
-| **Market Watcher** | Polls Kalshi for active markets, filters by category, enqueues for analysis |
+| **Market Watcher** | Polls Kalshi for active markets, upserts into DB |
+| **Market Selector** | Reads active markets from DB; calls `strategy.is_market_interesting()` on each registered strategy; passes selected markets to Catalyst Generator |
+| **Catalyst Generator** | LLM call (Haiku) per selected market: derives 3–5 specific search queries (catalysts) representing events that could materially shift probability. Stored as first-class DB entities. Re-runs daily, RAG-informed on subsequent passes. |
 | **Position Watcher** | Streams live price updates via Kalshi WebSocket for markets with open positions |
-| **Signal Pipeline** | Retrieves news context, runs LLM analysis, returns probability estimate |
+| **Ingestion Scheduler** | Reads the latest active catalyst queries per market from DB; runs Tavily + NewsAPI + Reddit fetchers against those queries; upserts results into Document store |
+| **Signal Pipeline** | Retrieves news context via RAG, runs LLM analysis, returns probability estimate |
 | **Strategy Engine** | Applies `IPredictionStrategy` plugins to signal output, decides trade/size/skip |
 | **IMarketClient** | Abstract interface over Kalshi (and future platforms); handles orders, positions, balance |
 | **Order Manager** | Executes paper or live trades; enforces hard risk caps before any order |
@@ -342,6 +355,41 @@ class Document:
 
 **Embedding model:** [Voyage AI](https://www.voyageai.com/) (`voyage-3`) — Anthropic's recommended embedding partner, purpose-built for retrieval tasks. Stored via the **pgvector** extension on RDS Postgres. No separate vector database needed.
 
+### CatalystRun + CatalystQuery
+
+Each time the Catalyst Generator runs for a market it creates one `CatalystRun` (the generation event) and N `CatalystQuery` rows (the actual search strings). The ingestion scheduler always reads from the latest active run per market.
+
+```python
+@dataclass
+class CatalystRun:
+    id: str                      # UUID
+    market_id: str               # FK → Market
+    generation: int              # monotonically increasing per market (1, 2, 3 ...)
+    llm_query_id: int            # FK → LLMQuery — audit trail for the catalyst LLM call
+    is_active: bool              # False when market closed or no strategy is interested
+    created_at: datetime
+
+
+@dataclass
+class CatalystQuery:
+    id: str                      # UUID
+    run_id: str                  # FK → CatalystRun
+    query_text: str              # the actual search string, e.g. "February CPI release 2026"
+    created_at: datetime
+```
+
+**Lifecycle rules:**
+- A `CatalystRun` is created when a market is first selected (generation=1) and then daily (generation increments).
+- On each new run, the previous run's `is_active` flag is left as-is; only the latest run is used for scheduling.
+- `CatalystRun.is_active` is set to `False` when: (a) the market's `close_time` has passed, or (b) all registered strategies return `False` from `is_market_interesting()` for that market.
+- Ingestion scheduler query: `SELECT cq.query_text FROM catalyst_queries cq JOIN catalyst_runs cr ON cr.id = cq.run_id WHERE cr.is_active = TRUE AND cr.id IN (SELECT MAX(id)... per market)`.
+
+**Catalyst generation context (LLM prompt inputs):**
+- **Generation 1:** market question + market metadata (close_time, category, description from Kalshi)
+- **Generation 2+:** same as above, plus the top-K documents most recently retrieved for this market's existing catalyst queries (RAG pull). This lets the LLM refine or add catalysts based on what has actually been appearing in the news.
+
+**Catalyst generation model:** Claude Haiku (cheap) — this is a reasoning task, not primary signal analysis. Logged to `llm_queries` with `query_type="catalyst_generation"`.
+
 ### DocumentMarketLink (join table)
 
 Tracks which documents were retrieved for which market analysis, enabling retroactive analysis of what evidence was available when a signal was created.
@@ -399,6 +447,7 @@ class LLMQuery:
 | `query_type` | Description | Model tier |
 |---|---|---|
 | `market_analysis` | Primary signal generation for a market | Primary (Sonnet) |
+| `catalyst_generation` | Generate 3–5 targeted search queries for a market | Cheap (Haiku) |
 | `social_summarization` | Pre-summarizer pass on raw Reddit/Twitter posts | Cheap (Haiku) |
 | `movement_prediction` | Optional: predict short-term price movement | Primary (Sonnet) |
 | `daily_digest` | Generate natural language daily summary for alerts | Cheap (Haiku) |
@@ -469,20 +518,35 @@ class IPredictionStrategy(ABC):
         """Return dollar amount to risk on this position."""
         ...
 
+    def is_market_interesting(self, market: Market) -> bool:
+        """
+        Return True if this strategy wants the ingestion pipeline to monitor
+        this market (i.e. generate catalysts and fetch targeted news for it).
+
+        The Market Selector calls this on all registered strategies. A market
+        is selected for catalyst generation if *any* strategy returns True.
+        When all strategies return False for a market, its catalysts are
+        marked inactive and ingestion stops.
+
+        Default implementation applies StrategyConfig filters (category,
+        volume, days-to-close). Override for custom market selection logic.
+        """
+        days_to_close = (market.close_time - datetime.utcnow()).days
+        return (
+            market.category in self.config.categories
+            and market.volume_24h >= self.config.min_volume_24h
+            and self.config.min_days_to_close
+                <= days_to_close
+                <= self.config.max_days_to_close
+        )
+
     def filter_markets(self, markets: list[Market]) -> list[Market]:
         """
         Pre-filter markets before signal analysis.
         Default implementation applies config filters.
         Override for custom filtering logic.
         """
-        return [
-            m for m in markets
-            if m.category in self.config.categories
-            and m.volume_24h >= self.config.min_volume_24h
-            and self.config.min_days_to_close
-                <= (m.close_time - datetime.utcnow()).days
-                <= self.config.max_days_to_close
-        ]
+        return [m for m in markets if self.is_market_interesting(m)]
 
     def on_resolution(self, position: Position) -> None:
         """
@@ -508,15 +572,40 @@ The pipeline has two distinct phases that run on different schedules: **ingestio
 
 ### Phase 1: Document Ingestion (continuous background job)
 
-Runs on a schedule independent of signal generation. Fetches new content and stores it — no LLM involved except the cheap social pre-summarizer.
+Runs on a schedule independent of signal generation. Fetches new content and stores it — the only LLM calls here are the cheap catalyst generator and social pre-summarizer.
+
+Ingestion is **catalyst-driven**, not category-driven. Instead of broad keyword searches per category, the scheduler fetches news and social content targeted at the specific events and hypotheses that matter for each selected market.
 
 ```
-Fetch schedule fires (per category, e.g. every 30 min)
+Market Watcher upserts active markets into DB
       │
       ▼
 ┌─────────────────┐
-│  Fetch          │  Query Tavily, NewsAPI, Reddit, etc.
-│  Sources        │  for category keywords + active market questions
+│  Market         │  Reads all active markets from DB.
+│  Selector       │  Calls strategy.is_market_interesting(market)
+│                 │  on each registered strategy. Selects markets
+│                 │  where any strategy returns True.
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Catalyst       │  For each selected market:
+│  Generator      │  - First seen: LLM (Haiku) derives 3-5 search
+│                 │    queries from market question + metadata.
+│                 │  - Daily re-run: same, but also pulls recent docs
+│                 │    from RAG (what has been found so far) so the
+│                 │    LLM can refine or add catalysts.
+│                 │  Writes CatalystRun + CatalystQuery rows to DB.
+│                 │  Logs to llm_queries (query_type=catalyst_generation).
+│                 │  Deactivates catalysts for closed/unselected markets.
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Ingestion      │  Reads latest active CatalystQuery rows from DB.
+│  Scheduler      │  For each query: runs Tavily + NewsAPI + Reddit.
+│  (every 30 min) │  Tracks last-run per market in Redis.
+│                 │  One fetcher failing does not stop others.
 └────────┬────────┘
          │
          ▼
@@ -529,9 +618,9 @@ Fetch schedule fires (per category, e.g. every 30 min)
          │
          ▼
 ┌─────────────────┐
-│  Social         │  For Reddit/Twitter only: cheap LLM pass
-│  Pre-summarizer │  (Haiku) compresses raw posts into structured
-│  (if social)    │  sentiment summary before storing.
+│  Social         │  For Reddit posts only: cheap LLM pass (Haiku)
+│  Pre-summarizer │  compresses raw posts into structured sentiment
+│  (if social)    │  summary before storing.
 └─────────────────┘
 ```
 
@@ -758,6 +847,10 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 - [ ] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (Voyage AI) → store
 - [ ] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
 - [ ] Twitter/X fetcher (optional — gated on API cost decision)
+- [ ] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault` strategy
+- [ ] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy
+- [ ] Catalyst Generator: LLM (Haiku) derives 3–5 search queries per selected market; writes `CatalystRun` + `CatalystQuery` to DB; RAG-informed on re-runs; deactivates on market close/deselection
+- [ ] Ingestion Scheduler: reads latest active `CatalystQuery` rows from DB; drives fetchers; tracks last-run per market in Redis
 - [ ] RAG retriever: vector search against Document store for a given market question
 - [ ] LLM signal pipeline: retrieve docs → hash check → Claude analysis → Signal creation
 - [ ] LLM audit logging (LLMQuery table — every call logged with cost)
@@ -830,7 +923,9 @@ freqpred/
 │   │   ├── watcher.py           # polling loop: price refresh, staleness detection
 │   │   └── models.py            # Market, Order, Position dataclasses
 │   ├── ingestion/
-│   │   ├── scheduler.py         # background ingestion job (runs every 30 min per category)
+│   │   ├── selector.py          # market selector: calls strategy.is_market_interesting()
+│   │   ├── catalyst_generator.py# LLM (Haiku) derives catalyst queries per market; manages CatalystRun/CatalystQuery
+│   │   ├── scheduler.py         # background ingestion job: reads catalyst queries, drives fetchers
 │   │   ├── fetchers/
 │   │   │   ├── tavily.py        # Tavily Search API fetcher
 │   │   │   ├── newsapi.py       # NewsAPI fetcher

@@ -10,7 +10,7 @@ Full architecture in [SPEC.md](SPEC.md). Read it before making structural decisi
 
 ## Architecture in one paragraph
 
-The system has two async pipelines. The **ingestion pipeline** runs continuously: it fetches news and social content, deduplicates by URL, generates Voyage AI embeddings, and stores everything in a Postgres `documents` table with pgvector. The **signal pipeline** is triggered: it embeds a market question, does semantic search against the document store (RAG), checks if the retrieval result is new (hash check), then calls Claude for a probability estimate. Signals are written to Postgres and used by strategy plugins to decide whether to place paper or live trades on Kalshi.
+The system has two async pipelines. The **ingestion pipeline** runs continuously and is catalyst-driven: the **Market Selector** reads active markets from the DB and asks each registered strategy `is_market_interesting(market)` to filter down to markets worth monitoring; the **Catalyst Generator** calls Claude Haiku per selected market to derive 3–5 targeted search queries (catalysts) representing events that could shift the probability — these are stored as `CatalystRun`/`CatalystQuery` DB rows and refreshed daily using RAG context; the **Ingestion Scheduler** reads the latest catalyst queries and runs Tavily, NewsAPI, and Reddit fetchers against them, deduplicates by URL, generates Voyage AI embeddings, and stores results in the `documents` table. The **signal pipeline** is triggered: it embeds a market question, does semantic search against the document store (RAG), checks if the retrieval result is new (hash check), then calls Claude Sonnet for a probability estimate. Signals are written to Postgres and used by strategy plugins to decide whether to place paper or live trades on Kalshi.
 
 ---
 
@@ -22,7 +22,7 @@ freqpred/
 │   ├── cli.py              # entry point
 │   ├── config.py           # config loading
 │   ├── markets/            # Kalshi API client + watcher
-│   ├── ingestion/          # fetchers (Tavily, NewsAPI, Reddit) + scheduler
+│   ├── ingestion/          # selector, catalyst_generator, scheduler, fetchers, store
 │   ├── rag/                # Voyage AI embedder + pgvector retriever
 │   ├── signal/             # signal pipeline + LLM analysis
 │   ├── strategy/           # IPredictionStrategy interface + bundled strategies
