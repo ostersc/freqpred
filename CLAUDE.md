@@ -176,8 +176,12 @@ Before declaring any task complete, verify every acceptance criterion listed in 
 - Run `uv run pytest tests/unit/` and confirm all tests pass
 
 **For any task that adds code:**
-- Run `uv run pytest tests/unit/` and confirm all tests pass
-- If the task has integration tests, run `uv run pytest tests/integration/`
+- Always run the full test suite (unit + integration) when DB is available:
+  ```bash
+  DATABASE_URL="postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test" uv run pytest tests/ -v
+  ```
+- If DB is not available, run unit tests at minimum: `uv run pytest tests/unit/`
+- All tests must pass before declaring the task done
 
 **Never say a task is done based on code compiling or unit tests alone when the acceptance criteria include runtime behavior** (e.g. "runs cleanly against a fresh DB").
 
