@@ -17,6 +17,12 @@ from unittest.mock import AsyncMock, MagicMock
 import anthropic
 import click
 
+# Register all ORM models before any SQLAlchemy mapper is instantiated.
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models        # noqa: F401
+import freqpred.rag.models        # noqa: F401
+import freqpred.signal.models     # noqa: F401
+
 from freqpred.config import load_config
 from freqpred.ingestion.catalyst_generator import generate_catalysts
 from freqpred.ingestion.fetchers import newsapi, reddit, tavily

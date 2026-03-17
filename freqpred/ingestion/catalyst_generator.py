@@ -282,7 +282,7 @@ async def _call_llm(
     try:
         message = await client.messages.create(
             model=_CATALYST_MODEL,
-            max_tokens=256,
+            max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
         )
         latency_ms = int((time.monotonic() - t0) * 1000)
@@ -302,13 +302,24 @@ async def _call_llm(
 def _parse_queries(text: str) -> tuple[list[str], str | None]:
     """Extract a JSON array of strings from the LLM response text.
 
-    Tries the full text first, then looks for the first '[' to handle any
-    leading explanation the model may have added.
+    Handles:
+    - Clean JSON array
+    - Markdown code fences (```json ... ``` or ``` ... ```)
+    - Leading explanation text before the array
     """
     text = text.strip()
+
+    # Strip markdown code fences if present.
+    if "```" in text:
+        import re
+        text = re.sub(r"```(?:json)?\s*", "", text).strip()
+
     for candidate in (text, text[text.find("["):] if "[" in text else ""):
         if not candidate:
             continue
+        # Trim anything after the closing ] to handle trailing text.
+        if "]" in candidate:
+            candidate = candidate[: candidate.rfind("]") + 1]
         try:
             parsed = json.loads(candidate)
             if isinstance(parsed, list) and all(isinstance(q, str) for q in parsed):
