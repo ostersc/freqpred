@@ -65,6 +65,19 @@ class LLMQueryRow(Base):
 
 
 @dataclass
+class LLMResponse:
+    """Return value from LLMClient.complete()."""
+
+    content: str
+    model: str
+    tokens_input: int
+    tokens_output: int
+    cost_usd: float
+    latency_ms: int
+    llm_query_id: int
+
+
+@dataclass
 class LLMQuery:
     # auto-increment PK (int, not UUID)
     id: int | None

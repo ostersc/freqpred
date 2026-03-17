@@ -1,20 +1,20 @@
 """Unit tests for freqpred/ingestion/social_summarizer.py.
 
-Anthropic SDK and SQLAlchemy session are mocked — no real API or DB calls.
+LLMClient is mocked — no real API or DB calls.
 """
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from freqpred.ingestion.social_summarizer import summarize
 from freqpred.ingestion.store import RawDocument
-from freqpred.llm.models import LLMQueryRow
+from freqpred.llm.client import LLMError
+from freqpred.llm.models import LLMResponse
 
-_API_KEY = "test-anthropic-key"
 _TOPIC = "US presidential election"
 _MODEL = "claude-haiku-4-5-20251001"
 
@@ -26,16 +26,13 @@ _VALID_SUMMARY = {
 }
 
 
-def _make_raw_doc(
-    i: int = 1,
-    source_type: str = "reddit",
-) -> RawDocument:
+def _make_raw_doc(i: int = 1) -> RawDocument:
     now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
     return RawDocument(
         source_url=f"https://reddit.com/r/politics/comments/{i}/",
         title=f"Post {i} about the election",
         body=f"Body text for post {i}. Lots of opinions here.",
-        source_type=source_type,
+        source_type="reddit",
         source_name="r/politics",
         category="",
         tags=[],
@@ -44,35 +41,24 @@ def _make_raw_doc(
     )
 
 
-@pytest.fixture()
-def mock_anthropic():
-    """Patch anthropic.AsyncAnthropic and return a mock messages response."""
-    with patch(
-        "freqpred.ingestion.social_summarizer.anthropic.AsyncAnthropic"
-    ) as MockClient:
-        instance = AsyncMock()
-        MockClient.return_value = instance
-
-        # Build a realistic response object
-        content_block = MagicMock()
-        content_block.text = json.dumps(_VALID_SUMMARY)
-        usage = MagicMock()
-        usage.input_tokens = 300
-        usage.output_tokens = 100
-        response = MagicMock()
-        response.content = [content_block]
-        response.usage = usage
-
-        instance.messages.create = AsyncMock(return_value=response)
-        yield instance
-
-
-@pytest.fixture()
-def mock_session():
-    session = AsyncMock()
-    session.add = MagicMock()
-    session.flush = AsyncMock()
-    return session
+def _make_llm_client(content: str = "", raises: Exception | None = None) -> MagicMock:
+    """Return a mock LLMClient."""
+    client = MagicMock()
+    if raises:
+        client.complete = AsyncMock(side_effect=raises)
+    else:
+        client.complete = AsyncMock(
+            return_value=LLMResponse(
+                content=content,
+                model=_MODEL,
+                tokens_input=300,
+                tokens_output=100,
+                cost_usd=0.00035,
+                latency_ms=450,
+                llm_query_id=1,
+            )
+        )
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -81,43 +67,38 @@ def mock_session():
 
 
 @pytest.mark.asyncio
-async def test_summarize_returns_raw_document(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1), _make_raw_doc(2)]
-    result = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
+async def test_summarize_returns_raw_document():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
+    result = await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
     assert isinstance(result, RawDocument)
 
 
 @pytest.mark.asyncio
-async def test_summarize_source_type_is_reddit_summary(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    result = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
+async def test_summarize_source_type_is_reddit_summary():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
+    result = await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
     assert result.source_type == "reddit_summary"
 
 
 @pytest.mark.asyncio
-async def test_summarize_title_contains_topic(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    result = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
+async def test_summarize_title_contains_topic():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
+    result = await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
     assert _TOPIC in result.title
 
 
 @pytest.mark.asyncio
-async def test_summarize_body_is_valid_json(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    result = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
+async def test_summarize_body_is_valid_json():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
+    result = await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
     parsed = json.loads(result.body)
     assert isinstance(parsed, dict)
 
 
 @pytest.mark.asyncio
-async def test_summarize_body_has_required_keys(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    result = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
+async def test_summarize_body_has_required_keys():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
+    result = await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
     parsed = json.loads(result.body)
     assert "sentiment" in parsed
     assert "key_claims" in parsed
@@ -126,73 +107,42 @@ async def test_summarize_body_has_required_keys(mock_anthropic, mock_session):
 
 
 @pytest.mark.asyncio
-async def test_summarize_source_url_is_unique(mock_anthropic, mock_session):
+async def test_summarize_source_url_is_unique():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
     docs = [_make_raw_doc(1)]
-    r1 = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-    r2 = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
+    r1 = await summarize(docs, _TOPIC, client, _MODEL)
+    r2 = await summarize(docs, _TOPIC, client, _MODEL)
     assert r1.source_url != r2.source_url
 
 
 # ---------------------------------------------------------------------------
-# Audit log
+# Audit: LLMClient.complete() is called with expected args
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_summarize_writes_audit_row(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
-    mock_session.add.assert_called_once()
-    row = mock_session.add.call_args[0][0]
-    assert isinstance(row, LLMQueryRow)
-
-
-@pytest.mark.asyncio
-async def test_summarize_audit_row_query_type(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
-    row = mock_session.add.call_args[0][0]
-    assert row.query_type == "social_summarization"
+async def test_summarize_calls_llm_client_with_correct_query_type():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
+    await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
+    client.complete.assert_called_once()
+    kwargs = client.complete.call_args
+    assert kwargs.args[2] == "social_summarization"  # positional: prompt, model, query_type
 
 
 @pytest.mark.asyncio
-async def test_summarize_audit_row_strategy(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
-    row = mock_session.add.call_args[0][0]
-    assert row.strategy == "social_summarizer"
-
-
-@pytest.mark.asyncio
-async def test_summarize_audit_row_success_true(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
-    row = mock_session.add.call_args[0][0]
-    assert row.success is True
+async def test_summarize_calls_llm_client_with_strategy():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
+    await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
+    kwargs = client.complete.call_args.kwargs
+    assert kwargs["strategy"] == "social_summarizer"
 
 
 @pytest.mark.asyncio
-async def test_summarize_audit_row_flush_called(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
-    mock_session.flush.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_summarize_audit_row_has_token_counts(mock_anthropic, mock_session):
-    docs = [_make_raw_doc(1)]
-    await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
-    row = mock_session.add.call_args[0][0]
-    assert row.tokens_input == 300
-    assert row.tokens_output == 100
-    assert row.tokens_total == 400
+async def test_summarize_passes_system_prompt():
+    client = _make_llm_client(content=json.dumps(_VALID_SUMMARY))
+    await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
+    kwargs = client.complete.call_args.kwargs
+    assert kwargs.get("system") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -201,40 +151,21 @@ async def test_summarize_audit_row_has_token_counts(mock_anthropic, mock_session
 
 
 @pytest.mark.asyncio
-async def test_summarize_on_api_error_still_writes_audit_row(mock_session):
-    with patch(
-        "freqpred.ingestion.social_summarizer.anthropic.AsyncAnthropic"
-    ) as MockClient:
-        instance = AsyncMock()
-        MockClient.return_value = instance
-        instance.messages.create = AsyncMock(side_effect=RuntimeError("API down"))
-
-        docs = [_make_raw_doc(1)]
-        result = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
-    mock_session.add.assert_called_once()
-    row = mock_session.add.call_args[0][0]
-    assert isinstance(row, LLMQueryRow)
-    assert row.success is False
-    assert row.error_message == "API down"
-
-
-@pytest.mark.asyncio
-async def test_summarize_on_api_error_returns_fallback_doc(mock_session):
-    with patch(
-        "freqpred.ingestion.social_summarizer.anthropic.AsyncAnthropic"
-    ) as MockClient:
-        instance = AsyncMock()
-        MockClient.return_value = instance
-        instance.messages.create = AsyncMock(side_effect=RuntimeError("API down"))
-
-        docs = [_make_raw_doc(1)]
-        result = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
+async def test_summarize_on_api_error_returns_fallback_doc():
+    client = _make_llm_client(raises=LLMError("API down"))
+    result = await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
     assert result.source_type == "reddit_summary"
     parsed = json.loads(result.body)
     assert parsed["sentiment"] == "unknown"
     assert "Summarization failed" in parsed["overall_signal"]
+
+
+@pytest.mark.asyncio
+async def test_summarize_on_api_error_does_not_raise():
+    """summarize() must never propagate LLMError — it returns a fallback."""
+    client = _make_llm_client(raises=LLMError("network error"))
+    result = await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
+    assert isinstance(result, RawDocument)
 
 
 # ---------------------------------------------------------------------------
@@ -243,27 +174,7 @@ async def test_summarize_on_api_error_returns_fallback_doc(mock_session):
 
 
 @pytest.mark.asyncio
-async def test_summarize_on_invalid_json_uses_raw_body(mock_session):
-    with patch(
-        "freqpred.ingestion.social_summarizer.anthropic.AsyncAnthropic"
-    ) as MockClient:
-        instance = AsyncMock()
-        MockClient.return_value = instance
-
-        content_block = MagicMock()
-        content_block.text = "This is not JSON at all."
-        usage = MagicMock()
-        usage.input_tokens = 100
-        usage.output_tokens = 20
-        response = MagicMock()
-        response.content = [content_block]
-        response.usage = usage
-        instance.messages.create = AsyncMock(return_value=response)
-
-        docs = [_make_raw_doc(1)]
-        result = await summarize(docs, _TOPIC, mock_session, _API_KEY, _MODEL)
-
+async def test_summarize_on_invalid_json_uses_raw_body():
+    client = _make_llm_client(content="This is not JSON at all.")
+    result = await summarize([_make_raw_doc(1)], _TOPIC, client, _MODEL)
     assert result.body == "This is not JSON at all."
-    # Audit row should still be success=True (LLM responded, just bad JSON)
-    row = mock_session.add.call_args[0][0]
-    assert row.success is True

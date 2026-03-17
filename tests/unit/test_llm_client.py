@@ -1,0 +1,200 @@
+"""Unit tests for freqpred/llm/client.py.
+
+All Anthropic API calls and DB writes are mocked — no real API calls made.
+"""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from freqpred.llm.client import LLMClient, LLMError
+from freqpred.llm.models import LLMResponse
+
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models        # noqa: F401
+import freqpred.signal.models     # noqa: F401
+
+MODEL = "claude-haiku-4-5-20251001"
+PROMPT = "Will the Fed raise rates?"
+QUERY_TYPE = "market_analysis"
+FAKE_CONTENT = "Probability is approximately 0.35."
+FAKE_QUERY_ID = 42
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_anthropic_response(
+    content: str = FAKE_CONTENT,
+    input_tokens: int = 100,
+    output_tokens: int = 30,
+) -> MagicMock:
+    msg = MagicMock()
+    block = MagicMock()
+    block.text = content
+    msg.content = [block]
+    msg.usage.input_tokens = input_tokens
+    msg.usage.output_tokens = output_tokens
+    return msg
+
+
+def _make_client(anthropic_response=None, api_error: Exception | None = None) -> tuple[LLMClient, MagicMock]:
+    """Return (LLMClient, mock_anthropic_client)."""
+    anth = MagicMock()
+    anth.messages = MagicMock()
+    if api_error:
+        anth.messages.create = AsyncMock(side_effect=api_error)
+    else:
+        anth.messages.create = AsyncMock(return_value=anthropic_response or _make_anthropic_response())
+
+    session_factory = MagicMock()
+    # Session context manager
+    session = AsyncMock()
+    session.commit = AsyncMock()
+    session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    client = LLMClient(anth, session_factory, default_strategy="test_strategy")
+    return client, anth
+
+
+# ---------------------------------------------------------------------------
+# Success path
+# ---------------------------------------------------------------------------
+
+
+class TestComplete:
+    @pytest.mark.asyncio
+    async def test_returns_llm_response_on_success(self) -> None:
+        client, _ = _make_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = FAKE_QUERY_ID
+            result = await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+        assert isinstance(result, LLMResponse)
+        assert result.content == FAKE_CONTENT
+        assert result.model == MODEL
+        assert result.tokens_input == 100
+        assert result.tokens_output == 30
+        assert result.llm_query_id == FAKE_QUERY_ID
+        assert result.cost_usd > 0
+        assert result.latency_ms >= 0
+
+    @pytest.mark.asyncio
+    async def test_audit_row_written_on_success(self) -> None:
+        client, _ = _make_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = FAKE_QUERY_ID
+            await client.complete(PROMPT, MODEL, QUERY_TYPE, market_id="MKT-1")
+
+        mock_log.assert_called_once()
+        kwargs = mock_log.call_args.kwargs
+        assert kwargs["success"] is True
+        assert kwargs["model_used"] == MODEL
+        assert kwargs["query_type"] == QUERY_TYPE
+        assert kwargs["market_id"] == "MKT-1"
+        assert kwargs.get("error_message") is None
+        assert kwargs["tokens_input"] == 100
+        assert kwargs["tokens_output"] == 30
+
+    @pytest.mark.asyncio
+    async def test_strategy_passed_through(self) -> None:
+        client, _ = _make_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 1
+            await client.complete(PROMPT, MODEL, QUERY_TYPE, strategy="ConservativeDefault")
+
+        assert mock_log.call_args.kwargs["strategy"] == "ConservativeDefault"
+
+    @pytest.mark.asyncio
+    async def test_default_strategy_used_when_not_provided(self) -> None:
+        client, _ = _make_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 1
+            await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+        assert mock_log.call_args.kwargs["strategy"] == "test_strategy"
+
+    @pytest.mark.asyncio
+    async def test_exactly_one_audit_row_per_call(self) -> None:
+        client, _ = _make_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 1
+            await client.complete(PROMPT, MODEL, QUERY_TYPE)
+            await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+        assert mock_log.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Failure path
+# ---------------------------------------------------------------------------
+
+
+class TestCompleteFailure:
+    @pytest.mark.asyncio
+    async def test_raises_llm_error_on_api_failure(self) -> None:
+        client, _ = _make_client(api_error=RuntimeError("API timeout"))
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 5
+            with pytest.raises(LLMError, match="API timeout"):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+    @pytest.mark.asyncio
+    async def test_audit_row_written_on_failure(self) -> None:
+        client, _ = _make_client(api_error=RuntimeError("network error"))
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 7
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE, market_id="MKT-2")
+
+        mock_log.assert_called_once()
+        kwargs = mock_log.call_args.kwargs
+        assert kwargs["success"] is False
+        assert "network error" in kwargs["error_message"]
+        assert kwargs["market_id"] == "MKT-2"
+
+    @pytest.mark.asyncio
+    async def test_failure_row_has_zero_tokens_and_cost(self) -> None:
+        client, _ = _make_client(api_error=ValueError("bad request"))
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 3
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+        kwargs = mock_log.call_args.kwargs
+        assert kwargs["tokens_input"] == 0
+        assert kwargs["tokens_output"] == 0
+        assert kwargs["cost_usd"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Cost calculation
+# ---------------------------------------------------------------------------
+
+
+class TestCostCalculation:
+    @pytest.mark.asyncio
+    async def test_haiku_cost_computed_correctly(self) -> None:
+        resp = _make_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
+        client, _ = _make_client(anthropic_response=resp)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 1
+            result = await client.complete(PROMPT, "claude-haiku-4-5-20251001", QUERY_TYPE)
+
+        # 0.80/M input + 4.00/M output = $4.80
+        assert abs(result.cost_usd - 4.80) < 1e-6
+
+    @pytest.mark.asyncio
+    async def test_sonnet_cost_computed_correctly(self) -> None:
+        resp = _make_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
+        client, _ = _make_client(anthropic_response=resp)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 1
+            result = await client.complete(PROMPT, "claude-sonnet-4-6", QUERY_TYPE)
+
+        # 3.00/M input + 15.00/M output = $18.00
+        assert abs(result.cost_usd - 18.00) < 1e-6

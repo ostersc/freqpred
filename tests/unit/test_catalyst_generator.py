@@ -5,10 +5,9 @@ No real API calls are made.
 """
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -18,6 +17,8 @@ from freqpred.ingestion.catalyst_generator import (
     _parse_queries,
     generate_catalysts,
 )
+from freqpred.llm.client import LLMError
+from freqpred.llm.models import LLMResponse
 from freqpred.markets.models import Market
 from freqpred.rag.models import Document
 
@@ -53,18 +54,32 @@ def _market(market_id: str = "MKT-1") -> Market:
     )
 
 
-def _make_anthropic_response(queries: list[str]) -> MagicMock:
-    """Build a mock Anthropic message response containing a JSON array."""
-    msg = MagicMock()
-    content_block = MagicMock()
-    content_block.text = json.dumps(queries)
-    msg.content = [content_block]
-    msg.usage.input_tokens = 120
-    msg.usage.output_tokens = 40
-    return msg
+def _make_llm_client(
+    queries: list[str] = FAKE_QUERIES,
+    raises: Exception | None = None,
+    llm_query_id: int = 42,
+) -> MagicMock:
+    """Return a mock LLMClient."""
+    import json
+    client = MagicMock()
+    if raises:
+        client.complete = AsyncMock(side_effect=raises)
+    else:
+        client.complete = AsyncMock(
+            return_value=LLMResponse(
+                content=json.dumps(queries),
+                model="claude-haiku-4-5-20251001",
+                tokens_input=120,
+                tokens_output=40,
+                cost_usd=0.000256,
+                latency_ms=300,
+                llm_query_id=llm_query_id,
+            )
+        )
+    return client
 
 
-def _make_session(prior_run_row=None, has_run_today: bool = False) -> AsyncMock:
+def _make_session(prior_run_row=None) -> AsyncMock:
     """Build a mock AsyncSession."""
     session = AsyncMock()
     session.add = MagicMock()
@@ -76,28 +91,14 @@ def _make_session(prior_run_row=None, has_run_today: bool = False) -> AsyncMock:
         result = MagicMock()
         call_count += 1
         if call_count == 1:
-            # _get_latest_run query
             result.scalar_one_or_none.return_value = prior_run_row
-        elif call_count == 2:
-            # log_llm_query flush triggers auto-id
-            result.scalar_one_or_none.return_value = None
         else:
             result.scalar_one_or_none.return_value = None
         return result
 
     session.execute.side_effect = execute_side_effect
-
-    # flush does nothing but must be awaitable
     session.flush = AsyncMock()
-
     return session
-
-
-def _make_anthropic_client(queries: list[str]) -> MagicMock:
-    client = MagicMock()
-    client.messages = MagicMock()
-    client.messages.create = AsyncMock(return_value=_make_anthropic_response(queries))
-    return client
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +199,6 @@ class TestBuildPrompt:
             embedding_model="voyage-3",
         )
         prompt = _build_prompt(_market(), rag_docs=[doc])
-        # 500 char limit + "..." — prompt should not contain the full 2000 chars
         assert long_body not in prompt
 
 
@@ -211,18 +211,16 @@ class TestGenerateCatalysts:
     @pytest.mark.asyncio
     async def test_first_run_creates_run_and_queries(self) -> None:
         session = _make_session(prior_run_row=None)
-        client = _make_anthropic_client(FAKE_QUERIES)
+        client = _make_llm_client(llm_query_id=42)
 
-        with patch("freqpred.ingestion.catalyst_generator.log_llm_query", new_callable=AsyncMock) as mock_log:
-            mock_log.return_value = 42  # fake llm_query_id
-            result = await generate_catalysts(_market(), session, client)
+        result = await generate_catalysts(_market(), session, client)
 
         assert result.market_id == "MKT-1"
         assert result.generation == 1
         assert result.is_active is True
         assert result.llm_query_id == 42
 
-        # CatalystRunRow + 3 CatalystQueryRow adds = 4 calls to session.add
+        # CatalystRunRow + 3 CatalystQueryRow = 4 session.add calls
         assert session.add.call_count == 4
 
     @pytest.mark.asyncio
@@ -232,64 +230,79 @@ class TestGenerateCatalysts:
         prior.id = uuid.uuid4()
 
         session = _make_session(prior_run_row=prior)
-        client = _make_anthropic_client(FAKE_QUERIES)
+        client = _make_llm_client(llm_query_id=99)
 
-        with patch("freqpred.ingestion.catalyst_generator.log_llm_query", new_callable=AsyncMock) as mock_log:
-            mock_log.return_value = 99
-            result = await generate_catalysts(_market(), session, client)
+        result = await generate_catalysts(_market(), session, client)
 
         assert result.generation == 3
 
     @pytest.mark.asyncio
-    async def test_llm_always_logged_on_failure(self) -> None:
-        """Even when the LLM returns unparseable output, audit row is written."""
+    async def test_llm_api_error_raises_catalyst_error(self) -> None:
+        """LLMError from the client propagates as CatalystGenerationError."""
         session = _make_session(prior_run_row=None)
-        client = MagicMock()
-        bad_msg = MagicMock()
-        bad_msg.content = [MagicMock(text="not valid json")]
-        bad_msg.usage.input_tokens = 50
-        bad_msg.usage.output_tokens = 10
-        client.messages.create = AsyncMock(return_value=bad_msg)
+        client = _make_llm_client(raises=LLMError("API down"))
 
-        with patch("freqpred.ingestion.catalyst_generator.log_llm_query", new_callable=AsyncMock) as mock_log:
-            mock_log.return_value = 7
-            with pytest.raises(CatalystGenerationError):
-                await generate_catalysts(_market(), session, client)
-
-        mock_log.assert_called_once()
-        # success=False should be passed
-        call_kwargs = mock_log.call_args.kwargs
-        assert call_kwargs["success"] is False
+        with pytest.raises(CatalystGenerationError):
+            await generate_catalysts(_market(), session, client)
 
     @pytest.mark.asyncio
-    async def test_llm_api_error_logged_and_raises(self) -> None:
+    async def test_unparseable_response_raises_catalyst_error(self) -> None:
+        """If LLM returns bad JSON, generate_catalysts raises CatalystGenerationError."""
+        import json
         session = _make_session(prior_run_row=None)
+        # Return a valid LLMResponse but with unparseable content
         client = MagicMock()
-        client.messages.create = AsyncMock(side_effect=RuntimeError("API down"))
+        client.complete = AsyncMock(
+            return_value=LLMResponse(
+                content="not valid json",
+                model="claude-haiku-4-5-20251001",
+                tokens_input=50,
+                tokens_output=10,
+                cost_usd=0.0,
+                latency_ms=100,
+                llm_query_id=7,
+            )
+        )
 
-        with patch("freqpred.ingestion.catalyst_generator.log_llm_query", new_callable=AsyncMock) as mock_log:
-            mock_log.return_value = 5
-            with pytest.raises(CatalystGenerationError):
-                await generate_catalysts(_market(), session, client)
+        with pytest.raises(CatalystGenerationError):
+            await generate_catalysts(_market(), session, client)
 
-        mock_log.assert_called_once()
-        assert mock_log.call_args.kwargs["success"] is False
+    @pytest.mark.asyncio
+    async def test_llm_client_called_with_correct_query_type(self) -> None:
+        session = _make_session(prior_run_row=None)
+        client = _make_llm_client()
+
+        await generate_catalysts(_market(), session, client)
+
+        client.complete.assert_called_once()
+        args = client.complete.call_args.args
+        assert args[2] == "catalyst_generation"
+
+    @pytest.mark.asyncio
+    async def test_llm_client_called_with_market_id(self) -> None:
+        session = _make_session(prior_run_row=None)
+        client = _make_llm_client()
+
+        await generate_catalysts(_market("MKT-99"), session, client)
+
+        kwargs = client.complete.call_args.kwargs
+        assert kwargs["market_id"] == "MKT-99"
 
     @pytest.mark.asyncio
     async def test_rerun_uses_embedder_for_rag(self) -> None:
         """On a re-run, the embedder is called to retrieve RAG context."""
+        from unittest.mock import patch
+
         prior = MagicMock()
         prior.generation = 1
         prior.id = uuid.uuid4()
 
         session = _make_session(prior_run_row=prior)
-        client = _make_anthropic_client(FAKE_QUERIES)
+        client = _make_llm_client()
         embedder = AsyncMock()
         embedder.embed_text.return_value = [0.1] * 1024
 
-        with patch("freqpred.llm.audit.log_llm_query", new_callable=AsyncMock) as mock_log, \
-             patch("freqpred.rag.retriever.retrieve", new_callable=AsyncMock) as mock_retrieve:
-            mock_log.return_value = 10
+        with patch("freqpred.rag.retriever.retrieve", new_callable=AsyncMock) as mock_retrieve:
             mock_retrieve.return_value = []
             await generate_catalysts(_market(), session, client, embedder=embedder)
 
@@ -298,13 +311,13 @@ class TestGenerateCatalysts:
     @pytest.mark.asyncio
     async def test_first_run_no_rag_call(self) -> None:
         """On a first run (no prior), embedder/RAG should NOT be called."""
+        from unittest.mock import patch
+
         session = _make_session(prior_run_row=None)
-        client = _make_anthropic_client(FAKE_QUERIES)
+        client = _make_llm_client()
         embedder = AsyncMock()
 
-        with patch("freqpred.llm.audit.log_llm_query", new_callable=AsyncMock) as mock_log, \
-             patch("freqpred.rag.retriever.retrieve", new_callable=AsyncMock) as mock_retrieve:
-            mock_log.return_value = 1
+        with patch("freqpred.rag.retriever.retrieve", new_callable=AsyncMock) as mock_retrieve:
             await generate_catalysts(_market(), session, client, embedder=embedder)
 
         mock_retrieve.assert_not_called()

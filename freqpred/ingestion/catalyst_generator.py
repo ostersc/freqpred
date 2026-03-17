@@ -15,18 +15,16 @@ Every LLM call is logged to llm_queries (constraint: audit log is non-negotiable
 from __future__ import annotations
 
 import json
-import time
 import uuid
 from datetime import UTC, date, datetime
 from typing import Protocol
 
-import anthropic
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.ingestion.models import CatalystQuery, CatalystQueryRow, CatalystRun, CatalystRunRow
-from freqpred.llm.audit import calculate_cost, log_llm_query
+from freqpred.llm.client import LLMClient, LLMError
 from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.models import Document
 
@@ -53,7 +51,7 @@ class _Embedder(Protocol):
 async def generate_catalysts(
     market: Market,
     session: AsyncSession,
-    anthropic_client: anthropic.AsyncAnthropic,
+    llm_client: LLMClient,
     embedder: _Embedder | None = None,
 ) -> CatalystRun:
     """Generate (or re-generate) catalyst queries for *market*.
@@ -84,32 +82,26 @@ async def generate_catalysts(
         rag_docs = await _retrieve_recent_docs(session, embedder, market)
 
     prompt = _build_prompt(market, rag_docs)
-    queries, raw_response, tokens_in, tokens_out, latency_ms, success, error = (
-        await _call_llm(anthropic_client, prompt)
-    )
 
-    cost = calculate_cost(_CATALYST_MODEL, tokens_in, tokens_out)
-
-    llm_query_id = await log_llm_query(
-        session,
-        strategy="system",
-        query_type="catalyst_generation",
-        model_used=_CATALYST_MODEL,
-        prompt_version=_PROMPT_VERSION,
-        prompt=prompt,
-        response=raw_response,
-        tokens_input=tokens_in,
-        tokens_output=tokens_out,
-        cost_usd=cost,
-        latency_ms=latency_ms,
-        success=success,
-        market_id=market.id,
-        error_message=error,
-    )
-
-    if not success or not queries:
+    try:
+        llm_resp = await llm_client.complete(
+            prompt,
+            _CATALYST_MODEL,
+            "catalyst_generation",
+            market_id=market.id,
+            strategy="system",
+        )
+    except LLMError as exc:
         raise CatalystGenerationError(
-            f"Catalyst generation failed for market {market.id}: {error}"
+            f"Catalyst generation failed for market {market.id}: {exc}"
+        ) from exc
+
+    llm_query_id = llm_resp.llm_query_id
+    queries, parse_error = _parse_queries(llm_resp.content)
+
+    if not queries:
+        raise CatalystGenerationError(
+            f"Catalyst generation failed for market {market.id}: {parse_error}"
         )
 
     # Persist the run.
@@ -139,7 +131,7 @@ async def generate_catalysts(
         generation=generation,
         query_count=len(queries),
         rag_docs_used=len(rag_docs),
-        cost_usd=round(cost, 6),
+        cost_usd=round(llm_resp.cost_usd, 6),
     )
 
     return CatalystRun(
@@ -155,7 +147,7 @@ async def generate_catalysts(
 async def run_catalyst_refresh(
     session: AsyncSession,
     strategies: list,
-    anthropic_client: anthropic.AsyncAnthropic,
+    llm_client: LLMClient,
     embedder: _Embedder | None = None,
 ) -> dict[str, int]:
     """Refresh catalysts for all strategy-selected active markets.
@@ -201,7 +193,7 @@ async def run_catalyst_refresh(
             continue
 
         try:
-            await generate_catalysts(market, session, anthropic_client, embedder)
+            await generate_catalysts(market, session, llm_client, embedder)
             generated += 1
         except CatalystGenerationError:
             log.warning(
@@ -262,41 +254,6 @@ def _build_prompt(market: Market, rag_docs: list[Document]) -> str:
 
     return "\n".join(lines)
 
-
-# ---------------------------------------------------------------------------
-# LLM call
-# ---------------------------------------------------------------------------
-
-
-async def _call_llm(
-    client: anthropic.AsyncAnthropic,
-    prompt: str,
-) -> tuple[list[str], str, int, int, int, bool, str | None]:
-    """Call Claude Haiku and parse the JSON array response.
-
-    Returns:
-        (queries, raw_response, tokens_in, tokens_out, latency_ms, success, error)
-    """
-    t0 = time.monotonic()
-    raw_response = ""
-    try:
-        message = await client.messages.create(
-            model=_CATALYST_MODEL,
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        latency_ms = int((time.monotonic() - t0) * 1000)
-        raw_response = message.content[0].text if message.content else ""
-        tokens_in = message.usage.input_tokens
-        tokens_out = message.usage.output_tokens
-    except Exception as exc:
-        latency_ms = int((time.monotonic() - t0) * 1000)
-        return [], str(exc), 0, 0, latency_ms, False, str(exc)
-
-    # Parse JSON array from response.
-    queries, error = _parse_queries(raw_response)
-    success = bool(queries) and error is None
-    return queries, raw_response, tokens_in, tokens_out, latency_ms, success, error
 
 
 def _parse_queries(text: str) -> tuple[list[str], str | None]:

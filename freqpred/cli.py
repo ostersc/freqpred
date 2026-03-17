@@ -170,6 +170,7 @@ async def _ingestion_run(
 
     from freqpred.db import make_engine, make_session_factory
     from freqpred.ingestion.catalyst_generator import CatalystGenerationError, generate_catalysts
+    from freqpred.llm.client import LLMClient
     from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
     from freqpred.ingestion.store import RawDocument, upsert_document
     from freqpred.markets.models import MarketRow
@@ -186,7 +187,11 @@ async def _ingestion_run(
 
     engine = make_engine(config.database.url)
     session_factory = make_session_factory(engine)
-    anthropic_client = anthropic.AsyncAnthropic(api_key=anthropic_api_key)
+    llm_client = LLMClient(
+        anthropic.AsyncAnthropic(api_key=anthropic_api_key),
+        session_factory,
+        prompt_version="catalyst-v1",
+    )
 
     embedder = None
     if config.voyage.api_key:
@@ -244,7 +249,7 @@ async def _ingestion_run(
         # Generate catalysts.
         async with session_factory() as session:
             try:
-                run = await generate_catalysts(market, session, anthropic_client, embedder)
+                run = await generate_catalysts(market, session, llm_client, embedder)
                 await session.commit()
 
                 # Fetch the query texts we just wrote.
