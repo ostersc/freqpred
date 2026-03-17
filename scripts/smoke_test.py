@@ -1,16 +1,17 @@
-"""Manual smoke test: pick a random Kalshi market, generate catalysts via LLM,
-then fetch targeted news from Tavily + NewsAPI + Reddit against those catalysts.
+"""Manual smoke test: pick a random Kalshi market, generate catalysts, fetch
+targeted news, then run the full signal pipeline to produce a probability estimate.
 
 Usage:
-    uv run python scripts/test_fetchers.py
-    uv run python scripts/test_fetchers.py --category politics
-    uv run python scripts/test_fetchers.py --max-results 5
-    uv run python scripts/test_fetchers.py --dry-run   # catalysts only, no fetching
+    uv run python scripts/smoke_test.py
+    uv run python scripts/smoke_test.py --category politics
+    uv run python scripts/smoke_test.py --max-results 5
+    uv run python scripts/smoke_test.py --dry-run   # catalysts only, no fetching/signal
 """
 from __future__ import annotations
 
 import asyncio
 import random
+import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -27,7 +28,11 @@ from freqpred.config import load_config
 from freqpred.ingestion.catalyst_generator import generate_catalysts
 from freqpred.ingestion.fetchers import newsapi, reddit, tavily
 from freqpred.ingestion.store import RawDocument
+from freqpred.llm.client import LLMClient
 from freqpred.markets.kalshi import KalshiClient
+from freqpred.markets.models import Market
+from freqpred.rag.models import Document
+from freqpred.signal.llm import SYSTEM_PROMPT, build_prompt, parse_signal_response
 
 # From SPEC.md §9 — subreddit targets by category
 _CATEGORY_SUBREDDITS: dict[str, list[str]] = {
@@ -39,6 +44,8 @@ _CATEGORY_SUBREDDITS: dict[str, list[str]] = {
     "crypto":     ["CryptoCurrency", "Bitcoin"],
     "climate":    ["climate", "environment"],
 }
+
+_SIGNAL_MODEL = "claude-sonnet-4-6"
 
 
 def _print_docs(docs: list[RawDocument], max_body: int = 200) -> None:
@@ -59,21 +66,16 @@ def _print_docs(docs: list[RawDocument], max_body: int = 200) -> None:
 
 
 def _make_stub_session() -> MagicMock:
-    """Build a minimal stub AsyncSession for the catalyst generator.
+    """Build a minimal stub AsyncSession for components that need a DB session.
 
-    In this script we don't need to persist to DB — we just want the LLM
-    call and the returned CatalystRun domain object. The session stubs allow
-    generate_catalysts() to run without a real DB connection.
+    In this smoke test we don't persist to DB — we just want the LLM calls
+    and their return values. The session stubs satisfy the audit-logging
+    interface without a real DB connection.
     """
     session = AsyncMock()
 
-    # _get_latest_run: return None (treat every run as a first run)
     first_result = MagicMock()
     first_result.scalar_one_or_none.return_value = None
-
-    # log_llm_query flush: simulate auto-increment id
-    flush_result = MagicMock()
-    flush_result.scalar_one_or_none.return_value = None
 
     call_count = 0
 
@@ -82,13 +84,13 @@ def _make_stub_session() -> MagicMock:
         call_count += 1
         if call_count == 1:
             return first_result
-        return flush_result
+        return MagicMock()
 
     session.execute.side_effect = execute_side_effect
     session.flush = AsyncMock()
     session.add = MagicMock()
+    session.commit = AsyncMock()
 
-    # Give each added row a fake id so log_llm_query doesn't return None.
     session.add.side_effect = lambda row: (
         setattr(row, "id", 999),
         setattr(row, "created_at", datetime.now(timezone.utc)),
@@ -97,10 +99,101 @@ def _make_stub_session() -> MagicMock:
     return session
 
 
+def _make_stub_session_factory() -> MagicMock:
+    """Return an async session factory that always yields a fresh stub session."""
+    factory = MagicMock()
+    stub = _make_stub_session()
+    factory.return_value.__aenter__ = AsyncMock(return_value=stub)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+    return factory
+
+
+def _raw_to_document(raw: RawDocument, category: str) -> Document:
+    """Convert a RawDocument to a Document domain object for signal analysis.
+
+    Uses a synthetic UUID and zero embedding since we're bypassing the
+    vector store in this smoke test.
+    """
+    return Document(
+        id=str(uuid.uuid4()),
+        source_url=raw.source_url,
+        content_hash="",
+        title=raw.title or "",
+        body=raw.body,
+        source_type=raw.source_type,
+        source_name=raw.source_name,
+        category=category,
+        tags=[],
+        published_at=raw.published_at,
+        fetched_at=datetime.now(timezone.utc),
+        embedding=[],
+        embedding_model="none",
+        summary=None,
+    )
+
+
+async def _run_signal_analysis(
+    market: Market,
+    docs: list[Document],
+    anthropic_client: anthropic.AsyncAnthropic,
+) -> None:
+    """Call Claude Sonnet with fetched docs as evidence and print the signal."""
+    click.echo(f"\n{'═' * 70}")
+    click.echo(f"  SIGNAL ANALYSIS  ({_SIGNAL_MODEL})")
+    click.echo(f"{'═' * 70}")
+    click.echo(f"  Evidence docs: {len(docs)}")
+
+    if not docs:
+        click.echo("  No evidence to analyze — skipping signal.")
+        return
+
+    prompt = build_prompt(market, docs)
+    session_factory = _make_stub_session_factory()
+    llm_client = LLMClient(
+        anthropic_client,
+        session_factory,
+        default_strategy="smoke_test",
+        prompt_version="signal-v1",
+    )
+
+    click.echo("  Calling LLM…")
+    try:
+        response = await llm_client.complete(
+            prompt,
+            _SIGNAL_MODEL,
+            query_type="market_analysis",
+            system=SYSTEM_PROMPT,
+            market_id=market.id,
+            max_tokens=1024,
+        )
+    except Exception as exc:
+        click.echo(f"  LLM call failed: {exc}", err=True)
+        return
+
+    parsed = parse_signal_response(response.content)
+    if parsed is None:
+        click.echo("  Failed to parse LLM response:")
+        click.echo(f"  {response.content[:400]}")
+        return
+
+    edge = parsed["probability"] - market.mid_price
+    edge_pct = f"+{edge:.1%}" if edge >= 0 else f"{edge:.1%}"
+
+    click.echo()
+    click.echo(f"  Probability : {parsed['probability']:.1%}")
+    click.echo(f"  Market mid  : {market.mid_price:.1%}")
+    click.echo(f"  Edge        : {edge_pct}")
+    click.echo(f"  Confidence  : {parsed['confidence']:.1%}")
+    click.echo(f"  Direction   : {parsed['direction']}")
+    click.echo(f"  Reasoning   : {parsed['reasoning']}")
+    click.echo(f"  Cost        : ${response.cost_usd:.4f}  ({response.latency_ms}ms)")
+    click.echo()
+
+
 @click.command()
 @click.option("--category", default=None, help="Kalshi category to filter markets.")
 @click.option("--max-results", default=5, show_default=True, help="Results per source per catalyst.")
-@click.option("--dry-run", is_flag=True, default=False, help="Generate catalysts only, skip news fetching.")
+@click.option("--dry-run", is_flag=True, default=False, help="Generate catalysts only, skip fetching and signal.")
 def main(category: str | None, max_results: int, dry_run: bool) -> None:
     asyncio.run(_run(category=category, max_results=max_results, dry_run=dry_run))
 
@@ -132,18 +225,22 @@ async def _run(category: str | None, max_results: int, dry_run: bool) -> None:
     click.echo(f"{'═' * 70}\n")
 
     # ── 2. Generate catalysts via LLM ────────────────────────────────────────
-    click.echo(f"Generating catalyst queries (Claude Haiku)…")
+    click.echo("Generating catalyst queries (Claude Haiku)…")
     anthropic_client = anthropic.AsyncAnthropic(api_key=cfg.anthropic.api_key)
     stub_session = _make_stub_session()
+    llm_client = LLMClient(
+        anthropic_client,
+        _make_stub_session_factory(),
+        default_strategy="smoke_test",
+        prompt_version="catalyst-v1",
+    )
 
     try:
-        run = await generate_catalysts(market, stub_session, anthropic_client, embedder=None)
+        run = await generate_catalysts(market, stub_session, llm_client, embedder=None)
     except Exception as exc:
         click.echo(f"Catalyst generation failed: {exc}", err=True)
         return
 
-    # Retrieve query texts from the stub session's add() calls.
-    # generate_catalysts calls session.add() for: 1 CatalystRunRow + N CatalystQueryRow.
     from freqpred.ingestion.models import CatalystQueryRow
     added_objects = [call.args[0] for call in stub_session.add.call_args_list]
     catalyst_queries = [obj.query_text for obj in added_objects if isinstance(obj, CatalystQueryRow)]
@@ -153,7 +250,7 @@ async def _run(category: str | None, max_results: int, dry_run: bool) -> None:
         click.echo(f"  {i}. {q}")
 
     if dry_run or not catalyst_queries:
-        click.echo("\n(dry-run: skipping news fetch)")
+        click.echo("\n(dry-run: skipping news fetch and signal analysis)")
         return
 
     # ── 3. Fetch news against each catalyst query ────────────────────────────
@@ -161,24 +258,28 @@ async def _run(category: str | None, max_results: int, dry_run: bool) -> None:
     subs_display = ", ".join(f"r/{s}" for s in subreddits)
     from_date = datetime.now(timezone.utc) - timedelta(days=7)
 
+    all_raw_docs: list[RawDocument] = []
+
     for query in catalyst_queries:
         click.echo(f"\n{'─' * 70}")
         click.echo(f'Catalyst: "{query}"')
         click.echo(f"{'─' * 70}")
 
         # Tavily
-        click.echo(f"\n[Tavily]")
+        click.echo("\n[Tavily]")
         tavily_docs = await tavily.fetch(cfg.tavily.api_key, query, max_results=max_results)
         click.echo(f"{len(tavily_docs)} result(s)\n")
         _print_docs(tavily_docs)
+        all_raw_docs.extend(tavily_docs)
 
         # NewsAPI
-        click.echo(f"[NewsAPI]")
+        click.echo("[NewsAPI]")
         newsapi_docs = await newsapi.fetch(
             cfg.newsapi.api_key, query, from_date=from_date, max_results=max_results
         )
         click.echo(f"{len(newsapi_docs)} result(s)\n")
         _print_docs(newsapi_docs)
+        all_raw_docs.extend(newsapi_docs)
 
         # Reddit
         click.echo(f"[Reddit] ({subs_display})")
@@ -190,6 +291,19 @@ async def _run(category: str | None, max_results: int, dry_run: bool) -> None:
         )
         click.echo(f"{len(reddit_docs)} result(s) (filtered: score≥10, age≤7d)\n")
         _print_docs(reddit_docs)
+        all_raw_docs.extend(reddit_docs)
+
+    # ── 4. Run signal analysis on all fetched evidence ───────────────────────
+    # Deduplicate by URL, then convert to Document objects for the signal prompt
+    seen_urls: set[str] = set()
+    unique_raw: list[RawDocument] = []
+    for raw in all_raw_docs:
+        if raw.source_url not in seen_urls:
+            seen_urls.add(raw.source_url)
+            unique_raw.append(raw)
+
+    docs = [_raw_to_document(raw, market.category) for raw in unique_raw]
+    await _run_signal_analysis(market, docs, anthropic_client)
 
 
 if __name__ == "__main__":
