@@ -47,7 +47,7 @@ async def upsert_market(session: AsyncSession, market: Market) -> None:
         price_updated_at = now
 
     stmt = (
-        pg_insert(MarketRow)
+        pg_insert(MarketRow.__table__)
         .values(
             id=market.id,
             platform=market.platform,
@@ -62,7 +62,7 @@ async def upsert_market(session: AsyncSession, market: Market) -> None:
             last_fetched_at=now,
             price_updated_at=price_updated_at,
             metadata_fetched_at=market.metadata_fetched_at,
-            metadata_=market.metadata,
+            metadata=market.metadata,
             current_signal_id=None,
         )
         .on_conflict_do_update(
@@ -79,7 +79,7 @@ async def upsert_market(session: AsyncSession, market: Market) -> None:
                 "last_fetched_at": now,
                 "price_updated_at": price_updated_at,
                 "metadata_fetched_at": market.metadata_fetched_at,
-                "metadata_": market.metadata,
+                "metadata": market.metadata,
             },
         )
     )

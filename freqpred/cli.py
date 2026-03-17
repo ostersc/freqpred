@@ -62,6 +62,8 @@ async def _markets_list(config: object, category: str | None, skip_db: bool) -> 
     from freqpred.db import make_engine, make_session_factory
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.markets.repository import upsert_markets
+    import freqpred.signal.models  # noqa: F401 — register SignalRow with SQLAlchemy mapper
+    import freqpred.rag.models  # noqa: F401 — register DocumentMarketLinkRow with SQLAlchemy mapper
 
     async with KalshiClient(
         api_key=config.kalshi.api_key,
