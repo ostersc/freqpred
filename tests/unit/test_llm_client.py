@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from freqpred.llm.audit import LLMBudgetExceededError
 from freqpred.llm.client import LLMClient, LLMError
 from freqpred.llm.models import LLMResponse
 
@@ -41,7 +42,11 @@ def _make_anthropic_response(
     return msg
 
 
-def _make_client(anthropic_response=None, api_error: Exception | None = None) -> tuple[LLMClient, MagicMock]:
+def _make_client(
+    anthropic_response=None,
+    api_error: Exception | None = None,
+    daily_spend_cap_usd: float | None = None,
+) -> tuple[LLMClient, MagicMock]:
     """Return (LLMClient, mock_anthropic_client)."""
     anth = MagicMock()
     anth.messages = MagicMock()
@@ -57,7 +62,12 @@ def _make_client(anthropic_response=None, api_error: Exception | None = None) ->
     session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
     session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
-    client = LLMClient(anth, session_factory, default_strategy="test_strategy")
+    client = LLMClient(
+        anth,
+        session_factory,
+        default_strategy="test_strategy",
+        daily_spend_cap_usd=daily_spend_cap_usd,
+    )
     return client, anth
 
 
@@ -198,3 +208,51 @@ class TestCostCalculation:
 
         # 3.00/M input + 15.00/M output = $18.00
         assert abs(result.cost_usd - 18.00) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Budget circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class TestBudgetCircuitBreaker:
+    @pytest.mark.asyncio
+    async def test_raises_when_cap_exceeded(self) -> None:
+        client, _ = _make_client(daily_spend_cap_usd=10.0)
+        with patch("freqpred.llm.client.get_daily_spend_usd", new_callable=AsyncMock, return_value=10.0):
+            with pytest.raises(LLMBudgetExceededError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+    @pytest.mark.asyncio
+    async def test_raises_when_spend_exceeds_cap(self) -> None:
+        client, _ = _make_client(daily_spend_cap_usd=5.0)
+        with patch("freqpred.llm.client.get_daily_spend_usd", new_callable=AsyncMock, return_value=7.32):
+            with pytest.raises(LLMBudgetExceededError, match="5.00"):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+    @pytest.mark.asyncio
+    async def test_no_api_call_when_budget_exceeded(self) -> None:
+        client, anth = _make_client(daily_spend_cap_usd=10.0)
+        with patch("freqpred.llm.client.get_daily_spend_usd", new_callable=AsyncMock, return_value=10.0):
+            with pytest.raises(LLMBudgetExceededError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+        anth.messages.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allows_call_when_under_cap(self) -> None:
+        client, _ = _make_client(daily_spend_cap_usd=10.0)
+        with patch("freqpred.llm.client.get_daily_spend_usd", new_callable=AsyncMock, return_value=9.99):
+            with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+                mock_log.return_value = 1
+                result = await client.complete(PROMPT, MODEL, QUERY_TYPE)
+        assert isinstance(result, LLMResponse)
+
+    @pytest.mark.asyncio
+    async def test_no_cap_check_when_cap_is_none(self) -> None:
+        """When daily_spend_cap_usd is None, no spend check is performed."""
+        client, _ = _make_client(daily_spend_cap_usd=None)
+        with patch("freqpred.llm.client.get_daily_spend_usd", new_callable=AsyncMock) as mock_spend:
+            with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+                mock_log.return_value = 1
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+        mock_spend.assert_not_called()

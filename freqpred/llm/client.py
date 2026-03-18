@@ -11,7 +11,7 @@ import anthropic
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from freqpred.llm.audit import calculate_cost, log_llm_query
+from freqpred.llm.audit import LLMBudgetExceededError, calculate_cost, get_daily_spend_usd, log_llm_query
 from freqpred.llm.models import LLMResponse
 
 log = structlog.get_logger(__name__)
@@ -41,11 +41,13 @@ class LLMClient:
         *,
         default_strategy: str = "system",
         prompt_version: str = "v1",
+        daily_spend_cap_usd: float | None = None,
     ) -> None:
         self._client = anthropic_client
         self._session_factory = session_factory
         self._default_strategy = default_strategy
         self._prompt_version = prompt_version
+        self._daily_spend_cap_usd = daily_spend_cap_usd
 
     async def complete(
         self,
@@ -81,6 +83,21 @@ class LLMClient:
             ``LLMError`` on Anthropic API failure.
         """
         strategy_name = strategy or self._default_strategy
+
+        if self._daily_spend_cap_usd is not None:
+            async with self._session_factory() as session:
+                daily_spend = await get_daily_spend_usd(session)
+            if daily_spend >= self._daily_spend_cap_usd:
+                log.warning(
+                    "llm_budget_exceeded",
+                    daily_spend_usd=round(daily_spend, 4),
+                    cap_usd=self._daily_spend_cap_usd,
+                )
+                raise LLMBudgetExceededError(
+                    f"Daily LLM spend cap of ${self._daily_spend_cap_usd:.2f} reached "
+                    f"(spent ${daily_spend:.4f} today)"
+                )
+
         start = time.monotonic()
 
         create_kwargs: dict = dict(

@@ -8,9 +8,32 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.llm.models import LLMQueryRow
+
+
+class LLMBudgetExceededError(Exception):
+    """Raised when the configured daily LLM spend cap has been reached."""
+
+
+async def get_daily_spend_usd(session: AsyncSession) -> float:
+    """Return the total LLM spend in USD for today (UTC).
+
+    Args:
+        session: Open async session.
+
+    Returns:
+        Sum of cost_usd for all llm_queries rows timestamped today, or 0.0.
+    """
+    today = datetime.now(UTC).date()
+    result = await session.execute(
+        select(func.coalesce(func.sum(LLMQueryRow.cost_usd), 0.0)).where(
+            func.date(LLMQueryRow.timestamp) == today
+        )
+    )
+    return float(result.scalar_one())
 
 log = structlog.get_logger(__name__)
 

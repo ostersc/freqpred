@@ -76,6 +76,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
         session_factory,
         prompt_version="signal-v1",
+        daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
     )
     pipeline = SignalPipeline(
         session_factory=session_factory,

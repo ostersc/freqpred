@@ -3,8 +3,8 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-03-15
-**Status:** Pre-development
+**Last updated:** 2026-03-17
+**Status:** Phase 1 complete — signal engine running; Phase 2 (paper trading) in progress
 
 ---
 
@@ -23,8 +23,8 @@ freqpred is to prediction markets what [freqtrade](https://github.com/freqtrade/
 
 ## 2. Goals
 
-- [ ] Fetch active prediction markets from Kalshi and score them with an LLM signal pipeline
-- [ ] Implement a code-driven strategy plugin interface (`IPredictionStrategy`)
+- [x] Fetch active prediction markets from Kalshi and score them with an LLM signal pipeline
+- [x] Implement a code-driven strategy plugin interface (`IPredictionStrategy`)
 - [ ] Track paper trades and measure real-world calibration over time
 - [ ] Execute live trades on Kalshi with hard risk controls
 - [ ] Provide a web dashboard and Telegram/Discord alerts
@@ -839,25 +839,25 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 
 ## 13. Development Phases
 
-### Phase 1: Signal Engine MVP
+### Phase 1: Signal Engine MVP ✅
 *Goal: produce scored signals for active Kalshi markets*
 
-- [ ] Kalshi API client (market fetch, no trading yet)
-- [ ] Document store schema (Postgres + pgvector extension)
-- [ ] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (sentence-transformers) → store
-- [ ] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
+- [x] Kalshi API client (market fetch, no trading yet)
+- [x] Document store schema (Postgres + pgvector extension)
+- [x] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (sentence-transformers) → store
+- [x] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
 - [ ] Twitter/X fetcher (optional — gated on API cost decision)
-- [ ] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault` strategy
-- [ ] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy
-- [ ] Catalyst Generator: LLM (Haiku) derives 3–5 search queries per selected market; writes `CatalystRun` + `CatalystQuery` to DB; RAG-informed on re-runs; deactivates on market close/deselection
-- [ ] Ingestion Scheduler: reads latest active `CatalystQuery` rows from DB; drives fetchers; tracks last-run per market in Redis
-- [ ] RAG retriever: vector search against Document store for a given market question
-- [ ] LLM signal pipeline: retrieve docs → hash check → Claude analysis → Signal creation
-- [ ] LLM audit logging (LLMQuery table — every call logged with cost)
-- [ ] LLM budget circuit breaker (configurable daily spend cap)
-- [ ] Signal scoring and logging to Postgres
-- [ ] Basic CLI: `freqpred run --strategy ConservativeDefault --mode signal-only`
-- [ ] Docker + local dev setup
+- [x] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy` strategies
+- [x] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy
+- [x] Catalyst Generator: LLM (Haiku) derives 3–5 search queries per selected market; writes `CatalystRun` + `CatalystQuery` to DB; RAG-informed on re-runs; deactivates on market close/deselection
+- [x] Ingestion Scheduler: reads latest active `CatalystQuery` rows from DB; drives fetchers; tracks last-run per market in Redis
+- [x] RAG retriever: vector search against Document store for a given market question
+- [x] LLM signal pipeline: retrieve docs → hash check → Claude analysis → Signal creation
+- [x] LLM audit logging (LLMQuery table — every call logged with cost)
+- [x] LLM budget circuit breaker (configurable daily spend cap — enforced in `LLMClient.complete()`)
+- [x] Signal scoring and logging to Postgres
+- [x] Basic CLI: `freqpred run --strategy ConservativeDefault --mode signal-only`
+- [x] Docker + local dev setup
 
 **Done when:** System runs continuously, produces signals for 20+ markets/day, signals are logged with full context for review.
 
@@ -872,8 +872,6 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 **RAG improvements:**
 - [ ] `document_market_links.relevance_score` is currently a rank-based proxy (`1/rank`). Swap to actual cosine similarity scores from pgvector so calibration analysis can weight document influence by true semantic relevance.
 
-- [ ] `IPredictionStrategy` plugin interface
-- [ ] `PoliticsEdgeStrategy` and `TechNewsStrategy` implementations
 - [ ] Order Manager (paper mode)
 - [ ] Ledger (positions, resolutions, P&L)
 - [ ] Calibration metrics (Brier score, calibration curve)
@@ -945,7 +943,7 @@ freqpred/
 │   │   ├── retriever.py         # vector search against Document store (pgvector)
 │   │   └── models.py            # Document, DocumentMarketLink dataclasses
 │   ├── signal/
-│   │   ├── pipeline.py          # orchestrates retrieval + LLM analysis (Phase 2)
+│   │   ├── pipeline.py          # orchestrates retrieval + LLM analysis
 │   │   ├── llm.py               # Claude client, structured output
 │   │   ├── cache.py             # retrieval hash check, signal dedup
 │   │   └── models.py            # Signal dataclass
