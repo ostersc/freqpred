@@ -51,6 +51,8 @@ class TavilyConfig(BaseModel):
 
 class NewsAPIConfig(BaseModel):
     api_key: str = Field(default="")
+    enabled: bool = Field(default=True)
+    max_daily_requests: int = Field(default=90)
 
 
 class RedditConfig(BaseModel):

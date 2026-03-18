@@ -1,4 +1,4 @@
-"""Unit tests for freqpred.ingestion.scheduler._ensure_catalysts."""
+"""Unit tests for freqpred.ingestion.scheduler._ensure_catalysts and run_cycle."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.scheduler import _CATALYST_REFRESH_INTERVAL, _ensure_catalysts
+from freqpred.ingestion.scheduler import _CATALYST_REFRESH_INTERVAL, _ensure_catalysts, run_cycle
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +155,44 @@ class TestEnsureCatalysts:
 
         assert count == 0
         mock_gen.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_newsapi_skipped_when_disabled(self) -> None:
+        """run_cycle with newsapi_enabled=False must never call the NewsAPI fetcher."""
+        session = AsyncMock()
+        embedder = MagicMock()
+        redis_client = AsyncMock()
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=[("MKT-1", "politics", ["query one"])],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.newsapi_fetcher.fetch",
+                new_callable=AsyncMock,
+            ) as mock_newsapi,
+            patch(
+                "freqpred.ingestion.scheduler.tavily_fetcher.fetch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            await run_cycle(
+                session=session,
+                embedder=embedder,
+                redis_client=redis_client,
+                newsapi_api_key="some-key",
+                newsapi_enabled=False,
+            )
+
+        mock_newsapi.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_generation_error_is_swallowed(self) -> None:

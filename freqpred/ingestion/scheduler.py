@@ -28,6 +28,7 @@ from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
 from freqpred.ingestion.fetchers import reddit as reddit_fetcher
 from freqpred.ingestion.fetchers import tavily as tavily_fetcher
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
+from freqpred.ingestion.quota import get_daily_count, increment_daily_count
 from freqpred.ingestion.store import DocumentSkipped, upsert_document
 from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.embedder import LocalEmbedder
@@ -76,6 +77,8 @@ async def run_cycle(
     llm_client: "LLMClient | None" = None,
     tavily_api_key: str = "",
     newsapi_api_key: str = "",
+    newsapi_enabled: bool = True,
+    newsapi_max_daily_requests: int = 90,
     reddit_user_agent: str = "freqpred/0.1",
 ) -> dict[str, int]:
     """Run one full ingestion cycle.
@@ -91,16 +94,20 @@ async def run_cycle(
     Fetcher errors are caught per-fetcher; one failure does not abort others.
 
     Args:
-        session:          Open async SQLAlchemy session (caller manages commit).
-        embedder:         Voyage AI embedder for document storage.
-        redis_client:     Async Redis client.
-        strategy:         Strategy used to filter markets. If None, all markets
-                          with active catalyst runs are processed.
-        llm_client:       LLM client for catalyst generation. If None, catalyst
-                          generation is skipped.
-        tavily_api_key:   Tavily API key. Tavily is skipped if empty.
-        newsapi_api_key:  NewsAPI key. NewsAPI is skipped if empty.
-        reddit_user_agent: User-Agent for Reddit requests.
+        session:                    Open async SQLAlchemy session (caller manages commit).
+        embedder:                   Local embedder for document storage.
+        redis_client:               Async Redis client.
+        strategy:                   Strategy used to filter markets. If None, all markets
+                                    with active catalyst runs are processed.
+        llm_client:                 LLM client for catalyst generation. If None, catalyst
+                                    generation is skipped.
+        tavily_api_key:             Tavily API key. Tavily is skipped if empty.
+        newsapi_api_key:            NewsAPI key. NewsAPI is skipped if empty.
+        newsapi_enabled:            When False, the NewsAPI fetcher is skipped entirely
+                                    even if newsapi_api_key is set (default: True).
+        newsapi_max_daily_requests: Daily request cap tracked in Postgres
+                                    ``api_daily_counters`` (default: 90).
+        reddit_user_agent:          User-Agent for Reddit requests.
 
     Returns:
         Stats dict with keys: markets_processed, catalysts_generated,
@@ -158,23 +165,33 @@ async def run_cycle(
                         exc_info=True,
                     )
 
-            # NewsAPI
-            if newsapi_api_key:
-                try:
-                    docs = await newsapi_fetcher.fetch(
-                        api_key=newsapi_api_key,
-                        query=query_text,
-                        from_date=newsapi_from,
-                    )
-                    raw_docs.extend(docs)
-                except Exception:
+            # NewsAPI — guarded by enabled flag and daily Postgres quota
+            if newsapi_api_key and newsapi_enabled:
+                daily_count = await get_daily_count(session, "newsapi", now.date())
+                if daily_count >= newsapi_max_daily_requests:
                     log.warning(
-                        "scheduler.fetcher_error",
-                        market_id=market_id,
-                        fetcher="newsapi",
-                        query=query_text,
-                        exc_info=True,
+                        "newsapi_daily_limit_reached",
+                        date=now.date().isoformat(),
+                        count=daily_count,
+                        max_daily_requests=newsapi_max_daily_requests,
                     )
+                else:
+                    try:
+                        docs = await newsapi_fetcher.fetch(
+                            api_key=newsapi_api_key,
+                            query=query_text,
+                            from_date=newsapi_from,
+                        )
+                        raw_docs.extend(docs)
+                        await increment_daily_count(session, "newsapi", now.date())
+                    except Exception:
+                        log.warning(
+                            "scheduler.fetcher_error",
+                            market_id=market_id,
+                            fetcher="newsapi",
+                            query=query_text,
+                            exc_info=True,
+                        )
 
             # Reddit
             try:
@@ -262,6 +279,8 @@ async def run_scheduler(
     llm_client: "LLMClient | None" = None,
     tavily_api_key: str = "",
     newsapi_api_key: str = "",
+    newsapi_enabled: bool = True,
+    newsapi_max_daily_requests: int = 90,
     reddit_user_agent: str = "freqpred/0.1",
 ) -> None:
     """Async loop: runs run_cycle every *interval_seconds*.
@@ -270,15 +289,17 @@ async def run_scheduler(
     market watcher. Logs and continues on cycle-level errors — never exits.
 
     Args:
-        session_factory:  Async SQLAlchemy session factory.
-        embedder:         Voyage AI embedder.
-        redis_client:     Async Redis client.
-        interval_seconds: Sleep duration between cycles (default 1800 = 30 min).
-        strategy:         Strategy used to filter markets for catalyst generation.
-        llm_client:       LLM client for catalyst generation.
-        tavily_api_key:   Tavily API key.
-        newsapi_api_key:  NewsAPI key.
-        reddit_user_agent: User-Agent for Reddit requests.
+        session_factory:            Async SQLAlchemy session factory.
+        embedder:                   Voyage AI embedder.
+        redis_client:               Async Redis client.
+        interval_seconds:           Sleep duration between cycles (default 1800 = 30 min).
+        strategy:                   Strategy used to filter markets for catalyst generation.
+        llm_client:                 LLM client for catalyst generation.
+        tavily_api_key:             Tavily API key.
+        newsapi_api_key:            NewsAPI key.
+        newsapi_enabled:            When False, NewsAPI fetcher is skipped entirely.
+        newsapi_max_daily_requests: Daily request cap for the NewsAPI fetcher.
+        reddit_user_agent:          User-Agent for Reddit requests.
     """
     log.info("scheduler.started", interval_seconds=interval_seconds)
 
@@ -293,6 +314,8 @@ async def run_scheduler(
                     llm_client=llm_client,
                     tavily_api_key=tavily_api_key,
                     newsapi_api_key=newsapi_api_key,
+                    newsapi_enabled=newsapi_enabled,
+                    newsapi_max_daily_requests=newsapi_max_daily_requests,
                     reddit_user_agent=reddit_user_agent,
                 )
                 await session.commit()

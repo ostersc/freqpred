@@ -727,7 +727,7 @@ Market Watcher upserts active markets into DB
 ┌─────────────────┐
 │  Ingestion      │  Reads latest active CatalystQuery rows from DB.
 │  Scheduler      │  For each query: runs Tavily + NewsAPI + Reddit.
-│  (every 30 min) │  Tracks last-run per market in Redis.
+│  (every 30 min) │  Tracks last-run per market in Postgres.
 │                 │  One fetcher failing does not stop others.
 └────────┬────────┘
          │
@@ -909,8 +909,7 @@ Where `config.kelly_multiplier` defaults to `0.25` (quarter-Kelly). Full Kelly i
 | Service | Use |
 |---|---|
 | **ECS Fargate** | Runs the main freqpred service (containerized, always-on) |
-| **RDS (Postgres + pgvector)** | Ledger, positions, signals, market history, Document store + embeddings |
-| **ElastiCache (Redis)** | Signal cache, rate limiting, ingestion job dedup |
+| **RDS (Postgres + pgvector)** | Ledger, positions, signals, market history, Document store + embeddings, signal cache (retrieval hash), per-service daily request quotas, ingestion dedup |
 | **CloudWatch** | Logs, metrics, alarms |
 | **Secrets Manager** | API keys (Kalshi, LLM providers, news APIs) |
 | **ECR** | Docker image registry |
@@ -973,7 +972,7 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 - [x] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy` strategies
 - [x] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy
 - [x] Catalyst Generator: LLM (Haiku) derives 3–5 search queries per selected market; writes `CatalystRun` + `CatalystQuery` to DB; RAG-informed on re-runs; deactivates on market close/deselection
-- [x] Ingestion Scheduler: reads latest active `CatalystQuery` rows from DB; drives fetchers; tracks last-run per market in Redis
+- [x] Ingestion Scheduler: reads latest active `CatalystQuery` rows from DB; drives fetchers; tracks last-run per market in Redis in Postgres
 - [x] RAG retriever: vector search against Document store for a given market question
 - [x] LLM signal pipeline: retrieve docs → hash check → Claude analysis → Signal creation
 - [x] LLM audit logging (LLMQuery table — every call logged with cost)
@@ -990,7 +989,7 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 *Goal: validate signal quality with simulated trades*
 
 **Ingestion improvements (address before running at scale):**
-- [ ] NewsAPI rate limiting: developer accounts are capped at 100 req/24h. Either upgrade to a paid plan, reduce query frequency, or disable NewsAPI and rely on Tavily + Reddit only. Running 5 queries × 3 markets per cycle exhausts the quota in one ingestion pass.
+- [x] NewsAPI rate limiting (T15): `config.newsapi.enabled` flag to disable fetcher; daily request quota tracked in `api_daily_counters` Postgres table (default cap: 90/day).
 
 **RAG improvements:**
 - [ ] `document_market_links.relevance_score` is currently a rank-based proxy (`1/rank`). Swap to actual cosine similarity scores from pgvector so calibration analysis can weight document influence by true semantic relevance.

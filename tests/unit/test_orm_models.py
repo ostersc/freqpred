@@ -17,6 +17,7 @@ from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from freqpred.db import Base, make_engine, make_session_factory
+from freqpred.ingestion.models import ApiDailyCounterRow  # registers the table
 from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
@@ -50,6 +51,7 @@ def test_all_tables_registered():
         "llm_queries",
         "catalyst_runs",
         "catalyst_queries",
+        "api_daily_counters",
     }
     registered = set(Base.metadata.tables.keys())
     assert expected == registered

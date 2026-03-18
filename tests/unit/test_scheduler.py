@@ -29,6 +29,19 @@ FAKE_EMBEDDING = [0.1] * 384
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def mock_quota(monkeypatch):
+    """Patch quota helpers so scheduler tests don't need a real DB session."""
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.get_daily_count",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.increment_daily_count",
+        AsyncMock(return_value=None),
+    )
+
+
 def _make_raw_doc(url: str = "https://example.com/article") -> RawDocument:
     return RawDocument(
         source_url=url,

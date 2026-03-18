@@ -1,11 +1,14 @@
-"""Catalyst data models: CatalystRun and CatalystQuery — ORM + dataclasses."""
+"""Catalyst data models: CatalystRun and CatalystQuery — ORM + dataclasses.
+
+Also contains ApiDailyCounterRow for per-service daily request tracking.
+"""
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, ForeignKey, Integer, Text, VARCHAR
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, Text, VARCHAR
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -73,6 +76,20 @@ class CatalystQueryRow(Base):
     run: Mapped["CatalystRunRow"] = relationship(
         "CatalystRunRow", back_populates="queries"
     )
+
+
+class ApiDailyCounterRow(Base):
+    """ORM model for the ``api_daily_counters`` table.
+
+    One row per (service, date) pair. Incremented atomically via
+    INSERT ... ON CONFLICT DO UPDATE in quota.py.
+    """
+
+    __tablename__ = "api_daily_counters"
+
+    service: Mapped[str] = mapped_column(Text, primary_key=True)
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 # ---------------------------------------------------------------------------
