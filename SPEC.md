@@ -866,6 +866,12 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 ### Phase 2: Paper Trading + Calibration
 *Goal: validate signal quality with simulated trades*
 
+**Ingestion improvements (address before running at scale):**
+- [ ] NewsAPI rate limiting: developer accounts are capped at 100 req/24h. Either upgrade to a paid plan, reduce query frequency, or disable NewsAPI and rely on Tavily + Reddit only. Running 5 queries × 3 markets per cycle exhausts the quota in one ingestion pass.
+
+**RAG improvements:**
+- [ ] `document_market_links.relevance_score` is currently a rank-based proxy (`1/rank`). Swap to actual cosine similarity scores from pgvector so calibration analysis can weight document influence by true semantic relevance.
+
 - [ ] `IPredictionStrategy` plugin interface
 - [ ] `PoliticsEdgeStrategy` and `TechNewsStrategy` implementations
 - [ ] Order Manager (paper mode)

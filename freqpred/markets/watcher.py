@@ -110,7 +110,7 @@ class MarketWatcher:
             elapsed_s=round((datetime.now(UTC) - cycle_start).total_seconds(), 2),
         )
         if stale_ids:
-            log.warning("market_watcher_stale_markets", market_ids=stale_ids)
+            log.warning("market_watcher_stale_markets", count=len(stale_ids))
 
     async def _check_price_move_triggers(
         self,
@@ -175,8 +175,12 @@ class MarketWatcher:
         Stale = last_fetched_at older than now - polling_interval × 3.
         These markets are logged but not enqueued for signal analysis.
         """
-        cutoff = datetime.now(UTC) - timedelta(seconds=self._polling_interval * 3)
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=self._polling_interval * 3)
         result = await session.execute(
-            select(MarketRow.id).where(MarketRow.last_fetched_at < cutoff)
+            select(MarketRow.id).where(
+                MarketRow.last_fetched_at < cutoff,
+                MarketRow.close_time > now,
+            )
         )
         return [row.id for row in result.all()]
