@@ -75,8 +75,8 @@ def _make_document(doc_id: str | None = None) -> MagicMock:
         tags=["fed", "rates"],
         published_at=NOW,
         fetched_at=NOW,
-        embedding=[0.1] * 1024,
-        embedding_model="voyage-3",
+        embedding=[0.1] * 384,
+        embedding_model="all-MiniLM-L6-v2",
         summary=None,
     )
 
@@ -327,7 +327,7 @@ class TestSignalPipelineAnalyze:
         session_factory = _make_session_factory(session)
 
         embedder = AsyncMock()
-        embedder.embed_text = AsyncMock(return_value=[0.1] * 1024)
+        embedder.embed_text = AsyncMock(return_value=[0.1] * 384)
 
         llm_client = _make_llm_client(content=llm_content, error=llm_error)
 
@@ -482,8 +482,8 @@ class TestSignalPipelineAnalyze:
         assert abs(result.edge - 0.20) < 1e-6
 
     @pytest.mark.asyncio
-    async def test_no_docs_still_runs(self) -> None:
-        """Empty retrieval still triggers LLM (hash of empty list is valid)."""
+    async def test_no_docs_returns_none(self) -> None:
+        """Empty retrieval skips LLM and returns None."""
         pipeline, _, llm_client = self._make_pipeline(
             docs=[],
             llm_content=_valid_llm_json(),
@@ -493,6 +493,5 @@ class TestSignalPipelineAnalyze:
         with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[])):
             result = await pipeline.analyze(_make_market())
 
-        # LLM should still be called even with no evidence
-        llm_client.complete.assert_awaited_once()
-        assert result is not None
+        llm_client.complete.assert_not_awaited()
+        assert result is None

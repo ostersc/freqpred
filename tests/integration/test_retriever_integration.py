@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(
 from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.rag.models import DocumentRow
 from freqpred.rag.retriever import compute_retrieval_hash, retrieve
-from freqpred.rag.embedder import VoyageEmbedder
+from freqpred.rag.embedder import LocalEmbedder
 
 # Import all models so Base.metadata is fully populated before create_all.
 import freqpred.markets.models  # noqa: F401
@@ -66,7 +66,7 @@ async def session(engine):
 
 def _make_embedder_for_question(question_embedding: list[float]) -> MagicMock:
     """Embedder whose embed_text returns the given vector for the query."""
-    embedder = MagicMock(spec=VoyageEmbedder)
+    embedder = MagicMock(spec=LocalEmbedder)
     embedder.embed_text = AsyncMock(return_value=question_embedding)
     return embedder
 
@@ -101,7 +101,7 @@ async def _insert_doc(
         published_at=published_at,
         fetched_at=NOW,
         embedding=embedding,
-        embedding_model="voyage-3",
+        embedding_model="all-MiniLM-L6-v2",
         summary=None,
     )
     session.add(row)
@@ -118,7 +118,7 @@ async def _insert_doc(
 async def test_retrieval_returns_correct_category_only(session):
     """Inserting 20 docs across 2 categories — retrieval returns only the
     requested category and excludes the other."""
-    dim = 1024
+    dim = 384
 
     # Insert 10 politics docs and 10 economics docs, all with same embedding
     shared_embedding = [0.1] * dim
@@ -138,7 +138,7 @@ async def test_retrieval_returns_correct_category_only(session):
 @pytest.mark.asyncio
 async def test_retrieval_ranked_by_relevance(session):
     """The most similar document (cosine distance ≈ 0) must rank first."""
-    dim = 1024
+    dim = 384
     # Two distinct embeddings: index 0 hot vs index 1 hot
     emb_a = _unit_vector(dim, 0)
     emb_b = _unit_vector(dim, 1)
@@ -159,7 +159,7 @@ async def test_retrieval_ranked_by_relevance(session):
 @pytest.mark.asyncio
 async def test_retrieval_excludes_old_documents(session):
     """Documents older than max_age_days must not appear in results."""
-    dim = 1024
+    dim = 384
     shared_embedding = [0.1] * dim
     old_date = NOW - timedelta(days=60)
     recent_date = NOW - timedelta(days=5)
@@ -181,7 +181,7 @@ async def test_retrieval_excludes_old_documents(session):
 @pytest.mark.asyncio
 async def test_retrieval_top_k_limits_results(session):
     """top_k must cap the result set even when more matching docs exist."""
-    dim = 1024
+    dim = 384
     shared_embedding = [0.1] * dim
     for _ in range(15):
         await _insert_doc(session, category="politics", embedding=shared_embedding)
@@ -204,7 +204,7 @@ async def test_compute_retrieval_hash_deterministic_across_calls():
 @pytest.mark.asyncio
 async def test_retrieval_empty_category_returns_empty(session):
     """Querying a category with no documents returns an empty list."""
-    dim = 1024
+    dim = 384
     await _insert_doc(session, category="politics", embedding=[0.1] * dim)
     await session.flush()
 

@@ -56,13 +56,14 @@ class SignalPipeline:
 
         Steps:
         1. Retrieve top-K documents via RAG.
-        2. Compute retrieval hash from doc IDs.
-        3. If hash == current signal hash → return None (no new evidence).
-        4. Call Claude with market question + docs as context.
-        5. Parse JSON response.
-        6. Write Signal + DocumentMarketLinks + update Market.current_signal_id
+        2. If no documents retrieved → return None (no evidence to analyze).
+        3. Compute retrieval hash from doc IDs.
+        4. If hash == current signal hash → return None (no new evidence).
+        5. Call Claude with market question + docs as context.
+        6. Parse JSON response.
+        7. Write Signal + DocumentMarketLinks + update Market.current_signal_id
            in a single transaction.
-        7. Return Signal.
+        8. Return Signal.
 
         Returns:
             A new ``Signal`` if evidence has changed and LLM analysis succeeded.
@@ -79,11 +80,19 @@ class SignalPipeline:
                 top_k=self._top_k,
             )
 
-            # Step 2: compute retrieval hash from returned doc IDs
+            # Step 2: skip if no documents were retrieved
+            if not docs:
+                log.debug(
+                    "signal.pipeline.skip_no_docs",
+                    market_id=market.id,
+                )
+                return None
+
+            # Step 3: compute retrieval hash from returned doc IDs
             doc_ids = [d.id for d in docs]
             new_hash = compute_retrieval_hash(doc_ids)
 
-            # Step 3: skip if evidence unchanged since last signal
+            # Step 5: skip if evidence unchanged since last signal
             if await should_skip(session, market.current_signal_id, new_hash):
                 log.info(
                     "signal.pipeline.skip_unchanged",
@@ -92,7 +101,7 @@ class SignalPipeline:
                 )
                 return None
 
-            # Step 4: build prompt and call LLM
+            # Step 6: build prompt and call LLM
             prompt = build_prompt(market, docs)
             try:
                 llm_response = await self._llm_client.complete(

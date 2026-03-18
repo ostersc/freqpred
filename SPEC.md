@@ -348,12 +348,12 @@ class Document:
 
     # --- Vector search ---
     embedding: list[float]           # dense vector (pgvector) — generated on insert
-    embedding_model: str             # e.g. "voyage-3" — track model version for re-embedding
+    embedding_model: str             # e.g. "all-MiniLM-L6-v2" — track model version for re-embedding
 ```
 
 **Deduplication:** Documents are inserted with `ON CONFLICT (source_url) DO UPDATE` — if a URL is fetched again, we update `content_hash` and `fetched_at` only if the content changed. The embedding is regenerated only when content changes.
 
-**Embedding model:** [Voyage AI](https://www.voyageai.com/) (`voyage-3`) — Anthropic's recommended embedding partner, purpose-built for retrieval tasks. Stored via the **pgvector** extension on RDS Postgres. No separate vector database needed.
+**Embedding model:** `sentence-transformers` (`all-MiniLM-L6-v2`, 384-dim) — local CPU-based embeddings, no API key required. Stored via the **pgvector** extension on RDS Postgres. No separate vector database needed. Voyage AI (`voyage-3`, 1024-dim) is a possible future enhancement for higher-quality retrieval.
 
 ### CatalystRun + CatalystQuery
 
@@ -613,7 +613,7 @@ Market Watcher upserts active markets into DB
 │  Dedup &        │  Check source_url against Document store.
 │  Store          │  Skip if URL known + content_hash unchanged.
 │                 │  New/changed docs: clean, generate embedding
-│                 │  (Voyage AI), insert into Document store.
+│                 │  (sentence-transformers), insert into Document store.
 └────────┬────────┘
          │
          ▼
@@ -633,7 +633,7 @@ Signal trigger fires for a market
       │
       ▼
 ┌─────────────────┐
-│  Vector Search  │  Embed the market question (Voyage AI).
+│  Vector Search  │  Embed the market question (sentence-transformers).
 │  (RAG retrieval)│  Semantic search against Document store:
 │                 │  - Filter: category match + published_at recency
 │                 │  - Rank: cosine similarity to market question
@@ -844,7 +844,7 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 
 - [ ] Kalshi API client (market fetch, no trading yet)
 - [ ] Document store schema (Postgres + pgvector extension)
-- [ ] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (Voyage AI) → store
+- [ ] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (sentence-transformers) → store
 - [ ] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
 - [ ] Twitter/X fetcher (optional — gated on API cost decision)
 - [ ] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault` strategy
@@ -932,10 +932,10 @@ freqpred/
 │   │   │   ├── gdelt.py         # GDELT fetcher
 │   │   │   ├── reddit.py        # Reddit API fetcher
 │   │   │   └── twitter.py       # Twitter/X API fetcher (optional)
-│   │   ├── store.py             # dedup, embed (Voyage AI), insert into Document store
+│   │   ├── store.py             # dedup, embed (sentence-transformers), insert into Document store
 │   │   └── social_summarizer.py # cheap LLM pre-summarizer for raw social posts
 │   ├── rag/
-│   │   ├── embedder.py          # Voyage AI embedding client
+│   │   ├── embedder.py          # local sentence-transformers embedding client
 │   │   ├── retriever.py         # vector search against Document store (pgvector)
 │   │   └── models.py            # Document, DocumentMarketLink dataclasses
 │   ├── signal/

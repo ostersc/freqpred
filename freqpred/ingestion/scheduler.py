@@ -1,18 +1,24 @@
 """Ingestion scheduler: runs fetchers per-market on catalyst queries.
 
-Reads the latest active CatalystRun per market, runs Tavily + NewsAPI +
-Reddit fetchers against each CatalystQuery, and upserts results into the
-document store. Tracks last-run per market in Redis.
+Each cycle:
+  1. Loads all non-closed markets from the DB.
+  2. Filters them through the registered strategy (select_markets).
+  3. Generates catalyst queries for markets that have none yet
+     (or whose last run is stale) via generate_catalysts.
+  4. Deactivates catalysts for markets no longer selected.
+  5. Runs Tavily + NewsAPI + Reddit fetchers against every active
+     CatalystQuery and upserts results into the document store.
+  6. Updates ingestion:last_run:{market_id} in Redis.
 
 Public API:
-    run_cycle(...)   — one fetch pass over all active-catalyst markets.
+    run_cycle(...)   — one full pass (steps 1-6).
     run_scheduler(…) — async loop that calls run_cycle every N seconds.
 """
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import structlog
 from sqlalchemy import func, select
@@ -22,9 +28,13 @@ from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
 from freqpred.ingestion.fetchers import reddit as reddit_fetcher
 from freqpred.ingestion.fetchers import tavily as tavily_fetcher
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
-from freqpred.ingestion.store import upsert_document
-from freqpred.markets.models import MarketRow
-from freqpred.rag.embedder import VoyageEmbedder
+from freqpred.ingestion.store import DocumentSkipped, upsert_document
+from freqpred.markets.models import Market, MarketRow
+from freqpred.rag.embedder import LocalEmbedder
+
+if TYPE_CHECKING:
+    from freqpred.llm.client import LLMClient
+    from freqpred.ingestion.selector import StrategyProtocol
 
 log = structlog.get_logger(__name__)
 
@@ -60,19 +70,23 @@ def _subreddits_for_category(category: str) -> list[str]:
 
 async def run_cycle(
     session: AsyncSession,
-    embedder: VoyageEmbedder,
+    embedder: LocalEmbedder,
     redis_client: _RedisClient,
+    strategy: "StrategyProtocol | None" = None,
+    llm_client: "LLMClient | None" = None,
     tavily_api_key: str = "",
     newsapi_api_key: str = "",
     reddit_user_agent: str = "freqpred/0.1",
 ) -> dict[str, int]:
-    """Run one ingestion cycle for all markets with an active CatalystRun.
+    """Run one full ingestion cycle.
 
-    For each market:
-      - Reads CatalystQuery rows from its latest active CatalystRun.
-      - Runs Tavily, NewsAPI, and Reddit fetchers per query.
-      - Upserts results via the document store.
-      - Updates ``ingestion:last_run:{market_id}`` in Redis.
+    Steps:
+      1. Load all non-closed markets from the DB.
+      2. Filter through strategy.is_market_interesting() (if strategy provided).
+      3. Generate catalyst queries for selected markets with no active run.
+      4. Deactivate catalysts for markets no longer selected.
+      5. Fetch documents for every market with active catalyst queries.
+      6. Update Redis last-run timestamps.
 
     Fetcher errors are caught per-fetcher; one failure does not abort others.
 
@@ -80,19 +94,38 @@ async def run_cycle(
         session:          Open async SQLAlchemy session (caller manages commit).
         embedder:         Voyage AI embedder for document storage.
         redis_client:     Async Redis client.
+        strategy:         Strategy used to filter markets. If None, all markets
+                          with active catalyst runs are processed.
+        llm_client:       LLM client for catalyst generation. If None, catalyst
+                          generation is skipped.
         tavily_api_key:   Tavily API key. Tavily is skipped if empty.
         newsapi_api_key:  NewsAPI key. NewsAPI is skipped if empty.
         reddit_user_agent: User-Agent for Reddit requests.
 
     Returns:
-        Stats dict with keys: markets_processed, docs_fetched,
-        docs_stored, docs_error.
+        Stats dict with keys: markets_processed, catalysts_generated,
+        docs_fetched, docs_stored, docs_error.
     """
+    catalysts_generated = 0
+
+    # --- Phase 1: catalyst generation for newly-selected markets ---------------
+    if strategy is not None and llm_client is not None:
+        catalysts_generated = await _ensure_catalysts(
+            session, strategy, llm_client, embedder
+        )
+
+    # --- Phase 2: load markets that have active catalyst queries ---------------
     market_queries = await _load_active_market_queries(session)
 
     if not market_queries:
         log.debug("scheduler.run_cycle.no_active_markets")
-        return {"markets_processed": 0, "docs_fetched": 0, "docs_stored": 0, "docs_error": 0}
+        return {
+            "markets_processed": 0,
+            "catalysts_generated": catalysts_generated,
+            "docs_fetched": 0,
+            "docs_stored": 0,
+            "docs_error": 0,
+        }
 
     total_fetched = 0
     total_stored = 0
@@ -164,11 +197,17 @@ async def run_cycle(
             market_fetched += len(raw_docs)
 
             # Upsert each document.
+            # Each upsert is wrapped in a savepoint so that a single document
+            # failure (e.g. constraint violation) does not abort the entire
+            # PostgreSQL transaction and roll back all other documents.
             for raw_doc in raw_docs:
                 raw_doc.category = category
                 try:
-                    await upsert_document(session, embedder, raw_doc)
+                    async with session.begin_nested():
+                        await upsert_document(session, embedder, raw_doc)
                     market_stored += 1
+                except DocumentSkipped:
+                    pass  # empty body after cleaning — already logged at debug
                 except Exception:
                     log.warning(
                         "scheduler.upsert_error",
@@ -204,6 +243,7 @@ async def run_cycle(
 
     stats = {
         "markets_processed": len(market_queries),
+        "catalysts_generated": catalysts_generated,
         "docs_fetched": total_fetched,
         "docs_stored": total_stored,
         "docs_error": total_error,
@@ -215,9 +255,11 @@ async def run_cycle(
 
 async def run_scheduler(
     session_factory: async_sessionmaker[AsyncSession],
-    embedder: VoyageEmbedder,
+    embedder: LocalEmbedder,
     redis_client: _RedisClient,
     interval_seconds: int = 1800,
+    strategy: "StrategyProtocol | None" = None,
+    llm_client: "LLMClient | None" = None,
     tavily_api_key: str = "",
     newsapi_api_key: str = "",
     reddit_user_agent: str = "freqpred/0.1",
@@ -232,6 +274,8 @@ async def run_scheduler(
         embedder:         Voyage AI embedder.
         redis_client:     Async Redis client.
         interval_seconds: Sleep duration between cycles (default 1800 = 30 min).
+        strategy:         Strategy used to filter markets for catalyst generation.
+        llm_client:       LLM client for catalyst generation.
         tavily_api_key:   Tavily API key.
         newsapi_api_key:  NewsAPI key.
         reddit_user_agent: User-Agent for Reddit requests.
@@ -245,6 +289,8 @@ async def run_scheduler(
                     session=session,
                     embedder=embedder,
                     redis_client=redis_client,
+                    strategy=strategy,
+                    llm_client=llm_client,
                     tavily_api_key=tavily_api_key,
                     newsapi_api_key=newsapi_api_key,
                     reddit_user_agent=reddit_user_agent,
@@ -259,6 +305,109 @@ async def run_scheduler(
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
+
+
+# How old a catalyst run must be before it is regenerated with fresh RAG context.
+_CATALYST_REFRESH_INTERVAL = timedelta(hours=24)
+
+
+async def _ensure_catalysts(
+    session: AsyncSession,
+    strategy: "StrategyProtocol",
+    llm_client: "LLMClient",
+    embedder: LocalEmbedder,
+) -> int:
+    """Generate or refresh catalyst queries for selected markets.
+
+    Two cases trigger generation for a market:
+    - No active CatalystRun exists (generation 1 — first time seen).
+    - The latest active run is older than _CATALYST_REFRESH_INTERVAL
+      (generation N+1 — daily refresh with RAG-informed context).
+
+    Returns the number of markets that had catalysts generated/refreshed.
+    """
+    from freqpred.ingestion.catalyst_generator import CatalystGenerationError, generate_catalysts
+    from freqpred.ingestion.selector import deactivate_stale_catalysts, select_markets
+
+    now = datetime.now(UTC)
+    stale_cutoff = now - _CATALYST_REFRESH_INTERVAL
+
+    # Load all non-closed markets.
+    result = await session.execute(
+        select(MarketRow).where(MarketRow.close_time > now)
+    )
+    all_rows = result.scalars().all()
+    all_markets: list[Market] = [_market_row_to_domain(r) for r in all_rows]
+
+    selected = select_markets(all_markets, [strategy])
+
+    # Deactivate catalysts for markets that are no longer interesting.
+    await deactivate_stale_catalysts(session, [strategy])
+
+    if not selected:
+        return 0
+
+    # For each selected market, find its latest active CatalystRun (if any)
+    # so we can decide whether it needs a fresh run.
+    selected_ids = {m.id for m in selected}
+    existing_result = await session.execute(
+        select(CatalystRunRow.market_id, func.max(CatalystRunRow.created_at).label("latest"))
+        .where(
+            CatalystRunRow.market_id.in_(selected_ids),
+            CatalystRunRow.is_active.is_(True),
+        )
+        .group_by(CatalystRunRow.market_id)
+    )
+    latest_run_by_market: dict[str, datetime] = {
+        row.market_id: row.latest for row in existing_result.all()
+    }
+
+    # A market needs (re)generation if it has no active run OR its run is stale.
+    needs_generation = [
+        m for m in selected
+        if m.id not in latest_run_by_market
+        or latest_run_by_market[m.id] < stale_cutoff
+    ]
+
+    generated = 0
+    for market in needs_generation:
+        is_refresh = market.id in latest_run_by_market
+        try:
+            await generate_catalysts(market, session, llm_client, embedder)
+            generated += 1
+            log.info(
+                "scheduler.catalysts_generated",
+                market_id=market.id,
+                refresh=is_refresh,
+            )
+        except CatalystGenerationError:
+            log.warning(
+                "scheduler.catalyst_generation_failed",
+                market_id=market.id,
+                exc_info=True,
+            )
+
+    return generated
+
+
+def _market_row_to_domain(row: MarketRow) -> Market:
+    return Market(
+        id=row.id,
+        platform=row.platform,
+        question=row.question,
+        category=row.category,
+        close_time=row.close_time,
+        yes_bid=row.yes_bid,
+        yes_ask=row.yes_ask,
+        mid_price=row.mid_price,
+        volume_24h=row.volume_24h,
+        open_interest=row.open_interest,
+        last_fetched_at=row.last_fetched_at,
+        price_updated_at=row.price_updated_at,
+        metadata_fetched_at=row.metadata_fetched_at,
+        current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
+        metadata=dict(row.metadata_),
+    )
 
 
 async def _load_active_market_queries(

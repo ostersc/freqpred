@@ -10,7 +10,7 @@ Full architecture in [SPEC.md](SPEC.md). Read it before making structural decisi
 
 ## Architecture in one paragraph
 
-The system has two async pipelines. The **ingestion pipeline** runs continuously and is catalyst-driven: the **Market Selector** reads active markets from the DB and asks each registered strategy `is_market_interesting(market)` to filter down to markets worth monitoring; the **Catalyst Generator** calls Claude Haiku per selected market to derive 3–5 targeted search queries (catalysts) representing events that could shift the probability — these are stored as `CatalystRun`/`CatalystQuery` DB rows and refreshed daily using RAG context; the **Ingestion Scheduler** reads the latest catalyst queries and runs Tavily, NewsAPI, and Reddit fetchers against them, deduplicates by URL, generates Voyage AI embeddings, and stores results in the `documents` table. The **signal pipeline** is triggered: it embeds a market question, does semantic search against the document store (RAG), checks if the retrieval result is new (hash check), then calls Claude Sonnet for a probability estimate. Signals are written to Postgres and used by strategy plugins to decide whether to place paper or live trades on Kalshi.
+The system has two async pipelines. The **ingestion pipeline** runs continuously and is catalyst-driven: the **Market Selector** reads active markets from the DB and asks each registered strategy `is_market_interesting(market)` to filter down to markets worth monitoring; the **Catalyst Generator** calls Claude Haiku per selected market to derive 3–5 targeted search queries (catalysts) representing events that could shift the probability — these are stored as `CatalystRun`/`CatalystQuery` DB rows and refreshed daily using RAG context; the **Ingestion Scheduler** reads the latest catalyst queries and runs Tavily, NewsAPI, and Reddit fetchers against them, deduplicates by URL, generates local embeddings (sentence-transformers), and stores results in the `documents` table. The **signal pipeline** is triggered: it embeds a market question, does semantic search against the document store (RAG), checks if the retrieval result is new (hash check), then calls Claude Sonnet for a probability estimate. Signals are written to Postgres and used by strategy plugins to decide whether to place paper or live trades on Kalshi.
 
 ---
 
@@ -23,7 +23,7 @@ freqpred/
 │   ├── config.py           # config loading
 │   ├── markets/            # Kalshi API client + watcher
 │   ├── ingestion/          # selector, catalyst_generator, scheduler, fetchers, store
-│   ├── rag/                # Voyage AI embedder + pgvector retriever
+│   ├── rag/                # local sentence-transformers embedder + pgvector retriever
 │   ├── signal/             # signal pipeline + LLM analysis
 │   ├── strategy/           # IPredictionStrategy interface + bundled strategies
 │   ├── trading/            # order manager, risk, ledger
@@ -49,7 +49,7 @@ freqpred/
 - **SQLAlchemy 2.0** (async) + **Alembic** — ORM + migrations
 - **PostgreSQL 16 + pgvector** — main DB + vector search
 - **Redis** — signal cache, ingestion dedup
-- **Voyage AI** (`voyage-3`) — document embeddings
+- **sentence-transformers** (`all-MiniLM-L6-v2`, 384-dim) — local document embeddings, no API key required
 - **Anthropic SDK** — Claude for signal analysis + social pre-summarizer
 - **PRAW** — Reddit API client
 - **Tavily SDK** — web search
@@ -82,7 +82,6 @@ Required environment variables (set in `.env` or AWS Secrets Manager in prod):
 ```
 KALSHI_API_KEY=
 ANTHROPIC_API_KEY=
-VOYAGE_API_KEY=
 TAVILY_API_KEY=
 NEWSAPI_KEY=
 # Reddit uses the public JSON API — no credentials required
@@ -158,7 +157,7 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 - Table names are snake_case plural: `markets`, `signals`, `positions`, `documents`, `llm_queries`
 - All tables have `created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()`
 - UUIDs for all primary keys except `llm_queries` (auto-increment int)
-- pgvector column: `embedding VECTOR(1024)` (Voyage AI voyage-3 dimension)
+- pgvector column: `embedding VECTOR(384)` (all-MiniLM-L6-v2 dimension)
 
 ---
 

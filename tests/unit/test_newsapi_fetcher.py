@@ -36,7 +36,13 @@ def _make_article(
 
 
 @pytest.fixture()
-def mock_newsapi_client():
+def mock_sleep():
+    with patch("freqpred.ingestion.fetchers.newsapi.asyncio.sleep", new_callable=AsyncMock) as m:
+        yield m
+
+
+@pytest.fixture()
+def mock_newsapi_client(mock_sleep):
     with patch("freqpred.ingestion.fetchers.newsapi.NewsApiClient") as MockClient:
         instance = MagicMock()
         MockClient.return_value = instance
@@ -147,11 +153,10 @@ async def test_fetch_empty_articles(mock_newsapi_client):
 
 
 @pytest.mark.asyncio
-async def test_fetch_enforces_rate_limit(mock_newsapi_client):
+async def test_fetch_enforces_rate_limit(mock_newsapi_client, mock_sleep):
     mock_newsapi_client.get_everything.return_value = {"articles": []}
-    with patch("freqpred.ingestion.fetchers.newsapi.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        await fetch(_API_KEY, _QUERY, _FROM)
-        mock_sleep.assert_called_once_with(_RATE_LIMIT_SLEEP)
+    await fetch(_API_KEY, _QUERY, _FROM)
+    mock_sleep.assert_called_once_with(_RATE_LIMIT_SLEEP)
 
 
 # ---------------------------------------------------------------------------

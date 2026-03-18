@@ -204,12 +204,12 @@ def test_document_row_instantiation():
         tags=["election", "senate"],
         published_at=NOW,
         fetched_at=NOW,
-        embedding=[0.1] * 1024,
-        embedding_model="voyage-3",
+        embedding=[0.1] * 384,
+        embedding_model="all-MiniLM-L6-v2",
     )
     assert row.source_type == "news"
     assert row.summary is None
-    assert len(row.embedding) == 1024
+    assert len(row.embedding) == 384
 
 
 def test_document_row_source_url_unique():

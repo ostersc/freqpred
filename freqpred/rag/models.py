@@ -51,8 +51,8 @@ class DocumentRow(Base):
         TIMESTAMP(timezone=True), nullable=False
     )
 
-    # Vector search — pgvector VECTOR(1024) for Voyage AI voyage-3
-    embedding: Mapped[list] = mapped_column(Vector(1024), nullable=False)
+    # Vector search — pgvector VECTOR(384) for all-MiniLM-L6-v2
+    embedding: Mapped[list] = mapped_column(Vector(384), nullable=False)
     embedding_model: Mapped[str] = mapped_column(VARCHAR(100), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(

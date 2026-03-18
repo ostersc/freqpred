@@ -21,7 +21,7 @@ import freqpred.llm.models      # noqa: F401
 
 
 NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
-FAKE_EMBEDDING = [0.1] * 1024
+FAKE_EMBEDDING = [0.1] * 384
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def _make_row(
         published_at=published_at,
         fetched_at=NOW,
         embedding=FAKE_EMBEDDING,
-        embedding_model="voyage-3",
+        embedding_model="all-MiniLM-L6-v2",
         summary=None,
     )
 
@@ -173,5 +173,5 @@ async def test_retrieve_document_fields_mapped():
     assert doc.body == row.body
     assert doc.category == row.category
     assert doc.embedding == FAKE_EMBEDDING
-    assert doc.embedding_model == "voyage-3"
+    assert doc.embedding_model == "all-MiniLM-L6-v2"
     assert doc.summary is None

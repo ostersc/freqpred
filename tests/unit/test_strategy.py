@@ -171,18 +171,17 @@ class TestConservativeDefaultPositionSize:
 class TestIsMarketInteresting:
     strategy = ConservativeDefault()
 
-    def test_passes_with_good_market(self) -> None:
+    def test_passes_with_technology_market(self) -> None:
         assert self.strategy.is_market_interesting(
-            _market(category="politics", volume_24h=1000.0, days_to_close=14)
+            _market(category="technology", volume_24h=1000.0, days_to_close=14)
         )
 
-    def test_passes_all_categories_when_categories_empty(self) -> None:
-        # ConservativeDefault has categories=[] meaning all categories
-        assert self.strategy.is_market_interesting(
+    def test_rejects_non_technology_categories(self) -> None:
+        assert not self.strategy.is_market_interesting(
             _market(category="sports", volume_24h=1000.0, days_to_close=14)
         )
-        assert self.strategy.is_market_interesting(
-            _market(category="economics", volume_24h=1000.0, days_to_close=14)
+        assert not self.strategy.is_market_interesting(
+            _market(category="politics", volume_24h=1000.0, days_to_close=14)
         )
 
     def test_rejects_below_volume_floor(self) -> None:
@@ -201,8 +200,8 @@ class TestIsMarketInteresting:
         )
 
     def test_passes_within_days_window(self) -> None:
-        assert self.strategy.is_market_interesting(_market(days_to_close=10))
-        assert self.strategy.is_market_interesting(_market(days_to_close=30))
+        assert self.strategy.is_market_interesting(_market(category="technology", days_to_close=10))
+        assert self.strategy.is_market_interesting(_market(category="technology", days_to_close=30))
 
     def test_category_filtered_strategy_rejects_wrong_category(self) -> None:
         from freqpred.strategy.config import StrategyConfig
@@ -239,9 +238,9 @@ class TestFilterMarkets:
     def test_delegates_to_is_market_interesting(self) -> None:
         strategy = ConservativeDefault()
 
-        good = _market(volume_24h=1000.0, days_to_close=14)
-        bad_volume = _market(volume_24h=10.0, days_to_close=14)
-        bad_days = _market(volume_24h=1000.0, days_to_close=90)
+        good = _market(category="technology", volume_24h=1000.0, days_to_close=14)
+        bad_volume = _market(category="technology", volume_24h=10.0, days_to_close=14)
+        bad_days = _market(category="technology", volume_24h=1000.0, days_to_close=90)
 
         result = strategy.filter_markets([good, bad_volume, bad_days])
         assert result == [good]
@@ -250,7 +249,7 @@ class TestFilterMarkets:
         assert ConservativeDefault().filter_markets([]) == []
 
     def test_all_pass(self) -> None:
-        markets = [_market() for _ in range(3)]
+        markets = [_market(category="technology") for _ in range(3)]
         result = ConservativeDefault().filter_markets(markets)
         assert result == markets
 

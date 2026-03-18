@@ -134,15 +134,15 @@ class MarketWatcher:
         result = await session.execute(
             select(MarketRow.id, MarketRow.mid_price, SignalRow.market_mid_at_signal)
             .join(SignalRow, SignalRow.id == MarketRow.current_signal_id)
-            .where(
-                MarketRow.current_signal_id.is_not(None),
-                MarketRow.id.in_(market_ids),
-            )
+            .where(MarketRow.current_signal_id.is_not(None))
         )
         rows = result.all()
 
         enqueued = 0
         for row in rows:
+            # Only trigger for markets present in the current poll batch.
+            if row.id not in current_mids:
+                continue
             market_id: str = row.id
             new_mid: float = current_mids[market_id]
             signal_mid: float = row.market_mid_at_signal

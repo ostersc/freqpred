@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(
 
 from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.ingestion.store import RawDocument, upsert_document
-from freqpred.rag.embedder import VoyageEmbedder
+from freqpred.rag.embedder import LocalEmbedder
 from freqpred.rag.models import DocumentRow
 
 # Import all models so Base.metadata is fully populated before create_all.
@@ -34,7 +34,7 @@ import freqpred.signal.models   # noqa: F401
 import freqpred.llm.models      # noqa: F401
 
 NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
-FAKE_EMBEDDING = [0.1] * 1024
+FAKE_EMBEDDING = [0.1] * 384
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test",
@@ -69,7 +69,7 @@ async def session(engine):
 @pytest.fixture
 def mock_embedder():
     """Voyage AI embedder that returns a fixed vector without hitting the API."""
-    embedder = MagicMock(spec=VoyageEmbedder)
+    embedder = MagicMock(spec=LocalEmbedder)
     embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
     return embedder
 
@@ -149,7 +149,7 @@ async def test_content_change_triggers_re_embed(session, mock_embedder):
 
 @pytest.mark.asyncio
 async def test_embedding_dimension_matches_pgvector(session, mock_embedder):
-    """Stored embedding must be 1024-dimensional."""
+    """Stored embedding must be 384-dimensional."""
     url = "https://example.com/dim-test"
     await upsert_document(session, mock_embedder, _make_raw_doc(url))
     await session.flush()
@@ -158,4 +158,4 @@ async def test_embedding_dimension_matches_pgvector(session, mock_embedder):
         select(DocumentRow).where(DocumentRow.source_url == url)
     )
     row = result.scalar_one()
-    assert len(row.embedding) == 1024
+    assert len(row.embedding) == 384

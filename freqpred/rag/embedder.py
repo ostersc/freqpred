@@ -1,46 +1,65 @@
-"""Voyage AI embedding client for voyage-3 (1024-dim)."""
+"""Local sentence-transformers embedder (free, no API key required).
+
+Uses ``all-MiniLM-L6-v2`` by default — 384-dim, ~90 MB, runs on CPU.
+The model is downloaded from HuggingFace on first use and cached locally.
+
+Public API:
+    LocalEmbedder  — async wrapper around SentenceTransformer
+"""
 from __future__ import annotations
 
+import asyncio
+import functools
+from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
 import structlog
-import voyageai
+from sentence_transformers import SentenceTransformer
 
 log = structlog.get_logger()
 
-_VOYAGE_MODEL = "voyage-3"
-_VOYAGE_DIM = 1024
-_VOYAGE_BATCH_SIZE = 128  # Voyage AI max texts per request
+_DEFAULT_MODEL = "all-MiniLM-L6-v2"
+
+# Single shared thread pool for CPU-bound inference — avoids spinning up a
+# new thread per call while still keeping the event loop unblocked.
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="embedder")
 
 
-class VoyageEmbedder:
-    """Async Voyage AI client wrapping voyage-3 embeddings (dim=1024)."""
+class LocalEmbedder:
+    """Async wrapper around SentenceTransformer for drop-in embedding support.
 
-    def __init__(self, api_key: str) -> None:
-        self._client = voyageai.AsyncClient(api_key=api_key)
-        self.model = _VOYAGE_MODEL
-        self.dim = _VOYAGE_DIM
+    All encoding runs in a thread-pool executor so the asyncio event loop is
+    never blocked, even on CPU-only hardware.
+
+    Args:
+        model_name: HuggingFace model ID. Defaults to ``all-MiniLM-L6-v2``
+                    (384-dim, ~90 MB).
+    """
+
+    def __init__(self, model_name: str = _DEFAULT_MODEL) -> None:
+        log.info("embedder.loading_model", model=model_name)
+        self._model = SentenceTransformer(model_name)
+        self.model = model_name
+        self.dim: int = self._model.get_sentence_embedding_dimension()
+        log.info("embedder.model_loaded", model=model_name, dim=self.dim)
 
     async def embed_text(self, text: str) -> list[float]:
-        """Embed a single text string. Returns a 1024-dim float list."""
+        """Embed a single string. Returns a dim-length float list."""
         results = await self.embed_batch([text])
         return results[0]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of texts, batching to respect API limits.
-
-        Args:
-            texts: List of strings to embed.
-
-        Returns:
-            List of embedding vectors, one per input text, each of length 1024.
-        """
+        """Embed a list of strings. Returns one vector per input text."""
         if not texts:
             return []
 
-        all_embeddings: list[list[float]] = []
-        for i in range(0, len(texts), _VOYAGE_BATCH_SIZE):
-            chunk = texts[i : i + _VOYAGE_BATCH_SIZE]
-            log.debug("voyage.embed_batch", chunk_size=len(chunk), model=self.model)
-            result = await self._client.embed(chunk, model=self.model)
-            all_embeddings.extend(result.embeddings)
-
-        return all_embeddings
+        loop = asyncio.get_event_loop()
+        encode_fn = functools.partial(
+            self._model.encode,
+            texts,
+            convert_to_tensor=False,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        embeddings: np.ndarray = await loop.run_in_executor(_EXECUTOR, encode_fn)
+        return embeddings.tolist()

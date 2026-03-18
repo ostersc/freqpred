@@ -148,6 +148,7 @@ class TestDeactivateStaleMarkets:
     def _make_session(self, pairs: list[tuple]) -> AsyncMock:
         """pairs: list of (run_row, market_row) tuples returned by execute."""
         session = AsyncMock()
+        session.add = MagicMock()  # sync in SQLAlchemy; avoid unawaited-coroutine warning
         result = MagicMock()
         result.all.return_value = pairs
         session.execute.return_value = result

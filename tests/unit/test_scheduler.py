@@ -17,11 +17,11 @@ from freqpred.ingestion.scheduler import (
     run_cycle,
     run_scheduler,
 )
-from freqpred.ingestion.store import RawDocument
+from freqpred.ingestion.store import DocumentSkipped, RawDocument
 from freqpred.rag.models import Document
 
 NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
-FAKE_EMBEDDING = [0.1] * 1024
+FAKE_EMBEDDING = [0.1] * 384
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +58,21 @@ def _make_document(url: str = "https://example.com/article") -> Document:
         published_at=NOW,
         fetched_at=NOW,
         embedding=FAKE_EMBEDDING,
-        embedding_model="voyage-3",
+        embedding_model="all-MiniLM-L6-v2",
     )
+
+
+def _make_session() -> AsyncMock:
+    """AsyncMock session with begin_nested properly set up as a sync context manager factory."""
+    session = AsyncMock()
+    # session.begin_nested() must return an async context manager, not a coroutine.
+    # SQLAlchemy's real begin_nested() returns AsyncSessionTransaction which supports
+    # `async with` directly (not via awaiting). We replicate that here.
+    nested_ctx = MagicMock()
+    nested_ctx.__aenter__ = AsyncMock(return_value=nested_ctx)
+    nested_ctx.__aexit__ = AsyncMock(return_value=None)
+    session.begin_nested = MagicMock(return_value=nested_ctx)
+    return session
 
 
 def _make_redis() -> AsyncMock:
@@ -127,7 +140,7 @@ class TestRunCycleFetchersCalled:
     @pytest.mark.asyncio
     async def test_fetchers_called_with_query_text(self) -> None:
         """Fetchers must receive the catalyst query text, not category keywords."""
-        session = AsyncMock()
+        session = _make_session()
         redis = _make_redis()
         embedder = _make_embedder()
         doc = _make_document()
@@ -371,7 +384,7 @@ class TestRunCycleErrorIsolation:
     @pytest.mark.asyncio
     async def test_upsert_error_counted_not_raised(self) -> None:
         """A document store error increments docs_error without raising."""
-        session = AsyncMock()
+        session = _make_session()
         redis = _make_redis()
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
@@ -410,6 +423,50 @@ class TestRunCycleErrorIsolation:
             )
 
         assert stats["docs_error"] == 1
+        assert stats["docs_stored"] == 0
+
+    @pytest.mark.asyncio
+    async def test_document_skipped_not_counted_as_error(self) -> None:
+        """DocumentSkipped (empty body) is silently ignored, not counted as an error."""
+        session = _make_session()
+        redis = _make_redis()
+        embedder = _make_embedder()
+        raw_doc = _make_raw_doc()
+
+        market_queries = [("MKT-1", "economics", ["query"])]
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=market_queries,
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.tavily_fetcher.fetch",
+                new_callable=AsyncMock,
+                return_value=[raw_doc],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.newsapi_fetcher.fetch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.upsert_document",
+                new_callable=AsyncMock,
+                side_effect=DocumentSkipped("https://example.com/empty"),
+            ),
+        ):
+            stats = await run_cycle(
+                session, embedder, redis, tavily_api_key="key"
+            )
+
+        assert stats["docs_error"] == 0
         assert stats["docs_stored"] == 0
 
 
@@ -542,7 +599,7 @@ class TestRunCycleRedis:
 class TestRunCycleStats:
     @pytest.mark.asyncio
     async def test_stats_counted_across_markets(self) -> None:
-        session = AsyncMock()
+        session = _make_session()
         redis = _make_redis()
         embedder = _make_embedder()
         doc = _make_document()

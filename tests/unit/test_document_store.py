@@ -20,7 +20,7 @@ from freqpred.rag.models import DocumentRow
 
 NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
 
-FAKE_EMBEDDING = [0.1] * 1024
+FAKE_EMBEDDING = [0.1] * 384
 
 
 def _make_raw_doc(
@@ -59,7 +59,7 @@ def _make_document_row(source_url: str, content_hash: str) -> DocumentRow:
         published_at=NOW,
         fetched_at=NOW,
         embedding=FAKE_EMBEDDING,
-        embedding_model="voyage-3",
+        embedding_model="all-MiniLM-L6-v2",
     )
 
 
@@ -260,60 +260,61 @@ async def test_embed_called_with_stripped_body():
 
 
 # ---------------------------------------------------------------------------
-# VoyageEmbedder unit tests (mock the voyageai client)
+# LocalEmbedder unit tests (mock the SentenceTransformer model)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_voyage_embedder_embed_text():
+async def test_local_embedder_embed_text():
     """embed_text must return the first embedding from a single-text batch."""
-    from freqpred.rag.embedder import VoyageEmbedder
+    import numpy as np
+    from freqpred.rag.embedder import LocalEmbedder
 
-    embedder = VoyageEmbedder(api_key="test-key")
-    mock_result = MagicMock()
-    mock_result.embeddings = [FAKE_EMBEDDING]
-    embedder._client.embed = AsyncMock(return_value=mock_result)
+    with patch("freqpred.rag.embedder.SentenceTransformer") as MockST:
+        mock_model = MockST.return_value
+        mock_model.get_sentence_embedding_dimension.return_value = 384
+        mock_model.encode.return_value = np.array([FAKE_EMBEDDING])
 
-    result = await embedder.embed_text("hello")
+        embedder = LocalEmbedder()
+        result = await embedder.embed_text("hello")
 
     assert result == FAKE_EMBEDDING
-    embedder._client.embed.assert_awaited_once_with(["hello"], model="voyage-3")
+    mock_model.encode.assert_called_once()
+    assert mock_model.encode.call_args.args[0] == ["hello"]
 
 
 @pytest.mark.asyncio
-async def test_voyage_embedder_embed_batch_empty():
-    """embed_batch([]) must return [] without calling the API."""
-    from freqpred.rag.embedder import VoyageEmbedder
+async def test_local_embedder_embed_batch_empty():
+    """embed_batch([]) must return [] without calling encode."""
+    from freqpred.rag.embedder import LocalEmbedder
 
-    embedder = VoyageEmbedder(api_key="test-key")
-    embedder._client.embed = AsyncMock()
+    with patch("freqpred.rag.embedder.SentenceTransformer") as MockST:
+        mock_model = MockST.return_value
+        mock_model.get_sentence_embedding_dimension.return_value = 384
 
-    result = await embedder.embed_batch([])
+        embedder = LocalEmbedder()
+        result = await embedder.embed_batch([])
 
     assert result == []
-    embedder._client.embed.assert_not_awaited()
+    mock_model.encode.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_voyage_embedder_embed_batch_batches_correctly():
-    """embed_batch must split large lists into chunks of ≤128."""
-    from freqpred.rag.embedder import VoyageEmbedder, _VOYAGE_BATCH_SIZE
+async def test_local_embedder_embed_batch_multiple():
+    """embed_batch must return one vector per input text."""
+    import numpy as np
+    from freqpred.rag.embedder import LocalEmbedder
 
-    embedder = VoyageEmbedder(api_key="test-key")
+    texts = ["text 1", "text 2", "text 3"]
+    fake_matrix = np.array([[0.1] * 384, [0.2] * 384, [0.3] * 384])
 
-    total = _VOYAGE_BATCH_SIZE + 10  # 138 texts → 2 API calls
-    texts = [f"text {i}" for i in range(total)]
-    single_embedding = [0.0] * 1024
+    with patch("freqpred.rag.embedder.SentenceTransformer") as MockST:
+        mock_model = MockST.return_value
+        mock_model.get_sentence_embedding_dimension.return_value = 384
+        mock_model.encode.return_value = fake_matrix
 
-    mock_result_1 = MagicMock()
-    mock_result_1.embeddings = [single_embedding] * _VOYAGE_BATCH_SIZE
-    mock_result_2 = MagicMock()
-    mock_result_2.embeddings = [single_embedding] * 10
-    embedder._client.embed = AsyncMock(
-        side_effect=[mock_result_1, mock_result_2]
-    )
+        embedder = LocalEmbedder()
+        result = await embedder.embed_batch(texts)
 
-    result = await embedder.embed_batch(texts)
-
-    assert len(result) == total
-    assert embedder._client.embed.await_count == 2
+    assert len(result) == 3
+    assert result[0] == [0.1] * 384

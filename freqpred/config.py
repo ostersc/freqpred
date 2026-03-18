@@ -67,6 +67,10 @@ class IngestionConfig(BaseModel):
 class SignalConfig(BaseModel):
     top_k_documents: int = Field(default=10)
     staleness_multiplier: int = Field(default=3)
+    # How often the signal loop re-analyzes markets (seconds).
+    # Separate from the watcher poll interval — no need to embed market
+    # questions every 5 minutes when the ingestion scheduler only runs every 30.
+    interval_seconds: int = Field(default=1800)
 
 
 class RiskConfig(BaseModel):

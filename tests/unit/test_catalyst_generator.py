@@ -174,8 +174,8 @@ class TestBuildPrompt:
             tags=[],
             published_at=NOW,
             fetched_at=NOW,
-            embedding=[0.1] * 1024,
-            embedding_model="voyage-3",
+            embedding=[0.1] * 384,
+            embedding_model="all-MiniLM-L6-v2",
         )
         prompt = _build_prompt(_market(), rag_docs=[doc])
         assert "Recent relevant news" in prompt
@@ -195,8 +195,8 @@ class TestBuildPrompt:
             tags=[],
             published_at=NOW,
             fetched_at=NOW,
-            embedding=[0.1] * 1024,
-            embedding_model="voyage-3",
+            embedding=[0.1] * 384,
+            embedding_model="all-MiniLM-L6-v2",
         )
         prompt = _build_prompt(_market(), rag_docs=[doc])
         assert long_body not in prompt
@@ -300,7 +300,7 @@ class TestGenerateCatalysts:
         session = _make_session(prior_run_row=prior)
         client = _make_llm_client()
         embedder = AsyncMock()
-        embedder.embed_text.return_value = [0.1] * 1024
+        embedder.embed_text.return_value = [0.1] * 384
 
         with patch("freqpred.rag.retriever.retrieve", new_callable=AsyncMock) as mock_retrieve:
             mock_retrieve.return_value = []

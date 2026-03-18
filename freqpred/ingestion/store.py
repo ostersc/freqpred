@@ -21,12 +21,20 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.rag.embedder import VoyageEmbedder
+from freqpred.rag.embedder import LocalEmbedder
 from freqpred.rag.models import Document, DocumentRow
 
 log = structlog.get_logger()
 
-_EMBEDDING_MODEL = "voyage-3"
+_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+
+class DocumentSkipped(Exception):
+    """Raised when a document is intentionally skipped (e.g. empty body after cleaning)."""
+
+# Truncate body before embedding to keep token count reasonable.
+# all-MiniLM-L6-v2 has a 512-token limit; ~2000 chars ≈ 400 tokens.
+_MAX_EMBED_CHARS = 2_000
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +124,7 @@ def _row_to_domain(row: DocumentRow) -> Document:
 
 async def upsert_document(
     session: AsyncSession,
-    embedder: VoyageEmbedder,
+    embedder: LocalEmbedder,
     raw_doc: RawDocument,
 ) -> Document:
     """Embed and upsert a document, skipping re-embedding if content unchanged.
@@ -130,7 +138,13 @@ async def upsert_document(
         The persisted Document domain object.
     """
     body_clean = _strip_html(raw_doc.body)
+
+    if not body_clean.strip():
+        log.debug("store.upsert_document.skip", source_url=raw_doc.source_url, reason="empty_body")
+        raise DocumentSkipped(raw_doc.source_url)
+
     content_hash = _sha256(body_clean)
+    embed_text = body_clean[:_MAX_EMBED_CHARS]
 
     # Check for an existing row with the same URL.
     result = await session.execute(
@@ -152,7 +166,7 @@ async def upsert_document(
         source_url=raw_doc.source_url,
         is_update=(existing is not None),
     )
-    embedding = await embedder.embed_text(body_clean)
+    embedding = await embedder.embed_text(embed_text)
 
     doc_id = uuid.uuid4() if existing is None else existing.id
 

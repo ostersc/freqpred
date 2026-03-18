@@ -41,7 +41,7 @@ import freqpred.signal.models     # noqa: F401
 
 NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
 FUTURE = NOW + timedelta(days=30)
-FAKE_EMBEDDING = [0.1] * 1024
+FAKE_EMBEDDING = [0.1] * 384
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test",

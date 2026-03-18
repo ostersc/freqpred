@@ -1,4 +1,4 @@
-"""ConservativeDefault: high-confidence only, tiny sizing — safe starting point."""
+"""ConservativeDefault: high-confidence only, tiny sizing — technology category."""
 from __future__ import annotations
 
 from freqpred.strategy.base import IPredictionStrategy
@@ -10,7 +10,7 @@ if False:  # TYPE_CHECKING
 
 
 class ConservativeDefault(IPredictionStrategy):
-    """High-confidence, small-sizing strategy that trades all categories.
+    """High-confidence, small-sizing strategy scoped to the technology category.
 
     Designed as a safe starting point: requires strong edge and confidence
     before trading, and uses a tiny Kelly fraction to limit exposure.
@@ -28,7 +28,7 @@ class ConservativeDefault(IPredictionStrategy):
         min_confidence=0.80,
         max_exposure_per_market=0.02,
         kelly_fraction=0.15,
-        categories=[],  # empty = all categories
+        categories=["technology"],
         min_volume_24h=500.0,
         max_days_to_close=60,
         min_days_to_close=2,

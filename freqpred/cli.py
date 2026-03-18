@@ -27,11 +27,168 @@ def main(ctx: click.Context) -> None:
 )
 @click.pass_context
 def run(ctx: click.Context, strategy: str, mode: str) -> None:
-    """Run the freqpred trading loop."""
+    """Start market watcher, ingestion scheduler, and signal pipeline."""
     config = ctx.obj["config"]
-    click.echo(f"Starting freqpred | strategy={strategy} | mode={mode}")
-    click.echo(f"Trading mode from config: {config.trading.mode}")
-    click.echo("(Not yet implemented — scaffold only)")
+    try:
+        asyncio.run(_run_main(config, strategy, mode))
+    except KeyboardInterrupt:
+        click.echo("\nShutting down.")
+
+
+async def _run_main(config: object, strategy_name: str, mode: str) -> None:
+    import anthropic
+    import redis.asyncio as aioredis
+
+    import freqpred.ingestion.models  # noqa: F401
+    import freqpred.signal.models  # noqa: F401
+    import freqpred.rag.models  # noqa: F401
+
+    from freqpred.db import make_engine, make_session_factory
+    from freqpred.ingestion.scheduler import run_scheduler
+    from freqpred.llm.client import LLMClient
+    from freqpred.markets.kalshi import KalshiClient
+    from freqpred.markets.models import Market, MarketRow
+    from freqpred.markets.watcher import MarketWatcher
+    from freqpred.rag.embedder import LocalEmbedder
+    from freqpred.signal.pipeline import SignalPipeline
+    from freqpred.strategy.loader import load_strategy
+
+    from sqlalchemy import select
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+    if not config.anthropic.api_key:
+        click.echo("ERROR: ANTHROPIC_API_KEY not configured.", err=True)
+        return
+
+    strategy = load_strategy(strategy_name)
+    click.echo(f"Loaded strategy: {strategy.config.name}")
+    click.echo(f"Starting freqpred | strategy={strategy_name} | mode={mode}")
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+
+    redis_client = aioredis.from_url(config.redis.url) if config.redis.url else None
+
+    embedder = LocalEmbedder()
+    llm_client = LLMClient(
+        anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
+        session_factory,
+        prompt_version="signal-v1",
+    )
+    pipeline = SignalPipeline(
+        session_factory=session_factory,
+        embedder=embedder,
+        llm_client=llm_client,
+        top_k=config.signal.top_k_documents,
+    )
+
+    async def signal_loop() -> None:
+        import structlog
+        log = structlog.get_logger("freqpred.cli.signal_loop")
+        log.info("signal_loop.started")
+        while True:
+            try:
+                async with session_factory() as session:
+                    from datetime import UTC, datetime
+                    now = datetime.now(UTC)
+                    result = await session.execute(
+                        select(MarketRow).where(MarketRow.close_time > now)
+                    )
+                    market_rows = result.scalars().all()
+
+                markets: list[Market] = [
+                    Market(
+                        id=row.id,
+                        platform=row.platform,
+                        question=row.question,
+                        category=row.category,
+                        close_time=row.close_time,
+                        yes_bid=row.yes_bid,
+                        yes_ask=row.yes_ask,
+                        mid_price=row.mid_price,
+                        volume_24h=row.volume_24h,
+                        open_interest=row.open_interest,
+                        last_fetched_at=row.last_fetched_at,
+                        price_updated_at=row.price_updated_at,
+                        metadata_fetched_at=row.metadata_fetched_at,
+                        current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
+                        metadata=dict(row.metadata_),
+                    )
+                    for row in market_rows
+                ]
+
+                interesting = strategy.filter_markets(markets)
+                log.info("signal_loop.cycle", total_markets=len(markets), selected=len(interesting))
+
+                for market in interesting:
+                    signal = await pipeline.analyze(market, trigger="scheduled")
+                    if signal:
+                        click.echo(
+                            f"[SIGNAL] market={market.id} "
+                            f"prob={signal.estimated_probability:.3f} "
+                            f"edge={signal.edge:+.3f} "
+                            f"confidence={signal.confidence:.2f} "
+                            f"direction={signal.direction} "
+                            f"signal_id={signal.id}"
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                import structlog
+                structlog.get_logger("freqpred.cli.signal_loop").exception("signal_loop.error")
+
+            await asyncio.sleep(config.signal.interval_seconds)
+
+    tasks: list[asyncio.Task] = []
+
+    async with KalshiClient(
+        api_key=config.kalshi.api_key,
+        base_url=config.kalshi.base_url,
+        private_key_path=config.kalshi.private_key_path,
+    ) as kalshi_client:
+        if redis_client is not None:
+            watcher = MarketWatcher(
+                client=kalshi_client,
+                session_factory=session_factory,
+                redis=redis_client,
+                polling_interval=config.kalshi.polling_interval_seconds,
+            )
+            tasks.append(asyncio.create_task(watcher.run(), name="market_watcher"))
+            tasks.append(
+                asyncio.create_task(
+                    run_scheduler(
+                        session_factory=session_factory,
+                        embedder=embedder,
+                        redis_client=redis_client,
+                        interval_seconds=config.ingestion.schedule_interval_seconds,
+                        strategy=strategy,
+                        llm_client=llm_client,
+                        tavily_api_key=config.tavily.api_key,
+                        newsapi_api_key=config.newsapi.api_key,
+                    ),
+                    name="ingestion_scheduler",
+                )
+            )
+        else:
+            click.echo("WARNING: REDIS_URL not configured — watcher and scheduler disabled.", err=True)
+
+        tasks.append(asyncio.create_task(signal_loop(), name="signal_loop"))
+
+        click.echo(f"Running {len(tasks)} task(s). Press Ctrl+C to stop.")
+        try:
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if redis_client is not None:
+                await redis_client.aclose()
+            await engine.dispose()
+            click.echo("Shutdown complete.")
 
 
 @main.group()
@@ -174,7 +331,7 @@ async def _ingestion_run(
     from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
     from freqpred.ingestion.store import RawDocument, upsert_document
     from freqpred.markets.models import MarketRow
-    from freqpred.rag.embedder import VoyageEmbedder
+    from freqpred.rag.embedder import LocalEmbedder
 
     if not config.database.url:
         click.echo("ERROR: DATABASE_URL not configured.", err=True)
@@ -193,9 +350,7 @@ async def _ingestion_run(
         prompt_version="catalyst-v1",
     )
 
-    embedder = None
-    if config.voyage.api_key:
-        embedder = VoyageEmbedder(api_key=config.voyage.api_key, model=config.voyage.model)
+    embedder = LocalEmbedder()
 
     now = datetime.now(UTC)
 
@@ -313,9 +468,7 @@ async def _ingestion_run(
 
         click.echo(f"  Fetched {len(raw_docs)} raw document(s) across all sources.")
 
-        if not raw_docs or not embedder:
-            if not embedder:
-                click.echo("  (skipping store: VOYAGE_API_KEY not configured)")
+        if not raw_docs:
             continue
 
         # Upsert into document store.
@@ -362,6 +515,104 @@ def signal() -> None:
 @click.option("--market-id", required=True, help="Kalshi market ID to analyze.")
 @click.pass_context
 def signal_analyze(ctx: click.Context, market_id: str) -> None:
-    """Run signal analysis for a specific market."""
-    click.echo(f"Analyzing market: {market_id}")
-    click.echo("(Not yet implemented — scaffold only)")
+    """One-shot signal analysis for a specific market."""
+    config = ctx.obj["config"]
+    asyncio.run(_signal_analyze(config, market_id))
+
+
+async def _signal_analyze(config: object, market_id: str) -> None:
+    import anthropic
+
+    import freqpred.signal.models  # noqa: F401
+    import freqpred.rag.models  # noqa: F401
+
+    from sqlalchemy import select
+
+    from freqpred.db import make_engine, make_session_factory
+    from freqpred.llm.client import LLMClient
+    from freqpred.markets.models import Market, MarketRow
+    from freqpred.rag.embedder import LocalEmbedder
+    from freqpred.signal.pipeline import SignalPipeline
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+    if not config.anthropic.api_key:
+        click.echo("ERROR: ANTHROPIC_API_KEY not configured.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(MarketRow).where(MarketRow.id == market_id)
+            )
+            row = result.scalar_one_or_none()
+
+        if row is None:
+            click.echo(f"ERROR: Market {market_id!r} not found in DB. Run `freqpred markets list` first.", err=True)
+            return
+
+        market = Market(
+            id=row.id,
+            platform=row.platform,
+            question=row.question,
+            category=row.category,
+            close_time=row.close_time,
+            yes_bid=row.yes_bid,
+            yes_ask=row.yes_ask,
+            mid_price=row.mid_price,
+            volume_24h=row.volume_24h,
+            open_interest=row.open_interest,
+            last_fetched_at=row.last_fetched_at,
+            price_updated_at=row.price_updated_at,
+            metadata_fetched_at=row.metadata_fetched_at,
+            current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
+            metadata=dict(row.metadata_),
+        )
+
+        click.echo(f"Analyzing: {market.question}")
+        click.echo(f"Category : {market.category}  |  Mid: {market.mid_price:.3f}")
+
+        embedder = LocalEmbedder()
+        llm_client = LLMClient(
+            anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
+            session_factory,
+            prompt_version="signal-v1",
+        )
+        pipeline = SignalPipeline(
+            session_factory=session_factory,
+            embedder=embedder,
+            llm_client=llm_client,
+            top_k=config.signal.top_k_documents,
+        )
+
+        signal = await pipeline.analyze(market, trigger="manual")
+
+        if signal is None:
+            click.echo("No new signal generated (evidence unchanged or LLM error).")
+        else:
+            click.echo(f"\nSignal ID  : {signal.id}")
+            click.echo(f"Probability: {signal.estimated_probability:.3f}")
+            click.echo(f"Edge       : {signal.edge:+.3f}")
+            click.echo(f"Confidence : {signal.confidence:.2f}")
+            click.echo(f"Direction  : {signal.direction}")
+            click.echo(f"\nReasoning:\n{signal.reasoning}")
+    finally:
+        await engine.dispose()
+
+
+@main.group()
+def db() -> None:
+    """Database management commands."""
+
+
+@db.command(name="migrate")
+def db_migrate() -> None:
+    """Apply all pending Alembic migrations (upgrade head)."""
+    import subprocess
+    click.echo("Running: alembic upgrade head")
+    result = subprocess.run(["uv", "run", "alembic", "upgrade", "head"])  # noqa: S603
+    raise SystemExit(result.returncode)
