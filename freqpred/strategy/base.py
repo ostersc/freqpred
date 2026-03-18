@@ -49,20 +49,32 @@ class IPredictionStrategy(ABC):
         """Return dollar amount to risk on this position."""
         ...
 
+    def is_market_interesting(self, market: Market) -> bool:
+        """Return True if this strategy wants the ingestion pipeline to monitor this market.
+
+        The Market Selector calls this on all registered strategies. A market is
+        selected for catalyst generation if *any* strategy returns True.
+
+        Default implementation applies StrategyConfig filters (category, volume,
+        days-to-close). Override for custom market selection logic.
+        """
+        now = datetime.now(tz=timezone.utc)
+        days_to_close = (market.close_time - now).days
+        return (
+            (not self.config.categories or market.category in self.config.categories)
+            and market.volume_24h >= self.config.min_volume_24h
+            and self.config.min_days_to_close
+                <= days_to_close
+                <= self.config.max_days_to_close
+        )
+
     def filter_markets(self, markets: list[Market]) -> list[Market]:
         """Pre-filter markets before signal analysis.
 
-        Default applies config filters. Override for custom logic.
+        Delegates to is_market_interesting. Override is_market_interesting for
+        custom logic rather than overriding this method.
         """
-        now = datetime.now(tz=timezone.utc)
-        return [
-            m for m in markets
-            if m.category in self.config.categories
-            and m.volume_24h >= self.config.min_volume_24h
-            and self.config.min_days_to_close
-                <= (m.close_time - now).days
-                <= self.config.max_days_to_close
-        ]
+        return [m for m in markets if self.is_market_interesting(m)]
 
     def on_resolution(self, position: Position) -> None:
         """Optional hook called when a market resolves."""
