@@ -316,6 +316,35 @@ class StrategyConfig:
     min_volume_24h: float            # liquidity filter
     max_days_to_close: int           # don't trade markets closing too soon/late
     min_days_to_close: int
+
+    # --- Exit management (freqtrade-style) ---
+    stoploss: float = -0.20
+    # Trigger exit when position loses this fraction from entry price.
+    # e.g. -0.20 = exit if unrealized loss exceeds 20%.
+    # Enforced by the position monitor on every price poll — strategy cannot override.
+
+    minimal_roi: dict[str, float] = field(default_factory=lambda: {"0": 0.30, "1440": 0.15, "10080": 0.05})
+    # Time-based profit targets. Key = minutes since entry, value = required profit fraction.
+    # Exit as soon as unrealized P&L % >= target for the elapsed time tier.
+    # e.g. {"0": 0.30, "1440": 0.15, "10080": 0.05}:
+    #   - exit immediately at 30% profit
+    #   - exit at 15% profit after 1 day (1440 min)
+    #   - exit at 5% profit after 1 week (10080 min)
+    # Prediction markets move slowly — use hour/day-scale values, not minute-scale.
+    # Set to {} to disable.
+
+    trailing_stop: bool = False
+    # If True, stoploss trails from the best mid-price achieved since entry
+    # (i.e. the stop floor rises as the position profits, locking in gains).
+
+    trailing_stop_positive: float | None = None
+    # Once unrealized P&L crosses this threshold (e.g. 0.10 = 10% profit),
+    # switch to a tighter trailing stop equal to trailing_stop_positive_offset
+    # below the peak price. Encourages letting winners run while protecting profit.
+
+    trailing_stop_positive_offset: float = 0.02
+    # Tight trail applied once trailing_stop_positive is crossed.
+    # e.g. 0.02 = trail 2% below the peak price once in profit.
 ```
 
 ### Document (RAG Store)
@@ -475,7 +504,17 @@ A **cost budget circuit breaker** enforces a configurable daily LLM spend cap (d
 
 ## 8. Strategy Plugin Interface
 
-Strategies are Python classes that implement `IPredictionStrategy`. This mirrors freqtrade's `IStrategy` design.
+Strategies are Python classes that implement `IPredictionStrategy`. The design mirrors freqtrade's `IStrategy` — entry signals, exit signals, stoploss, and ROI targets are all strategy-owned. The framework enforces hard caps on top; strategy logic defines the alpha.
+
+| freqtrade concept | freqpred equivalent |
+|---|---|
+| `populate_entry_trend()` | `should_trade(signal, market) -> bool` |
+| `populate_exit_trend()` | `should_exit(position, signal, market) -> bool` |
+| `stoploss = -0.10` | `config.stoploss = -0.20` |
+| `minimal_roi = {"0": 0.04}` | `config.minimal_roi = {"0": 0.30, "1440": 0.15}` |
+| `trailing_stop = True` | `config.trailing_stop = True` |
+| `custom_exit()` | `custom_exit(position, signal, market) -> str \| None` |
+| post-trade hook | `on_resolution(position)` |
 
 ```python
 from abc import ABC, abstractmethod
@@ -495,6 +534,9 @@ class IPredictionStrategy(ABC):
                 min_confidence=0.72,
                 kelly_fraction=0.25,
                 categories=["politics"],
+                stoploss=-0.20,
+                minimal_roi={"0": 0.30, "1440": 0.15},
+                trailing_stop=True,
                 ...
             )
 
@@ -504,19 +546,74 @@ class IPredictionStrategy(ABC):
             def position_size(self, signal: Signal, bankroll: float) -> float:
                 kelly = signal.edge / (1 - signal.estimated_probability)
                 return bankroll * kelly * self.config.kelly_fraction
+
+            def should_exit(self, position: Position, signal: Signal, market: Market) -> bool:
+                # Signal-driven exit: LLM now disagrees with the position direction
+                return (
+                    signal.direction != position.direction
+                    and signal.confidence >= self.config.min_confidence
+                )
     """
 
     config: StrategyConfig
 
+    # -------------------------------------------------------------------------
+    # Entry interface (required)
+    # -------------------------------------------------------------------------
+
     @abstractmethod
     def should_trade(self, signal: Signal, market: Market) -> bool:
-        """Return True if this signal warrants opening a position."""
+        """Return True if this signal warrants opening a new position."""
         ...
 
     @abstractmethod
     def position_size(self, signal: Signal, bankroll: float) -> float:
-        """Return dollar amount to risk on this position."""
+        """Return dollar amount to risk on this position (before risk capping)."""
         ...
+
+    # -------------------------------------------------------------------------
+    # Exit interface (optional overrides — defaults handle the common cases)
+    # -------------------------------------------------------------------------
+
+    def should_exit(self, position: Position, signal: Signal, market: Market) -> bool:
+        """
+        Signal-driven exit. Called after every LLM re-analysis of a market
+        with an open position (triggered by price move or scheduled refresh).
+
+        Return True to trigger an exit at current market price.
+
+        Default: exit if the new signal direction is opposite to the position
+        direction AND the signal confidence meets the strategy threshold.
+        Override for custom logic (e.g. exit when estimated probability
+        drops below a floor regardless of direction flip).
+        """
+        return (
+            signal.direction not in ("SKIP", position.direction)
+            and signal.confidence >= self.config.min_confidence
+        )
+
+    def custom_exit(
+        self,
+        position: Position,
+        signal: Signal,
+        market: Market,
+    ) -> str | None:
+        """
+        Custom exit hook. Called by the position monitor on every price poll,
+        after stoploss/ROI checks but before should_exit().
+
+        Return a non-None string (the exit reason tag) to force an immediate
+        exit. Return None to let normal exit logic proceed.
+
+        Use this for market-specific conditions that don't fit the standard
+        stoploss/ROI/signal framework — e.g. exit all positions 48h before
+        a market closes regardless of P&L.
+        """
+        return None
+
+    # -------------------------------------------------------------------------
+    # Market selection (optional override)
+    # -------------------------------------------------------------------------
 
     def is_market_interesting(self, market: Market) -> bool:
         """
@@ -541,20 +638,46 @@ class IPredictionStrategy(ABC):
         )
 
     def filter_markets(self, markets: list[Market]) -> list[Market]:
-        """
-        Pre-filter markets before signal analysis.
-        Default implementation applies config filters.
-        Override for custom filtering logic.
-        """
+        """Pre-filter markets before signal analysis."""
         return [m for m in markets if self.is_market_interesting(m)]
+
+    # -------------------------------------------------------------------------
+    # Lifecycle hooks (optional)
+    # -------------------------------------------------------------------------
 
     def on_resolution(self, position: Position) -> None:
         """
-        Optional hook called when a market resolves.
-        Use for logging, alerting, or adaptive logic.
+        Called when a market resolves (position closed by resolution, not exit).
+        Use for logging, alerting, or adaptive strategy logic.
         """
         pass
 ```
+
+### Exit Priority Order
+
+The position monitor evaluates exit conditions in this order on every price poll:
+
+1. **Hard stoploss** (`config.stoploss`) — framework-enforced, cannot be overridden
+2. **Trailing stoploss** (`config.trailing_stop`) — trails from the best price since entry
+3. **Minimal ROI** (`config.minimal_roi`) — time-based profit targets
+4. **Custom exit** (`strategy.custom_exit()`) — strategy-defined special conditions
+5. **Signal exit** (`strategy.should_exit()`) — called only after LLM re-analysis (on price-triggered signal refreshes, not every poll)
+6. **Market resolution** — market closes, position settled at $1.00 or $0.00
+
+If none of these conditions fire, the position is held.
+
+### Exit Reason Tagging
+
+Every closed position records an `exit_reason` string for analysis:
+
+| Exit reason | Source |
+|---|---|
+| `"stoploss"` | Hard stoploss hit |
+| `"trailing_stop"` | Trailing stoploss hit |
+| `"roi"` | Minimal ROI target met |
+| `"custom_exit:<tag>"` | `custom_exit()` returned a tag |
+| `"signal"` | `should_exit()` returned True |
+| `"market_resolved"` | Market paid out at resolution |
 
 ### Bundled Strategies
 
@@ -874,11 +997,13 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 
 - [ ] Order Manager (paper mode)
 - [ ] Ledger (positions, resolutions, P&L)
+- [ ] Strategy exit interface — `should_exit()`, `custom_exit()`, `stoploss`, `minimal_roi`, `trailing_stop` on `IPredictionStrategy` and `StrategyConfig`
+- [ ] Position monitor — background loop checking all open positions on each price poll; simulates paper exits when stoploss/ROI/signal conditions are met; logs `exit_reason`
 - [ ] Calibration metrics (Brier score, calibration curve)
 - [ ] Web dashboard (signal feed + ledger views)
 - [ ] Telegram alerts
 
-**Done when:** 100+ markets resolved with logged signals. Calibration score measured. Decision made: is the signal real?
+**Done when:** 100+ markets resolved or exited with logged signals. Calibration score measured. Exit behavior observable from ledger. Decision made: is the signal real?
 
 **Go/no-go criteria for Phase 3:**
 - Brier score < 0.20 (better than naive baseline)
@@ -890,9 +1015,11 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 ### Phase 3: Live Trading
 *Goal: real capital, controlled risk*
 
-- [ ] Kalshi order execution (real API)
+- [ ] Kalshi order execution (real API) — entry orders via REST
+- [ ] Real exit order execution — when position monitor fires an exit condition, submit a sell order via Kalshi REST API instead of simulating it
 - [ ] Hard cap enforcement in Order Manager
-- [ ] Position Watcher: Kalshi WebSocket `ticker` + `market_lifecycle` subscription for markets with open positions (see §6a)
+- [ ] Position Watcher: Kalshi WebSocket `ticker` subscription drives real-time position monitor for open positions — replaces the poll-based paper monitor with low-latency price feed; same exit logic, real sell orders (see §6a)
+- [ ] Position Watcher: `market_lifecycle` subscription for resolution events — closes positions at settlement price
 - [ ] Production AWS deployment (ECS, RDS, Secrets Manager)
 - [ ] GitHub Actions CI/CD pipeline
 - [ ] Full dashboard (all pages)
