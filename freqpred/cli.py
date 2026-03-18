@@ -2,10 +2,28 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import click
+import structlog
 
 from freqpred.config import load_config
+
+
+def _configure_logging(log_level: str) -> None:
+    """Set up structlog with stdlib integration at the given level."""
+    level = getattr(logging, log_level)
+    logging.basicConfig(
+        format="%(message)s",
+        level=level,
+    )
+    # httpx/httpcore log every request at INFO — suppress unless debugging
+    if level > logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+    )
 
 
 @click.group()
@@ -13,7 +31,9 @@ from freqpred.config import load_config
 def main(ctx: click.Context) -> None:
     """freqpred — LLM-driven prediction market trading framework."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = load_config()
+    config = load_config()
+    _configure_logging(config.log_level)
+    ctx.obj["config"] = config
 
 
 @main.command()

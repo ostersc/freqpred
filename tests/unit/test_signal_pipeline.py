@@ -348,7 +348,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash=None,  # no prior signal
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             result = await pipeline.analyze(_make_market())
 
         assert isinstance(result, Signal)
@@ -370,7 +370,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash=doc_hash,  # current signal already has this hash
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             result = await pipeline.analyze(_make_market(current_signal_id=FAKE_SIGNAL_ID))
 
         assert result is None
@@ -386,7 +386,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash="different_hash" + "x" * 50,  # won't match
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             result = await pipeline.analyze(_make_market(current_signal_id=FAKE_SIGNAL_ID))
 
         assert result is not None
@@ -401,7 +401,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash=None,
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             result = await pipeline.analyze(_make_market())
 
         assert result is None
@@ -415,7 +415,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash=None,
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             result = await pipeline.analyze(_make_market())
 
         assert result is None
@@ -429,7 +429,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash=None,
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             await pipeline.analyze(_make_market())
 
         # session.add should have been called (signal row + document link)
@@ -445,7 +445,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash=None,
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             await pipeline.analyze(_make_market())
 
         # session.execute is called at least once (the market update via UPDATE statement)
@@ -461,7 +461,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash=None,
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             await pipeline.analyze(_make_market())
 
         session.commit.assert_awaited_once()
@@ -475,7 +475,7 @@ class TestSignalPipelineAnalyze:
             current_signal_hash=None,
         )
 
-        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[doc])):
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
             result = await pipeline.analyze(_make_market(mid_price=0.50))
 
         assert result is not None
@@ -495,3 +495,32 @@ class TestSignalPipelineAnalyze:
 
         llm_client.complete.assert_not_awaited()
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_document_links_use_cosine_score(self) -> None:
+        """DocumentMarketLink is written with cosine similarity score, not 1/rank."""
+        doc = _make_document()
+        cosine_similarity = 0.73
+        pipeline, session, _ = self._make_pipeline(
+            docs=[doc],
+            llm_content=_valid_llm_json(doc_ids=[doc.id]),
+            current_signal_hash=None,
+        )
+
+        with patch(
+            "freqpred.signal.pipeline.retrieve",
+            new=AsyncMock(return_value=[(doc, cosine_similarity)]),
+        ):
+            await pipeline.analyze(_make_market())
+
+        from freqpred.rag.models import DocumentMarketLinkRow
+
+        added_links = [
+            call.args[0]
+            for call in session.add.call_args_list
+            if isinstance(call.args[0], DocumentMarketLinkRow)
+        ]
+        assert len(added_links) == 1
+        assert abs(added_links[0].relevance_score - cosine_similarity) < 1e-9
+        # confirm it's NOT the rank proxy (1/rank = 1.0 for rank=0)
+        assert added_links[0].relevance_score != 1.0

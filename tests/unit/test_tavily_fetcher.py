@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from freqpred.ingestion.fetchers import is_domain_excluded
 from freqpred.ingestion.fetchers.tavily import fetch
 from freqpred.ingestion.store import RawDocument
 
@@ -179,3 +180,81 @@ async def test_fetch_returns_empty_on_api_error(mock_tavily_client):
     mock_tavily_client.search.side_effect = RuntimeError("API down")
     docs = await fetch(_API_KEY, _QUERY)
     assert docs == []
+
+
+# ---------------------------------------------------------------------------
+# Domain blacklist — is_domain_excluded helper
+# ---------------------------------------------------------------------------
+
+
+def test_is_domain_excluded_exact_match():
+    assert is_domain_excluded("https://kalshi.com/markets/foo", frozenset({"kalshi.com"}))
+
+
+def test_is_domain_excluded_subdomain():
+    assert is_domain_excluded("https://api.kalshi.com/v1/events", frozenset({"kalshi.com"}))
+
+
+def test_is_domain_excluded_deep_subdomain():
+    assert is_domain_excluded("https://x.y.kalshi.com/path", frozenset({"kalshi.com"}))
+
+
+def test_is_domain_excluded_no_false_positive():
+    assert not is_domain_excluded("https://notkalshi.com/article", frozenset({"kalshi.com"}))
+
+
+def test_is_domain_excluded_unrelated_domain():
+    assert not is_domain_excluded("https://reuters.com/news/story", frozenset({"kalshi.com"}))
+
+
+def test_is_domain_excluded_multiple_domains():
+    blacklist = frozenset({"kalshi.com", "polymarket.com"})
+    assert is_domain_excluded("https://polymarket.com/market/x", blacklist)
+    assert is_domain_excluded("https://kalshi.com/event/y", blacklist)
+    assert not is_domain_excluded("https://reuters.com/news", blacklist)
+
+
+def test_is_domain_excluded_empty_blacklist():
+    assert not is_domain_excluded("https://kalshi.com/foo", frozenset())
+
+
+# ---------------------------------------------------------------------------
+# Domain blacklist — fetcher integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_skips_blacklisted_domain(mock_tavily_client):
+    mock_tavily_client.search.return_value = {
+        "results": [
+            _make_item(url="https://kalshi.com/markets/some-event", content="Kalshi market page."),
+            _make_item(url="https://reuters.com/article", content="News body."),
+        ]
+    }
+    docs = await fetch(_API_KEY, _QUERY, excluded_domains=frozenset({"kalshi.com"}))
+    assert len(docs) == 1
+    assert docs[0].source_url == "https://reuters.com/article"
+
+
+@pytest.mark.asyncio
+async def test_fetch_skips_subdomain_of_blacklisted_domain(mock_tavily_client):
+    mock_tavily_client.search.return_value = {
+        "results": [
+            _make_item(url="https://api.kalshi.com/v2/events", content="API response."),
+            _make_item(url="https://valid.com/article", content="Valid body."),
+        ]
+    }
+    docs = await fetch(_API_KEY, _QUERY, excluded_domains=frozenset({"kalshi.com"}))
+    assert len(docs) == 1
+    assert docs[0].source_url == "https://valid.com/article"
+
+
+@pytest.mark.asyncio
+async def test_fetch_empty_blacklist_keeps_all(mock_tavily_client):
+    mock_tavily_client.search.return_value = {
+        "results": [
+            _make_item(url="https://kalshi.com/foo", content="Body."),
+        ]
+    }
+    docs = await fetch(_API_KEY, _QUERY, excluded_domains=frozenset())
+    assert len(docs) == 1

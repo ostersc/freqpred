@@ -2,6 +2,8 @@
 # Copy to config/config.yaml and fill in values.
 # Secrets (API keys) must come from environment variables — never put them here.
 
+log_level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+
 database:
   # Overridden by DATABASE_URL env var
   url: ""
@@ -25,12 +27,6 @@ anthropic:
   primary_model: "claude-sonnet-4-6"
   cheap_model: "claude-haiku-4-5-20251001"
 
-voyage:
-  # Overridden by VOYAGE_API_KEY env var
-  api_key: ""
-  model: "voyage-3"
-  embedding_dim: 1024
-
 tavily:
   # Overridden by TAVILY_API_KEY env var
   api_key: ""
@@ -40,9 +36,7 @@ newsapi:
   api_key: ""
 
 reddit:
-  # Overridden by REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET env vars
-  client_id: ""
-  client_secret: ""
+  # Uses the public Reddit JSON API — no credentials required
   user_agent: "freqpred/0.1"
 
 ingestion:

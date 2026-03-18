@@ -25,6 +25,7 @@ def _make_config(
     anthropic_api_key: str = "sk-test",
 ) -> MagicMock:
     cfg = MagicMock()
+    cfg.log_level = "INFO"
     cfg.database.url = database_url
     cfg.redis.url = redis_url
     cfg.anthropic.api_key = anthropic_api_key

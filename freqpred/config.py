@@ -39,12 +39,6 @@ class AnthropicConfig(BaseModel):
     cheap_model: str = Field(default="claude-haiku-4-5-20251001")
 
 
-class VoyageConfig(BaseModel):
-    api_key: str = Field(default="")
-    model: str = Field(default="voyage-3")
-    embedding_dim: int = Field(default=1024)
-
-
 class TavilyConfig(BaseModel):
     api_key: str = Field(default="")
 
@@ -56,8 +50,6 @@ class NewsAPIConfig(BaseModel):
 
 
 class RedditConfig(BaseModel):
-    client_id: str = Field(default="")
-    client_secret: str = Field(default="")
     user_agent: str = Field(default="freqpred/0.1")
 
 
@@ -107,11 +99,11 @@ class AlertsConfig(BaseModel):
 
 
 class Settings(BaseModel):
+    log_level: str = Field(default="INFO")
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     kalshi: KalshiConfig = Field(default_factory=KalshiConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
-    voyage: VoyageConfig = Field(default_factory=VoyageConfig)
     tavily: TavilyConfig = Field(default_factory=TavilyConfig)
     newsapi: NewsAPIConfig = Field(default_factory=NewsAPIConfig)
     reddit: RedditConfig = Field(default_factory=RedditConfig)
@@ -122,6 +114,15 @@ class Settings(BaseModel):
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
 
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        upper = v.upper()
+        if upper not in valid:
+            raise ValueError(f"log_level must be one of {valid}, got: {v!r}")
+        return upper
+
 
 # Maps environment variable name → (section, field) path in Settings
 _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
@@ -130,11 +131,8 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "KALSHI_API_KEY": ("kalshi", "api_key"),
     "KALSHI_PRIVATE_KEY_PATH": ("kalshi", "private_key_path"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
-    "VOYAGE_API_KEY": ("voyage", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
     "NEWSAPI_KEY": ("newsapi", "api_key"),
-    "REDDIT_CLIENT_ID": ("reddit", "client_id"),
-    "REDDIT_CLIENT_SECRET": ("reddit", "client_secret"),
     "TELEGRAM_BOT_TOKEN": ("alerts", "telegram_bot_token"),
     "TELEGRAM_CHAT_ID": ("alerts", "telegram_chat_id"),
     "DISCORD_WEBHOOK_URL": ("alerts", "discord_webhook_url"),

@@ -339,7 +339,7 @@ async def _retrieve_recent_docs(
     from freqpred.rag.retriever import retrieve
 
     try:
-        return await retrieve(
+        pairs = await retrieve(
             session=session,
             embedder=embedder,
             question=market.question,
@@ -347,6 +347,7 @@ async def _retrieve_recent_docs(
             top_k=top_k,
             max_age_days=7,
         )
+        return [doc for doc, _ in pairs]
     except Exception:
         log.warning(
             "catalyst_generator.rag_retrieve_error",

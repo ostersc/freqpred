@@ -203,3 +203,45 @@ async def test_fetch_returns_empty_on_api_error(mock_newsapi_client):
     mock_newsapi_client.get_everything.side_effect = RuntimeError("API down")
     docs = await fetch(_API_KEY, _QUERY, _FROM)
     assert docs == []
+
+
+# ---------------------------------------------------------------------------
+# Domain blacklist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_skips_blacklisted_domain(mock_newsapi_client):
+    mock_newsapi_client.get_everything.return_value = {
+        "articles": [
+            _make_article(url="https://kalshi.com/markets/event", content="Kalshi page."),
+            _make_article(url="https://reuters.com/article", content="News body."),
+        ]
+    }
+    docs = await fetch(_API_KEY, _QUERY, _FROM, excluded_domains=frozenset({"kalshi.com"}))
+    assert len(docs) == 1
+    assert docs[0].source_url == "https://reuters.com/article"
+
+
+@pytest.mark.asyncio
+async def test_fetch_skips_subdomain_of_blacklisted_domain(mock_newsapi_client):
+    mock_newsapi_client.get_everything.return_value = {
+        "articles": [
+            _make_article(url="https://api.kalshi.com/v1/markets", content="API body."),
+            _make_article(url="https://valid.com/story", content="Valid body."),
+        ]
+    }
+    docs = await fetch(_API_KEY, _QUERY, _FROM, excluded_domains=frozenset({"kalshi.com"}))
+    assert len(docs) == 1
+    assert docs[0].source_url == "https://valid.com/story"
+
+
+@pytest.mark.asyncio
+async def test_fetch_empty_blacklist_keeps_all(mock_newsapi_client):
+    mock_newsapi_client.get_everything.return_value = {
+        "articles": [
+            _make_article(url="https://kalshi.com/foo", content="Body."),
+        ]
+    }
+    docs = await fetch(_API_KEY, _QUERY, _FROM, excluded_domains=frozenset())
+    assert len(docs) == 1

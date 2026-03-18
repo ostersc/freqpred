@@ -71,8 +71,8 @@ class SignalPipeline:
             response is malformed.
         """
         async with self._session_factory() as session:
-            # Step 1: retrieve relevant documents
-            docs = await retrieve(
+            # Step 1: retrieve relevant documents with cosine similarity scores
+            doc_pairs = await retrieve(
                 session,
                 self._embedder,
                 market.question,
@@ -81,12 +81,14 @@ class SignalPipeline:
             )
 
             # Step 2: skip if no documents were retrieved
-            if not docs:
+            if not doc_pairs:
                 log.debug(
                     "signal.pipeline.skip_no_docs",
                     market_id=market.id,
                 )
                 return None
+
+            docs = [doc for doc, _ in doc_pairs]
 
             # Step 3: compute retrieval hash from returned doc IDs
             doc_ids = [d.id for d in docs]
@@ -134,7 +136,7 @@ class SignalPipeline:
             signal = await self._write_signal(
                 session=session,
                 market=market,
-                docs=docs,
+                doc_pairs=doc_pairs,
                 parsed=parsed,
                 retrieval_hash=new_hash,
                 raw_context=prompt,
@@ -155,7 +157,7 @@ class SignalPipeline:
         self,
         session: AsyncSession,
         market: Market,
-        docs: list[Document],
+        doc_pairs: list[tuple[Document, float]],
         parsed: dict,
         retrieval_hash: str,
         raw_context: str,
@@ -169,6 +171,7 @@ class SignalPipeline:
         signal_id = uuid.uuid4()
         estimated_probability = parsed["probability"]
         edge = estimated_probability - market.mid_price
+        docs = [doc for doc, _ in doc_pairs]
 
         signal_row = SignalRow(
             id=signal_id,
@@ -191,14 +194,13 @@ class SignalPipeline:
         # Flush so the signal PK exists in the DB before DocumentMarketLinkRow FKs reference it
         await session.flush()
 
-        # Create one DocumentMarketLink per retrieved document
-        for rank, doc in enumerate(docs):
-            relevance_score = 1.0 / (rank + 1)  # rank-based proxy (most relevant = 1.0)
+        # Create one DocumentMarketLink per retrieved document using the actual cosine similarity
+        for doc, similarity_score in doc_pairs:
             link = DocumentMarketLinkRow(
                 document_id=uuid.UUID(doc.id),
                 market_id=market.id,
                 signal_id=signal_id,
-                relevance_score=relevance_score,
+                relevance_score=similarity_score,
                 linked_at=now,
             )
             session.add(link)

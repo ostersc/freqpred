@@ -51,13 +51,16 @@ def _make_row(
     )
 
 
-def _make_session(rows: list[DocumentRow]) -> AsyncMock:
-    """Mock AsyncSession whose execute() returns *rows* as scalars."""
+def _make_session(rows: list[DocumentRow], distances: list[float] | None = None) -> AsyncMock:
+    """Mock AsyncSession whose execute() returns (DocumentRow, distance) tuples.
+
+    *distances* defaults to 0.0 for every row (similarity = 1.0).
+    """
+    if distances is None:
+        distances = [0.0] * len(rows)
     session = AsyncMock()
-    scalars_result = MagicMock()
-    scalars_result.all.return_value = rows
     execute_result = MagicMock()
-    execute_result.scalars.return_value = scalars_result
+    execute_result.all.return_value = list(zip(rows, distances))
     session.execute = AsyncMock(return_value=execute_result)
     return session
 
@@ -117,9 +120,9 @@ async def test_retrieve_returns_documents():
     session = _make_session(rows)
     embedder = _make_embedder()
 
-    docs = await retrieve(session, embedder, "question", category="politics")
+    pairs = await retrieve(session, embedder, "question", category="politics")
 
-    assert len(docs) == 2
+    assert len(pairs) == 2
 
 
 @pytest.mark.asyncio
@@ -128,9 +131,9 @@ async def test_retrieve_maps_category_correctly():
     session = _make_session([row])
     embedder = _make_embedder()
 
-    docs = await retrieve(session, embedder, "question", category="economics")
+    pairs = await retrieve(session, embedder, "question", category="economics")
 
-    assert docs[0].category == "economics"
+    assert pairs[0][0].category == "economics"
 
 
 @pytest.mark.asyncio
@@ -138,9 +141,9 @@ async def test_retrieve_empty_result():
     session = _make_session([])
     embedder = _make_embedder()
 
-    docs = await retrieve(session, embedder, "question", category="politics")
+    pairs = await retrieve(session, embedder, "question", category="politics")
 
-    assert docs == []
+    assert pairs == []
 
 
 @pytest.mark.asyncio
@@ -164,8 +167,8 @@ async def test_retrieve_document_fields_mapped():
     session = _make_session([row])
     embedder = _make_embedder()
 
-    docs = await retrieve(session, embedder, "question", category="politics")
-    doc = docs[0]
+    pairs = await retrieve(session, embedder, "question", category="politics")
+    doc, _ = pairs[0]
 
     assert doc.id == str(row.id)
     assert doc.source_url == row.source_url
@@ -175,3 +178,35 @@ async def test_retrieve_document_fields_mapped():
     assert doc.embedding == FAKE_EMBEDDING
     assert doc.embedding_model == "all-MiniLM-L6-v2"
     assert doc.summary is None
+
+
+# ---------------------------------------------------------------------------
+# retrieve — cosine similarity scores (T16)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_relevance_score_is_cosine_similarity():
+    """Cosine distance 0.2 should produce similarity score 0.8."""
+    row = _make_row()
+    session = _make_session([row], distances=[0.2])
+    embedder = _make_embedder()
+
+    pairs = await retrieve(session, embedder, "question", category="politics")
+
+    _, score = pairs[0]
+    assert abs(score - 0.8) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_relevance_scores_are_in_unit_interval():
+    """All returned scores must be in [0.0, 1.0] for a range of distances."""
+    rows = [_make_row() for _ in range(4)]
+    distances = [0.0, 0.5, 0.99, 1.0]
+    session = _make_session(rows, distances=distances)
+    embedder = _make_embedder()
+
+    pairs = await retrieve(session, embedder, "question", category="politics")
+
+    for _, score in pairs:
+        assert 0.0 <= score <= 1.0

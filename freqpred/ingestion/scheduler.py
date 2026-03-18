@@ -80,6 +80,7 @@ async def run_cycle(
     newsapi_enabled: bool = True,
     newsapi_max_daily_requests: int = 90,
     reddit_user_agent: str = "freqpred/0.1",
+    domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
 ) -> dict[str, int]:
     """Run one full ingestion cycle.
 
@@ -108,6 +109,8 @@ async def run_cycle(
         newsapi_max_daily_requests: Daily request cap tracked in Postgres
                                     ``api_daily_counters`` (default: 90).
         reddit_user_agent:          User-Agent for Reddit requests.
+        domain_blacklist:           Domains to exclude from Tavily and NewsAPI results.
+                                    Matched as a substring of each URL (default: kalshi.com).
 
     Returns:
         Stats dict with keys: markets_processed, catalysts_generated,
@@ -154,6 +157,7 @@ async def run_cycle(
                     docs = await tavily_fetcher.fetch(
                         api_key=tavily_api_key,
                         query=query_text,
+                        excluded_domains=domain_blacklist,
                     )
                     raw_docs.extend(docs)
                 except Exception:
@@ -181,6 +185,7 @@ async def run_cycle(
                             api_key=newsapi_api_key,
                             query=query_text,
                             from_date=newsapi_from,
+                            excluded_domains=domain_blacklist,
                         )
                         raw_docs.extend(docs)
                         await increment_daily_count(session, "newsapi", now.date())
@@ -282,6 +287,7 @@ async def run_scheduler(
     newsapi_enabled: bool = True,
     newsapi_max_daily_requests: int = 90,
     reddit_user_agent: str = "freqpred/0.1",
+    domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
 ) -> None:
     """Async loop: runs run_cycle every *interval_seconds*.
 
@@ -300,6 +306,7 @@ async def run_scheduler(
         newsapi_enabled:            When False, NewsAPI fetcher is skipped entirely.
         newsapi_max_daily_requests: Daily request cap for the NewsAPI fetcher.
         reddit_user_agent:          User-Agent for Reddit requests.
+        domain_blacklist:           Domains to exclude from Tavily and NewsAPI results.
     """
     log.info("scheduler.started", interval_seconds=interval_seconds)
 
@@ -317,6 +324,7 @@ async def run_scheduler(
                     newsapi_enabled=newsapi_enabled,
                     newsapi_max_daily_requests=newsapi_max_daily_requests,
                     reddit_user_agent=reddit_user_agent,
+                    domain_blacklist=domain_blacklist,
                 )
                 await session.commit()
         except Exception:
