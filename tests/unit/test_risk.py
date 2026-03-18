@@ -1,0 +1,212 @@
+"""Unit tests for freqpred/trading/risk.py.
+
+All DB calls are mocked — no external dependencies.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from freqpred.config import RiskConfig
+from freqpred.signal.models import Signal
+from freqpred.trading.risk import RiskDecision, RiskEngine, TradingCircuitBreakerError
+
+# Ensure ORM relationships resolve
+import freqpred.ingestion.models   # noqa: F401
+import freqpred.llm.models         # noqa: F401
+import freqpred.markets.models     # noqa: F401
+import freqpred.rag.models         # noqa: F401
+import freqpred.signal.models      # noqa: F401
+
+NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
+BANKROLL = 2000.0
+
+
+def _make_config(**overrides: object) -> RiskConfig:
+    defaults = dict(
+        max_position_pct=0.05,
+        max_daily_loss_pct=0.15,
+        max_total_exposure_pct=0.40,
+        min_edge_floor=0.10,
+        max_open_positions=20,
+    )
+    defaults.update(overrides)
+    return RiskConfig(**defaults)  # type: ignore[arg-type]
+
+
+def _make_signal(edge: float = 0.15) -> Signal:
+    return Signal(
+        id=str(uuid.uuid4()),
+        market_id="MKT-X",
+        estimated_probability=0.60,
+        confidence=0.80,
+        edge=edge,
+        market_mid_at_signal=0.45,
+        direction="YES",
+        reasoning="test",
+        sources=[],
+        retrieval_hash="x" * 64,
+        model_used="claude",
+        prompt_version="v1",
+        trigger="manual",
+        created_at=NOW,
+        raw_context="",
+    )
+
+
+def _make_session(
+    open_count: int = 0,
+    total_exposure: float = 0.0,
+    daily_pnl: float = 0.0,
+    all_pnl: float = 0.0,
+) -> MagicMock:
+    """Return a mock AsyncSession whose execute() returns canned scalar results."""
+    call_returns = [open_count, total_exposure, daily_pnl]
+
+    session = MagicMock()
+
+    async def _execute(stmt: object) -> MagicMock:
+        result = MagicMock()
+        result.scalar_one.return_value = call_returns.pop(0)
+        return result
+
+    session.execute = _execute
+    return session
+
+
+def _make_circuit_session(daily_pnl: float = 0.0, all_pnl: float = 0.0) -> MagicMock:
+    """Session for circuit-breaker calls (2 queries: daily P&L, all-time P&L)."""
+    call_returns = [daily_pnl, all_pnl]
+
+    session = MagicMock()
+
+    async def _execute(stmt: object) -> MagicMock:
+        result = MagicMock()
+        result.scalar_one.return_value = call_returns.pop(0)
+        return result
+
+    session.execute = _execute
+    return session
+
+
+# ---------------------------------------------------------------------------
+# check_position tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_blocks_when_edge_below_floor() -> None:
+    engine = RiskEngine(_make_config(min_edge_floor=0.10))
+    signal = _make_signal(edge=0.05)
+    session = MagicMock()  # should not be called — edge check is first
+
+    decision = await engine.check_position(session, signal, requested_size=100.0, bankroll=BANKROLL)
+
+    assert decision.allowed is False
+    assert "edge" in decision.reason
+    assert decision.capped_size == 0.0
+
+
+@pytest.mark.asyncio
+async def test_caps_size_at_max_position_pct() -> None:
+    # 5% of 2000 = 100; requesting 200 → should be capped at 100
+    engine = RiskEngine(_make_config(max_position_pct=0.05))
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=0, total_exposure=0.0, daily_pnl=0.0)
+
+    decision = await engine.check_position(session, signal, requested_size=200.0, bankroll=BANKROLL)
+
+    assert decision.allowed is True
+    assert decision.capped_size == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_blocks_when_max_open_positions_reached() -> None:
+    engine = RiskEngine(_make_config(max_open_positions=20))
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=20, total_exposure=0.0, daily_pnl=0.0)
+
+    decision = await engine.check_position(session, signal, requested_size=100.0, bankroll=BANKROLL)
+
+    assert decision.allowed is False
+    assert "open positions" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_blocks_when_total_exposure_exceeded() -> None:
+    # 40% of 2000 = 800; mock exposure = 820 → should block
+    engine = RiskEngine(_make_config(max_total_exposure_pct=0.40))
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=5, total_exposure=820.0, daily_pnl=0.0)
+
+    decision = await engine.check_position(session, signal, requested_size=100.0, bankroll=BANKROLL)
+
+    assert decision.allowed is False
+    assert "exposure" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_allows_valid_position() -> None:
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=5, total_exposure=200.0, daily_pnl=0.0)
+
+    decision = await engine.check_position(session, signal, requested_size=50.0, bankroll=BANKROLL)
+
+    assert decision.allowed is True
+    assert decision.reason == ""
+    assert decision.capped_size == pytest.approx(50.0)
+
+
+@pytest.mark.asyncio
+async def test_blocks_when_daily_loss_exceeded() -> None:
+    # 15% of 2000 = 300; daily loss = -320 → block
+    engine = RiskEngine(_make_config(max_daily_loss_pct=0.15))
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=0, total_exposure=0.0, daily_pnl=-320.0)
+
+    decision = await engine.check_position(session, signal, requested_size=100.0, bankroll=BANKROLL)
+
+    assert decision.allowed is False
+    assert "daily loss" in decision.reason
+
+
+# ---------------------------------------------------------------------------
+# check_circuit_breakers tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_fires_on_daily_loss() -> None:
+    # 15% of 2000 = 300; daily loss = -320 → should raise
+    engine = RiskEngine(_make_config(max_daily_loss_pct=0.15))
+    session = _make_circuit_session(daily_pnl=-320.0, all_pnl=-320.0)
+
+    with pytest.raises(TradingCircuitBreakerError, match="daily loss"):
+        await engine.check_circuit_breakers(session, bankroll=BANKROLL)
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_fires_on_drawdown() -> None:
+    # 30% drawdown: current bankroll = 1000, ATH would be ~1429 (1000 + 429 loss)
+    # drawdown = 429/1429 ≈ 30%; use 700 loss on 2000 bankroll
+    # ATH = 1300 + 700 = 2000; drawdown = 700/2000 = 35% > 30%
+    engine = RiskEngine(_make_config())
+    session = _make_circuit_session(daily_pnl=0.0, all_pnl=-700.0)
+    current_bankroll = 1300.0  # 2000 - 700
+
+    with pytest.raises(TradingCircuitBreakerError, match="drawdown"):
+        await engine.check_circuit_breakers(session, bankroll=current_bankroll)
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_silent_when_within_limits() -> None:
+    engine = RiskEngine(_make_config())
+    # small daily loss, small all-time loss — well within limits
+    session = _make_circuit_session(daily_pnl=-10.0, all_pnl=-10.0)
+
+    # Should not raise
+    await engine.check_circuit_breakers(session, bankroll=BANKROLL)
