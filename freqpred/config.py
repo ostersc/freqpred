@@ -140,6 +140,11 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "DISCORD_WEBHOOK_URL": ("alerts", "discord_webhook_url"),
 }
 
+# Env vars whose values are comma-separated lists.
+_ENV_LIST_OVERRIDES: dict[str, tuple[str, str]] = {
+    "TELEGRAM_AUTHORIZED_USERS": ("alerts", "telegram_authorized_users"),
+}
+
 
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     for env_var, (section, key) in _ENV_OVERRIDES.items():
@@ -148,6 +153,12 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
             if section not in data:
                 data[section] = {}
             data[section][key] = value
+    for env_var, (section, key) in _ENV_LIST_OVERRIDES.items():
+        value = os.environ.get(env_var)
+        if value:
+            if section not in data:
+                data[section] = {}
+            data[section][key] = [v.strip() for v in value.split(",") if v.strip()]
     return data
 
 

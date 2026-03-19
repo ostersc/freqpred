@@ -72,6 +72,8 @@ def _make_run_mocks(market_row: MagicMock, signal: "Signal | None"):
     mock_scalars.all.return_value = [market_row]
     mock_result = MagicMock()
     mock_result.scalars.return_value = mock_scalars
+    # get_run_state uses scalar_one_or_none; None → default "running" state
+    mock_result.scalar_one_or_none.return_value = None
 
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock(return_value=mock_result)

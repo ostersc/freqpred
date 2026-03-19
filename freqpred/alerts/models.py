@@ -1,0 +1,28 @@
+"""ORM model for persisting run-loop state."""
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import Integer, VARCHAR
+from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.orm import Mapped, mapped_column
+
+from freqpred.db import Base
+
+VALID_RUN_STATES = ("running", "paused", "stopped")
+
+
+class RunStateRow(Base):
+    """Singleton table that persists the run-loop state across restarts.
+
+    At most one row exists (id=1). Use ``run_state.get_run_state`` /
+    ``run_state.set_run_state`` to read/write it.
+    """
+
+    __tablename__ = "run_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    state: Mapped[str] = mapped_column(VARCHAR(20), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )

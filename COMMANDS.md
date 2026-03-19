@@ -173,7 +173,28 @@ alerts:
 |---|---|
 | `/help` | List all registered commands |
 
-Additional management commands (pause/resume, status, force-signal) will be added in subsequent tickets and appear in `/help` automatically once registered.
+### System control commands
+
+| Command | Description |
+|---|---|
+| `/start` | Set run loop to `running`; new positions resume |
+| `/pause` | Set run loop to `paused`; no new positions, existing positions still managed |
+| `/stop` | Halt signal analysis entirely; use `/start` to resume |
+| `/show_config` | Show strategy name, mode, min edge, max position size, LLM budget |
+| `/logs [n]` | Last *n* log lines (default 20); truncated at 4096 chars |
+| `/version` | freqpred version + short git commit hash |
+
+State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a process restart picks up the last state.
+
+### Status query commands
+
+| Command | Description |
+|---|---|
+| `/status` | List all open positions: market question, direction, entry price, est. prob, unrealized P&L |
+| `/status <position_id>` | Detailed single-position view: confidence, edge at entry, time open |
+| `/count` | `Open: N / Max: M` |
+| `/trades [n]` | Last *n* resolved positions (default 10): market, exit reason, P&L, hold duration |
+| `/signals [n]` | Last *n* signals (default 10): market, our prob, market price, edge, direction |
 
 ### Registering custom handlers (for developers)
 

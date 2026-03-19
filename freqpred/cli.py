@@ -22,8 +22,36 @@ def _configure_logging(log_level: str) -> None:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
     structlog.configure(
+        processors=[
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.add_logger_name,
+            structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.dev.ConsoleRenderer(),
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.make_filtering_bound_logger(level),
+        cache_logger_on_first_use=True,
     )
+
+
+# Module-level log buffer shared between _configure_logging and _run_main.
+_log_buffer: "LogBuffer | None" = None
+
+
+def _get_or_create_log_buffer() -> "LogBuffer":
+    from freqpred.alerts.command_handlers import LogBuffer, install_log_buffer
+
+    global _log_buffer
+    if _log_buffer is None:
+        _log_buffer = LogBuffer()
+        install_log_buffer(_log_buffer)
+    return _log_buffer
+
+
+# Forward reference to avoid circular import at module load time.
+if False:  # TYPE_CHECKING
+    from freqpred.alerts.command_handlers import LogBuffer
 
 
 @click.group()
@@ -126,6 +154,20 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         authorized_users=config.alerts.telegram_authorized_users,
     )
 
+    import freqpred.alerts.models  # noqa: F401 — register RunStateRow
+    from freqpred.alerts.command_handlers import register_system_commands
+    from freqpred.alerts.run_state import get_run_state
+
+    log_buffer = _get_or_create_log_buffer()
+    register_system_commands(
+        cmd_handler=telegram_cmd_handler,
+        session_factory=session_factory,
+        config=config,
+        mode=mode,
+        strategy_name=strategy_name,
+        log_buffer=log_buffer,
+    )
+
     order_manager = None
     if mode == "paper":
         from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
@@ -145,6 +187,15 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         log.info("signal_loop.started")
         while True:
             try:
+                # Check run-loop state; skip cycle if paused/stopped.
+                async with session_factory() as rs_session:
+                    run_state = await get_run_state(rs_session)
+
+                if run_state == "stopped":
+                    log.debug("signal_loop.skipped", reason="stopped")
+                    await asyncio.sleep(config.signal.interval_seconds)
+                    continue
+
                 async with session_factory() as session:
                     from datetime import UTC, datetime
                     now = datetime.now(UTC)
@@ -207,6 +258,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                             order_manager is not None
                             and not circuit_breaker_active
                             and signal.direction != "SKIP"
+                            and run_state == "running"
                         ):
                             position = await order_manager.submit(signal, market, strategy)
                             if position:
