@@ -78,6 +78,7 @@ class RiskConfig(BaseModel):
 
 class TradingConfig(BaseModel):
     mode: str = Field(default="paper")
+    bankroll_usd: float = Field(default=1000.0)
 
     @field_validator("mode")
     @classmethod

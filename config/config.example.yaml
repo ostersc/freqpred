@@ -59,6 +59,7 @@ risk:
 
 trading:
   mode: "paper"  # "paper" | "live"  (live also requires LIVE_TRADING_ENABLED=true)
+  bankroll_usd: 1000.0   # starting paper bankroll
 
 dashboard:
   host: "0.0.0.0"

@@ -37,8 +37,76 @@ def _make_config(
     cfg.tavily.api_key = ""
     cfg.newsapi.api_key = ""
     cfg.signal.top_k_documents = 10
+    cfg.signal.interval_seconds = 1800
     cfg.trading.mode = "paper"
+    cfg.trading.bankroll_usd = 1000.0
+    cfg.risk.max_daily_llm_spend_usd = 10.0
     return cfg
+
+
+def _make_fake_signal(direction: str = "YES") -> "Signal":
+    from freqpred.signal.models import Signal
+    return Signal(
+        id=str(uuid.uuid4()),
+        market_id="MKT-1",
+        estimated_probability=0.65,
+        confidence=0.82,
+        edge=0.23,
+        market_mid_at_signal=0.42,
+        direction=direction,
+        reasoning="test reasoning",
+        sources=[],
+        retrieval_hash="abc" * 21,
+        model_used="claude-sonnet-4-6",
+        prompt_version="v1",
+        trigger="scheduled",
+        created_at=NOW,
+        raw_context="{}",
+    )
+
+
+def _make_run_mocks(market_row: MagicMock, signal: "Signal | None"):
+    """Build the full set of mocks needed to run _run_main for one signal loop cycle."""
+    # DB session returns the market row
+    mock_scalars = MagicMock()
+    mock_scalars.all.return_value = [market_row]
+    mock_result = MagicMock()
+    mock_result.scalars.return_value = mock_scalars
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(return_value=mock_result)
+    ctx_mgr = MagicMock()
+    ctx_mgr.__aenter__ = AsyncMock(return_value=mock_session)
+    ctx_mgr.__aexit__ = AsyncMock(return_value=False)
+    mock_factory = MagicMock(return_value=ctx_mgr)
+
+    mock_engine = AsyncMock()
+    mock_engine.dispose = AsyncMock()
+
+    # Pipeline returns the signal (or None)
+    mock_pipeline_instance = AsyncMock()
+    mock_pipeline_instance.analyze = AsyncMock(return_value=signal)
+    mock_pipeline_cls = MagicMock(return_value=mock_pipeline_instance)
+
+    # Strategy passes all markets through
+    mock_strategy = MagicMock()
+    mock_strategy.config.name = "TestStrategy"
+    mock_strategy.filter_markets = MagicMock(side_effect=lambda markets: markets)
+
+    # KalshiClient as async context manager
+    mock_kalshi_ctx = AsyncMock()
+    mock_kalshi_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+    mock_kalshi_ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_kalshi_cls = MagicMock(return_value=mock_kalshi_ctx)
+
+    return {
+        "factory": mock_factory,
+        "engine": mock_engine,
+        "pipeline_cls": mock_pipeline_cls,
+        "pipeline_instance": mock_pipeline_instance,
+        "strategy": mock_strategy,
+        "kalshi_cls": mock_kalshi_cls,
+    }
 
 
 def _make_market_row(market_id: str = "MKT-1") -> MagicMock:
@@ -341,3 +409,194 @@ class TestDbMigrate:
             result = runner.invoke(main, ["db", "migrate"])
 
         assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# T20: Paper trading wired into signal loop
+# ---------------------------------------------------------------------------
+
+
+class TestPaperTradingSignalLoop:
+    @pytest.mark.asyncio
+    async def test_run_paper_mode_calls_order_manager(self) -> None:
+        """paper mode + non-SKIP signal → order_manager.submit() called."""
+        from freqpred.cli import _run_main
+
+        config = _make_config(redis_url="")  # no redis → only signal_loop task
+        market_row = _make_market_row("MKT-1")
+        fake_signal = _make_fake_signal(direction="YES")
+        mocks = _make_run_mocks(market_row, fake_signal)
+
+        mock_om_instance = AsyncMock()
+        mock_om_instance.submit = AsyncMock(return_value=None)
+        mock_om_instance._risk = AsyncMock()
+        mock_om_instance._risk.check_circuit_breakers = AsyncMock(return_value=None)
+        mock_om_instance._bankroll = 1000.0
+        mock_om_cls = MagicMock(return_value=mock_om_instance)
+
+        mock_risk_cls = MagicMock(return_value=MagicMock())
+
+        async def _cancel_on_sleep(_: float) -> None:
+            raise asyncio.CancelledError()
+
+        with patch("freqpred.db.make_engine", return_value=mocks["engine"]), \
+             patch("freqpred.db.make_session_factory", return_value=mocks["factory"]), \
+             patch("freqpred.strategy.loader.load_strategy", return_value=mocks["strategy"]), \
+             patch("freqpred.signal.pipeline.SignalPipeline", mocks["pipeline_cls"]), \
+             patch("freqpred.rag.embedder.LocalEmbedder"), \
+             patch("freqpred.llm.client.LLMClient"), \
+             patch("freqpred.markets.kalshi.KalshiClient", mocks["kalshi_cls"]), \
+             patch("freqpred.trading.risk.RiskEngine", mock_risk_cls), \
+             patch("freqpred.trading.order_manager.OrderManager", mock_om_cls), \
+             patch("asyncio.sleep", side_effect=_cancel_on_sleep), \
+             patch("anthropic.AsyncAnthropic"), \
+             patch("redis.asyncio.from_url"):
+            await _run_main(config, "TestStrategy", "paper")
+
+        mock_om_instance.submit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_run_signal_only_does_not_call_order_manager(self) -> None:
+        """signal-only mode → OrderManager never constructed or called."""
+        from freqpred.cli import _run_main
+
+        config = _make_config(redis_url="")
+        market_row = _make_market_row("MKT-1")
+        fake_signal = _make_fake_signal(direction="YES")
+        mocks = _make_run_mocks(market_row, fake_signal)
+
+        mock_om_cls = MagicMock()
+
+        async def _cancel_on_sleep(_: float) -> None:
+            raise asyncio.CancelledError()
+
+        with patch("freqpred.db.make_engine", return_value=mocks["engine"]), \
+             patch("freqpred.db.make_session_factory", return_value=mocks["factory"]), \
+             patch("freqpred.strategy.loader.load_strategy", return_value=mocks["strategy"]), \
+             patch("freqpred.signal.pipeline.SignalPipeline", mocks["pipeline_cls"]), \
+             patch("freqpred.rag.embedder.LocalEmbedder"), \
+             patch("freqpred.llm.client.LLMClient"), \
+             patch("freqpred.markets.kalshi.KalshiClient", mocks["kalshi_cls"]), \
+             patch("freqpred.trading.order_manager.OrderManager", mock_om_cls), \
+             patch("asyncio.sleep", side_effect=_cancel_on_sleep), \
+             patch("anthropic.AsyncAnthropic"), \
+             patch("redis.asyncio.from_url"):
+            await _run_main(config, "TestStrategy", "signal-only")
+
+        mock_om_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# T20: positions resolve command
+# ---------------------------------------------------------------------------
+
+
+class TestPositionsResolve:
+    def test_positions_resolve_help(self) -> None:
+        runner = CliRunner()
+        with patch("freqpred.cli.load_config", return_value=_make_config()):
+            result = runner.invoke(main, ["positions", "resolve", "--help"])
+        assert result.exit_code == 0
+        assert "--position-id" in result.output
+        assert "--resolution" in result.output
+
+    @pytest.mark.asyncio
+    async def test_positions_resolve_updates_db(self) -> None:
+        """resolve calls ledger.close_position with correct exit_price."""
+        from freqpred.cli import _positions_resolve
+
+        config = _make_config()
+        pos_id = str(uuid.uuid4())
+
+        mock_row = MagicMock()
+        mock_row.status = "open"
+        mock_row.direction = "YES"
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_row
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        ctx_mgr = MagicMock()
+        ctx_mgr.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx_mgr.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=ctx_mgr)
+
+        mock_engine = AsyncMock()
+        mock_engine.dispose = AsyncMock()
+
+        from freqpred.markets.models import Position
+        mock_closed_position = MagicMock(spec=Position)
+        mock_closed_position.id = pos_id
+        mock_closed_position.direction = "YES"
+        mock_closed_position.entry_price = 0.44
+        mock_closed_position.contracts = 100
+        mock_closed_position.pnl = 56.0
+        mock_closed_position.pnl_pct = 1.272727
+
+        with patch("freqpred.db.make_engine", return_value=mock_engine), \
+             patch("freqpred.db.make_session_factory", return_value=mock_factory), \
+             patch("freqpred.trading.ledger.close_position",
+                   new_callable=AsyncMock,
+                   return_value=mock_closed_position) as mock_close:
+            await _positions_resolve(config, pos_id, "yes")
+
+        mock_close.assert_called_once()
+        call_kwargs = mock_close.call_args.kwargs
+        assert call_kwargs["exit_price"] == 1.0  # YES direction + yes resolution
+        assert call_kwargs["resolution"] == 1
+
+    @pytest.mark.asyncio
+    async def test_positions_resolve_prints_pnl(self) -> None:
+        """resolve prints P&L after closing the position."""
+        from freqpred.cli import _positions_resolve
+
+        config = _make_config()
+        pos_id = str(uuid.uuid4())
+
+        mock_row = MagicMock()
+        mock_row.status = "open"
+        mock_row.direction = "NO"
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_row
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        ctx_mgr = MagicMock()
+        ctx_mgr.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx_mgr.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=ctx_mgr)
+
+        mock_engine = AsyncMock()
+        mock_engine.dispose = AsyncMock()
+
+        from freqpred.markets.models import Position
+        mock_closed_position = MagicMock(spec=Position)
+        mock_closed_position.id = pos_id
+        mock_closed_position.direction = "NO"
+        mock_closed_position.entry_price = 0.50
+        mock_closed_position.contracts = 80
+        mock_closed_position.pnl = 40.0
+        mock_closed_position.pnl_pct = 1.0
+
+        output_lines: list[str] = []
+
+        import freqpred.cli as cli_mod
+        original_echo = cli_mod.click.echo
+
+        def capture_echo(msg: str = "", **kwargs) -> None:
+            if not kwargs.get("err"):
+                output_lines.append(str(msg))
+
+        with patch("freqpred.db.make_engine", return_value=mock_engine), \
+             patch("freqpred.db.make_session_factory", return_value=mock_factory), \
+             patch("freqpred.trading.ledger.close_position",
+                   new_callable=AsyncMock,
+                   return_value=mock_closed_position), \
+             patch.object(cli_mod.click, "echo", side_effect=capture_echo):
+            await _positions_resolve(config, pos_id, "no")
+
+        full_output = "\n".join(output_lines)
+        assert "P&L" in full_output
+        assert pos_id in full_output

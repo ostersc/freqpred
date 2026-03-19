@@ -105,6 +105,19 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         top_k=config.signal.top_k_documents,
     )
 
+    order_manager = None
+    if mode == "paper":
+        from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
+        from freqpred.trading.order_manager import OrderManager
+
+        risk_engine = RiskEngine(config.risk)
+        order_manager = OrderManager(
+            risk=risk_engine,
+            session_factory=session_factory,
+            bankroll=config.trading.bankroll_usd,
+            mode="paper",
+        )
+
     async def signal_loop() -> None:
         import structlog
         log = structlog.get_logger("freqpred.cli.signal_loop")
@@ -143,6 +156,18 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 interesting = strategy.filter_markets(markets)
                 log.info("signal_loop.cycle", total_markets=len(markets), selected=len(interesting))
 
+                # Circuit breaker check at the top of each cycle (paper mode only)
+                circuit_breaker_active = False
+                if order_manager is not None:
+                    try:
+                        async with session_factory() as cb_session:
+                            await order_manager._risk.check_circuit_breakers(
+                                cb_session, order_manager._bankroll
+                            )
+                    except TradingCircuitBreakerError as exc:
+                        log.warning("signal_loop.circuit_breaker_fired", reason=str(exc))
+                        circuit_breaker_active = True
+
                 for market in interesting:
                     signal = await pipeline.analyze(market, trigger="scheduled")
                     if signal:
@@ -154,6 +179,19 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                             f"direction={signal.direction} "
                             f"signal_id={signal.id}"
                         )
+                        if (
+                            order_manager is not None
+                            and not circuit_breaker_active
+                            and signal.direction != "SKIP"
+                        ):
+                            position = await order_manager.submit(signal, market, strategy)
+                            if position:
+                                log.info(
+                                    "signal_loop.order_submitted",
+                                    position_id=position.id,
+                                    market_id=market.id,
+                                    direction=signal.direction,
+                                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -638,14 +676,20 @@ def positions() -> None:
     show_default=True,
     help="Filter by position status.",
 )
+@click.option(
+    "--limit",
+    default=50,
+    show_default=True,
+    help="Maximum number of positions to display.",
+)
 @click.pass_context
-def positions_list(ctx: click.Context, status: str) -> None:
+def positions_list(ctx: click.Context, status: str, limit: int) -> None:
     """Print positions from the database."""
     config = ctx.obj["config"]
-    asyncio.run(_positions_list(config, status))
+    asyncio.run(_positions_list(config, status, limit))
 
 
-async def _positions_list(config: object, status: str) -> None:
+async def _positions_list(config: object, status: str, limit: int) -> None:
     import freqpred.signal.models  # noqa: F401
     import freqpred.rag.models     # noqa: F401
 
@@ -663,7 +707,7 @@ async def _positions_list(config: object, status: str) -> None:
 
     try:
         async with session_factory() as session:
-            stmt = select(PositionRow).order_by(PositionRow.entry_time.desc())
+            stmt = select(PositionRow).order_by(PositionRow.entry_time.desc()).limit(limit)
             if status != "all":
                 stmt = stmt.where(PositionRow.status == status)
             result = await session.execute(stmt)
@@ -676,19 +720,100 @@ async def _positions_list(config: object, status: str) -> None:
         return
 
     header = (
-        f"{'ID':<38} {'MARKET':<32} {'DIR':<4} {'CTRCTS':>6} "
-        f"{'ENTRY':>6} {'STATUS':<7} {'MODE':<6} {'PNL':>8}"
+        f"{'ID':<38} {'MARKET':<32} {'STRATEGY':<20} {'DIR':<4} {'CTRCTS':>6} "
+        f"{'ENTRY':>6} {'EDGE':>6} {'STATUS':<7} {'MODE':<6} {'PNL':>8}"
     )
     click.echo(header)
     click.echo("-" * len(header))
     for r in rows:
         pnl_str = f"{r.pnl:+.4f}" if r.pnl is not None else "      -"
+        edge_str = f"{r.signal_edge:+.3f}" if r.signal_edge is not None else "     -"
+        strategy_str = (r.strategy_name or "")[:20]
         click.echo(
-            f"{str(r.id):<38} {r.market_id:<32} {r.direction:<4} "
-            f"{r.contracts:>6} {r.entry_price:>6.3f} {r.status:<7} "
+            f"{str(r.id):<38} {r.market_id:<32} {strategy_str:<20} {r.direction:<4} "
+            f"{r.contracts:>6} {r.entry_price:>6.3f} {edge_str:>6} {r.status:<7} "
             f"{r.mode:<6} {pnl_str:>8}"
         )
     click.echo(f"\nTotal: {len(rows)} position(s)")
+
+
+@positions.command(name="resolve")
+@click.option("--position-id", required=True, help="UUID of the position to resolve.")
+@click.option(
+    "--resolution",
+    type=click.Choice(["yes", "no"]),
+    required=True,
+    help="Market resolution outcome (yes = event happened, no = event did not happen).",
+)
+@click.pass_context
+def positions_resolve(ctx: click.Context, position_id: str, resolution: str) -> None:
+    """Close a position and calculate P&L based on market resolution."""
+    config = ctx.obj["config"]
+    asyncio.run(_positions_resolve(config, position_id, resolution))
+
+
+async def _positions_resolve(config: object, position_id: str, resolution: str) -> None:
+    import freqpred.signal.models  # noqa: F401
+    import freqpred.rag.models     # noqa: F401
+
+    import uuid as _uuid
+    from sqlalchemy import select
+
+    from freqpred.db import make_engine, make_session_factory
+    from freqpred.markets.models import PositionRow
+    from freqpred.trading import ledger
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(PositionRow).where(PositionRow.id == _uuid.UUID(position_id))
+            )
+            row = result.scalar_one_or_none()
+
+        if row is None:
+            click.echo(f"ERROR: Position {position_id!r} not found.", err=True)
+            return
+
+        if row.status == "closed":
+            click.echo(f"Position {position_id} is already closed.", err=True)
+            return
+
+        # Determine exit price: YES contracts pay 1.0 if YES resolves, 0.0 otherwise.
+        # NO contracts pay 1.0 if NO resolves (i.e., YES did NOT happen), 0.0 otherwise.
+        yes_resolved = resolution == "yes"
+        if row.direction == "YES":
+            exit_price = 1.0 if yes_resolved else 0.0
+        else:  # NO
+            exit_price = 0.0 if yes_resolved else 1.0
+        resolution_int = 1 if yes_resolved else 0
+
+        async with session_factory() as session:
+            position = await ledger.close_position(
+                session,
+                position_id,
+                exit_price=exit_price,
+                resolution=resolution_int,
+            )
+
+        pnl_str = f"{position.pnl:+.4f}" if position.pnl is not None else "N/A"
+        pnl_pct_str = f"{position.pnl_pct:+.2%}" if position.pnl_pct is not None else "N/A"
+
+        click.echo(f"Position resolved: {position.id}")
+        click.echo(f"Direction  : {position.direction}")
+        click.echo(f"Resolution : {resolution.upper()}")
+        click.echo(f"Entry price: {position.entry_price:.4f}")
+        click.echo(f"Exit price : {exit_price:.4f}")
+        click.echo(f"Contracts  : {position.contracts}")
+        click.echo(f"P&L        : {pnl_str} ({pnl_pct_str})")
+    finally:
+        await engine.dispose()
 
 
 @main.group()
