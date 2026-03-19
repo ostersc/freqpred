@@ -76,5 +76,26 @@ class IPredictionStrategy(ABC):
         """
         return [m for m in markets if self.is_market_interesting(m)]
 
+    def should_exit(self, position: Position, signal: Signal, market: Market) -> bool:
+        """Signal-driven exit.
+
+        Called after LLM re-analysis of a market with an open position.
+        Default: exit if new signal direction != position direction AND
+        confidence >= min_confidence.
+        """
+        return (
+            signal.direction not in ("SKIP", position.direction)
+            and signal.confidence >= self.config.min_confidence
+        )
+
+    def custom_exit(self, position: Position, signal: Signal, market: Market) -> str | None:
+        """Custom exit hook.
+
+        Return a non-None exit reason tag to force exit.
+        Return None to proceed with normal logic.
+        Default: None (no custom exit).
+        """
+        return None
+
     def on_resolution(self, position: Position) -> None:
         """Optional hook called when a market resolves."""

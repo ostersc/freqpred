@@ -32,6 +32,11 @@ class ConservativeDefault(IPredictionStrategy):
         min_volume_24h=500.0,
         max_days_to_close=60,
         min_days_to_close=2,
+        stoploss=-0.25,
+        minimal_roi={"0": 0.35, "1440": 0.20, "10080": 0.08},
+        trailing_stop=True,
+        trailing_stop_positive=0.15,
+        trailing_stop_positive_offset=0.03,
     )
 
     def should_trade(self, signal: Signal, market: Market) -> bool:

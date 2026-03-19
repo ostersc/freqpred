@@ -20,6 +20,11 @@ class PoliticsEdgeStrategy(IPredictionStrategy):
         min_volume_24h=1000.0,
         max_days_to_close=90,
         min_days_to_close=1,
+        stoploss=-0.30,
+        minimal_roi={"0": 0.40, "1440": 0.25, "10080": 0.10},
+        trailing_stop=False,
+        trailing_stop_positive=None,
+        trailing_stop_positive_offset=0.02,
     )
 
     def should_trade(self, signal: Signal, market: Market) -> bool:

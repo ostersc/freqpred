@@ -318,6 +318,68 @@ class TestLoadStrategyFromFile:
         with pytest.raises(ValueError, match="No concrete IPredictionStrategy"):
             load_strategy(str(empty_file))
 
+# ---------------------------------------------------------------------------
+# should_exit — default implementation
+# ---------------------------------------------------------------------------
+
+class TestShouldExitDefault:
+    strategy = ConservativeDefault()
+
+    def _position(self, direction: str = "YES") -> MagicMock:
+        pos = MagicMock()
+        pos.direction = direction
+        return pos
+
+    def _signal(self, direction: str, confidence: float) -> MagicMock:
+        sig = MagicMock()
+        sig.direction = direction
+        sig.confidence = confidence
+        return sig
+
+    def test_returns_true_when_direction_flips(self) -> None:
+        pos = self._position("YES")
+        sig = self._signal("NO", confidence=0.82)
+        assert self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_returns_false_when_direction_matches(self) -> None:
+        pos = self._position("YES")
+        sig = self._signal("YES", confidence=0.82)
+        assert not self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_returns_false_when_skip(self) -> None:
+        pos = self._position("YES")
+        sig = self._signal("SKIP", confidence=0.82)
+        assert not self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_returns_false_when_confidence_too_low(self) -> None:
+        # min_confidence for ConservativeDefault is 0.80
+        pos = self._position("YES")
+        sig = self._signal("NO", confidence=0.79)
+        assert not self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_returns_true_at_exact_confidence_threshold(self) -> None:
+        pos = self._position("YES")
+        sig = self._signal("NO", confidence=0.80)
+        assert self.strategy.should_exit(pos, sig, MagicMock())
+
+
+# ---------------------------------------------------------------------------
+# custom_exit — default implementation
+# ---------------------------------------------------------------------------
+
+class TestCustomExitDefault:
+    strategy = ConservativeDefault()
+
+    def test_returns_none(self) -> None:
+        pos = MagicMock()
+        sig = MagicMock()
+        assert self.strategy.custom_exit(pos, sig, MagicMock()) is None
+
+
+# ---------------------------------------------------------------------------
+# TestLoadStrategyFromFile (continued)
+# ---------------------------------------------------------------------------
+
     def test_loaded_file_strategy_behaves_like_builtin(self, tmp_path: Path) -> None:
         strategy_code = textwrap.dedent("""\
             from freqpred.strategy.base import IPredictionStrategy

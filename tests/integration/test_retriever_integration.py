@@ -18,11 +18,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-pytestmark = pytest.mark.skipif(
-    "freqpred_test" not in os.environ.get("DATABASE_URL", ""),
-    reason="Integration tests require DATABASE_URL pointing to freqpred_test",
-)
-
 from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.rag.models import DocumentRow
 from freqpred.rag.retriever import compute_retrieval_hash, retrieve
@@ -132,7 +127,7 @@ async def test_retrieval_returns_correct_category_only(session):
     docs = await retrieve(session, embedder, "political event?", category="politics", top_k=20)
 
     assert len(docs) == 10
-    assert all(d.category == "politics" for d in docs)
+    assert all(d.category == "politics" for d, _ in docs)
 
 
 @pytest.mark.asyncio
@@ -152,8 +147,8 @@ async def test_retrieval_ranked_by_relevance(session):
     docs = await retrieve(session, embedder, "question", category="politics", top_k=10)
 
     assert len(docs) == 2
-    assert docs[0].id == str(doc_a.id)
-    assert docs[1].id == str(doc_b.id)
+    assert docs[0][0].id == str(doc_a.id)
+    assert docs[1][0].id == str(doc_b.id)
 
 
 @pytest.mark.asyncio
@@ -175,7 +170,7 @@ async def test_retrieval_excludes_old_documents(session):
                           top_k=10, max_age_days=30)
 
     assert len(docs) == 1
-    assert docs[0].id == str(recent_row.id)
+    assert docs[0][0].id == str(recent_row.id)
 
 
 @pytest.mark.asyncio

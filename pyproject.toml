@@ -38,12 +38,16 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=8.2.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-env>=1.6.0",
     "pytest-mock>=3.14.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+env = [
+    "DATABASE_URL=postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["freqpred"]

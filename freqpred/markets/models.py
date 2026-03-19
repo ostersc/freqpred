@@ -130,6 +130,7 @@ class PositionRow(Base):
     exit_time: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )
+    exit_reason: Mapped[str | None] = mapped_column(VARCHAR(100), nullable=True)
     resolution: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -300,6 +301,7 @@ class Position:
     # Filled after resolution
     exit_price: float | None = None
     exit_time: datetime | None = None
+    exit_reason: str | None = None  # "stoploss" | "trailing_stop" | "roi" | "signal" | "custom_exit:<tag>" | "market_resolved"
     resolution: int | None = None   # 1 = YES won, 0 = NO won
     pnl: float | None = None
     pnl_pct: float | None = None
