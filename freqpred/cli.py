@@ -626,6 +626,72 @@ async def _signal_analyze(config: object, market_id: str) -> None:
 
 
 @main.group()
+def positions() -> None:
+    """Inspect trading positions."""
+
+
+@positions.command(name="list")
+@click.option(
+    "--status",
+    type=click.Choice(["open", "closed", "all"]),
+    default="all",
+    show_default=True,
+    help="Filter by position status.",
+)
+@click.pass_context
+def positions_list(ctx: click.Context, status: str) -> None:
+    """Print positions from the database."""
+    config = ctx.obj["config"]
+    asyncio.run(_positions_list(config, status))
+
+
+async def _positions_list(config: object, status: str) -> None:
+    import freqpred.signal.models  # noqa: F401
+    import freqpred.rag.models     # noqa: F401
+
+    from sqlalchemy import select
+
+    from freqpred.db import make_engine, make_session_factory
+    from freqpred.markets.models import PositionRow
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            stmt = select(PositionRow).order_by(PositionRow.entry_time.desc())
+            if status != "all":
+                stmt = stmt.where(PositionRow.status == status)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+    finally:
+        await engine.dispose()
+
+    if not rows:
+        click.echo("No positions found.")
+        return
+
+    header = (
+        f"{'ID':<38} {'MARKET':<32} {'DIR':<4} {'CTRCTS':>6} "
+        f"{'ENTRY':>6} {'STATUS':<7} {'MODE':<6} {'PNL':>8}"
+    )
+    click.echo(header)
+    click.echo("-" * len(header))
+    for r in rows:
+        pnl_str = f"{r.pnl:+.4f}" if r.pnl is not None else "      -"
+        click.echo(
+            f"{str(r.id):<38} {r.market_id:<32} {r.direction:<4} "
+            f"{r.contracts:>6} {r.entry_price:>6.3f} {r.status:<7} "
+            f"{r.mode:<6} {pnl_str:>8}"
+        )
+    click.echo(f"\nTotal: {len(rows)} position(s)")
+
+
+@main.group()
 def db() -> None:
     """Database management commands."""
 

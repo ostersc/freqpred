@@ -1,0 +1,327 @@
+"""Unit tests for freqpred/trading/order_manager.py.
+
+All DB interactions and ledger writes are mocked — no external dependencies.
+"""
+from __future__ import annotations
+
+import math
+import uuid
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from freqpred.markets.models import Market, Position
+from freqpred.signal.models import Signal
+from freqpred.strategy.base import IPredictionStrategy
+from freqpred.strategy.config import StrategyConfig
+from freqpred.trading.order_manager import OrderManager
+from freqpred.trading.risk import RiskDecision, RiskEngine, TradingCircuitBreakerError
+
+# Ensure ORM relationships resolve
+import freqpred.ingestion.models   # noqa: F401
+import freqpred.llm.models         # noqa: F401
+import freqpred.markets.models     # noqa: F401
+import freqpred.rag.models         # noqa: F401
+import freqpred.signal.models      # noqa: F401
+
+NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
+MARKET_ID = "MKT-TEST"
+SIGNAL_ID = str(uuid.uuid4())
+BANKROLL = 10_000.0
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_market(yes_bid: float = 0.50, yes_ask: float = 0.56) -> Market:
+    return Market(
+        id=MARKET_ID,
+        platform="kalshi",
+        question="Will X happen?",
+        category="politics",
+        close_time=NOW + timedelta(days=10),
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
+        mid_price=(yes_bid + yes_ask) / 2,
+        volume_24h=1000.0,
+        open_interest=5000.0,
+        last_fetched_at=NOW,
+        price_updated_at=NOW,
+        metadata_fetched_at=NOW,
+    )
+
+
+def _make_signal(
+    direction: str = "YES",
+    edge: float = 0.15,
+    estimated_probability: float = 0.65,
+) -> Signal:
+    return Signal(
+        id=SIGNAL_ID,
+        market_id=MARKET_ID,
+        estimated_probability=estimated_probability,
+        confidence=0.80,
+        edge=edge,
+        market_mid_at_signal=0.53,
+        direction=direction,
+        reasoning="test",
+        sources=[],
+        retrieval_hash="a" * 64,
+        model_used="claude-sonnet-4-6",
+        prompt_version="v1",
+        trigger="manual",
+        created_at=NOW,
+        raw_context="",
+    )
+
+
+def _make_strategy(
+    should_trade_result: bool = True,
+    position_size_result: float = 100.0,
+) -> IPredictionStrategy:
+    """Return a minimal concrete strategy stub."""
+
+    class _Stub(IPredictionStrategy):
+        config = StrategyConfig(
+            name="TestStrategy",
+            min_edge=0.10,
+            min_confidence=0.70,
+            max_exposure_per_market=0.10,
+            kelly_fraction=0.25,
+            categories=["politics"],
+            min_volume_24h=0.0,
+            max_days_to_close=90,
+            min_days_to_close=1,
+        )
+
+        def should_trade(self, signal: Signal, market: Market) -> bool:
+            return should_trade_result
+
+        def position_size(self, signal: Signal, bankroll: float) -> float:
+            return position_size_result
+
+    return _Stub()
+
+
+def _make_position(
+    contracts: int = 100,
+    entry_price: float = 0.56,
+    direction: str = "YES",
+) -> Position:
+    return Position(
+        id=str(uuid.uuid4()),
+        market_id=MARKET_ID,
+        signal_id=SIGNAL_ID,
+        strategy_name="TestStrategy",
+        strategy_version="1.0",
+        signal_confidence=0.80,
+        signal_edge=0.15,
+        signal_estimated_prob=0.65,
+        direction=direction,
+        contracts=contracts,
+        entry_price=entry_price,
+        entry_time=NOW,
+        mode="paper",
+        status="open",
+    )
+
+
+def _make_order_manager(
+    risk: RiskEngine | None = None,
+    bankroll: float = BANKROLL,
+    mode: str = "paper",
+) -> tuple[OrderManager, MagicMock]:
+    """Return (OrderManager, session_factory_mock)."""
+    session_factory = MagicMock()
+    # Make session_factory() return an async context manager
+    mock_session = AsyncMock()
+    session_ctx = MagicMock()
+    session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    session_ctx.__aexit__ = AsyncMock(return_value=False)
+    session_factory.return_value = session_ctx
+
+    if risk is None:
+        risk = MagicMock(spec=RiskEngine)
+        risk.check_circuit_breakers = AsyncMock(return_value=None)
+        risk.check_position = AsyncMock(
+            return_value=RiskDecision(allowed=True, reason="", capped_size=100.0)
+        )
+
+    om = OrderManager(
+        risk=risk,
+        session_factory=session_factory,
+        bankroll=bankroll,
+        mode=mode,
+        strategy_version="1.0",
+    )
+    return om, session_factory
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_submit_returns_none_when_strategy_declines() -> None:
+    """should_trade() returns False → None, risk and ledger not called."""
+    om, _ = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=False)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(), _make_market(), strategy)
+
+    assert result is None
+    mock_ledger.assert_not_called()
+    om._risk.check_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_submit_returns_none_when_risk_blocks() -> None:
+    """risk.check_position returns allowed=False → None, no ledger write."""
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_position = AsyncMock(
+        return_value=RiskDecision(
+            allowed=False, reason="edge below floor", capped_size=0.0
+        )
+    )
+    om, _ = _make_order_manager(risk=risk)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=200.0)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(), _make_market(), strategy)
+
+    assert result is None
+    mock_ledger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_submit_opens_position_when_all_clear() -> None:
+    """Happy path: all checks pass → Position returned, ledger.open_position called."""
+    expected_position = _make_position(contracts=178, entry_price=0.56)
+    om, _ = _make_order_manager()
+    # $100 / $0.56 = 178 contracts (floor)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.56), strategy)
+
+    assert result is expected_position
+    mock_ledger.assert_called_once()
+    call_kwargs = mock_ledger.call_args.kwargs
+    assert call_kwargs["direction"] == "YES"
+    assert call_kwargs["entry_price"] == pytest.approx(0.56)
+    assert call_kwargs["contracts"] == math.floor(100.0 / 0.56)
+    assert call_kwargs["mode"] == "paper"
+
+
+@pytest.mark.asyncio
+async def test_contracts_floored_to_integer() -> None:
+    """$55 / $0.54 = floor(101.85) = 101 contracts."""
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_position = AsyncMock(
+        return_value=RiskDecision(allowed=True, reason="", capped_size=55.0)
+    )
+    om, _ = _make_order_manager(risk=risk)
+    strategy = _make_strategy(position_size_result=55.0)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=_make_position(contracts=101, entry_price=0.54),
+    ) as mock_ledger:
+        await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.54), strategy)
+
+    call_kwargs = mock_ledger.call_args.kwargs
+    assert call_kwargs["contracts"] == 101
+
+
+@pytest.mark.asyncio
+async def test_returns_none_when_contracts_below_one() -> None:
+    """Tiny edge → floor < 1 → return None without ledger write."""
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_position = AsyncMock(
+        return_value=RiskDecision(allowed=True, reason="", capped_size=0.40)
+    )
+    om, _ = _make_order_manager(risk=risk)
+    strategy = _make_strategy(position_size_result=0.40)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(), _make_market(yes_ask=0.56), strategy)
+
+    assert result is None
+    mock_ledger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_uses_yes_ask_as_entry_price_for_yes_direction() -> None:
+    """YES direction → entry_price = market.yes_ask."""
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_position = AsyncMock(
+        return_value=RiskDecision(allowed=True, reason="", capped_size=100.0)
+    )
+    om, _ = _make_order_manager(risk=risk)
+    strategy = _make_strategy(position_size_result=100.0)
+    market = _make_market(yes_bid=0.50, yes_ask=0.60)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=_make_position(entry_price=0.60),
+    ) as mock_ledger:
+        await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    assert mock_ledger.call_args.kwargs["entry_price"] == pytest.approx(0.60)
+
+
+@pytest.mark.asyncio
+async def test_uses_no_price_for_no_direction() -> None:
+    """NO direction → entry_price = 1 - market.yes_bid."""
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_position = AsyncMock(
+        return_value=RiskDecision(allowed=True, reason="", capped_size=100.0)
+    )
+    om, _ = _make_order_manager(risk=risk)
+    strategy = _make_strategy(position_size_result=100.0)
+    market = _make_market(yes_bid=0.50, yes_ask=0.56)
+    # NO price = 1 - 0.50 = 0.50
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=_make_position(direction="NO", entry_price=0.50),
+    ) as mock_ledger:
+        await om.submit(_make_signal(direction="NO"), market, strategy)
+
+    call_kwargs = mock_ledger.call_args.kwargs
+    assert call_kwargs["entry_price"] == pytest.approx(0.50)
+    assert call_kwargs["direction"] == "NO"
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_errors_propagate() -> None:
+    """TradingCircuitBreakerError from check_circuit_breakers propagates up."""
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(
+        side_effect=TradingCircuitBreakerError("daily loss limit hit")
+    )
+    risk.check_position = AsyncMock()
+    om, _ = _make_order_manager(risk=risk)
+    strategy = _make_strategy(should_trade_result=True)
+
+    with pytest.raises(TradingCircuitBreakerError):
+        await om.submit(_make_signal(), _make_market(), strategy)
+
+    risk.check_position.assert_not_called()
