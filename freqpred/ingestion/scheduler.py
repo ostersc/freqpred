@@ -24,6 +24,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from freqpred.ingestion.fetchers import gdelt as gdelt_fetcher
 from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
 from freqpred.ingestion.fetchers import reddit as reddit_fetcher
 from freqpred.ingestion.fetchers import tavily as tavily_fetcher
@@ -226,6 +227,22 @@ async def run_cycle(
                     "scheduler.fetcher_error",
                     market_id=market_id,
                     fetcher="reddit",
+                    query=query_text,
+                    exc_info=True,
+                )
+
+            # GDELT — no API key required; skipped silently if no results
+            try:
+                docs = await gdelt_fetcher.fetch(
+                    query=query_text,
+                    excluded_domains=domain_blacklist,
+                )
+                raw_docs.extend(docs)
+            except Exception:
+                log.warning(
+                    "scheduler.fetcher_error",
+                    market_id=market_id,
+                    fetcher="gdelt",
                     query=query_text,
                     exc_info=True,
                 )
