@@ -84,6 +84,11 @@ def _strip_html(text: str) -> str:
     return stripper.get_text()
 
 
+def _sanitize(text: str) -> str:
+    """Strip null bytes that PostgreSQL's UTF-8 encoding rejects."""
+    return text.replace("\x00", "")
+
+
 # ---------------------------------------------------------------------------
 # Hash
 # ---------------------------------------------------------------------------
@@ -137,7 +142,7 @@ async def upsert_document(
     Returns:
         The persisted Document domain object.
     """
-    body_clean = _strip_html(raw_doc.body)
+    body_clean = _sanitize(_strip_html(raw_doc.body))
 
     if not body_clean.strip():
         log.debug("store.upsert_document.skip", source_url=raw_doc.source_url, reason="empty_body")
@@ -176,9 +181,9 @@ async def upsert_document(
             id=doc_id,
             source_url=raw_doc.source_url,
             content_hash=content_hash,
-            title=raw_doc.title,
+            title=_sanitize(raw_doc.title),
             body=body_clean,
-            summary=raw_doc.summary,
+            summary=_sanitize(raw_doc.summary) if raw_doc.summary else raw_doc.summary,
             source_type=raw_doc.source_type,
             source_name=raw_doc.source_name,
             category=raw_doc.category,
@@ -192,9 +197,9 @@ async def upsert_document(
             index_elements=["source_url"],
             set_={
                 "content_hash": content_hash,
-                "title": raw_doc.title,
+                "title": _sanitize(raw_doc.title),
                 "body": body_clean,
-                "summary": raw_doc.summary,
+                "summary": _sanitize(raw_doc.summary) if raw_doc.summary else raw_doc.summary,
                 "source_type": raw_doc.source_type,
                 "source_name": raw_doc.source_name,
                 "category": raw_doc.category,

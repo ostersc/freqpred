@@ -817,6 +817,61 @@ async def _positions_resolve(config: object, position_id: str, resolution: str) 
 
 
 @main.group()
+def metrics() -> None:
+    """Calibration and performance metrics."""
+
+
+@metrics.command(name="calibration")
+@click.pass_context
+def metrics_calibration(ctx: click.Context) -> None:
+    """Print Brier score, naive baseline, and calibration buckets."""
+    config = ctx.obj["config"]
+    asyncio.run(_metrics_calibration(config))
+
+
+async def _metrics_calibration(config: object) -> None:
+    import freqpred.signal.models  # noqa: F401
+    import freqpred.rag.models     # noqa: F401
+
+    from freqpred.db import make_engine, make_session_factory
+    from freqpred.metrics.calibration import compute_calibration
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            report = await compute_calibration(session)
+    finally:
+        await engine.dispose()
+
+    if report.n_samples == 0:
+        click.echo("No resolved positions yet.")
+        return
+
+    improvement = report.naive_brier_score - report.brier_score
+    direction = "better" if improvement > 0 else "worse"
+    click.echo(f"Brier Score:     {report.brier_score:.3f}  (naive baseline: {report.naive_brier_score:.3f})")
+    click.echo(f"Improvement vs baseline: {improvement:+.3f} ({direction})")
+    click.echo(f"Samples: {report.n_samples}")
+    click.echo("")
+    header = f"{'Probability Bucket':<22} {'Count':>6} {'Mean Est.':>10} {'Resolution Rate':>16}"
+    click.echo(header)
+    click.echo("-" * len(header))
+    for b in report.buckets:
+        if b.count == 0:
+            continue
+        click.echo(
+            f"{b.lower:.2f} \u2013 {b.upper:.2f}              "
+            f"{b.count:>6} {b.mean_estimated_prob:>10.3f} {b.actual_resolution_rate:>16.3f}"
+        )
+
+
+@main.group()
 def db() -> None:
     """Database management commands."""
 
