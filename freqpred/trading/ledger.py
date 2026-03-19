@@ -50,9 +50,10 @@ async def close_position(
     position_id: str,
     *,
     exit_price: float,
-    resolution: int,
+    exit_reason: str | None = None,
+    resolution: int | None = None,
 ) -> Position:
-    """Update position: set exit_price, exit_time, resolution, status='closed', pnl, pnl_pct."""
+    """Update position: set exit_price, exit_time, exit_reason, resolution, status='closed', pnl, pnl_pct."""
     result = await session.execute(
         select(PositionRow).where(PositionRow.id == uuid.UUID(position_id))
     )
@@ -63,6 +64,7 @@ async def close_position(
 
     row.exit_price = exit_price
     row.exit_time = datetime.now(tz=timezone.utc)
+    row.exit_reason = exit_reason
     row.resolution = resolution
     row.status = "closed"
     row.pnl = round(pnl, 4)
@@ -147,6 +149,7 @@ def _row_to_position(row: PositionRow) -> Position:
         status=row.status,
         exit_price=row.exit_price,
         exit_time=row.exit_time,
+        exit_reason=row.exit_reason,
         resolution=row.resolution,
         pnl=row.pnl,
         pnl_pct=row.pnl_pct,

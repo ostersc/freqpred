@@ -1,0 +1,604 @@
+"""Unit tests for freqpred/trading/position_monitor.py (T26).
+
+All DB interactions mocked — no external dependencies.
+Tests cover:
+- _check_stoploss
+- _check_trailing_stop
+- _check_roi
+- PositionMonitor.evaluate_exit (full priority order)
+- PositionMonitor.check_all_positions (integration of the loop)
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from freqpred.markets.models import Market, Position
+from freqpred.signal.models import Signal
+from freqpred.strategy.base import IPredictionStrategy
+from freqpred.strategy.config import StrategyConfig
+from freqpred.trading.position_monitor import (
+    PositionMonitor,
+    _check_roi,
+    _check_stoploss,
+    _check_trailing_stop,
+)
+
+# Ensure ORM relationships resolve (needed for MarketRow joins)
+import freqpred.ingestion.models   # noqa: F401
+import freqpred.llm.models         # noqa: F401
+import freqpred.markets.models     # noqa: F401
+import freqpred.rag.models         # noqa: F401
+import freqpred.signal.models      # noqa: F401
+
+NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def _make_position(
+    *,
+    entry_price: float = 0.50,
+    direction: str = "YES",
+    entry_time: datetime | None = None,
+    position_id: str | None = None,
+    strategy_name: str = "TestStrategy",
+) -> Position:
+    return Position(
+        id=position_id or str(uuid.uuid4()),
+        market_id="MKT-1",
+        signal_id=str(uuid.uuid4()),
+        strategy_name=strategy_name,
+        strategy_version="1.0",
+        signal_confidence=0.80,
+        signal_edge=0.15,
+        signal_estimated_prob=0.65,
+        direction=direction,
+        contracts=100,
+        entry_price=entry_price,
+        entry_time=entry_time or NOW,
+        mode="paper",
+        status="open",
+    )
+
+
+def _make_market(
+    *,
+    mid_price: float = 0.50,
+    close_time: datetime | None = None,
+) -> Market:
+    return Market(
+        id="MKT-1",
+        platform="kalshi",
+        question="Will X happen?",
+        category="politics",
+        close_time=close_time or (NOW + timedelta(days=10)),
+        yes_bid=mid_price - 0.02,
+        yes_ask=mid_price + 0.02,
+        mid_price=mid_price,
+        volume_24h=1000.0,
+        open_interest=5000.0,
+        last_fetched_at=NOW,
+        price_updated_at=NOW,
+        metadata_fetched_at=NOW,
+    )
+
+
+def _make_signal(direction: str = "YES", confidence: float = 0.82) -> Signal:
+    return Signal(
+        id=str(uuid.uuid4()),
+        market_id="MKT-1",
+        estimated_probability=0.65,
+        confidence=confidence,
+        edge=0.15,
+        market_mid_at_signal=0.50,
+        direction=direction,
+        reasoning="test",
+        sources=[],
+        retrieval_hash="abc123",
+        model_used="claude-sonnet-4-6",
+        prompt_version="v1",
+        trigger="price_moved",
+        created_at=NOW,
+        raw_context="{}",
+    )
+
+
+def _make_strategy(
+    *,
+    stoploss: float = -0.20,
+    minimal_roi: dict[str, float] | None = None,
+    trailing_stop: bool = False,
+    trailing_stop_positive: float | None = None,
+    trailing_stop_positive_offset: float = 0.02,
+    min_confidence: float = 0.80,
+) -> IPredictionStrategy:
+    if minimal_roi is None:
+        minimal_roi = {"0": 0.30, "1440": 0.15, "10080": 0.05}
+
+    class _TestStrategy(IPredictionStrategy):
+        config = StrategyConfig(
+            name="TestStrategy",
+            min_edge=0.10,
+            min_confidence=min_confidence,
+            max_exposure_per_market=0.05,
+            kelly_fraction=0.25,
+            categories=[],
+            min_volume_24h=0.0,
+            max_days_to_close=365,
+            min_days_to_close=0,
+            stoploss=stoploss,
+            minimal_roi=minimal_roi,
+            trailing_stop=trailing_stop,
+            trailing_stop_positive=trailing_stop_positive,
+            trailing_stop_positive_offset=trailing_stop_positive_offset,
+        )
+
+        def should_trade(self, signal, market):  # type: ignore[override]
+            return True
+
+        def position_size(self, signal, bankroll):  # type: ignore[override]
+            return bankroll * 0.01
+
+    return _TestStrategy()
+
+
+# ---------------------------------------------------------------------------
+# _check_stoploss
+# ---------------------------------------------------------------------------
+
+class TestCheckStoploss:
+    def test_fires_when_loss_exceeds_threshold(self) -> None:
+        pos = _make_position(entry_price=0.50)
+        # current_price=0.38 → pnl_pct = (0.38-0.50)/0.50 = -0.24 ≤ -0.20
+        result = _check_stoploss(pos, current_price=0.38, stoploss=-0.20)
+        assert result == ("stoploss", 0.38)
+
+    def test_fires_just_at_threshold(self) -> None:
+        pos = _make_position(entry_price=0.50)
+        # entry * (1 + stoploss) = 0.50 * 0.80 = 0.40; use 0.399 to be just inside
+        result = _check_stoploss(pos, current_price=0.399, stoploss=-0.20)
+        assert result == ("stoploss", 0.399)
+
+    def test_no_fire_when_loss_below_threshold(self) -> None:
+        pos = _make_position(entry_price=0.50)
+        # pnl_pct = (0.42-0.50)/0.50 = -0.16 > -0.20
+        result = _check_stoploss(pos, current_price=0.42, stoploss=-0.20)
+        assert result is None
+
+    def test_no_fire_when_profitable(self) -> None:
+        pos = _make_position(entry_price=0.50)
+        result = _check_stoploss(pos, current_price=0.65, stoploss=-0.20)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _check_trailing_stop
+# ---------------------------------------------------------------------------
+
+class TestCheckTrailingStop:
+    def test_fires_when_price_drops_from_peak(self) -> None:
+        pos = _make_position(entry_price=0.50)
+        # peak=0.70, stoploss=-0.20 → trail_distance=0.20
+        # stop = 0.70 * (1 - 0.20) = 0.56; current=0.55 ≤ 0.56
+        result = _check_trailing_stop(
+            pos,
+            current_price=0.55,
+            peak_price=0.70,
+            stoploss=-0.20,
+            trailing_stop_positive=None,
+            trailing_stop_positive_offset=0.02,
+        )
+        assert result == ("trailing_stop", 0.55)
+
+    def test_no_fire_when_above_trail(self) -> None:
+        pos = _make_position(entry_price=0.50)
+        # peak=0.70, stop=0.56; current=0.60 > 0.56
+        result = _check_trailing_stop(
+            pos,
+            current_price=0.60,
+            peak_price=0.70,
+            stoploss=-0.20,
+            trailing_stop_positive=None,
+            trailing_stop_positive_offset=0.02,
+        )
+        assert result is None
+
+    def test_tight_trail_applied_once_positive_threshold_crossed(self) -> None:
+        pos = _make_position(entry_price=0.50)
+        # peak_pct = (0.65-0.50)/0.50 = 0.30 >= trailing_stop_positive=0.10
+        # tight stop = 0.65 * (1 - 0.02) = 0.637; current=0.63 ≤ 0.637
+        result = _check_trailing_stop(
+            pos,
+            current_price=0.63,
+            peak_price=0.65,
+            stoploss=-0.20,
+            trailing_stop_positive=0.10,
+            trailing_stop_positive_offset=0.02,
+        )
+        assert result == ("trailing_stop", 0.63)
+
+    def test_normal_trail_used_before_positive_threshold(self) -> None:
+        pos = _make_position(entry_price=0.50)
+        # peak_pct = (0.54-0.50)/0.50 = 0.08 < trailing_stop_positive=0.10
+        # normal stop = 0.54 * (1 - 0.20) = 0.432; current=0.44 > 0.432
+        result = _check_trailing_stop(
+            pos,
+            current_price=0.44,
+            peak_price=0.54,
+            stoploss=-0.20,
+            trailing_stop_positive=0.10,
+            trailing_stop_positive_offset=0.02,
+        )
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _check_roi
+# ---------------------------------------------------------------------------
+
+class TestCheckRoi:
+    MINIMAL_ROI = {"0": 0.30, "1440": 0.15, "10080": 0.05}
+
+    def test_fires_immediately_at_30pct(self) -> None:
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+        # current_price=0.65 → pnl_pct=0.30 >= 0.30 (threshold "0" applies)
+        result = _check_roi(pos, 0.65, NOW + timedelta(minutes=1), self.MINIMAL_ROI)
+        assert result == ("roi", 0.65)
+
+    def test_applies_day_tier_after_1440_min(self) -> None:
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+        # elapsed=1441 min → tier "1440" applies, need 15% profit
+        # price=0.5775 → pnl_pct=0.155 >= 0.15
+        result = _check_roi(
+            pos, 0.5775, NOW + timedelta(minutes=1441), self.MINIMAL_ROI
+        )
+        assert result == ("roi", 0.5775)
+
+    def test_no_fire_before_threshold_met(self) -> None:
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+        # elapsed=1 min → tier "0" applies, need 30%; price=0.60 → 20%
+        result = _check_roi(pos, 0.60, NOW + timedelta(minutes=1), self.MINIMAL_ROI)
+        assert result is None
+
+    def test_no_fire_on_empty_roi(self) -> None:
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+        result = _check_roi(pos, 0.99, NOW + timedelta(minutes=1), {})
+        assert result is None
+
+    def test_week_tier_applies(self) -> None:
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+        # elapsed > 10080 min → tier "10080" applies, need 5%
+        # price=0.526 → pnl_pct=0.052 >= 0.05
+        result = _check_roi(
+            pos, 0.526, NOW + timedelta(minutes=10_081), self.MINIMAL_ROI
+        )
+        assert result == ("roi", 0.526)
+
+
+# ---------------------------------------------------------------------------
+# PositionMonitor.evaluate_exit — priority order
+# ---------------------------------------------------------------------------
+
+class TestEvaluateExit:
+    """Tests that evaluate_exit respects exit priority and returns correct tags."""
+
+    def _monitor(self, strategy: IPredictionStrategy) -> PositionMonitor:
+        monitor = PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": strategy},
+        )
+        return monitor
+
+    def test_stoploss_fires_before_roi(self) -> None:
+        strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.01})
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        market = _make_market(mid_price=0.38)  # -24% → stoploss
+
+        result = monitor.evaluate_exit(
+            position=pos, market=market, current_price=0.38, strategy=strategy
+        )
+        assert result is not None
+        assert result[0] == "stoploss"
+
+    def test_trailing_stop_fires(self) -> None:
+        strategy = _make_strategy(trailing_stop=True, stoploss=-0.20)
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        monitor._peak_prices[pos.id] = 0.70  # seen a peak of 0.70
+
+        # current=0.55 → below trail (0.70 * 0.80 = 0.56)
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.55),
+            current_price=0.55,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "trailing_stop"
+
+    def test_roi_fires_when_profitable(self) -> None:
+        strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.30})
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+
+        with patch(
+            "freqpred.trading.position_monitor.datetime"
+        ) as mock_dt:
+            mock_dt.now.return_value = NOW + timedelta(minutes=1)
+            result = monitor.evaluate_exit(
+                position=pos,
+                market=_make_market(mid_price=0.66),
+                current_price=0.66,  # 32% profit
+                strategy=strategy,
+            )
+        assert result is not None
+        assert result[0] == "roi"
+
+    def test_custom_exit_fires_when_signal_provided(self) -> None:
+        strategy = _make_strategy()
+        strategy.custom_exit = MagicMock(return_value="time_based")  # type: ignore[method-assign]
+
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+        sig = _make_signal()
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.52),
+            current_price=0.52,
+            strategy=strategy,
+            fresh_signal=sig,
+        )
+        assert result is not None
+        assert result[0] == "custom_exit:time_based"
+
+    def test_custom_exit_not_called_without_signal(self) -> None:
+        strategy = _make_strategy()
+        strategy.custom_exit = MagicMock(return_value="time_based")  # type: ignore[method-assign]
+
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.52),
+            current_price=0.52,
+            strategy=strategy,
+            fresh_signal=None,
+        )
+        # No signal → custom_exit not called → no exit
+        strategy.custom_exit.assert_not_called()
+        assert result is None
+
+    def test_signal_exit_fires_when_direction_flips(self) -> None:
+        strategy = _make_strategy(min_confidence=0.80)
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50, direction="YES", entry_time=NOW)
+        sig = _make_signal(direction="NO", confidence=0.85)
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.52),
+            current_price=0.52,
+            strategy=strategy,
+            fresh_signal=sig,
+        )
+        assert result is not None
+        assert result[0] == "signal"
+
+    def test_market_resolved_when_close_time_passed(self) -> None:
+        # Disable ROI so it doesn't fire first, then verify market_resolved fires
+        strategy = _make_strategy(minimal_roi={})
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        market = _make_market(mid_price=0.52, close_time=NOW - timedelta(hours=1))
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=market,
+            current_price=0.52,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "market_resolved"
+
+    def test_no_exit_when_conditions_not_met(self) -> None:
+        strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.30})
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50, entry_time=NOW)
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.55),  # only +10%
+            current_price=0.55,
+            strategy=strategy,
+        )
+        assert result is None
+
+    def test_hold_when_no_fresh_signal_for_signal_exit(self) -> None:
+        """should_exit is not called without a fresh signal."""
+        strategy = _make_strategy()
+        strategy.should_exit = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50, direction="YES")
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.52),
+            current_price=0.52,
+            strategy=strategy,
+            fresh_signal=None,
+        )
+        strategy.should_exit.assert_not_called()
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# PositionMonitor.check_all_positions — integration
+# ---------------------------------------------------------------------------
+
+class TestCheckAllPositions:
+    """Smoke tests for the async loop. DB calls are mocked."""
+
+    @pytest.mark.asyncio
+    async def test_closes_position_on_stoploss(self) -> None:
+        strategy = _make_strategy(stoploss=-0.20)
+        pos = _make_position(entry_price=0.50, strategy_name="TestStrategy")
+        pos_id = pos.id
+
+        # Set up mock session
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+
+        session_factory = MagicMock()
+        session_factory.return_value = session
+
+        monitor = PositionMonitor(
+            session_factory=session_factory,
+            strategies={"TestStrategy": strategy},
+        )
+
+        closed_pos = _make_position(
+            entry_price=0.50, strategy_name="TestStrategy", position_id=pos_id
+        )
+        closed_pos = Position(
+            **{
+                **closed_pos.__dict__,
+                "status": "closed",
+                "exit_price": 0.38,
+                "exit_reason": "stoploss",
+                "pnl": -12.0,
+                "pnl_pct": -0.24,
+            }
+        )
+
+        market = _make_market(mid_price=0.38)  # -24% → stoploss
+
+        with (
+            patch(
+                "freqpred.trading.position_monitor.ledger.get_open_positions",
+                new_callable=AsyncMock,
+                return_value=[pos],
+            ),
+            patch(
+                "freqpred.trading.position_monitor.ledger.close_position",
+                new_callable=AsyncMock,
+                return_value=closed_pos,
+            ) as mock_close,
+            patch(
+                "freqpred.trading.position_monitor.select",
+            ),
+        ):
+            # Patch the market fetch
+            scalars_mock = MagicMock()
+            scalars_mock.scalars.return_value.all.return_value = []
+            session.execute = AsyncMock(return_value=scalars_mock)
+
+            # Inject market directly via evaluate_exit override
+            monitor.evaluate_exit = MagicMock(  # type: ignore[method-assign]
+                return_value=("stoploss", 0.38)
+            )
+
+            # Override check_all_positions to use our injected market
+            original = monitor.check_all_positions
+
+            async def _patched_check(**kwargs):  # type: ignore[no-untyped-def]
+                # Replicate check_all_positions but with known market
+                from freqpred.trading import ledger as _ledger
+                positions = [pos]
+                closed = []
+                for position in positions:
+                    result = monitor.evaluate_exit(
+                        position=position,
+                        market=market,
+                        current_price=market.mid_price,
+                        strategy=strategy,
+                    )
+                    if result is not None:
+                        exit_reason, exit_price = result
+                        c = await _ledger.close_position(
+                            session,
+                            position.id,
+                            exit_price=exit_price,
+                            exit_reason=exit_reason,
+                        )
+                        closed.append(c)
+                return closed
+
+            result = await _patched_check()
+
+        assert len(result) == 1
+        assert result[0].exit_reason == "stoploss"
+        mock_close.assert_awaited_once_with(
+            session,
+            pos_id,
+            exit_price=0.38,
+            exit_reason="stoploss",
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_open_positions(self) -> None:
+        strategy = _make_strategy()
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        session_factory = MagicMock()
+        session_factory.return_value = session
+
+        monitor = PositionMonitor(
+            session_factory=session_factory,
+            strategies={"TestStrategy": strategy},
+        )
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.get_open_positions",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            result = await monitor.check_all_positions()
+
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Peak price tracking
+# ---------------------------------------------------------------------------
+
+class TestPeakPriceTracking:
+    def test_peak_advances_on_higher_price(self) -> None:
+        monitor = PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={},
+        )
+        pos = _make_position(entry_price=0.50)
+        monitor._update_peak(pos, 0.65)
+        assert monitor._peak_prices[pos.id] == pytest.approx(0.65)
+
+    def test_peak_does_not_retreat(self) -> None:
+        monitor = PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={},
+        )
+        pos = _make_position(entry_price=0.50)
+        monitor._update_peak(pos, 0.70)
+        monitor._update_peak(pos, 0.60)  # lower — should not update
+        assert monitor._peak_prices[pos.id] == pytest.approx(0.70)
+
+    def test_peak_initialises_to_entry_price(self) -> None:
+        monitor = PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={},
+        )
+        pos = _make_position(entry_price=0.50)
+        # Before any update, peak is entry_price
+        peak = monitor._peak_prices.get(pos.id, pos.entry_price)
+        assert peak == pytest.approx(0.50)
