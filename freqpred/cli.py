@@ -872,6 +872,65 @@ async def _metrics_calibration(config: object) -> None:
 
 
 @main.group()
+def report() -> None:
+    """Reporting commands."""
+
+
+@report.command(name="digest")
+@click.option(
+    "--send",
+    is_flag=True,
+    default=False,
+    help="Send digest via Telegram/Discord alert (requires T23).",
+)
+@click.pass_context
+def report_digest(ctx: click.Context, send: bool) -> None:
+    """Generate and print a daily digest summary."""
+    config = ctx.obj["config"]
+    asyncio.run(_report_digest(config, send=send))
+
+
+async def _report_digest(config: object, *, send: bool) -> None:
+    import anthropic
+
+    import freqpred.ingestion.models  # noqa: F401
+    import freqpred.signal.models     # noqa: F401
+    import freqpred.rag.models        # noqa: F401
+
+    from freqpred.db import make_engine, make_session_factory
+    from freqpred.llm.client import LLMClient
+    from freqpred.metrics.reporting import generate_daily_digest
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+    if not config.anthropic.api_key:
+        click.echo("ERROR: ANTHROPIC_API_KEY not configured.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+
+    llm_client = LLMClient(
+        anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
+        session_factory,
+        prompt_version="digest-v1",
+        daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
+    )
+
+    try:
+        async with session_factory() as session:
+            digest = await generate_daily_digest(session, llm_client)
+    finally:
+        await engine.dispose()
+
+    click.echo(digest)
+
+    if send:
+        click.echo("\n(--send flag set but alert integrations not yet implemented; T23)", err=True)
+
+
+@main.group()
 def db() -> None:
     """Database management commands."""
 
