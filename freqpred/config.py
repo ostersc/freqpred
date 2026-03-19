@@ -96,6 +96,7 @@ class DashboardConfig(BaseModel):
 class AlertsConfig(BaseModel):
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
+    telegram_authorized_users: list[str] = Field(default_factory=list)
     discord_webhook_url: str = Field(default="")
 
 

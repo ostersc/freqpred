@@ -69,4 +69,7 @@ alerts:
   # Overridden by TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID / DISCORD_WEBHOOK_URL env vars
   telegram_bot_token: ""
   telegram_chat_id: ""
+  # Telegram usernames or numeric user IDs allowed to send bot commands.
+  # Empty list = no one can send commands.
+  telegram_authorized_users: []
   discord_webhook_url: ""

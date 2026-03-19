@@ -106,6 +106,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     )
 
     from freqpred.alerts.telegram import TelegramSender
+    from freqpred.alerts.telegram_commands import TelegramCommandHandler
     from freqpred.alerts.discord import DiscordSender
     from freqpred.alerts.dispatcher import AlertDispatcher
 
@@ -119,6 +120,11 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     senders.append(discord)
     alert_dispatcher = AlertDispatcher(senders)
     await alert_dispatcher.send(f"freqpred started | strategy={strategy_name} | mode={mode}")
+
+    telegram_cmd_handler = TelegramCommandHandler(
+        bot_token=config.alerts.telegram_bot_token,
+        authorized_users=config.alerts.telegram_authorized_users,
+    )
 
     order_manager = None
     if mode == "paper":
@@ -253,6 +259,9 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             click.echo("WARNING: REDIS_URL not configured — watcher and scheduler disabled.", err=True)
 
         tasks.append(asyncio.create_task(signal_loop(), name="signal_loop"))
+        tasks.append(
+            asyncio.create_task(telegram_cmd_handler.run(), name="telegram_commands")
+        )
 
         click.echo(f"Running {len(tasks)} task(s). Press Ctrl+C to stop.")
         try:

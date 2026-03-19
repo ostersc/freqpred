@@ -184,6 +184,10 @@ Before declaring any task complete, verify every acceptance criterion listed in 
 
 **Never say a task is done based on code compiling or unit tests alone when the acceptance criteria include runtime behavior** (e.g. "runs cleanly against a fresh DB").
 
+**For any task that adds, removes, or changes a CLI command or Telegram bot command:**
+- Update [COMMANDS.md](COMMANDS.md) to reflect the change before declaring the task done.
+- This includes: new commands, removed commands, changed option names/defaults, new Telegram bot commands registered via `TelegramCommandHandler.register()`.
+
 ---
 
 ## Code style

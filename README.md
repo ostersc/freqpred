@@ -108,11 +108,19 @@ freqpred can push real-time notifications to Telegram and/or Discord. Both chann
    TELEGRAM_BOT_TOKEN=123456789:AAF...
    TELEGRAM_CHAT_ID=123456789
    ```
-4. Verify:
+4. (Optional) Enable inbound bot commands by listing your Telegram username or user ID in `config.yaml`:
+   ```yaml
+   alerts:
+     telegram_authorized_users:
+       - your_username
+   ```
+5. Verify:
    ```bash
    uv run freqpred alerts test --channel telegram
    # Expected: message appears in your Telegram chat
    ```
+
+See [COMMANDS.md — Telegram bot commands](COMMANDS.md#telegram-bot-commands) for available bot commands and how to authorize users.
 
 ### Discord setup
 
@@ -146,33 +154,19 @@ uv run freqpred report digest
 
 ## CLI reference
 
+See **[COMMANDS.md](COMMANDS.md)** for the full reference — CLI commands and Telegram bot commands with all options documented.
+
+Quick reference:
+
 ```bash
-# Run the full pipeline
-uv run freqpred run --strategy <name|path> --mode <signal-only|paper|live>
-
-# Fetch active Kalshi markets and write to DB
+uv run freqpred run --strategy ConservativeDefault --mode paper
 uv run freqpred markets list
-uv run freqpred markets list --category politics
-
-# One-shot signal analysis for a specific market
 uv run freqpred signal analyze --market-id <KALSHI-TICKER>
-
-# Run ingestion pipeline manually (fetch news for catalyst queries)
 uv run freqpred ingestion run --limit 5
-uv run freqpred ingestion run --category politics --dry-run
-
-# Alert channel commands
-uv run freqpred alerts test --channel telegram
-uv run freqpred alerts test --channel discord
-uv run freqpred alerts test --channel all
-
-# Daily digest
-uv run freqpred report digest
-
-# Calibration metrics
+uv run freqpred positions list --status open
 uv run freqpred metrics calibration
-
-# Apply database migrations
+uv run freqpred report digest
+uv run freqpred alerts test --channel all
 uv run freqpred db migrate
 ```
 
