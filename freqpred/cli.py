@@ -105,6 +105,21 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         top_k=config.signal.top_k_documents,
     )
 
+    from freqpred.alerts.telegram import TelegramSender
+    from freqpred.alerts.discord import DiscordSender
+    from freqpred.alerts.dispatcher import AlertDispatcher
+
+    senders = []
+    telegram = TelegramSender(
+        bot_token=config.alerts.telegram_bot_token,
+        chat_id=config.alerts.telegram_chat_id,
+    )
+    senders.append(telegram)
+    discord = DiscordSender(webhook_url=config.alerts.discord_webhook_url)
+    senders.append(discord)
+    alert_dispatcher = AlertDispatcher(senders)
+    await alert_dispatcher.send(f"freqpred started | strategy={strategy_name} | mode={mode}")
+
     order_manager = None
     if mode == "paper":
         from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
@@ -167,6 +182,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     except TradingCircuitBreakerError as exc:
                         log.warning("signal_loop.circuit_breaker_fired", reason=str(exc))
                         circuit_breaker_active = True
+                        await alert_dispatcher.circuit_breaker_alert(str(exc))
 
                 for market in interesting:
                     signal = await pipeline.analyze(market, trigger="scheduled")
@@ -179,6 +195,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                             f"direction={signal.direction} "
                             f"signal_id={signal.id}"
                         )
+                        if signal.edge >= strategy.config.min_edge and signal.direction != "SKIP":
+                            await alert_dispatcher.signal_alert(signal, market)
                         if (
                             order_manager is not None
                             and not circuit_breaker_active
@@ -192,6 +210,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                     market_id=market.id,
                                     direction=signal.direction,
                                 )
+                                await alert_dispatcher.trade_alert(position, market)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -928,6 +947,52 @@ async def _report_digest(config: object, *, send: bool) -> None:
 
     if send:
         click.echo("\n(--send flag set but alert integrations not yet implemented; T23)", err=True)
+
+
+@main.group()
+def alerts() -> None:
+    """Alert channel commands."""
+
+
+@alerts.command(name="test")
+@click.option(
+    "--channel",
+    type=click.Choice(["telegram", "discord", "all"]),
+    default="all",
+    show_default=True,
+    help="Which alert channel(s) to test.",
+)
+@click.pass_context
+def alerts_test(ctx: click.Context, channel: str) -> None:
+    """Send a test message to verify alert credentials."""
+    config = ctx.obj["config"]
+    asyncio.run(_alerts_test(config, channel))
+
+
+async def _alerts_test(config: object, channel: str) -> None:
+    from freqpred.alerts.telegram import TelegramSender
+    from freqpred.alerts.discord import DiscordSender
+
+    test_msg = "freqpred alert test — if you see this, alerts are working."
+
+    if channel in ("telegram", "all"):
+        sender = TelegramSender(
+            bot_token=config.alerts.telegram_bot_token,
+            chat_id=config.alerts.telegram_chat_id,
+        )
+        try:
+            await sender.send(test_msg)
+            click.echo("Telegram: OK")
+        except Exception as exc:
+            click.echo(f"Telegram: FAILED — {exc}", err=True)
+
+    if channel in ("discord", "all"):
+        sender = DiscordSender(webhook_url=config.alerts.discord_webhook_url)
+        try:
+            await sender.send(test_msg)
+            click.echo("Discord: OK")
+        except Exception as exc:
+            click.echo(f"Discord: FAILED — {exc}", err=True)
 
 
 @main.group()

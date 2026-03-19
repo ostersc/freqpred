@@ -91,6 +91,7 @@ def _make_run_mocks(market_row: MagicMock, signal: "Signal | None"):
     # Strategy passes all markets through
     mock_strategy = MagicMock()
     mock_strategy.config.name = "TestStrategy"
+    mock_strategy.config.min_edge = 0.10
     mock_strategy.filter_markets = MagicMock(side_effect=lambda markets: markets)
 
     # KalshiClient as async context manager

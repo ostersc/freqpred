@@ -57,6 +57,11 @@ NEWSAPI_KEY=...
 # Optional — enables live Kalshi trading
 KALSHI_API_KEY=...
 KALSHI_PRIVATE_KEY_PATH=...
+
+# Optional — enables Telegram + Discord alerts (see Alerts section below)
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+DISCORD_WEBHOOK_URL=...
 ```
 
 ---
@@ -83,6 +88,62 @@ uv run freqpred run --strategy strategies/my_strategy.py --mode signal-only
 
 ---
 
+## Alerts (Telegram + Discord)
+
+freqpred can push real-time notifications to Telegram and/or Discord. Both channels are independently optional — missing credentials silently disable that channel without affecting the other.
+
+**Events that trigger an alert:**
+- New signal where edge meets the strategy's minimum threshold
+- Paper trade opened
+- Circuit breaker fired (daily loss / drawdown limits hit)
+- Daily digest (via `report digest` command)
+
+### Telegram setup
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram and run `/newbot` to create a bot — copy the **bot token**.
+2. Get your **chat ID** by messaging [@userinfobot](https://t.me/userinfobot) — it replies immediately with your user ID. That number is your personal chat ID.
+   > **Alternative:** open a chat with your new bot, send it any message (e.g. `/start`), then immediately fetch `https://api.telegram.org/bot<TOKEN>/getUpdates` — look for `"chat": {"id": ...}` in the result. `getUpdates` returns empty if no messages have been sent since the last poll.
+3. Add to `.env`:
+   ```
+   TELEGRAM_BOT_TOKEN=123456789:AAF...
+   TELEGRAM_CHAT_ID=123456789
+   ```
+4. Verify:
+   ```bash
+   uv run freqpred alerts test --channel telegram
+   # Expected: message appears in your Telegram chat
+   ```
+
+### Discord setup
+
+1. Open your Discord server → **Server Settings → Integrations → Webhooks → New Webhook**.
+2. Choose the target channel, copy the **Webhook URL**.
+3. Add to `.env`:
+   ```
+   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+   ```
+4. Verify:
+   ```bash
+   uv run freqpred alerts test --channel discord
+   # Expected: message appears in your Discord channel
+   ```
+
+### Test both channels at once
+
+```bash
+uv run freqpred alerts test --channel all
+```
+
+### Daily digest
+
+Generate and print a natural-language summary of system health (positions, P&L, LLM spend, calibration):
+
+```bash
+uv run freqpred report digest
+```
+
+---
+
 ## CLI reference
 
 ```bash
@@ -99,6 +160,17 @@ uv run freqpred signal analyze --market-id <KALSHI-TICKER>
 # Run ingestion pipeline manually (fetch news for catalyst queries)
 uv run freqpred ingestion run --limit 5
 uv run freqpred ingestion run --category politics --dry-run
+
+# Alert channel commands
+uv run freqpred alerts test --channel telegram
+uv run freqpred alerts test --channel discord
+uv run freqpred alerts test --channel all
+
+# Daily digest
+uv run freqpred report digest
+
+# Calibration metrics
+uv run freqpred metrics calibration
 
 # Apply database migrations
 uv run freqpred db migrate
