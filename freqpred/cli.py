@@ -995,6 +995,49 @@ async def _alerts_test(config: object, channel: str) -> None:
             click.echo(f"Discord: FAILED — {exc}", err=True)
 
 
+@main.command()
+@click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind.")
+@click.option("--port", default=8000, show_default=True, help="Port to listen on.")
+@click.pass_context
+def dashboard(ctx: click.Context, host: str, port: int) -> None:
+    """Start the dashboard API server (read-only JSON API)."""
+    config = ctx.obj["config"]
+    asyncio.run(_dashboard(config, host, port))
+
+
+async def _dashboard(config: object, host: str, port: int) -> None:
+    import uvicorn
+
+    import freqpred.ingestion.models  # noqa: F401
+    import freqpred.llm.models        # noqa: F401
+    import freqpred.rag.models        # noqa: F401
+    import freqpred.signal.models     # noqa: F401
+
+    from freqpred.dashboard.api.app import create_app
+    from freqpred.db import make_engine, make_session_factory
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+
+    app = create_app(
+        session_factory=session_factory,
+        redis_url=config.redis.url or None,
+        daily_cap_usd=config.risk.max_daily_llm_spend_usd,
+    )
+
+    click.echo(f"Starting dashboard on http://{host}:{port}")
+    server_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(server_config)
+    try:
+        await server.serve()
+    finally:
+        await engine.dispose()
+
+
 @main.group()
 def db() -> None:
     """Database management commands."""

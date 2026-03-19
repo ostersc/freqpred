@@ -949,6 +949,8 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 
 ### Telegram / Discord Alerts
 
+Push notifications sent on key events (outbound only for Discord; Telegram supports inbound commands):
+
 | Event | Alert |
 |---|---|
 | New signal above threshold | "📊 NEW SIGNAL: [question] — Our prob: 71%, Market: 54%, Edge: +17%" |
@@ -956,6 +958,77 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 | Market resolved | "✅ WIN: [question] resolved YES. P&L: +$X (+34%)" or "❌ LOSS..." |
 | Circuit breaker triggered | "🚨 CIRCUIT BREAKER: Daily loss limit hit. Trading halted." |
 | Daily digest | Morning summary: open positions, yesterday's P&L, calibration score |
+
+### Telegram Management Commands
+
+The Telegram bot supports inbound slash commands for monitoring and control. Commands are processed via long-polling. Only users listed in `telegram.authorized_users` may issue commands; all others receive the push alerts but are silently ignored on commands.
+
+**Configuration:**
+```yaml
+telegram:
+  enabled: true
+  bot_token: "..."
+  chat_id: "..."           # personal or group chat id (include leading - for groups)
+  authorized_users:        # list of telegram user IDs allowed to run commands
+    - "123456789"
+  notification_settings:
+    new_signal: "on"       # on | silent | off
+    position_opened: "on"
+    position_closed: "on"
+    circuit_breaker: "on"
+    daily_digest: "silent"
+```
+
+**System commands:**
+
+| Command | Description |
+|---|---|
+| `/start` | Resume trading after a pause. Changes run-loop state to `running`. |
+| `/pause` | Stop entering new positions. Open positions continue to be managed. |
+| `/stop` | Halt the run loop entirely (requires restart to resume). |
+| `/show_config` | Print active strategy name, mode (paper/live), key thresholds. |
+| `/logs [n]` | Show the last *n* structured log lines (default: 20). |
+| `/help` | List all available commands. |
+| `/version` | Show freqpred version and git commit hash. |
+
+**Status commands:**
+
+| Command | Description |
+|---|---|
+| `/status` | List all open positions: market question, direction, entry price, estimated prob, unrealized P&L. |
+| `/status <position_id>` | Detailed view of one position including the signal that triggered entry. |
+| `/count` | Current open position count vs. configured maximum. |
+| `/trades [n]` | List the last *n* resolved/closed positions (default: 10) in a table. |
+| `/signals [n]` | List the last *n* signals generated (default: 10): market, our prob, market price, edge. |
+
+**Metrics commands:**
+
+| Command | Description |
+|---|---|
+| `/profit [n]` | P&L summary over the last *n* days (default: all time): total, win rate, Brier score. |
+| `/daily [n]` | P&L broken down by day for the last *n* days (default: 7). |
+| `/weekly [n]` | P&L broken down by week for the last *n* weeks (default: 8). |
+| `/monthly [n]` | P&L broken down by month for the last *n* months (default: 6). |
+| `/stats` | Win/loss counts by exit reason (stoploss, ROI, signal flip, manual). |
+| `/balance` | Current Kalshi account balance and available capital. |
+| `/budget` | LLM spend today vs. daily cap, breakdown by query type. |
+| `/calibration` | Current Brier score and calibration summary (last 30/90/all-time). |
+
+**Position management commands:**
+
+| Command | Description |
+|---|---|
+| `/forceexit <position_id>` | Force-close a specific open position immediately (submits a sell order). Works in both paper and live mode. |
+| `/forceexit all` | Force-close all open positions. Prompts for confirmation before executing. |
+| `/fx <position_id>` | Alias for `/forceexit`. |
+| `/delete <position_id>` | Delete a paper position from the DB without placing an order. Paper mode only; rejected in live mode. |
+
+**Implementation notes:**
+- Command polling runs as a background asyncio task inside the main run loop.
+- Each inbound update is checked against `authorized_users` before dispatch; unauthorized senders receive no response.
+- `/forceexit` and `/delete` in live mode require a confirmation reply within 30 seconds (inline keyboard with Confirm / Cancel buttons) to prevent accidental execution.
+- All command responses are sent as reply messages to the original command.
+- The polling task logs every inbound command to `structlog` at INFO level (not to `llm_queries` — these are not LLM calls).
 
 ---
 
