@@ -121,6 +121,8 @@ async def run_cycle(
     catalysts_generated = 0
 
     # --- Phase 1: catalyst generation for newly-selected markets ---------------
+    # Each market's catalysts are committed inside _ensure_catalysts so rows
+    # are durable even if the process dies during the generation loop.
     if strategy is not None and llm_client is not None:
         catalysts_generated = await _ensure_catalysts(
             session, strategy, llm_client, embedder
@@ -436,6 +438,9 @@ async def _ensure_catalysts(
         is_refresh = market.id in latest_run_by_market
         try:
             await generate_catalysts(market, session, llm_client, embedder)
+            # Commit per-market so catalysts are durable immediately; if the
+            # process dies mid-loop the already-generated rows are preserved.
+            await session.commit()
             generated += 1
             log.info(
                 "scheduler.catalysts_generated",
@@ -448,6 +453,13 @@ async def _ensure_catalysts(
                 market_id=market.id,
                 exc_info=True,
             )
+        except Exception:
+            log.warning(
+                "scheduler.catalyst_generation_failed",
+                market_id=market.id,
+                exc_info=True,
+            )
+            await session.rollback()
 
     return generated
 

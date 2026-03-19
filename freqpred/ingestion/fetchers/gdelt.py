@@ -13,6 +13,18 @@ from freqpred.ingestion.store import RawDocument
 log = structlog.get_logger()
 
 _GDELT_API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+_GDELT_MIN_KEYWORD_LEN = 4  # GDELT rejects tokens shorter than this
+
+
+def _sanitize_query(query: str) -> str | None:
+    """Strip tokens shorter than _GDELT_MIN_KEYWORD_LEN from *query*.
+
+    Returns None if no tokens remain after filtering (caller should skip).
+    """
+    tokens = [t for t in query.split() if len(t) >= _GDELT_MIN_KEYWORD_LEN]
+    return " ".join(tokens) if tokens else None
+
+
 _DEFAULT_EXCLUDED_DOMAINS: frozenset[str] = frozenset({"kalshi.com"})
 _ARTICLE_FETCH_TIMEOUT = 10.0  # seconds per URL
 _API_TIMEOUT = 30.0
@@ -53,8 +65,15 @@ async def fetch(
     """
     now = datetime.now(timezone.utc)
 
+    sanitized = _sanitize_query(query)
+    if sanitized is None:
+        log.warning("gdelt.fetch.query_empty_after_sanitize", query=query)
+        return []
+    if sanitized != query:
+        log.debug("gdelt.fetch.query_sanitized", original=query, sanitized=sanitized)
+
     params: dict[str, str | int] = {
-        "query": query,
+        "query": sanitized,
         "mode": "artlist",
         "format": "json",
         "timespan": timespan,
@@ -67,6 +86,12 @@ async def fetch(
         try:
             response = await client.get(_GDELT_API_URL, params=params, timeout=_API_TIMEOUT)
             response.raise_for_status()
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            log.warning("gdelt.fetch.error", query=query, error=type(exc).__name__)
+            return []
+        except httpx.HTTPStatusError as exc:
+            log.warning("gdelt.fetch.error", query=query, status_code=exc.response.status_code)
+            return []
         except Exception:
             log.warning("gdelt.fetch.error", query=query, exc_info=True)
             return []

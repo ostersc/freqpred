@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.fetchers.gdelt import fetch
+from freqpred.ingestion.fetchers.gdelt import _sanitize_query, fetch
 from freqpred.ingestion.store import RawDocument
 
 # Suppress the 5-second rate-limit sleep in all tests.
@@ -283,6 +283,27 @@ async def test_fetch_returns_empty_on_http_error():
 
 
 @pytest.mark.asyncio
+async def test_fetch_returns_empty_on_429():
+    import httpx as _httpx
+
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    exc = _httpx.HTTPStatusError("429", request=MagicMock(), response=mock_response)
+    resp = MagicMock()
+    resp.raise_for_status.side_effect = exc
+
+    client_instance = AsyncMock()
+    client_instance.__aenter__ = AsyncMock(return_value=client_instance)
+    client_instance.__aexit__ = AsyncMock(return_value=False)
+    client_instance.get = AsyncMock(return_value=resp)
+
+    with patch("freqpred.ingestion.fetchers.gdelt.httpx.AsyncClient", return_value=client_instance):
+        docs = await fetch(_QUERY)
+
+    assert docs == []
+
+
+@pytest.mark.asyncio
 async def test_fetch_all_bodies_fail_returns_empty():
     articles = [_make_article(url="https://a.com/1"), _make_article(url="https://b.com/2")]
     failing_body = MagicMock()
@@ -297,6 +318,53 @@ async def test_fetch_all_bodies_fail_returns_empty():
         docs = await fetch(_QUERY)
 
     assert docs == []
+
+
+# ---------------------------------------------------------------------------
+# Query sanitization
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_query_removes_short_tokens():
+    result = _sanitize_query("How often does Trump mention specific medical conditions in rallies speeches")
+    assert result == "often does Trump mention specific medical conditions rallies speeches"
+
+
+def test_sanitize_query_unchanged_when_all_long():
+    q = "Trump rally medical"
+    assert _sanitize_query(q) == q
+
+
+def test_sanitize_query_returns_none_when_all_tokens_short():
+    assert _sanitize_query("is in of") is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_sanitizes_query_before_api_call():
+    articles = [_make_article()]
+    client_mock = _make_client_mock(
+        _make_gdelt_response(articles),
+        [_make_body_response("Article body.")],
+    )
+
+    with patch("freqpred.ingestion.fetchers.gdelt.httpx.AsyncClient", return_value=client_mock):
+        await fetch("How often does Trump rally in speeches")
+
+    call_kwargs = client_mock.get.call_args_list[0]
+    params = call_kwargs.kwargs.get("params", {})
+    # "How" (3 chars) and "in" (2 chars) should be stripped
+    assert "How" not in params["query"]
+    assert " in " not in params["query"]
+    assert "Trump" in params["query"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_returns_empty_when_query_all_short_tokens():
+    with patch("freqpred.ingestion.fetchers.gdelt.httpx.AsyncClient") as mock_client:
+        docs = await fetch("is in of")
+
+    assert docs == []
+    mock_client.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
