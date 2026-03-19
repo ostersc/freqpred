@@ -196,6 +196,23 @@ State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a 
 | `/trades [n]` | Last *n* resolved positions (default 10): market, exit reason, P&L, hold duration |
 | `/signals [n]` | Last *n* signals (default 10): market, our prob, market price, edge, direction |
 
+### Metrics and performance commands
+
+| Command | Description |
+|---|---|
+| `/profit [n]` | P&L summary over the last *n* days (default: all time): total P&L ($, %), win rate, trade count, avg hold duration, best/worst trade, Brier score |
+| `/daily [n]` | Table: date \| trade count \| P&L $ \| P&L % — last *n* days (default 7) |
+| `/weekly [n]` | Table: week start \| trade count \| P&L $ \| P&L % — last *n* weeks (default 8) |
+| `/monthly [n]` | Table: month \| trade count \| P&L $ \| P&L % — last *n* months (default 6) |
+| `/stats` | All-time aggregate stats: total trades, P&L, win rate, best/worst trade, avg hold duration, breakdown by exit reason |
+| `/balance` | Portfolio snapshot: bankroll, all-time P&L, net value, open exposure ($ and %), today's P&L, open position count |
+| `/budget` | LLM cost breakdown: today vs daily cap (%), per-query-type breakdown, this week, this month, all-time |
+| `/calibration` | Brier score vs naive baseline, improvement, sample count, per-probability-bucket breakdown |
+
+Tabular responses use monospace code blocks. Rows are truncated at 4096 chars with `... and N more` footer.
+
+---
+
 ### Registering custom handlers (for developers)
 
 ```python
