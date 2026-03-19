@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
 from freqpred.ingestion.fetchers import reddit as reddit_fetcher
 from freqpred.ingestion.fetchers import tavily as tavily_fetcher
+from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.ingestion.quota import get_daily_count, increment_daily_count
 from freqpred.ingestion.store import DocumentSkipped, upsert_document
@@ -143,6 +144,11 @@ async def run_cycle(
     now = datetime.now(UTC)
     newsapi_from = now - timedelta(days=_NEWSAPI_LOOKBACK_DAYS)
 
+    # Circuit-breaker flags — set to True when a plan/quota limit is hit so we
+    # don't log the same error once per query for the rest of the cycle.
+    tavily_limit_hit = False
+    newsapi_limit_logged = False
+
     for market_id, category, query_texts in market_queries:
         market_fetched = 0
         market_stored = 0
@@ -151,8 +157,8 @@ async def run_cycle(
         for query_text in query_texts:
             raw_docs = []
 
-            # Tavily
-            if tavily_api_key:
+            # Tavily — skip the rest of the cycle if the plan limit was already hit.
+            if tavily_api_key and not tavily_limit_hit:
                 try:
                     docs = await tavily_fetcher.fetch(
                         api_key=tavily_api_key,
@@ -160,6 +166,12 @@ async def run_cycle(
                         excluded_domains=domain_blacklist,
                     )
                     raw_docs.extend(docs)
+                except (ForbiddenError, UsageLimitExceededError) as exc:
+                    tavily_limit_hit = True
+                    log.warning(
+                        "scheduler.tavily_limit_reached",
+                        reason=str(exc),
+                    )
                 except Exception:
                     log.warning(
                         "scheduler.fetcher_error",
@@ -173,12 +185,14 @@ async def run_cycle(
             if newsapi_api_key and newsapi_enabled:
                 daily_count = await get_daily_count(session, "newsapi", now.date())
                 if daily_count >= newsapi_max_daily_requests:
-                    log.warning(
-                        "newsapi_daily_limit_reached",
-                        date=now.date().isoformat(),
-                        count=daily_count,
-                        max_daily_requests=newsapi_max_daily_requests,
-                    )
+                    if not newsapi_limit_logged:
+                        log.warning(
+                            "newsapi_daily_limit_reached",
+                            date=now.date().isoformat(),
+                            count=daily_count,
+                            max_daily_requests=newsapi_max_daily_requests,
+                        )
+                        newsapi_limit_logged = True
                 else:
                     try:
                         docs = await newsapi_fetcher.fetch(

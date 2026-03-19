@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 from tavily import TavilyClient
+from tavily.errors import ForbiddenError, UsageLimitExceededError
 
 from freqpred.ingestion.fetchers import is_domain_excluded
 from freqpred.ingestion.store import RawDocument
@@ -50,6 +51,9 @@ async def fetch(
             search_depth="advanced",
             include_raw_content=True,
         )
+    except (ForbiddenError, UsageLimitExceededError):
+        # Plan/usage limit — re-raise so the caller can short-circuit remaining queries.
+        raise
     except Exception:
         log.warning("tavily.fetch.error", query=query, exc_info=True)
         return []

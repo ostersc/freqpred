@@ -797,15 +797,43 @@ Signal trigger fires for a market
 | **Tavily Search API** | Fresh web search per market question | Primary |
 | **NewsAPI** | Structured article archive for less-breaking topics | Secondary |
 | **Kalshi market metadata** | Market description + linked sources from the exchange | Always included |
-| **GDELT** | High-volume event archive, especially for politics | Supplementary |
+| **GDELT** | High-volume global news index; free, no key required | Supplementary |
+
+**GDELT implementation:**
+- Query the GDELT Doc API (`api.gdeltproject.org/api/v2/doc/doc`) with the catalyst query text and a `timespan=1d` parameter per cycle
+- Response returns article URLs + titles only — no body text
+- Fetch article bodies in parallel (`asyncio.gather`) with a per-URL timeout of 10s; skip paywalled/failed fetches silently
+- Wired into the per-query loop in the scheduler alongside Tavily/NewsAPI
+- No API key required; no quota tracking needed
+- `source_type="news"`, `source_name="GDELT"`
 
 #### Social & Community Signals
 | Source | Use Case | Notes |
 |---|---|---|
 | **Reddit** | Subreddit sentiment for relevant communities | No credentials required — uses public JSON API (`reddit.com/r/{sub}/search.json`); target subs per category (see below) |
+| **Truth Social** | Real-time posts from key political/market-moving accounts + keyword search | Requires a Truth Social account (`TRUTHSOCIAL_USERNAME` / `TRUTHSOCIAL_PASSWORD`); uses `truthbrush` library |
 | **Twitter/X API** | Real-time public sentiment on market topics | Expensive ($100–$5000/mo tier); treat as optional enrichment |
 | **Kalshi market comments** | Crowd reasoning directly on the market in question | Already fetched with market metadata |
 | **Manifold Markets** | Community probability estimates on overlapping questions | Free API; useful as an independent signal cross-check |
+
+**Truth Social implementation — two modes:**
+
+*Search mode* (catalyst-driven, runs per query in scheduler loop):
+- Calls `api.search(query=query_text, searchtype="statuses")`
+- Filters client-side to posts with `created_at >= now - 48h`
+- Results stored as-is — no pre-summarization (posts are short)
+- `source_type="social"`, `source_name="TruthSocial"`
+
+*Account feed mode* (standing feeds, runs once per cycle):
+- Calls `api.pull_statuses(username, created_after=last_run)` for each configured account
+- `last_run` tracked in Redis at `ingestion:last_run:truthsocial:{username}`
+- Not tied to a specific market — broad ingestion, all categories benefit
+- Configured via `ingestion.truthsocial.accounts: [realDonaldTrump, ...]` in `config.yaml`
+
+**Truth Social error handling:**
+- `LoginErrorException` → log error + disable Truth Social for the rest of the cycle (circuit-breaker, same pattern as Tavily plan limit)
+- Rate limiting handled internally by `truthbrush` (auto-sleep on approach)
+- `ingestion.truthsocial.enabled` flag in config to disable entirely (same pattern as `newsapi.enabled`)
 
 **Reddit subreddit targets by category:**
 
@@ -1041,6 +1069,8 @@ telegram:
 - [x] Document store schema (Postgres + pgvector extension)
 - [x] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (sentence-transformers) → store
 - [x] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
+- [ ] GDELT fetcher: Doc API query → parallel article body fetch → store (T32)
+- [ ] Truth Social fetcher: search mode (per catalyst query) + account feed mode (per cycle) via `truthbrush` (T33)
 - [ ] Twitter/X fetcher (optional — gated on API cost decision)
 - [x] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy` strategies
 - [x] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy
@@ -1132,8 +1162,9 @@ freqpred/
 │   │   ├── fetchers/
 │   │   │   ├── tavily.py        # Tavily Search API fetcher
 │   │   │   ├── newsapi.py       # NewsAPI fetcher
-│   │   │   ├── gdelt.py         # GDELT fetcher
+│   │   │   ├── gdelt.py         # GDELT Doc API fetcher + article body fetch
 │   │   │   ├── reddit.py        # Reddit API fetcher
+│   │   │   ├── truthsocial.py   # Truth Social fetcher (search + account feeds via truthbrush)
 │   │   │   └── twitter.py       # Twitter/X API fetcher (optional)
 │   │   ├── store.py             # dedup, embed (sentence-transformers), insert into Document store
 │   │   └── social_summarizer.py # cheap LLM pre-summarizer for raw social posts
