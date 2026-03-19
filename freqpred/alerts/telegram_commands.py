@@ -30,6 +30,10 @@ _API_BASE = "https://api.telegram.org"
 # Callable type: receives (chat_id, args) and returns a reply string or None.
 CommandHandler = Callable[[int, list[str]], Awaitable[str | None]]
 
+# Callable type for inline keyboard callbacks.
+# Receives (chat_id, callback_data, callback_query_id) and returns a reply or None.
+CallbackHandler = Callable[[int, str, str], Awaitable[str | None]]
+
 
 class TelegramCommandHandler:
     """Inbound Telegram command handler.
@@ -58,6 +62,7 @@ class TelegramCommandHandler:
         self._enabled = bool(bot_token)
         self._offset: int = 0
         self._handlers: dict[str, CommandHandler] = {}
+        self._callback_handlers: dict[str, CallbackHandler] = {}
 
         if not self._enabled:
             log.info("telegram_commands_disabled", reason="missing bot_token")
@@ -77,6 +82,53 @@ class TelegramCommandHandler:
         """
         self._handlers[command.lstrip("/")] = handler
         log.debug("telegram_command_registered", command=command)
+
+    def register_callback(self, data: str, handler: CallbackHandler) -> None:
+        """Register *handler* for an inline keyboard callback with the given *data*.
+
+        When a user presses an inline button whose ``callback_data`` equals *data*,
+        *handler* is called with ``(chat_id, callback_data, callback_query_id)``.
+        Re-registering the same data string replaces the previous handler.
+        """
+        self._callback_handlers[data] = handler
+        log.debug("telegram_callback_registered", data=data)
+
+    def unregister_callback(self, data: str) -> None:
+        """Remove a previously registered callback handler (no-op if not found)."""
+        self._callback_handlers.pop(data, None)
+
+    async def send_inline_keyboard(
+        self,
+        chat_id: int,
+        text: str,
+        buttons: list[list[dict[str, str]]],
+    ) -> int | None:
+        """Send *text* with an inline keyboard to *chat_id*.
+
+        *buttons* is a list of rows; each row is a list of button dicts with
+        ``text`` and ``callback_data`` keys.  Returns the Telegram ``message_id``
+        of the sent message, or ``None`` on error.
+        """
+        if not self._enabled:
+            return None
+        url = f"{_API_BASE}/bot{self._token}/sendMessage"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    json={
+                        "chat_id": chat_id,
+                        "text": text,
+                        "reply_markup": {"inline_keyboard": buttons},
+                    },
+                    timeout=10.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data.get("result", {}).get("message_id")
+        except Exception as exc:
+            log.warning("telegram_send_inline_keyboard_error", chat_id=chat_id, error=str(exc))
+            return None
 
     async def run(self) -> None:
         """Long-polling loop. Runs until the task is cancelled."""
@@ -126,6 +178,10 @@ class TelegramCommandHandler:
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         """Parse a single update and dispatch if it's an authorized command."""
+        if callback_query := update.get("callback_query"):
+            await self._handle_callback_query(callback_query)
+            return
+
         message = update.get("message") or update.get("edited_message")
         if not message:
             return
@@ -185,6 +241,49 @@ class TelegramCommandHandler:
         if "@" in raw_command:
             raw_command = raw_command.split("@", 1)[0]
         return raw_command, parts[1:]
+
+    async def _handle_callback_query(self, callback_query: dict[str, Any]) -> None:
+        """Dispatch an inline keyboard callback query to its registered handler."""
+        callback_query_id: str = callback_query.get("id", "")
+        from_user: dict[str, Any] = callback_query.get("from") or {}
+        data: str = callback_query.get("data", "")
+        chat_id: int = (callback_query.get("message") or {}).get("chat", {}).get("id", 0)
+
+        if not self._is_authorized(from_user):
+            await self._answer_callback_query(callback_query_id)
+            return
+
+        handler = self._callback_handlers.get(data)
+        if handler is None:
+            await self._answer_callback_query(callback_query_id, "Action expired or unknown.")
+            return
+
+        log.info("telegram_callback_dispatched", data=data, chat_id=chat_id)
+        try:
+            reply = await handler(chat_id, data, callback_query_id)
+        except Exception as exc:
+            log.exception("telegram_callback_handler_error", data=data, error=str(exc))
+            await self._answer_callback_query(callback_query_id, f"Error: {exc}")
+            return
+
+        await self._answer_callback_query(callback_query_id)
+        if reply and chat_id:
+            await self._send_reply(chat_id, reply)
+
+    async def _answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        """Acknowledge a callback query (required by Telegram to dismiss the loading state)."""
+        if not self._enabled:
+            return
+        url = f"{_API_BASE}/bot{self._token}/answerCallbackQuery"
+        try:
+            async with httpx.AsyncClient() as client:
+                payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+                if text:
+                    payload["text"] = text
+                response = await client.post(url, json=payload, timeout=10.0)
+                response.raise_for_status()
+        except Exception as exc:
+            log.warning("telegram_answer_callback_error", error=str(exc))
 
     async def _send_reply(self, chat_id: int, text: str) -> None:
         """Send a plain-text reply to chat_id."""

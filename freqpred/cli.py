@@ -157,6 +157,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     import freqpred.alerts.models  # noqa: F401 — register RunStateRow
     from freqpred.alerts.command_handlers import register_system_commands
     from freqpred.alerts.metrics_handlers import register_metrics_commands
+    from freqpred.alerts.position_handlers import register_position_commands
     from freqpred.alerts.run_state import get_run_state
 
     log_buffer = _get_or_create_log_buffer()
@@ -169,6 +170,12 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         log_buffer=log_buffer,
     )
     register_metrics_commands(
+        cmd_handler=telegram_cmd_handler,
+        session_factory=session_factory,
+        config=config,
+        mode=mode,
+    )
+    register_position_commands(
         cmd_handler=telegram_cmd_handler,
         session_factory=session_factory,
         config=config,

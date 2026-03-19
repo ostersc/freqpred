@@ -213,6 +213,19 @@ Tabular responses use monospace code blocks. Rows are truncated at 4096 chars wi
 
 ---
 
+### Position management commands
+
+| Command | Description |
+|---|---|
+| `/forceexit <position_id>` | Force-close a specific open position immediately. Paper mode: closes at current mid price with `exit_reason=manual_telegram`. Live mode: requires inline keyboard confirmation, then closes the ledger record at current mid price. |
+| `/forceexit all` | Force-close all open positions. Always requires inline keyboard confirmation regardless of mode. |
+| `/fx <position_id>` | Alias for `/forceexit <position_id>`. |
+| `/delete <position_id>` | Hard-delete a paper position record from the database without placing an order. Requires inline keyboard confirmation. Rejected with an error message in live mode. |
+
+**Confirmation flow** — `/forceexit all`, `/forceexit <id>` in live mode, and `/delete <id>` in paper mode send an inline keyboard with **Confirm** and **Cancel** buttons before executing. If no button is pressed within 30 seconds the action is automatically cancelled and the bot sends a timeout notice. Pending confirmation state is stored in memory and is lost on process restart.
+
+---
+
 ### Registering custom handlers (for developers)
 
 ```python
