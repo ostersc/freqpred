@@ -9,7 +9,9 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -18,9 +20,29 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
+# alembic.ini lives at the project root (one level above this package directory).
+_ALEMBIC_INI = Path(__file__).parent.parent / "alembic.ini"
+
 
 class Base(DeclarativeBase):
     """Shared declarative base for all ORM models."""
+
+
+def run_migrations(database_url: str) -> None:
+    """Apply all pending Alembic migrations (upgrade head) at startup.
+
+    Uses the project's alembic.ini and env.py so the same migration logic
+    runs here as via ``uv run alembic upgrade head``. DATABASE_URL is set in
+    the environment so env.py can read it.
+
+    Safe to call on every startup — Alembic is a no-op when already up to date.
+    """
+    from alembic.config import Config as AlembicConfig
+    from alembic import command as alembic_command
+
+    os.environ.setdefault("DATABASE_URL", database_url)
+    cfg = AlembicConfig(str(_ALEMBIC_INI))
+    alembic_command.upgrade(cfg, "head")
 
 
 def make_engine(database_url: str):

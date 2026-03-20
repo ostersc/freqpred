@@ -57,6 +57,17 @@ class AlertDispatcher:
         )
         await self.send(msg)
 
+    async def exit_alert(self, position: Position, exit_reason: str) -> None:
+        pnl = position.pnl or 0.0
+        prefix = "WIN" if pnl >= 0 else "LOSS"
+        msg = (
+            f"{prefix} EXIT ({exit_reason}): {position.direction} position closed\n"
+            f"Market: {position.market_id}\n"
+            f"P&L: {pnl:+.4f}  |  Entry: {position.entry_price:.4f}  "
+            f"Exit: {position.exit_price:.4f}  |  {position.contracts} contracts"
+        )
+        await self.send(msg)
+
     async def circuit_breaker_alert(self, reason: str) -> None:
         msg = f"CIRCUIT BREAKER: {reason}. Trading halted."
         await self.send(msg)

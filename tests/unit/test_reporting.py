@@ -62,20 +62,26 @@ def _make_session(
     yesterday_pnl: float = 3.20,
     yesterday_llm_spend: float = 0.38,
     today_llm_spend: float = 0.05,
-    cb_events: int = 0,
+    llm_errors: int = 0,
+    backed_off_services: list = [],
 ) -> AsyncMock:
     """Return a mock AsyncSession with pre-configured execute responses."""
     session = AsyncMock()
 
-    # We need to sequence the execute() calls in the order generate_daily_digest makes them:
-    # 1. open positions (count, exposure)
-    # 2. yesterday pnl (scalar)
-    # 3. yesterday llm spend (scalar)
-    # 4. calibration (delegated to compute_calibration — mocked separately)
-    # 5. circuit breaker events (scalar)
+    # execute() calls in order:
+    # 1. open positions (count, exposure) → .one()
+    # 2. unrealized P&L rows → .all()
+    # 3. yesterday pnl (scalar) → .scalar_one()
+    # 4. yesterday llm spend (scalar) → .scalar_one()
+    # 5. LLM errors count (scalar) → .scalar_one()
+    # 6. fetcher backoff rows → .all()
+    # (calibration and today_llm_spend are patched separately)
 
     open_result = MagicMock()
     open_result.one.return_value = (open_count, total_exposure)
+
+    unrealized_result = MagicMock()
+    unrealized_result.all.return_value = []  # no open positions in unit tests
 
     pnl_result = MagicMock()
     pnl_result.scalar_one.return_value = yesterday_pnl
@@ -83,11 +89,14 @@ def _make_session(
     llm_spend_result = MagicMock()
     llm_spend_result.scalar_one.return_value = yesterday_llm_spend
 
-    cb_result = MagicMock()
-    cb_result.scalar_one.return_value = cb_events
+    llm_errors_result = MagicMock()
+    llm_errors_result.scalar_one.return_value = llm_errors
+
+    backoff_result = MagicMock()
+    backoff_result.all.return_value = backed_off_services
 
     session.execute = AsyncMock(
-        side_effect=[open_result, pnl_result, llm_spend_result, cb_result]
+        side_effect=[open_result, unrealized_result, pnl_result, llm_spend_result, llm_errors_result, backoff_result]
     )
     return session
 
@@ -150,7 +159,7 @@ async def test_digest_returns_llm_response_text() -> None:
     ):
         result = await generate_daily_digest(session, llm_client)
 
-    assert result == _FAKE_DIGEST
+    assert result == f"[PAPER MODE]\n{_FAKE_DIGEST}"
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +204,6 @@ async def test_digest_handles_zero_positions_gracefully() -> None:
         yesterday_pnl=0.0,
         yesterday_llm_spend=0.0,
         today_llm_spend=0.0,
-        cb_events=0,
     )
     llm_client = _make_llm_client()
 
@@ -214,5 +222,5 @@ async def test_digest_handles_zero_positions_gracefully() -> None:
     prompt: str = llm_client.complete.call_args.kwargs.get("prompt", "")
     # Prompt should reflect 0 open positions
     assert "Open positions: 0" in prompt
-    # Result is the mock response
-    assert result == _FAKE_DIGEST
+    # Result is the mode banner + mock response
+    assert result == f"[PAPER MODE]\n{_FAKE_DIGEST}"

@@ -67,6 +67,23 @@ def mock_quota(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def mock_backoff(monkeypatch):
+    """Patch backoff helpers so scheduler tests don't need a real DB session."""
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.tick_and_load",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.record_rate_limit",
+        AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.record_success",
+        AsyncMock(return_value=None),
+    )
+
+
 def _make_raw_doc(url: str = "https://example.com/article") -> RawDocument:
     return RawDocument(
         source_url=url,

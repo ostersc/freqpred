@@ -4,10 +4,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.markets.models import Market, Position, PositionRow
+from freqpred.markets.models import Market, MarketRow, Position, PositionRow
 from freqpred.signal.models import Signal
 
 
@@ -74,6 +74,22 @@ async def close_position(
     return _row_to_position(row)
 
 
+async def update_position_excursions(
+    session: AsyncSession,
+    position_id: str,
+    *,
+    mae: float,
+    mfe: float,
+) -> None:
+    """Update mae/mfe on an open position. Does not commit — caller decides."""
+    await session.execute(
+        update(PositionRow)
+        .where(PositionRow.id == uuid.UUID(position_id))
+        .values(mae=round(mae, 6), mfe=round(mfe, 6))
+    )
+    await session.commit()
+
+
 async def get_open_positions(session: AsyncSession) -> list[Position]:
     """Return all positions with status='open', ordered by entry_time desc."""
     result = await session.execute(
@@ -123,11 +139,59 @@ async def get_portfolio_summary(session: AsyncSession) -> dict:
     )
     all_time_pnl = float(all_time_result.scalar_one())
 
+    # Unrealized P&L, exposure breakdown, and MAE/MFE across all open positions.
+    # YES: contracts * (mid - entry_price)
+    # NO:  contracts * ((1 - mid) - entry_price)
+    open_rows_result = await session.execute(
+        select(
+            PositionRow.contracts,
+            PositionRow.entry_price,
+            PositionRow.direction,
+            PositionRow.mae,
+            PositionRow.mfe,
+            MarketRow.mid_price,
+        )
+        .join(MarketRow, PositionRow.market_id == MarketRow.id)
+        .where(PositionRow.status == "open")
+    )
+    unrealized_pnl = 0.0
+    long_exposure = 0.0
+    short_exposure = 0.0
+    mae_dollar_sum = 0.0
+    mfe_dollar_sum = 0.0
+    mae_contract_sum = 0
+    mfe_contract_sum = 0
+
+    for contracts, entry_price, direction, mae, mfe, mid_price in open_rows_result.all():
+        if direction == "YES":
+            unrealized_pnl += contracts * (mid_price - entry_price)
+            long_exposure += contracts * entry_price
+        else:
+            unrealized_pnl += contracts * ((1.0 - mid_price) - entry_price)
+            short_exposure += contracts * entry_price
+
+        if mae is not None:
+            mae_dollar_sum += mae * contracts
+            mae_contract_sum += contracts
+        if mfe is not None:
+            mfe_dollar_sum += mfe * contracts
+            mfe_contract_sum += contracts
+
+    net_exposure = long_exposure - short_exposure
+    portfolio_mae_pct = mae_dollar_sum / mae_contract_sum if mae_contract_sum > 0 else None
+    portfolio_mfe_pct = mfe_dollar_sum / mfe_contract_sum if mfe_contract_sum > 0 else None
+
     return {
         "open_count": open_count,
         "total_exposure_usd": total_exposure,
+        "net_exposure_usd": net_exposure,
         "daily_pnl_usd": daily_pnl,
         "all_time_pnl_usd": all_time_pnl,
+        "unrealized_pnl_usd": unrealized_pnl,
+        "portfolio_mae_usd": mae_dollar_sum if mae_contract_sum > 0 else None,
+        "portfolio_mfe_usd": mfe_dollar_sum if mfe_contract_sum > 0 else None,
+        "portfolio_mae_pct": portfolio_mae_pct,
+        "portfolio_mfe_pct": portfolio_mfe_pct,
     }
 
 
@@ -153,4 +217,6 @@ def _row_to_position(row: PositionRow) -> Position:
         resolution=row.resolution,
         pnl=row.pnl,
         pnl_pct=row.pnl_pct,
+        mae=row.mae,
+        mfe=row.mfe,
     )

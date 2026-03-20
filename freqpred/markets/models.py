@@ -135,6 +135,10 @@ class PositionRow(Base):
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Excursion tracking — signed price deltas (multiply by contracts for $ impact)
+    mae: Mapped[float | None] = mapped_column(Float, nullable=True)  # max adverse excursion
+    mfe: Mapped[float | None] = mapped_column(Float, nullable=True)  # max favorable excursion
+
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
@@ -305,3 +309,5 @@ class Position:
     resolution: int | None = None   # 1 = YES won, 0 = NO won
     pnl: float | None = None
     pnl_pct: float | None = None
+    mae: float | None = None  # max adverse excursion (signed price delta)
+    mfe: float | None = None  # max favorable excursion (signed price delta)

@@ -362,8 +362,14 @@ async def test_balance_zero_state():
         return_value={
             "open_count": 0,
             "total_exposure_usd": 0.0,
+            "net_exposure_usd": 0.0,
             "daily_pnl_usd": 0.0,
             "all_time_pnl_usd": 0.0,
+            "unrealized_pnl_usd": 0.0,
+            "portfolio_mae_usd": None,
+            "portfolio_mfe_usd": None,
+            "portfolio_mae_pct": None,
+            "portfolio_mfe_pct": None,
         },
     ):
         cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
@@ -387,8 +393,14 @@ async def test_balance_with_pnl():
         return_value={
             "open_count": 3,
             "total_exposure_usd": 48.60,
+            "net_exposure_usd": 30.00,
             "daily_pnl_usd": 0.48,
             "all_time_pnl_usd": 3.21,
+            "unrealized_pnl_usd": 1.05,
+            "portfolio_mae_usd": -3.50,
+            "portfolio_mfe_usd": 5.20,
+            "portfolio_mae_pct": -0.072,
+            "portfolio_mfe_pct": 0.107,
         },
     ):
         cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])

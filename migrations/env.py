@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -18,9 +17,6 @@ import freqpred.llm.models  # noqa: F401 — registers LLMQueryRow
 import freqpred.ingestion.models  # noqa: F401 — registers CatalystRunRow, CatalystQueryRow
 
 config = context.config
-
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
 

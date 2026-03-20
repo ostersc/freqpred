@@ -92,6 +92,29 @@ class ApiDailyCounterRow(Base):
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
+class FetcherRateLimitRow(Base):
+    """ORM model for the ``fetcher_rate_limits`` table.
+
+    Persists exponential backoff state per fetcher service across restarts.
+    Managed by backoff.py.
+
+    skip_cycles_remaining: how many more cycles to skip before retrying.
+    skip_cycles_next:       what to set skip_cycles_remaining to on the next
+                            rate-limit trip (doubles each time, capped at 32).
+    """
+
+    __tablename__ = "fetcher_rate_limits"
+
+    service: Mapped[str] = mapped_column(Text, primary_key=True)
+    skip_cycles_remaining: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skip_cycles_next: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    tripped_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses (domain models)
 # ---------------------------------------------------------------------------

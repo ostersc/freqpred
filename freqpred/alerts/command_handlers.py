@@ -239,6 +239,11 @@ def register_system_commands(
             edge_str = f"{pos.signal_edge:+.3f}" if pos.signal_edge is not None else "N/A"
             prob_str = f"{pos.signal_estimated_prob:.3f}" if pos.signal_estimated_prob is not None else "N/A"
 
+            def _excursion_str(delta: float | None, contracts: int) -> str:
+                if delta is None:
+                    return "N/A"
+                return f"{delta:+.4f}  (${delta * contracts:+.2f})"
+
             lines = [
                 f"Position: {pos.id}",
                 f"Market  : {_truncate(question, 60)}",
@@ -247,6 +252,8 @@ def register_system_commands(
                 f"Est. probability: {prob_str}",
                 f"Edge at entry   : {edge_str}",
                 f"Confidence      : {conf_str}",
+                f"MAE (worst seen): {_excursion_str(pos.mae, pos.contracts)}",
+                f"MFE (best seen) : {_excursion_str(pos.mfe, pos.contracts)}",
                 f"Status  : {pos.status}",
                 f"Time open: {time_open}",
             ]
@@ -266,6 +273,7 @@ def register_system_commands(
             return "No open positions."
 
         lines = ["Open positions:"]
+        total_unrealized = 0.0
         for pos, question, mid in rows:
             q = _truncate(question, 60)
             # Unrealized P&L estimate
@@ -273,11 +281,16 @@ def register_system_commands(
                 unreal_pnl = pos.contracts * (mid - pos.entry_price)
             else:
                 unreal_pnl = pos.contracts * ((1.0 - mid) - pos.entry_price)
+            total_unrealized += unreal_pnl
             prob_str = f"{pos.signal_estimated_prob:.3f}" if pos.signal_estimated_prob is not None else "N/A"
+            mae_str = f"{pos.mae:+.4f}" if pos.mae is not None else "—"
+            mfe_str = f"{pos.mfe:+.4f}" if pos.mfe is not None else "—"
             lines.append(
                 f"  [{pos.direction}] {q}\n"
-                f"    entry={pos.entry_price:.4f}  prob={prob_str}  unreal_pnl={unreal_pnl:+.4f}"
+                f"    entry={pos.entry_price:.4f}  prob={prob_str}  unreal_pnl=${unreal_pnl:+.2f}"
+                f"  mae={mae_str}  mfe={mfe_str}"
             )
+        lines.append(f"\nTotal unrealized P&L: ${total_unrealized:+.2f}")
         return _clip("\n".join(lines))
 
     # ------------------------------------------------------------------ #

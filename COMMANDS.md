@@ -81,6 +81,8 @@ uv run freqpred positions list --status closed --limit 100
 | `--status` | `all` | `open`, `closed`, or `all` |
 | `--limit` | `50` | Maximum rows to display |
 
+Columns include MAE and MFE (signed price deltas; multiply by contracts for dollar impact). These are populated for positions that have been monitored by the position monitor since entry.
+
 ---
 
 ### `positions resolve` — close a position against a market resolution
@@ -190,8 +192,8 @@ State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a 
 
 | Command | Description |
 |---|---|
-| `/status` | List all open positions: market question, direction, entry price, est. prob, unrealized P&L |
-| `/status <position_id>` | Detailed single-position view: confidence, edge at entry, time open |
+| `/status` | List all open positions: market question, direction, entry price, est. prob, unrealized P&L, MAE, MFE |
+| `/status <position_id>` | Detailed single-position view: confidence, edge at entry, MAE/MFE (with dollar value), time open |
 | `/count` | `Open: N / Max: M` |
 | `/trades [n]` | Last *n* resolved positions (default 10): market, exit reason, P&L, hold duration |
 | `/signals [n]` | Last *n* signals (default 10): market, our prob, market price, edge, direction |
@@ -205,7 +207,7 @@ State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a 
 | `/weekly [n]` | Table: week start \| trade count \| P&L $ \| P&L % — last *n* weeks (default 8) |
 | `/monthly [n]` | Table: month \| trade count \| P&L $ \| P&L % — last *n* months (default 6) |
 | `/stats` | All-time aggregate stats: total trades, P&L, win rate, best/worst trade, avg hold duration, breakdown by exit reason |
-| `/balance` | Portfolio snapshot: bankroll, all-time P&L, net value, open exposure ($ and %), today's P&L, open position count |
+| `/balance` | Portfolio snapshot: bankroll, all-time P&L, net value, gross/net exposure, unrealized P&L, today's P&L, open position count, contract-weighted portfolio MAE/MFE |
 | `/budget` | LLM cost breakdown: today vs daily cap (%), per-query-type breakdown, this week, this month, all-time |
 | `/calibration` | Brier score vs naive baseline, improvement, sample count, per-probability-bucket breakdown |
 | `/digest` | On-demand daily digest: Claude Haiku natural-language summary of open positions, P&L, LLM spend, and calibration |

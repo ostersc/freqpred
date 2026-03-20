@@ -10,29 +10,74 @@ import structlog
 from freqpred.config import load_config
 
 
-def _configure_logging(log_level: str) -> None:
-    """Set up structlog with stdlib integration at the given level."""
+def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int = 14) -> None:
+    """Set up structlog with stdlib integration at the given level.
+
+    Uses ProcessorFormatter so that console output gets colors while the
+    rolling file gets plain text.  Creates the log directory automatically.
+    """
+    import logging.handlers
+    import sys
+    from pathlib import Path
+
     level = getattr(logging, log_level)
-    logging.basicConfig(
-        format="%(message)s",
-        level=level,
-    )
-    # httpx/httpcore log every request at INFO — suppress unless debugging
-    if level > logging.DEBUG:
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # Shared pre-processors applied before the final renderer.
+    # These run for both structlog-native records and foreign stdlib records.
+    shared_processors: list[structlog.types.Processor] = [
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
+        structlog.processors.StackInfoRenderer(),
+    ]
+
     structlog.configure(
         processors=[
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.add_logger_name,
-            structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.dev.ConsoleRenderer(),
+            *shared_processors,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.make_filtering_bound_logger(level),
         cache_logger_on_first_use=True,
     )
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+
+    # Console handler — colours on
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            foreign_pre_chain=shared_processors,
+            processor=structlog.dev.ConsoleRenderer(colors=True),
+        )
+    )
+    root.addHandler(console_handler)
+
+    # Rolling file handler — plain text, one file per day, keep N days
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.TimedRotatingFileHandler(
+            log_path,
+            when="midnight",
+            backupCount=log_backup_days,
+            encoding="utf-8",
+            utc=True,
+        )
+        file_handler.setFormatter(
+            structlog.stdlib.ProcessorFormatter(
+                foreign_pre_chain=shared_processors,
+                processor=structlog.dev.ConsoleRenderer(colors=False),
+            )
+        )
+        root.addHandler(file_handler)
+
+    # Suppress chatty libraries unless debugging
+    if level > logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 # Module-level log buffer shared between _configure_logging and _run_main.
@@ -60,7 +105,7 @@ def main(ctx: click.Context) -> None:
     """freqpred — LLM-driven prediction market trading framework."""
     ctx.ensure_object(dict)
     config = load_config()
-    _configure_logging(config.log_level)
+    _configure_logging(config.log_level, log_file=config.log_file, log_backup_days=config.log_backup_days)
     ctx.obj["config"] = config
 
 
@@ -77,6 +122,10 @@ def main(ctx: click.Context) -> None:
 def run(ctx: click.Context, strategy: str, mode: str) -> None:
     """Start market watcher, ingestion scheduler, and signal pipeline."""
     config = ctx.obj["config"]
+    if config.database.url:
+        from freqpred.db import run_migrations
+        click.echo("Applying pending migrations...")
+        run_migrations(config.database.url)
     try:
         asyncio.run(_run_main(config, strategy, mode))
     except KeyboardInterrupt:
@@ -193,6 +242,13 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             mode="paper",
         )
 
+    from freqpred.trading.position_monitor import PositionMonitor
+    position_monitor = PositionMonitor(
+        session_factory=session_factory,
+        strategies={strategy_name: strategy},
+        alert_dispatcher=alert_dispatcher,
+    )
+
     async def signal_loop() -> None:
         import structlog
         log = structlog.get_logger("freqpred.cli.signal_loop")
@@ -264,7 +320,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                             f"direction={signal.direction} "
                             f"signal_id={signal.id}"
                         )
-                        if signal.edge >= strategy.config.min_edge and signal.direction != "SKIP":
+                        if mode == "signal-only" and signal.edge >= strategy.config.min_edge and signal.direction != "SKIP":
                             await alert_dispatcher.signal_alert(signal, market)
                         if (
                             order_manager is not None
@@ -322,8 +378,24 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         )
 
         tasks.append(asyncio.create_task(signal_loop(), name="signal_loop"))
+        tasks.append(asyncio.create_task(position_monitor.run(), name="position_monitor"))
         tasks.append(
             asyncio.create_task(telegram_cmd_handler.run(), name="telegram_commands")
+        )
+
+        from freqpred.metrics.reporting import run_digest_scheduler
+        tasks.append(
+            asyncio.create_task(
+                run_digest_scheduler(
+                    session_factory=session_factory,
+                    llm_client=llm_client,
+                    alert_dispatcher=alert_dispatcher,
+                    digest_time=config.alerts.digest_time,
+                    digest_timezone=config.alerts.digest_timezone,
+                    trading_mode=mode,
+                ),
+                name="digest_scheduler",
+            )
         )
 
         click.echo(f"Running {len(tasks)} task(s). Press Ctrl+C to stop.")
@@ -809,19 +881,21 @@ async def _positions_list(config: object, status: str, limit: int) -> None:
         return
 
     header = (
-        f"{'ID':<38} {'MARKET':<32} {'STRATEGY':<20} {'DIR':<4} {'CTRCTS':>6} "
-        f"{'ENTRY':>6} {'EDGE':>6} {'STATUS':<7} {'MODE':<6} {'PNL':>8}"
+        f"{'ID':<38} {'MARKET':<28} {'STRATEGY':<20} {'DIR':<4} {'CTRCTS':>6} "
+        f"{'ENTRY':>6} {'EDGE':>6} {'STATUS':<7} {'MODE':<6} {'PNL':>8} {'MAE':>7} {'MFE':>7}"
     )
     click.echo(header)
     click.echo("-" * len(header))
     for r in rows:
         pnl_str = f"{r.pnl:+.4f}" if r.pnl is not None else "      -"
         edge_str = f"{r.signal_edge:+.3f}" if r.signal_edge is not None else "     -"
+        mae_str = f"{r.mae:+.4f}" if r.mae is not None else "      -"
+        mfe_str = f"{r.mfe:+.4f}" if r.mfe is not None else "      -"
         strategy_str = (r.strategy_name or "")[:20]
         click.echo(
-            f"{str(r.id):<38} {r.market_id:<32} {strategy_str:<20} {r.direction:<4} "
+            f"{str(r.id):<38} {r.market_id:<28} {strategy_str:<20} {r.direction:<4} "
             f"{r.contracts:>6} {r.entry_price:>6.3f} {edge_str:>6} {r.status:<7} "
-            f"{r.mode:<6} {pnl_str:>8}"
+            f"{r.mode:<6} {pnl_str:>8} {mae_str:>7} {mfe_str:>7}"
         )
     click.echo(f"\nTotal: {len(rows)} position(s)")
 
@@ -972,14 +1046,21 @@ def report() -> None:
     default=False,
     help="Send digest via Telegram/Discord alert (requires T23).",
 )
+@click.option(
+    "--mode",
+    default="paper",
+    show_default=True,
+    type=click.Choice(["paper", "live", "signal-only"]),
+    help="Trading mode to display in digest.",
+)
 @click.pass_context
-def report_digest(ctx: click.Context, send: bool) -> None:
+def report_digest(ctx: click.Context, send: bool, mode: str) -> None:
     """Generate and print a daily digest summary."""
     config = ctx.obj["config"]
-    asyncio.run(_report_digest(config, send=send))
+    asyncio.run(_report_digest(config, send=send, trading_mode=mode))
 
 
-async def _report_digest(config: object, *, send: bool) -> None:
+async def _report_digest(config: object, *, send: bool, trading_mode: str = "paper") -> None:
     import anthropic
 
     import freqpred.ingestion.models  # noqa: F401
@@ -1009,7 +1090,7 @@ async def _report_digest(config: object, *, send: bool) -> None:
 
     try:
         async with session_factory() as session:
-            digest = await generate_daily_digest(session, llm_client)
+            digest = await generate_daily_digest(session, llm_client, trading_mode=trading_mode)
     finally:
         await engine.dispose()
 
@@ -1095,7 +1176,6 @@ async def _dashboard(config: object, host: str, port: int) -> None:
 
     app = create_app(
         session_factory=session_factory,
-        redis_url=config.redis.url or None,
         daily_cap_usd=config.risk.max_daily_llm_spend_usd,
     )
 

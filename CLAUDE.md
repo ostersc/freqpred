@@ -147,6 +147,8 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 - Every new module gets a corresponding test file. Aim for coverage on all public functions.
 - LLM calls in tests should always be mocked — never make real API calls in tests.
 
+**There is no such thing as a pre-existing failure or a flaky test that can be ignored.** If any test is failing — for any reason, in any file — it must be fixed before the task is considered done. Never declare work complete while tests are red. Never attribute a failure to "pre-existing" state and move on; investigate and fix it.
+
 ---
 
 ## Database conventions

@@ -18,6 +18,7 @@ from freqpred.trading.ledger import (
     get_open_positions,
     get_portfolio_summary,
     open_position,
+    update_position_excursions,
 )
 
 # Ensure ORM relationships resolve
@@ -245,12 +246,19 @@ async def test_get_open_positions_excludes_closed() -> None:
 @pytest.mark.asyncio
 async def test_portfolio_summary_totals() -> None:
     """Two open positions: 100 @ $0.54 and 50 @ $0.60 → exposure = $84."""
-    # execute() is called 4 times: open_count, exposure, daily_pnl (today_start check), all_time
-    # get_daily_pnl calls execute once; get_portfolio_summary calls execute 3 times + delegates daily_pnl
-
     call_returns = [2, 84.0, 5.0, 120.0]  # open_count, exposure, daily_pnl, all_time_pnl
 
+    # The 5th execute call fetches open positions for unrealized P&L + excursions; return empty rows.
+    open_rows_mock = MagicMock()
+    open_rows_mock.all.return_value = []
+
+    call_count = 0
+
     async def _execute(stmt: object) -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 5:
+            return open_rows_mock
         result = MagicMock()
         result.scalar_one.return_value = call_returns.pop(0)
         return result
@@ -264,6 +272,70 @@ async def test_portfolio_summary_totals() -> None:
     assert summary["total_exposure_usd"] == pytest.approx(84.0)
     assert summary["daily_pnl_usd"] == pytest.approx(5.0)
     assert summary["all_time_pnl_usd"] == pytest.approx(120.0)
+    assert summary["unrealized_pnl_usd"] == pytest.approx(0.0)
+    assert summary["net_exposure_usd"] == pytest.approx(0.0)
+    assert summary["portfolio_mae_usd"] is None
+    assert summary["portfolio_mfe_usd"] is None
+
+
+@pytest.mark.asyncio
+async def test_portfolio_summary_excursions_weighted() -> None:
+    """MAE/MFE are contract-weighted: 100-contract position dominates a 1-contract position."""
+    call_returns = [2, 101.0, 0.0, 0.0]
+
+    # 100 YES contracts @ 0.40 with mae=-0.08, mfe=+0.12
+    # 1   YES contract  @ 0.50 with mae=-0.20, mfe=+0.30
+    open_rows_mock = MagicMock()
+    open_rows_mock.all.return_value = [
+        (100, 0.40, "YES", -0.08, 0.12, 0.44),
+        (1,   0.50, "YES", -0.20, 0.30, 0.55),
+    ]
+
+    call_count = 0
+
+    async def _execute(stmt: object) -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 5:
+            return open_rows_mock
+        result = MagicMock()
+        result.scalar_one.return_value = call_returns.pop(0)
+        return result
+
+    session = MagicMock()
+    session.execute = _execute
+
+    summary = await get_portfolio_summary(session)
+
+    # Portfolio MAE $ = 100*(-0.08) + 1*(-0.20) = -8.20
+    # Portfolio MAE % = -8.20 / 101 ≈ -0.08119
+    assert summary["portfolio_mae_usd"] == pytest.approx(-8.20, abs=1e-4)
+    assert summary["portfolio_mae_pct"] == pytest.approx(-8.20 / 101, rel=1e-4)
+
+    # Portfolio MFE $ = 100*(0.12) + 1*(0.30) = 12.30
+    assert summary["portfolio_mfe_usd"] == pytest.approx(12.30, abs=1e-4)
+    assert summary["portfolio_mfe_pct"] == pytest.approx(12.30 / 101, rel=1e-4)
+
+    # Net exposure: both YES → 100*0.40 + 1*0.50 = 40.50
+    assert summary["net_exposure_usd"] == pytest.approx(40.50, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# update_position_excursions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_position_excursions() -> None:
+    pid = uuid.uuid4()
+    session = MagicMock()
+    session.execute = AsyncMock()
+    session.commit = AsyncMock()
+
+    await update_position_excursions(session, str(pid), mae=-0.08, mfe=0.12)
+
+    session.execute.assert_awaited_once()
+    session.commit.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

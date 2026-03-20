@@ -430,16 +430,31 @@ def register_metrics_commands(
         exposure_pct = exposure / bankroll if bankroll > 0 else 0.0
         daily_pnl = summary["daily_pnl_usd"]
         open_count = summary["open_count"]
+        unrealized_pnl = summary["unrealized_pnl_usd"]
+        net_exposure = summary["net_exposure_usd"]
+        portfolio_mae_usd = summary["portfolio_mae_usd"]
+        portfolio_mfe_usd = summary["portfolio_mfe_usd"]
+        portfolio_mae_pct = summary["portfolio_mae_pct"]
+        portfolio_mfe_pct = summary["portfolio_mfe_pct"]
+
+        def _excursion_line(label: str, usd: float | None, pct: float | None) -> str:
+            if usd is None:
+                return f"  {label}: —"
+            return f"  {label}: ${usd:+.2f}  ({pct:+.4f} wtd avg)"
 
         mode_label = f"({mode} mode)"
         lines = [
             f"Balance snapshot {mode_label}:",
             f"  Bankroll      : ${bankroll:,.2f}",
-            f"  All-time P&L  : {all_time_pnl:+.2f}",
+            f"  All-time P&L  : ${all_time_pnl:+.2f}",
             f"  Net value     : ${net_value:,.2f}",
-            f"  Open exposure : ${exposure:.2f}  ({exposure_pct:.2%} of bankroll)",
-            f"  Today's P&L   : {daily_pnl:+.2f}",
+            f"  Gross exposure: ${exposure:.2f}  ({exposure_pct:.2%} of bankroll)",
+            f"  Net exposure  : ${net_exposure:+.2f}",
+            f"  Unrealized P&L: ${unrealized_pnl:+.2f}",
+            f"  Today's P&L   : ${daily_pnl:+.2f}",
             f"  Open positions: {open_count}",
+            _excursion_line("Portfolio MAE ", portfolio_mae_usd, portfolio_mae_pct),
+            _excursion_line("Portfolio MFE ", portfolio_mfe_usd, portfolio_mfe_pct),
         ]
         return "\n".join(lines)
 
@@ -562,7 +577,7 @@ def register_metrics_commands(
             return "Digest unavailable: LLM client not configured."
 
         async with session_factory() as session:
-            return await generate_daily_digest(session, llm_client)
+            return await generate_daily_digest(session, llm_client, trading_mode=mode)
 
     # ------------------------------------------------------------------ #
     # Register all handlers

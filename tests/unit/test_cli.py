@@ -25,6 +25,8 @@ def _make_config(
 ) -> MagicMock:
     cfg = MagicMock()
     cfg.log_level = "INFO"
+    cfg.log_file = ""        # disable file logging in tests
+    cfg.log_backup_days = 14
     cfg.database.url = database_url
     cfg.anthropic.api_key = anthropic_api_key
     cfg.kalshi.api_key = ""
@@ -179,6 +181,7 @@ class TestRunCommand:
         config = _make_config()
 
         with patch("freqpred.cli.load_config", return_value=config), \
+             patch("freqpred.db.run_migrations"), \
              patch("freqpred.cli._run_main", new_callable=AsyncMock, side_effect=KeyboardInterrupt):
             result = runner.invoke(main, ["run", "--strategy", "ConservativeDefault", "--mode", "signal-only"])
         # KeyboardInterrupt is caught; exit code should be 0
@@ -223,6 +226,7 @@ class TestRunCommand:
             captured_mode.append(mode)
 
         with patch("freqpred.cli.load_config", return_value=config), \
+             patch("freqpred.db.run_migrations"), \
              patch("freqpred.cli._run_main", new=capture):
             runner.invoke(main, ["run", "--strategy", "ConservativeDefault"])
 

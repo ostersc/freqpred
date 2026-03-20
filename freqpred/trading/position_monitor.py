@@ -22,6 +22,7 @@ from freqpred.markets.models import Market, MarketRow, Position
 from freqpred.trading import ledger
 
 if TYPE_CHECKING:
+    from freqpred.alerts.dispatcher import AlertDispatcher
     from freqpred.signal.models import Signal
     from freqpred.strategy.base import IPredictionStrategy
     from freqpred.strategy.config import StrategyConfig
@@ -48,12 +49,17 @@ class PositionMonitor:
         session_factory: async_sessionmaker[AsyncSession],
         strategies: dict[str, IPredictionStrategy],
         poll_interval_seconds: float = 60.0,
+        alert_dispatcher: "AlertDispatcher | None" = None,
     ) -> None:
         self._session_factory = session_factory
         self._strategies = strategies
         self._poll_interval = poll_interval_seconds
-        # position_id → best mid_price seen since entry
+        self._alert_dispatcher = alert_dispatcher
+        # position_id → best mid_price seen since entry (used by trailing stop)
         self._peak_prices: dict[str, float] = {}
+        # position_id → best/worst effective P&L delta seen (for MAE/MFE)
+        self._peak_deltas: dict[str, float] = {}    # MFE
+        self._trough_deltas: dict[str, float] = {}  # MAE
 
     # ------------------------------------------------------------------
     # Public API
@@ -132,8 +138,9 @@ class PositionMonitor:
                 fresh_signal=fresh_signal,
             )
             if result is None:
-                # No exit — update peak price tracker
+                # No exit — update peak price tracker (trailing stop) + MAE/MFE
                 self._update_peak(position, current_price)
+                await self._update_excursions(position, current_price)
                 continue
 
             exit_reason, exit_price = result
@@ -144,8 +151,10 @@ class PositionMonitor:
                     exit_price=exit_price,
                     exit_reason=exit_reason,
                 )
-            # Clean up peak price tracker
+            # Clean up trackers
             self._peak_prices.pop(position.id, None)
+            self._peak_deltas.pop(position.id, None)
+            self._trough_deltas.pop(position.id, None)
 
             logger.info(
                 "position_monitor.exit_triggered",
@@ -159,6 +168,11 @@ class PositionMonitor:
                 pnl=closed_position.pnl,
                 mode=position.mode,
             )
+            if self._alert_dispatcher is not None:
+                try:
+                    await self._alert_dispatcher.exit_alert(closed_position, exit_reason)
+                except Exception:
+                    logger.exception("position_monitor.alert_failed", position_id=position.id)
             closed.append(closed_position)
 
         return closed
@@ -232,6 +246,34 @@ class PositionMonitor:
         peak = self._peak_prices.get(position.id, position.entry_price)
         if current_price > peak:
             self._peak_prices[position.id] = current_price
+
+    async def _update_excursions(self, position: Position, current_price: float) -> None:
+        """Update MAE/MFE for a position and persist to DB when a new extreme is hit."""
+        if position.direction == "YES":
+            delta = current_price - position.entry_price
+        else:
+            delta = (1.0 - current_price) - position.entry_price
+
+        is_first_observation = position.id not in self._peak_deltas
+        prev_best = self._peak_deltas.get(position.id, position.mfe if position.mfe is not None else delta)
+        prev_worst = self._trough_deltas.get(position.id, position.mae if position.mae is not None else delta)
+
+        new_best = max(prev_best, delta)
+        new_worst = min(prev_worst, delta)
+
+        # Write if a new extreme is found, or on first observation when DB has no value yet
+        changed = new_best > prev_best or new_worst < prev_worst or (is_first_observation and position.mae is None)
+        self._peak_deltas[position.id] = new_best
+        self._trough_deltas[position.id] = new_worst
+
+        if changed:
+            async with self._session_factory() as session:
+                await ledger.update_position_excursions(
+                    session,
+                    position.id,
+                    mae=new_worst,
+                    mfe=new_best,
+                )
 
 
 # ---------------------------------------------------------------------------

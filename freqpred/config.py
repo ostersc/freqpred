@@ -105,10 +105,14 @@ class AlertsConfig(BaseModel):
     telegram_chat_id: str = Field(default="")
     telegram_authorized_users: list[str] = Field(default_factory=list)
     discord_webhook_url: str = Field(default="")
+    digest_time: str = Field(default="07:00", description="HH:MM time to send the daily digest")
+    digest_timezone: str = Field(default="America/New_York", description="IANA timezone for digest_time")
 
 
 class Settings(BaseModel):
     log_level: str = Field(default="INFO")
+    log_file: str = Field(default="logs/freqpred.log", description="Path to rolling log file. Set to '' to disable.")
+    log_backup_days: int = Field(default=14, description="Number of daily log files to retain.")
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     kalshi: KalshiConfig = Field(default_factory=KalshiConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)

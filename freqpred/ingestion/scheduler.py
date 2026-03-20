@@ -25,6 +25,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from freqpred.ingestion.backoff import record_rate_limit, record_success, tick_and_load
 from freqpred.ingestion.cursors import get_cursor, set_cursor
 from freqpred.ingestion.fetchers import gdelt as gdelt_fetcher
 from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
@@ -158,13 +159,21 @@ async def run_cycle(
     now = datetime.now(UTC)
     newsapi_from = now - timedelta(days=_NEWSAPI_LOOKBACK_DAYS)
 
-    # Circuit-breaker flags — set to True when a plan/quota limit is hit so we
-    # don't log the same error once per query for the rest of the cycle.
-    tavily_limit_hit = False
-    newsapi_limit_hit = False
-    newsapi_limit_logged = False
-    gdelt_limit_hit = False
-    truthsocial_login_failed = False
+    # Load persistent backoff state from DB (ticks down all counters by 1).
+    # Returns {service: is_backed_off} for services with existing rows.
+    backoff_state = await tick_and_load(session)
+
+    # In-memory flags for within-cycle short-circuit. Initialized from DB
+    # state so a restart respects backoff that was set in a previous cycle.
+    tavily_limit_hit: bool = backoff_state.get("tavily", False)
+    newsapi_limit_hit: bool = backoff_state.get("newsapi", False)
+    newsapi_limit_logged: bool = newsapi_limit_hit
+    gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
+    truthsocial_login_failed: bool = backoff_state.get("truthsocial", False)
+
+    # Track which services had a successful call this cycle so we only write
+    # record_success once per service (it's idempotent but avoids extra DB hits).
+    success_recorded: set[str] = set()
 
     # Build Truth Social Api object once for the cycle (avoids re-auth per call).
     ts_api: object | None = None
@@ -207,18 +216,32 @@ async def run_cycle(
                         total_error += 1
                 total_fetched += len(docs)
                 await set_cursor(session, _TS_ACCOUNT_FETCHER, ts_username, now)
+                if "truthsocial" not in success_recorded:
+                    await record_success(session, "truthsocial")
+                    success_recorded.add("truthsocial")
                 log.info(
                     "scheduler.truthsocial_account_fetched",
                     username=ts_username,
                     docs_fetched=len(docs),
                 )
-            except TruthSocialLoginError:
+            except TruthSocialLoginError as exc:
                 truthsocial_login_failed = True
-                log.error(
-                    "scheduler.truthsocial_login_failed",
-                    username=ts_username,
-                    exc_info=True,
-                )
+                skip_cycles = await record_rate_limit(session, "truthsocial")
+                from freqpred.ingestion.fetchers.truthsocial import TruthSocialBlockedError  # noqa: PLC0415
+                if isinstance(exc, TruthSocialBlockedError):
+                    log.warning(
+                        "scheduler.truthsocial_cloudflare_blocked",
+                        username=ts_username,
+                        skip_cycles=skip_cycles,
+                        hint="IP temporarily banned by Cloudflare (error 1015); backing off",
+                    )
+                else:
+                    log.error(
+                        "scheduler.truthsocial_login_failed",
+                        username=ts_username,
+                        skip_cycles=skip_cycles,
+                        exc_info=True,
+                    )
             except Exception:
                 log.warning(
                     "scheduler.fetcher_error",
@@ -299,25 +322,30 @@ async def run_cycle(
                 if isinstance(result, BaseException):
                     if name == "tavily" and isinstance(result, (ForbiddenError, UsageLimitExceededError)):
                         tavily_limit_hit = True
-                        log.warning("scheduler.tavily_limit_reached", reason=str(result))
+                        skip_cycles = await record_rate_limit(session, "tavily")
+                        log.warning("scheduler.tavily_limit_reached", reason=str(result), skip_cycles=skip_cycles)
                     elif name == "newsapi" and isinstance(result, NewsAPIRateLimitError):
                         newsapi_limit_hit = True
                         newsapi_limit_logged = True
-                        log.warning("scheduler.newsapi_rate_limited", reason=str(result))
+                        skip_cycles = await record_rate_limit(session, "newsapi")
+                        log.warning("scheduler.newsapi_rate_limited", reason=str(result), skip_cycles=skip_cycles)
                     elif name == "gdelt" and isinstance(result, GDELTRateLimitError):
                         gdelt_limit_hit = True
-                        log.warning("scheduler.gdelt_rate_limited", reason=str(result))
+                        skip_cycles = await record_rate_limit(session, "gdelt")
+                        log.warning("scheduler.gdelt_rate_limited", reason=str(result), skip_cycles=skip_cycles)
                     elif name == "truthsocial_search" and isinstance(result, TruthSocialLoginError):
                         truthsocial_login_failed = True
                         from freqpred.ingestion.fetchers.truthsocial import TruthSocialBlockedError  # noqa: PLC0415
+                        skip_cycles = await record_rate_limit(session, "truthsocial")
                         if isinstance(result, TruthSocialBlockedError):
                             log.warning(
                                 "scheduler.truthsocial_cloudflare_blocked",
                                 query=query_text,
-                                hint="IP temporarily banned by Cloudflare (error 1015); skipping remaining Truth Social calls this cycle — will retry next cycle",
+                                skip_cycles=skip_cycles,
+                                hint="IP temporarily banned by Cloudflare (error 1015); backing off",
                             )
                         else:
-                            log.error("scheduler.truthsocial_login_failed", query=query_text, error=str(result))
+                            log.error("scheduler.truthsocial_login_failed", query=query_text, skip_cycles=skip_cycles, error=str(result))
                     else:
                         log.warning(
                             "scheduler.fetcher_error",
@@ -330,6 +358,12 @@ async def run_cycle(
                     raw_docs.extend(result)
                     if name == "newsapi" and newsapi_fetched:
                         await increment_daily_count(session, "newsapi", now.date())
+                    # Clear backoff on first success this cycle for this service.
+                    # Map truthsocial_search → truthsocial to match the service key.
+                    svc = "truthsocial" if name == "truthsocial_search" else name
+                    if svc not in success_recorded:
+                        await record_success(session, svc)
+                        success_recorded.add(svc)
 
             market_fetched += len(raw_docs)
 
