@@ -283,8 +283,9 @@ async def test_fetch_returns_empty_on_http_error():
 
 
 @pytest.mark.asyncio
-async def test_fetch_returns_empty_on_429():
+async def test_fetch_raises_on_429():
     import httpx as _httpx
+    from freqpred.ingestion.fetchers.gdelt import GDELTRateLimitError
 
     mock_response = MagicMock()
     mock_response.status_code = 429
@@ -298,9 +299,8 @@ async def test_fetch_returns_empty_on_429():
     client_instance.get = AsyncMock(return_value=resp)
 
     with patch("freqpred.ingestion.fetchers.gdelt.httpx.AsyncClient", return_value=client_instance):
-        docs = await fetch(_QUERY)
-
-    assert docs == []
+        with pytest.raises(GDELTRateLimitError):
+            await fetch(_QUERY)
 
 
 @pytest.mark.asyncio

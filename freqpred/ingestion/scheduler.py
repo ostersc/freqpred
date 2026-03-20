@@ -17,6 +17,7 @@ Public API:
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -227,6 +228,7 @@ async def run_cycle(
                 )
 
     for market_id, category, query_texts in market_queries:
+        market_start = time.monotonic()
         market_fetched = 0
         market_stored = 0
         market_error = 0
@@ -355,6 +357,7 @@ async def run_cycle(
         log.info(
             "scheduler.market_cycle_complete",
             market_id=market_id,
+            elapsed_s=round(time.monotonic() - market_start, 2),
             queries=len(query_texts),
             docs_fetched=market_fetched,
             docs_stored=market_stored,

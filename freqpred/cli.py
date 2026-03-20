@@ -171,6 +171,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         session_factory=session_factory,
         config=config,
         mode=mode,
+        llm_client=llm_client,
     )
     register_position_commands(
         cmd_handler=telegram_cmd_handler,

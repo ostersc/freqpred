@@ -208,6 +208,7 @@ State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a 
 | `/balance` | Portfolio snapshot: bankroll, all-time P&L, net value, open exposure ($ and %), today's P&L, open position count |
 | `/budget` | LLM cost breakdown: today vs daily cap (%), per-query-type breakdown, this week, this month, all-time |
 | `/calibration` | Brier score vs naive baseline, improvement, sample count, per-probability-bucket breakdown |
+| `/digest` | On-demand daily digest: Claude Haiku natural-language summary of open positions, P&L, LLM spend, and calibration |
 
 Tabular responses use monospace code blocks. Rows are truncated at 4096 chars with `... and N more` footer.
 

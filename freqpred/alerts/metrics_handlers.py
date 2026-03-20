@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
     from freqpred.alerts.telegram_commands import TelegramCommandHandler
     from freqpred.config import Settings
+    from freqpred.llm.client import LLMClient
 
 log = structlog.get_logger(__name__)
 
@@ -93,6 +94,7 @@ def register_metrics_commands(
     session_factory: "async_sessionmaker[AsyncSession]",
     config: "Settings",
     mode: str,
+    llm_client: "LLMClient | None" = None,
 ) -> None:
     """Register all T29 metrics commands onto *cmd_handler*."""
 
@@ -550,6 +552,19 @@ def register_metrics_commands(
         return _clip("\n".join(header_lines) + "\n" + table_block)
 
     # ------------------------------------------------------------------ #
+    # /digest  — on-demand daily digest via Claude Haiku                  #
+    # ------------------------------------------------------------------ #
+
+    async def handle_digest(chat_id: int, args: list[str]) -> str:
+        from freqpred.metrics.reporting import generate_daily_digest
+
+        if llm_client is None:
+            return "Digest unavailable: LLM client not configured."
+
+        async with session_factory() as session:
+            return await generate_daily_digest(session, llm_client)
+
+    # ------------------------------------------------------------------ #
     # Register all handlers
     # ------------------------------------------------------------------ #
 
@@ -561,3 +576,4 @@ def register_metrics_commands(
     cmd_handler.register("balance", handle_balance)
     cmd_handler.register("budget", handle_budget)
     cmd_handler.register("calibration", handle_calibration)
+    cmd_handler.register("digest", handle_digest)
