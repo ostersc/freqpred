@@ -467,11 +467,12 @@ class TestSignalPipelineAnalyze:
         session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_edge_computed_correctly(self) -> None:
+    async def test_edge_computed_correctly_yes(self) -> None:
+        """YES signal: edge = estimated_prob - mid (positive when underpriced)."""
         doc = _make_document()
         pipeline, _, _ = self._make_pipeline(
             docs=[doc],
-            llm_content=_valid_llm_json(probability=0.70),
+            llm_content=_valid_llm_json(probability=0.70, direction="YES"),
             current_signal_hash=None,
         )
 
@@ -480,6 +481,23 @@ class TestSignalPipelineAnalyze:
 
         assert result is not None
         assert abs(result.edge - 0.20) < 1e-6
+
+    @pytest.mark.asyncio
+    async def test_edge_computed_correctly_no(self) -> None:
+        """NO signal: edge = mid - estimated_prob (positive when NO is underpriced)."""
+        doc = _make_document()
+        pipeline, _, _ = self._make_pipeline(
+            docs=[doc],
+            llm_content=_valid_llm_json(probability=0.01, direction="NO"),
+            current_signal_hash=None,
+        )
+
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
+            result = await pipeline.analyze(_make_market(mid_price=0.045))
+
+        assert result is not None
+        # edge = 0.045 - 0.01 = 0.035 (positive — there IS edge on the NO side)
+        assert abs(result.edge - 0.035) < 1e-6
 
     @pytest.mark.asyncio
     async def test_no_docs_returns_none(self) -> None:

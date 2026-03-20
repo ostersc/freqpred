@@ -53,9 +53,20 @@ class RedditConfig(BaseModel):
     user_agent: str = Field(default="freqpred/0.1")
 
 
+class TruthSocialConfig(BaseModel):
+    username: str = Field(default="")
+    password: str = Field(default="")
+
+
+class TruthSocialIngestionConfig(BaseModel):
+    enabled: bool = Field(default=False)
+    accounts: list[str] = Field(default_factory=list)
+
+
 class IngestionConfig(BaseModel):
     schedule_interval_seconds: int = Field(default=1800)
     categories: list[str] = Field(default_factory=lambda: ["politics", "technology"])
+    truthsocial: TruthSocialIngestionConfig = Field(default_factory=TruthSocialIngestionConfig)
 
 
 class SignalConfig(BaseModel):
@@ -109,6 +120,7 @@ class Settings(BaseModel):
     tavily: TavilyConfig = Field(default_factory=TavilyConfig)
     newsapi: NewsAPIConfig = Field(default_factory=NewsAPIConfig)
     reddit: RedditConfig = Field(default_factory=RedditConfig)
+    truthsocial: TruthSocialConfig = Field(default_factory=TruthSocialConfig)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
     signal: SignalConfig = Field(default_factory=SignalConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
@@ -135,6 +147,8 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
     "NEWSAPI_KEY": ("newsapi", "api_key"),
+    "TRUTHSOCIAL_USERNAME": ("truthsocial", "username"),
+    "TRUTHSOCIAL_PASSWORD": ("truthsocial", "password"),
     "TELEGRAM_BOT_TOKEN": ("alerts", "telegram_bot_token"),
     "TELEGRAM_CHAT_ID": ("alerts", "telegram_chat_id"),
     "DISCORD_WEBHOOK_URL": ("alerts", "discord_webhook_url"),

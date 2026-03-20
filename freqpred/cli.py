@@ -317,6 +317,10 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                         llm_client=llm_client,
                         tavily_api_key=config.tavily.api_key,
                         newsapi_api_key=config.newsapi.api_key,
+                        truthsocial_enabled=config.ingestion.truthsocial.enabled,
+                        truthsocial_username=config.truthsocial.username,
+                        truthsocial_password=config.truthsocial.password,
+                        truthsocial_accounts=config.ingestion.truthsocial.accounts,
                     ),
                     name="ingestion_scheduler",
                 )

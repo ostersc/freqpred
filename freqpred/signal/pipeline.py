@@ -170,7 +170,16 @@ class SignalPipeline:
         now = datetime.now(timezone.utc)
         signal_id = uuid.uuid4()
         estimated_probability = parsed["probability"]
-        edge = estimated_probability - market.mid_price
+        direction = parsed["direction"]
+        # Edge is always positive when there is an exploitable advantage in the
+        # signal's direction.  For YES signals: edge = prob - mid (we think YES
+        # is underpriced).  For NO signals: edge = (1 - prob) - (1 - mid) =
+        # mid - prob (we think NO is underpriced).  SKIP signals keep the raw
+        # YES-side value for audit purposes.
+        if direction == "NO":
+            edge = market.mid_price - estimated_probability
+        else:
+            edge = estimated_probability - market.mid_price
         docs = [doc for doc, _ in doc_pairs]
 
         signal_row = SignalRow(
@@ -180,7 +189,7 @@ class SignalPipeline:
             confidence=parsed["confidence"],
             edge=edge,
             market_mid_at_signal=market.mid_price,
-            direction=parsed["direction"],
+            direction=direction,
             reasoning=parsed["reasoning"],
             sources=[d.id for d in docs],
             retrieval_hash=retrieval_hash,

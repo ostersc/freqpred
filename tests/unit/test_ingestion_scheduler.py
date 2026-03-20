@@ -9,6 +9,17 @@ import pytest
 from freqpred.ingestion.scheduler import _CATALYST_REFRESH_INTERVAL, _ensure_catalysts, run_cycle
 
 
+@pytest.fixture(autouse=True)
+def _mock_gdelt():
+    """Prevent real GDELT HTTP calls in every scheduler unit test."""
+    with patch(
+        "freqpred.ingestion.scheduler.gdelt_fetcher.fetch",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

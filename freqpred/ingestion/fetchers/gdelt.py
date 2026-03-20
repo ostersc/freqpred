@@ -21,7 +21,14 @@ def _sanitize_query(query: str) -> str | None:
 
     Returns None if no tokens remain after filtering (caller should skip).
     """
-    tokens = [t for t in query.split() if len(t) >= _GDELT_MIN_KEYWORD_LEN]
+    tokens = []
+    for t in query.split():
+        if len(t) < _GDELT_MIN_KEYWORD_LEN:
+            continue
+        # GDELT rejects bare hyphens in keywords; wrap hyphenated tokens in quotes.
+        if "-" in t and not (t.startswith('"') and t.endswith('"')):
+            t = f'"{t}"'
+        tokens.append(t)
     return " ".join(tokens) if tokens else None
 
 

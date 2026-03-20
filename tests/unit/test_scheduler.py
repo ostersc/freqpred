@@ -24,6 +24,17 @@ NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
 FAKE_EMBEDDING = [0.1] * 384
 
 
+@pytest.fixture(autouse=True)
+def _mock_gdelt(monkeypatch):
+    """Prevent real GDELT HTTP calls in every scheduler unit test."""
+    with patch(
+        "freqpred.ingestion.scheduler.gdelt_fetcher.fetch",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

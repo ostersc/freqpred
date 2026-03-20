@@ -83,6 +83,7 @@ def mock_embedder():
 def mock_redis():
     redis = AsyncMock()
     redis.set = AsyncMock(return_value=True)
+    redis.get = AsyncMock(return_value=None)
     return redis
 
 
@@ -211,6 +212,11 @@ async def test_scheduler_cycle_increases_document_count(session, mock_embedder, 
             new_callable=AsyncMock,
             return_value=[],
         ),
+        patch(
+            "freqpred.ingestion.scheduler.gdelt_fetcher.fetch",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
     ):
         stats = await run_cycle(
             session,
@@ -252,6 +258,11 @@ async def test_inactive_catalyst_run_market_excluded(session, mock_embedder, moc
             new_callable=AsyncMock,
             return_value=[],
         ),
+        patch(
+            "freqpred.ingestion.scheduler.gdelt_fetcher.fetch",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
     ):
         stats = await run_cycle(session, mock_embedder, mock_redis, tavily_api_key="key")
 
@@ -282,6 +293,11 @@ async def test_redis_key_written_after_cycle(session, mock_embedder, mock_redis)
         ),
         patch(
             "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "freqpred.ingestion.scheduler.gdelt_fetcher.fetch",
             new_callable=AsyncMock,
             return_value=[],
         ),
@@ -318,6 +334,11 @@ async def test_duplicate_docs_not_reembedded(session, mock_embedder, mock_redis)
         ),
         patch(
             "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "freqpred.ingestion.scheduler.gdelt_fetcher.fetch",
             new_callable=AsyncMock,
             return_value=[],
         ),

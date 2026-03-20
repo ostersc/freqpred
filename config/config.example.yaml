@@ -39,11 +39,21 @@ reddit:
   # Uses the public Reddit JSON API — no credentials required
   user_agent: "freqpred/0.1"
 
+truthsocial:
+  # Overridden by TRUTHSOCIAL_USERNAME / TRUTHSOCIAL_PASSWORD env vars
+  username: ""
+  password: ""
+
 ingestion:
   schedule_interval_seconds: 1800  # 30 minutes
   categories:
     - politics
     - technology
+  truthsocial:
+    enabled: false
+    accounts: []
+    # accounts:
+    #   - realDonaldTrump
 
 signal:
   top_k_documents: 10
