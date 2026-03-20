@@ -390,3 +390,4 @@ async def test_fetch_fetches_bodies_in_parallel():
     assert len(docs) == 3
     # client.get called 4 times total: 1 API + 3 bodies
     assert client_mock.get.call_count == 4
+

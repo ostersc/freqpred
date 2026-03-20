@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 
 import structlog
@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.rag.embedder import LocalEmbedder
-from freqpred.rag.models import Document, DocumentRow
+from freqpred.rag.models import Document, DocumentMarketLinkRow, DocumentRow
 
 log = structlog.get_logger()
 
@@ -218,3 +218,29 @@ async def upsert_document(
     await session.flush()
 
     return _row_to_domain(row)
+
+
+async def link_document_to_market(
+    session: AsyncSession,
+    document_id: str,
+    market_id: str,
+) -> None:
+    """Write an ingestion-time DocumentMarketLink (signal_id=None) if one does not exist.
+
+    Uses INSERT ... ON CONFLICT DO NOTHING against the partial unique index
+    (document_id, market_id) WHERE signal_id IS NULL, so repeated ingestion
+    cycles are idempotent.
+    """
+    stmt = (
+        pg_insert(DocumentMarketLinkRow)
+        .values(
+            id=uuid.uuid4(),
+            document_id=uuid.UUID(document_id),
+            market_id=market_id,
+            signal_id=None,
+            relevance_score=0.0,
+            linked_at=datetime.now(tz=timezone.utc),
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.execute(stmt)

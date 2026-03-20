@@ -68,7 +68,12 @@ class OrderManager:
 
             # Step 3: risk enforcement
             decision = await self._risk.check_position(
-                session, signal, raw_size, self._bankroll
+                session,
+                signal,
+                raw_size,
+                self._bankroll,
+                market_id=market.id,
+                max_market_exposure=strategy.config.max_exposure_per_market * self._bankroll,
             )
             if not decision.allowed:
                 logger.info(

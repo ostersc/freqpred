@@ -19,7 +19,8 @@ import pytest_asyncio
 from sqlalchemy import text
 
 from freqpred.db import Base, make_engine, make_session_factory
-from freqpred.rag.models import DocumentRow
+from freqpred.markets.models import MarketRow
+from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.rag.retriever import compute_retrieval_hash, retrieve
 from freqpred.rag.embedder import LocalEmbedder
 
@@ -29,6 +30,7 @@ import freqpred.signal.models   # noqa: F401
 import freqpred.llm.models      # noqa: F401
 
 NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
+FUTURE = NOW + timedelta(days=30)
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test",
@@ -76,10 +78,33 @@ def _unit_vector(dim: int, hot_index: int) -> list[float]:
     return v
 
 
+async def _seed_market(session, market_id: str, category: str = "politics") -> MarketRow:
+    row = MarketRow(
+        id=market_id,
+        platform="kalshi",
+        question=f"Test market {market_id}?",
+        category=category,
+        close_time=FUTURE,
+        yes_bid=0.40,
+        yes_ask=0.44,
+        mid_price=0.42,
+        volume_24h=1000.0,
+        open_interest=500.0,
+        last_fetched_at=NOW,
+        price_updated_at=NOW,
+        metadata_fetched_at=NOW,
+        metadata_={},
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
 async def _insert_doc(
     session,
-    category: str,
+    market_id: str,
     embedding: list[float],
+    category: str = "politics",
     published_at: datetime = NOW,
     title: str = "Test Article",
 ) -> DocumentRow:
@@ -101,6 +126,16 @@ async def _insert_doc(
     )
     session.add(row)
     await session.flush()
+    link = DocumentMarketLinkRow(
+        id=uuid.uuid4(),
+        document_id=row.id,
+        market_id=market_id,
+        signal_id=None,
+        relevance_score=0.0,
+        linked_at=NOW,
+    )
+    session.add(link)
+    await session.flush()
     return row
 
 
@@ -110,21 +145,22 @@ async def _insert_doc(
 
 
 @pytest.mark.asyncio
-async def test_retrieval_returns_correct_category_only(session):
-    """Inserting 20 docs across 2 categories — retrieval returns only the
-    requested category and excludes the other."""
+async def test_retrieval_returns_correct_market_only(session):
+    """Docs linked to market_A must not appear when querying market_B."""
     dim = 384
-
-    # Insert 10 politics docs and 10 economics docs, all with same embedding
     shared_embedding = [0.1] * dim
-    for i in range(10):
-        await _insert_doc(session, category="politics", embedding=shared_embedding)
-    for i in range(10):
-        await _insert_doc(session, category="economics", embedding=shared_embedding)
+
+    await _seed_market(session, "RETV-MKT-A", category="politics")
+    await _seed_market(session, "RETV-MKT-B", category="economics")
+
+    for _ in range(10):
+        await _insert_doc(session, market_id="RETV-MKT-A", embedding=shared_embedding, category="politics")
+    for _ in range(10):
+        await _insert_doc(session, market_id="RETV-MKT-B", embedding=shared_embedding, category="economics")
     await session.flush()
 
     embedder = _make_embedder_for_question(shared_embedding)
-    docs = await retrieve(session, embedder, "political event?", category="politics", top_k=20)
+    docs = await retrieve(session, embedder, "political event?", market_id="RETV-MKT-A", top_k=20)
 
     assert len(docs) == 10
     assert all(d.category == "politics" for d, _ in docs)
@@ -134,17 +170,16 @@ async def test_retrieval_returns_correct_category_only(session):
 async def test_retrieval_ranked_by_relevance(session):
     """The most similar document (cosine distance ≈ 0) must rank first."""
     dim = 384
-    # Two distinct embeddings: index 0 hot vs index 1 hot
     emb_a = _unit_vector(dim, 0)
     emb_b = _unit_vector(dim, 1)
 
-    doc_a = await _insert_doc(session, category="politics", embedding=emb_a, title="Doc A")
-    doc_b = await _insert_doc(session, category="politics", embedding=emb_b, title="Doc B")
+    await _seed_market(session, "RETV-RANK-MKT")
+    doc_a = await _insert_doc(session, market_id="RETV-RANK-MKT", embedding=emb_a, title="Doc A")
+    doc_b = await _insert_doc(session, market_id="RETV-RANK-MKT", embedding=emb_b, title="Doc B")
     await session.flush()
 
-    # Query vector identical to emb_a → doc_a must rank first
     embedder = _make_embedder_for_question(emb_a)
-    docs = await retrieve(session, embedder, "question", category="politics", top_k=10)
+    docs = await retrieve(session, embedder, "question", market_id="RETV-RANK-MKT", top_k=10)
 
     assert len(docs) == 2
     assert docs[0][0].id == str(doc_a.id)
@@ -159,14 +194,15 @@ async def test_retrieval_excludes_old_documents(session):
     old_date = NOW - timedelta(days=60)
     recent_date = NOW - timedelta(days=5)
 
-    await _insert_doc(session, category="politics", embedding=shared_embedding,
+    await _seed_market(session, "RETV-AGE-MKT")
+    await _insert_doc(session, market_id="RETV-AGE-MKT", embedding=shared_embedding,
                       published_at=old_date, title="Old Doc")
-    recent_row = await _insert_doc(session, category="politics", embedding=shared_embedding,
+    recent_row = await _insert_doc(session, market_id="RETV-AGE-MKT", embedding=shared_embedding,
                                    published_at=recent_date, title="Recent Doc")
     await session.flush()
 
     embedder = _make_embedder_for_question(shared_embedding)
-    docs = await retrieve(session, embedder, "question", category="politics",
+    docs = await retrieve(session, embedder, "question", market_id="RETV-AGE-MKT",
                           top_k=10, max_age_days=30)
 
     assert len(docs) == 1
@@ -178,12 +214,14 @@ async def test_retrieval_top_k_limits_results(session):
     """top_k must cap the result set even when more matching docs exist."""
     dim = 384
     shared_embedding = [0.1] * dim
+
+    await _seed_market(session, "RETV-TOPK-MKT")
     for _ in range(15):
-        await _insert_doc(session, category="politics", embedding=shared_embedding)
+        await _insert_doc(session, market_id="RETV-TOPK-MKT", embedding=shared_embedding)
     await session.flush()
 
     embedder = _make_embedder_for_question(shared_embedding)
-    docs = await retrieve(session, embedder, "question", category="politics", top_k=5)
+    docs = await retrieve(session, embedder, "question", market_id="RETV-TOPK-MKT", top_k=5)
 
     assert len(docs) == 5
 
@@ -197,13 +235,16 @@ async def test_compute_retrieval_hash_deterministic_across_calls():
 
 
 @pytest.mark.asyncio
-async def test_retrieval_empty_category_returns_empty(session):
-    """Querying a category with no documents returns an empty list."""
+async def test_retrieval_unlinked_market_returns_empty(session):
+    """Querying a market with no linked documents returns an empty list."""
     dim = 384
-    await _insert_doc(session, category="politics", embedding=[0.1] * dim)
+
+    await _seed_market(session, "RETV-LINKED-MKT")
+    await _seed_market(session, "RETV-EMPTY-MKT")
+    await _insert_doc(session, market_id="RETV-LINKED-MKT", embedding=[0.1] * dim)
     await session.flush()
 
     embedder = _make_embedder_for_question([0.1] * dim)
-    docs = await retrieve(session, embedder, "question", category="sports", top_k=10)
+    docs = await retrieve(session, embedder, "question", market_id="RETV-EMPTY-MKT", top_k=10)
 
     assert docs == []

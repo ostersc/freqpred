@@ -76,7 +76,7 @@ class SignalPipeline:
                 session,
                 self._embedder,
                 market.question,
-                market.category,
+                market.id,
                 top_k=self._top_k,
             )
 

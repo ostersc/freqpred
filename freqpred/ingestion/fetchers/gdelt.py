@@ -39,7 +39,7 @@ def _sanitize_query(query: str) -> str | None:
 _DEFAULT_EXCLUDED_DOMAINS: frozenset[str] = frozenset({"kalshi.com"})
 _ARTICLE_FETCH_TIMEOUT = 10.0  # seconds per URL
 _API_TIMEOUT = 30.0
-_RATE_LIMIT_SLEEP = 5.0  # GDELT enforces 1 req/5s; no Retry-After header is returned
+_RATE_LIMIT_SLEEP = 6.0  # GDELT enforces 1 req/5s; add margin to avoid boundary hits
 
 
 async def _fetch_article_body(client: httpx.AsyncClient, url: str) -> str | None:
@@ -112,8 +112,12 @@ async def fetch(
         try:
             data = response.json()
         except Exception:
-            # GDELT returns plain-text error messages (e.g. "keyword too short") with HTTP 200.
-            log.warning("gdelt.fetch.non_json_response", query=query, body=response.text.strip())
+            # GDELT returns plain-text error messages with HTTP 200.
+            # "querying too quickly" means we're rate-limited; raise so the scheduler backs off.
+            body = response.text.strip()
+            if "too quickly" in body.lower() or "rate limit" in body.lower():
+                raise GDELTRateLimitError(f"GDELT rate limited (plain-text): {body}")
+            log.warning("gdelt.fetch.non_json_response", query=query, body=body)
             return []
 
         articles = data.get("articles") or []

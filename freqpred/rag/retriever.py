@@ -1,4 +1,19 @@
-"""Vector search against the Document store (pgvector)."""
+"""Hybrid vector + full-text search against the Document store (pgvector).
+
+Retrieval is scoped to documents pre-linked to a specific market via
+document_market_links (written at ingestion time). This ensures the retriever
+only considers documents that were fetched because of that market's catalyst
+queries, not the entire category.
+
+For each candidate document two scores are computed:
+  - cosine_sim  : 1 - cosine_distance (pgvector)
+  - bm25        : ts_rank from Postgres full-text search (0–1 range)
+
+Final score = vector_weight * norm(cosine_sim) + (1 - vector_weight) * norm(bm25)
+
+Both scores are min-max normalised over the candidate set before blending so
+neither dominates purely due to scale differences.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -6,12 +21,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 import structlog
-from sqlalchemy import and_, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.rag.models import Document, DocumentRow
+from freqpred.rag.models import Document, DocumentMarketLinkRow, DocumentRow
 
 log = structlog.get_logger()
+
+_VECTOR_WEIGHT = 0.7  # weight for cosine similarity; (1 - this) goes to BM25
 
 
 class Embedder(Protocol):
@@ -22,47 +39,84 @@ async def retrieve(
     session: AsyncSession,
     embedder: Embedder,
     question: str,
-    category: str,
+    market_id: str,
     top_k: int = 10,
     max_age_days: int = 30,
+    vector_weight: float = _VECTOR_WEIGHT,
 ) -> list[tuple[Document, float]]:
-    """Embed *question* and return the top-K most relevant documents with cosine similarity scores.
+    """Return the top-K most relevant documents for *market_id* using hybrid scoring.
 
-    Filters by *category* and *published_at* recency, then ranks by cosine
-    similarity to the question embedding.  Results are sorted most-similar first.
+    Scope: only documents linked to *market_id* in document_market_links
+    (written at ingestion time). Documents outside that set are never considered.
 
-    Returns a list of (Document, similarity_score) tuples where similarity_score
-    is in [0.0, 1.0]: 1.0 = identical, 0.0 = maximally dissimilar.
+    Returns a list of (Document, blended_score) tuples sorted best-first.
+    blended_score is in [0.0, 1.0] after normalisation.
     """
     query_vector = await embedder.embed_text(question)
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
 
-    distance_col = DocumentRow.embedding.cosine_distance(query_vector).label(
-        "cosine_distance"
+    # Subquery: distinct document IDs linked to this market.
+    linked_ids_sq = (
+        select(DocumentMarketLinkRow.document_id)
+        .where(DocumentMarketLinkRow.market_id == market_id)
+        .distinct()
+        .subquery()
     )
+
+    distance_col = DocumentRow.embedding.cosine_distance(query_vector).label("cosine_distance")
+    bm25_col = func.ts_rank(
+        func.to_tsvector(text("'english'"), DocumentRow.title + " " + DocumentRow.body),
+        func.plainto_tsquery(text("'english'"), question),
+    ).label("bm25_score")
+
     stmt = (
-        select(DocumentRow, distance_col)
-        .where(
-            and_(
-                DocumentRow.category == category,
-                DocumentRow.published_at >= cutoff,
-            )
-        )
-        .order_by(distance_col)
-        .limit(top_k)
+        select(DocumentRow, distance_col, bm25_col)
+        .join(linked_ids_sq, DocumentRow.id == linked_ids_sq.c.document_id)
+        .where(DocumentRow.published_at >= cutoff)
     )
 
     result = await session.execute(stmt)
     rows = result.all()
 
+    if not rows:
+        log.debug("rag.retrieve.empty", market_id=market_id)
+        return []
+
+    # Compute cosine similarities and collect raw scores.
+    candidates = [
+        (row, 1.0 - float(distance), float(bm25))
+        for row, distance, bm25 in rows
+    ]
+
+    # Min-max normalise each score over the candidate set so they're on the
+    # same [0, 1] scale before blending.
+    cosine_vals = [c for _, c, _ in candidates]
+    bm25_vals = [b for _, _, b in candidates]
+
+    def _normalise(vals: list[float]) -> list[float]:
+        lo, hi = min(vals), max(vals)
+        if hi == lo:
+            return [1.0] * len(vals)
+        return [(v - lo) / (hi - lo) for v in vals]
+
+    norm_cosine = _normalise(cosine_vals)
+    norm_bm25 = _normalise(bm25_vals)
+
+    scored = [
+        (row, vector_weight * nc + (1.0 - vector_weight) * nb)
+        for (row, _, _), nc, nb in zip(candidates, norm_cosine, norm_bm25)
+    ]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top = scored[:top_k]
+
     log.debug(
         "rag.retrieve",
-        category=category,
-        top_k=top_k,
+        market_id=market_id,
+        candidates=len(rows),
+        returned=len(top),
         max_age_days=max_age_days,
-        returned=len(rows),
     )
-    return [(_row_to_document(row), 1.0 - float(distance)) for row, distance in rows]
+    return [(_row_to_document(row), score) for row, score in top]
 
 
 def compute_retrieval_hash(doc_ids: list[str]) -> str:

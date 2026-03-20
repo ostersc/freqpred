@@ -62,9 +62,17 @@ def _make_session(
     total_exposure: float = 0.0,
     daily_pnl: float = 0.0,
     all_pnl: float = 0.0,
+    market_exposure: float = 0.0,
 ) -> MagicMock:
-    """Return a mock AsyncSession whose execute() returns canned scalar results."""
-    call_returns = [open_count, total_exposure, daily_pnl]
+    """Return a mock AsyncSession whose execute() returns canned scalar results.
+
+    Query order matches check_position:
+      1. market_exposure (per-market cumulative)
+      2. open_count
+      3. total_exposure (portfolio-wide)
+      4. daily_pnl
+    """
+    call_returns = [market_exposure, open_count, total_exposure, daily_pnl]
 
     session = MagicMock()
 
@@ -97,13 +105,20 @@ def _make_circuit_session(daily_pnl: float = 0.0, all_pnl: float = 0.0) -> Magic
 # ---------------------------------------------------------------------------
 
 
+MARKET_ID = "MKT-X"
+MAX_MARKET_EXPOSURE = BANKROLL * 0.05  # $100 (5% of $2000)
+
+
 @pytest.mark.asyncio
 async def test_blocks_when_edge_below_floor() -> None:
     engine = RiskEngine(_make_config(min_edge_floor=0.10))
     signal = _make_signal(edge=0.05)
     session = MagicMock()  # should not be called — edge check is first
 
-    decision = await engine.check_position(session, signal, requested_size=100.0, bankroll=BANKROLL)
+    decision = await engine.check_position(
+        session, signal, requested_size=100.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+    )
 
     assert decision.allowed is False
     assert "edge" in decision.reason
@@ -117,10 +132,46 @@ async def test_caps_size_at_max_position_pct() -> None:
     signal = _make_signal(edge=0.20)
     session = _make_session(open_count=0, total_exposure=0.0, daily_pnl=0.0)
 
-    decision = await engine.check_position(session, signal, requested_size=200.0, bankroll=BANKROLL)
+    decision = await engine.check_position(
+        session, signal, requested_size=200.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+    )
 
     assert decision.allowed is True
     assert decision.capped_size == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_blocks_when_market_exposure_at_limit() -> None:
+    # Market already has $100 open, limit is $100 → no capacity remaining
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=1, total_exposure=100.0, daily_pnl=0.0, market_exposure=100.0)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=100.0,
+    )
+
+    assert decision.allowed is False
+    assert "market" in decision.reason
+    assert MARKET_ID in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_caps_size_to_remaining_market_capacity() -> None:
+    # Market limit $100, already $70 open → only $30 remaining; $60 request → capped to $30
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=1, total_exposure=70.0, daily_pnl=0.0, market_exposure=70.0)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=60.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=100.0,
+    )
+
+    assert decision.allowed is True
+    assert decision.capped_size == pytest.approx(30.0)
 
 
 @pytest.mark.asyncio
@@ -129,7 +180,10 @@ async def test_blocks_when_max_open_positions_reached() -> None:
     signal = _make_signal(edge=0.20)
     session = _make_session(open_count=20, total_exposure=0.0, daily_pnl=0.0)
 
-    decision = await engine.check_position(session, signal, requested_size=100.0, bankroll=BANKROLL)
+    decision = await engine.check_position(
+        session, signal, requested_size=100.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+    )
 
     assert decision.allowed is False
     assert "open positions" in decision.reason
@@ -142,7 +196,10 @@ async def test_blocks_when_total_exposure_exceeded() -> None:
     signal = _make_signal(edge=0.20)
     session = _make_session(open_count=5, total_exposure=820.0, daily_pnl=0.0)
 
-    decision = await engine.check_position(session, signal, requested_size=100.0, bankroll=BANKROLL)
+    decision = await engine.check_position(
+        session, signal, requested_size=100.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+    )
 
     assert decision.allowed is False
     assert "exposure" in decision.reason
@@ -154,7 +211,10 @@ async def test_allows_valid_position() -> None:
     signal = _make_signal(edge=0.20)
     session = _make_session(open_count=5, total_exposure=200.0, daily_pnl=0.0)
 
-    decision = await engine.check_position(session, signal, requested_size=50.0, bankroll=BANKROLL)
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+    )
 
     assert decision.allowed is True
     assert decision.reason == ""
@@ -168,7 +228,10 @@ async def test_blocks_when_daily_loss_exceeded() -> None:
     signal = _make_signal(edge=0.20)
     session = _make_session(open_count=0, total_exposure=0.0, daily_pnl=-320.0)
 
-    decision = await engine.check_position(session, signal, requested_size=100.0, bankroll=BANKROLL)
+    decision = await engine.check_position(
+        session, signal, requested_size=100.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+    )
 
     assert decision.allowed is False
     assert "daily loss" in decision.reason

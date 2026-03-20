@@ -5,7 +5,7 @@ All database and embedder calls are mocked — no external dependencies.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,6 +22,7 @@ import freqpred.llm.models      # noqa: F401
 
 NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
 FAKE_EMBEDDING = [0.1] * 384
+MARKET_ID = "KXTEST-26MAR20-FOO"
 
 
 # ---------------------------------------------------------------------------
@@ -51,16 +52,19 @@ def _make_row(
     )
 
 
-def _make_session(rows: list[DocumentRow], distances: list[float] | None = None) -> AsyncMock:
-    """Mock AsyncSession whose execute() returns (DocumentRow, distance) tuples.
-
-    *distances* defaults to 0.0 for every row (similarity = 1.0).
-    """
+def _make_session(
+    rows: list[DocumentRow],
+    distances: list[float] | None = None,
+    bm25_scores: list[float] | None = None,
+) -> AsyncMock:
+    """Mock AsyncSession whose execute() returns (DocumentRow, cosine_distance, bm25_score) tuples."""
     if distances is None:
         distances = [0.0] * len(rows)
+    if bm25_scores is None:
+        bm25_scores = [0.5] * len(rows)
     session = AsyncMock()
     execute_result = MagicMock()
-    execute_result.all.return_value = list(zip(rows, distances))
+    execute_result.all.return_value = list(zip(rows, distances, bm25_scores))
     session.execute = AsyncMock(return_value=execute_result)
     return session
 
@@ -109,7 +113,7 @@ async def test_retrieve_calls_embedder_once():
     session = _make_session([])
     embedder = _make_embedder()
 
-    await retrieve(session, embedder, "Will X happen?", category="politics")
+    await retrieve(session, embedder, "Will X happen?", market_id=MARKET_ID)
 
     embedder.embed_text.assert_awaited_once_with("Will X happen?")
 
@@ -120,20 +124,9 @@ async def test_retrieve_returns_documents():
     session = _make_session(rows)
     embedder = _make_embedder()
 
-    pairs = await retrieve(session, embedder, "question", category="politics")
+    pairs = await retrieve(session, embedder, "question", market_id=MARKET_ID)
 
     assert len(pairs) == 2
-
-
-@pytest.mark.asyncio
-async def test_retrieve_maps_category_correctly():
-    row = _make_row(category="economics")
-    session = _make_session([row])
-    embedder = _make_embedder()
-
-    pairs = await retrieve(session, embedder, "question", category="economics")
-
-    assert pairs[0][0].category == "economics"
 
 
 @pytest.mark.asyncio
@@ -141,24 +134,22 @@ async def test_retrieve_empty_result():
     session = _make_session([])
     embedder = _make_embedder()
 
-    pairs = await retrieve(session, embedder, "question", category="politics")
+    pairs = await retrieve(session, embedder, "question", market_id=MARKET_ID)
 
     assert pairs == []
 
 
 @pytest.mark.asyncio
 async def test_retrieve_respects_top_k():
-    """top_k is passed to the query — verify the LIMIT clause fires by checking
-    the SQL statement constructed (via the session.execute call argument)."""
-    session = _make_session([])
+    """top_k slices the sorted results — more candidates than top_k yields top_k results."""
+    rows = [_make_row() for _ in range(8)]
+    distances = [float(i) / 10 for i in range(8)]
+    session = _make_session(rows, distances=distances)
     embedder = _make_embedder()
 
-    await retrieve(session, embedder, "question", category="politics", top_k=5)
+    pairs = await retrieve(session, embedder, "question", market_id=MARKET_ID, top_k=3)
 
-    # The stmt passed to session.execute should compile to include LIMIT 5.
-    stmt = session.execute.call_args[0][0]
-    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-    assert "5" in compiled  # LIMIT 5 appears in the SQL
+    assert len(pairs) == 3
 
 
 @pytest.mark.asyncio
@@ -167,7 +158,7 @@ async def test_retrieve_document_fields_mapped():
     session = _make_session([row])
     embedder = _make_embedder()
 
-    pairs = await retrieve(session, embedder, "question", category="politics")
+    pairs = await retrieve(session, embedder, "question", market_id=MARKET_ID)
     doc, _ = pairs[0]
 
     assert doc.id == str(row.id)
@@ -181,32 +172,48 @@ async def test_retrieve_document_fields_mapped():
 
 
 # ---------------------------------------------------------------------------
-# retrieve — cosine similarity scores (T16)
+# retrieve — hybrid scoring
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_relevance_score_is_cosine_similarity():
-    """Cosine distance 0.2 should produce similarity score 0.8."""
-    row = _make_row()
-    session = _make_session([row], distances=[0.2])
-    embedder = _make_embedder()
-
-    pairs = await retrieve(session, embedder, "question", category="politics")
-
-    _, score = pairs[0]
-    assert abs(score - 0.8) < 1e-9
-
-
-@pytest.mark.asyncio
 async def test_relevance_scores_are_in_unit_interval():
-    """All returned scores must be in [0.0, 1.0] for a range of distances."""
+    """All blended scores must be in [0.0, 1.0]."""
     rows = [_make_row() for _ in range(4)]
     distances = [0.0, 0.5, 0.99, 1.0]
-    session = _make_session(rows, distances=distances)
+    bm25_scores = [0.8, 0.4, 0.1, 0.0]
+    session = _make_session(rows, distances=distances, bm25_scores=bm25_scores)
     embedder = _make_embedder()
 
-    pairs = await retrieve(session, embedder, "question", category="politics")
+    pairs = await retrieve(session, embedder, "question", market_id=MARKET_ID)
 
     for _, score in pairs:
         assert 0.0 <= score <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_higher_bm25_improves_rank():
+    """A doc with identical cosine but higher BM25 should rank first."""
+    row_a = _make_row()
+    row_b = _make_row()
+    # Same cosine distance, but row_b has a higher BM25 score.
+    session = _make_session([row_a, row_b], distances=[0.3, 0.3], bm25_scores=[0.1, 0.9])
+    embedder = _make_embedder()
+
+    pairs = await retrieve(session, embedder, "question", market_id=MARKET_ID)
+
+    assert pairs[0][0].id == str(row_b.id)
+
+
+@pytest.mark.asyncio
+async def test_results_sorted_best_first():
+    """Results are returned in descending blended score order."""
+    rows = [_make_row() for _ in range(3)]
+    # Intentionally varying distances and BM25 so scores differ.
+    session = _make_session(rows, distances=[0.9, 0.1, 0.5], bm25_scores=[0.0, 1.0, 0.5])
+    embedder = _make_embedder()
+
+    pairs = await retrieve(session, embedder, "question", market_id=MARKET_ID)
+
+    scores = [s for _, s in pairs]
+    assert scores == sorted(scores, reverse=True)

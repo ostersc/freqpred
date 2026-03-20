@@ -384,6 +384,8 @@ class Document:
 
 **Embedding model:** `sentence-transformers` (`all-MiniLM-L6-v2`, 384-dim) — local CPU-based embeddings, no API key required. Stored via the **pgvector** extension on RDS Postgres. No separate vector database needed. Voyage AI (`voyage-3`, 1024-dim) is a possible future enhancement for higher-quality retrieval.
 
+**Full-text search index:** A GIN index on `to_tsvector('english', title || ' ' || body)` supports BM25 keyword scoring via `ts_rank`. Used in hybrid retrieval alongside cosine similarity.
+
 ### CatalystRun + CatalystQuery
 
 Each time the Catalyst Generator runs for a market it creates one `CatalystRun` (the generation event) and N `CatalystQuery` rows (the actual search strings). The ingestion scheduler always reads from the latest active run per market.
@@ -421,15 +423,21 @@ class CatalystQuery:
 
 ### DocumentMarketLink (join table)
 
-Tracks which documents were retrieved for which market analysis, enabling retroactive analysis of what evidence was available when a signal was created.
+Links documents to markets at two distinct points in time:
+
+1. **Ingestion time** (`signal_id=None`) — written by the ingestion scheduler immediately after a document is upserted. Records which market's catalyst query caused this document to be fetched. This scopes retrieval: the retriever only searches documents pre-linked to the target market, not the entire category.
+
+2. **Signal time** (`signal_id=<uuid>`) — written by the signal pipeline after retrieval. Records which documents were actually used in a specific signal analysis, with the blended relevance score.
+
+This design solves a real failure mode: without ingestion-time links, the retriever searches all documents in a category and cosine similarity may miss documents with exact keyword matches (e.g. a document titled "Epic Fury" being retrieved for a market asking whether Trump says "Epic Fury"). By restricting retrieval to documents fetched for that specific market, the search corpus is both smaller and more relevant.
 
 ```python
 @dataclass
 class DocumentMarketLink:
     document_id: str                 # FK → Document
     market_id: str                   # FK → Market
-    signal_id: str | None            # FK → Signal this retrieval contributed to
-    relevance_score: float           # cosine similarity score from vector search
+    signal_id: str | None            # FK → Signal (None at ingestion time)
+    relevance_score: float           # blended hybrid score at signal time; 0.0 at ingestion time
     linked_at: datetime
 ```
 
@@ -756,11 +764,14 @@ Signal trigger fires for a market
       │
       ▼
 ┌─────────────────┐
-│  Vector Search  │  Embed the market question (sentence-transformers).
-│  (RAG retrieval)│  Semantic search against Document store:
-│                 │  - Filter: category match + published_at recency
-│                 │  - Rank: cosine similarity to market question
-│                 │  - Select: top-K documents (default K=10)
+│  Hybrid Search  │  Embed the market question (sentence-transformers).
+│  (RAG retrieval)│  Searches only documents pre-linked to this market
+│                 │  (written at ingestion time by the scheduler).
+│                 │  Two independent passes, then merged:
+│                 │  1. Cosine similarity (pgvector) — top-K by vector
+│                 │  2. BM25 full-text (ts_rank) — all linked docs
+│                 │  Final score = 0.7 * cosine + 0.3 * bm25 (normalised)
+│                 │  Select: top-K by blended score (default K=10)
 └────────┬────────┘
          │
          ▼

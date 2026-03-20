@@ -40,10 +40,17 @@ class RiskEngine:
         signal: Signal,
         requested_size: float,
         bankroll: float,
+        market_id: str,
+        max_market_exposure: float,
     ) -> RiskDecision:
         """Enforce all hard caps. Returns RiskDecision(allowed=False) if any
         limit is breached. Never raises — callers check .allowed.
         Raises TradingCircuitBreakerError if a circuit breaker fires.
+
+        Args:
+            market_id: The market being traded — used to check cumulative exposure.
+            max_market_exposure: Max dollar exposure allowed across all open positions
+                for this market (strategy.max_exposure_per_market * bankroll).
         """
         # 1. Edge floor check
         if signal.edge < self._config.min_edge_floor:
@@ -62,7 +69,36 @@ class RiskEngine:
         max_size = bankroll * self._config.max_position_pct
         capped_size = min(requested_size, max_size)
 
-        # 3. Max open positions check
+        # 3. Per-market cumulative exposure check.
+        # Counts existing open positions on this market so that multiple signals
+        # on the same market cannot stack exposure beyond the strategy limit.
+        market_exposure_result = await session.execute(
+            select(func.sum(PositionRow.contracts * PositionRow.entry_price)).where(
+                PositionRow.status == "open",
+                PositionRow.market_id == market_id,
+            )
+        )
+        existing_market_exposure: float = market_exposure_result.scalar_one() or 0.0
+        remaining_market_capacity = max_market_exposure - existing_market_exposure
+        if remaining_market_capacity <= 0.0:
+            logger.info(
+                "risk.market_exposure_exceeded",
+                market_id=market_id,
+                existing_exposure=existing_market_exposure,
+                max_market_exposure=max_market_exposure,
+            )
+            return RiskDecision(
+                allowed=False,
+                reason=(
+                    f"market {market_id} exposure {existing_market_exposure:.2f} >= "
+                    f"max {max_market_exposure:.2f} per market"
+                ),
+                capped_size=0.0,
+            )
+        # Also cap capped_size so the new position doesn't push over the limit.
+        capped_size = min(capped_size, remaining_market_capacity)
+
+        # 4. Max open positions check
         open_count_result = await session.execute(
             select(func.count()).select_from(PositionRow).where(
                 PositionRow.status == "open"
@@ -81,7 +117,7 @@ class RiskEngine:
                 capped_size=0.0,
             )
 
-        # 4. Total exposure check
+        # 5. Total exposure check
         exposure_result = await session.execute(
             select(func.sum(PositionRow.contracts * PositionRow.entry_price)).where(
                 PositionRow.status == "open"
@@ -104,7 +140,7 @@ class RiskEngine:
                 capped_size=0.0,
             )
 
-        # 5. Daily loss check
+        # 6. Daily loss check
         today_start = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         )

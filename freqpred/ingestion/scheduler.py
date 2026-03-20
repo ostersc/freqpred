@@ -41,7 +41,7 @@ from freqpred.ingestion.fetchers.truthsocial import (
 from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.ingestion.quota import get_daily_count, increment_daily_count
-from freqpred.ingestion.store import DocumentSkipped, upsert_document
+from freqpred.ingestion.store import DocumentSkipped, link_document_to_market, upsert_document
 from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.embedder import LocalEmbedder
 
@@ -125,7 +125,6 @@ async def run_cycle(
         truthsocial_username:       Truth Social account username (env: TRUTHSOCIAL_USERNAME).
         truthsocial_password:       Truth Social account password (env: TRUTHSOCIAL_PASSWORD).
         truthsocial_accounts:       Standing account feeds to poll each cycle.
-
     Returns:
         Stats dict with keys: markets_processed, catalysts_generated,
         docs_fetched, docs_stored, docs_error.
@@ -257,7 +256,11 @@ async def run_cycle(
         market_error = 0
 
         for query_text in query_texts:
-            # --- Build fetch coroutines to run in parallel ---
+            # --- Build non-GDELT fetch coroutines to run in parallel ---
+            # GDELT (doc + TV) are run sequentially afterwards because they share
+            # a 1 req/5 s rate limit across all their API endpoints. Running them
+            # concurrently in the same gather would fire simultaneous requests and
+            # trigger rate limiting despite each function's own sleep guard.
             fetch_names: list[str] = []
             fetch_coros = []
 
@@ -299,13 +302,6 @@ async def run_cycle(
                 user_agent=reddit_user_agent,
             ))
 
-            if not gdelt_limit_hit:
-                fetch_names.append("gdelt")
-                fetch_coros.append(gdelt_fetcher.fetch(
-                    query=query_text,
-                    excluded_domains=domain_blacklist,
-                ))
-
             if ts_api is not None and not truthsocial_login_failed:
                 fetch_names.append("truthsocial_search")
                 fetch_coros.append(truthsocial_fetcher.fetch_search(
@@ -314,7 +310,7 @@ async def run_cycle(
                     excluded_domains=domain_blacklist,
                 ))
 
-            # --- Run all fetchers in parallel ---
+            # --- Run non-GDELT fetchers in parallel ---
             results = await asyncio.gather(*fetch_coros, return_exceptions=True)
 
             raw_docs = []
@@ -329,10 +325,6 @@ async def run_cycle(
                         newsapi_limit_logged = True
                         skip_cycles = await record_rate_limit(session, "newsapi")
                         log.warning("scheduler.newsapi_rate_limited", reason=str(result), skip_cycles=skip_cycles)
-                    elif name == "gdelt" and isinstance(result, GDELTRateLimitError):
-                        gdelt_limit_hit = True
-                        skip_cycles = await record_rate_limit(session, "gdelt")
-                        log.warning("scheduler.gdelt_rate_limited", reason=str(result), skip_cycles=skip_cycles)
                     elif name == "truthsocial_search" and isinstance(result, TruthSocialLoginError):
                         truthsocial_login_failed = True
                         from freqpred.ingestion.fetchers.truthsocial import TruthSocialBlockedError  # noqa: PLC0415
@@ -365,6 +357,31 @@ async def run_cycle(
                         await record_success(session, svc)
                         success_recorded.add(svc)
 
+            # --- Run GDELT fetcher ---
+            # Runs sequentially after the parallel gather (has its own rate-limit sleep).
+            if not gdelt_limit_hit:
+                try:
+                    gdelt_docs = await gdelt_fetcher.fetch(
+                        query=query_text,
+                        excluded_domains=domain_blacklist,
+                    )
+                    raw_docs.extend(gdelt_docs)
+                    if "gdelt" not in success_recorded:
+                        await record_success(session, "gdelt")
+                        success_recorded.add("gdelt")
+                except GDELTRateLimitError as exc:
+                    gdelt_limit_hit = True
+                    skip_cycles = await record_rate_limit(session, "gdelt")
+                    log.warning("scheduler.gdelt_rate_limited", reason=str(exc), skip_cycles=skip_cycles)
+                except Exception:
+                    log.warning(
+                        "scheduler.fetcher_error",
+                        market_id=market_id,
+                        fetcher="gdelt",
+                        query=query_text,
+                        exc_info=True,
+                    )
+
             market_fetched += len(raw_docs)
 
             # Upsert each document.
@@ -375,7 +392,8 @@ async def run_cycle(
                 raw_doc.category = category
                 try:
                     async with session.begin_nested():
-                        await upsert_document(session, embedder, raw_doc)
+                        doc = await upsert_document(session, embedder, raw_doc)
+                        await link_document_to_market(session, doc.id, market_id)
                     market_stored += 1
                 except DocumentSkipped:
                     pass  # empty body after cleaning — already logged at debug
