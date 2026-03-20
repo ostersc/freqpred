@@ -90,6 +90,18 @@ def _make_session_scalar(return_value) -> AsyncMock:
     return session
 
 
+def _make_session_row(retrieval_hash: str | None, signal_mid: float | None) -> AsyncMock:
+    """Mock session whose execute().one_or_none() returns a (hash, mid) row."""
+    session = AsyncMock()
+    result = MagicMock()
+    if retrieval_hash is None and signal_mid is None:
+        result.one_or_none.return_value = None
+    else:
+        result.one_or_none.return_value = (retrieval_hash, signal_mid)
+    session.execute = AsyncMock(return_value=result)
+    return session
+
+
 def _make_llm_client(content: str = "", error: Exception | None = None) -> MagicMock:
     from freqpred.llm.models import LLMResponse
 
@@ -174,6 +186,119 @@ class TestShouldSkip:
 # ---------------------------------------------------------------------------
 # llm.parse_signal_response
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# SignalPipeline._clone_at_price
+# ---------------------------------------------------------------------------
+
+
+def _make_signal_row(
+    estimated_probability: float = 0.80,
+    confidence: float = 0.75,
+    direction: str = "YES",
+    market_mid_at_signal: float = 0.50,
+) -> MagicMock:
+    """Return a MagicMock that looks like a SignalRow."""
+    row = MagicMock()
+    row.estimated_probability = estimated_probability
+    row.confidence = confidence
+    row.direction = direction
+    row.market_mid_at_signal = market_mid_at_signal
+    row.edge = estimated_probability - market_mid_at_signal
+    row.reasoning = "Strong evidence."
+    row.sources = []
+    row.retrieval_hash = FAKE_HASH
+    row.model_used = "claude-sonnet-4-6"
+    row.prompt_version = "1"
+    row.trigger = "scheduled"
+    row.raw_context = "context"
+    return row
+
+
+class TestCloneAtPrice:
+    def _make_pipeline_instance(self) -> "SignalPipeline":
+        session_factory = MagicMock()
+        return SignalPipeline(
+            session_factory=session_factory,
+            embedder=AsyncMock(),
+            llm_client=AsyncMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_current_signal(self) -> None:
+        pipeline = self._make_pipeline_instance()
+        session = _make_session_row(None, None)
+        market = _make_market(current_signal_id=None)
+        result = await pipeline._clone_at_price(session, market)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_price_within_threshold(self) -> None:
+        pipeline = self._make_pipeline_instance()
+        signal_row = _make_signal_row(market_mid_at_signal=0.50)
+        session = AsyncMock()
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = signal_row
+        session.execute = AsyncMock(return_value=execute_result)
+        # current_mid=0.52 → delta=0.02, below 0.05 threshold
+        market = _make_market(mid_price=0.52, current_signal_id=FAKE_SIGNAL_ID)
+        result = await pipeline._clone_at_price(session, market)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_new_signal_when_price_moved(self) -> None:
+        pipeline = self._make_pipeline_instance()
+        signal_row = _make_signal_row(
+            estimated_probability=0.80, direction="YES", market_mid_at_signal=0.75
+        )
+        session = AsyncMock()
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = signal_row
+        session.execute = AsyncMock(return_value=execute_result)
+        session.flush = AsyncMock()
+        session.add = MagicMock()
+        # current_mid=0.50, signal_mid=0.75 → delta=0.25 → clone
+        market = _make_market(mid_price=0.50, current_signal_id=FAKE_SIGNAL_ID)
+        result = await pipeline._clone_at_price(session, market)
+        assert result is not None
+        assert result.trigger == "price_moved"
+        assert result.market_mid_at_signal == 0.50
+        assert result.estimated_probability == 0.80
+        assert abs(result.edge - (0.80 - 0.50)) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_edge_recalculated_for_no_direction(self) -> None:
+        pipeline = self._make_pipeline_instance()
+        signal_row = _make_signal_row(
+            estimated_probability=0.30, direction="NO", market_mid_at_signal=0.75
+        )
+        session = AsyncMock()
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = signal_row
+        session.execute = AsyncMock(return_value=execute_result)
+        session.flush = AsyncMock()
+        session.add = MagicMock()
+        # mid drops to 0.40, prob=0.30, NO edge = mid - prob = 0.40 - 0.30 = 0.10
+        market = _make_market(mid_price=0.40, current_signal_id=FAKE_SIGNAL_ID)
+        result = await pipeline._clone_at_price(session, market)
+        assert result is not None
+        assert abs(result.edge - (0.40 - 0.30)) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_custom_threshold_respected(self) -> None:
+        pipeline = self._make_pipeline_instance()
+        signal_row = _make_signal_row(market_mid_at_signal=0.50)
+        session = AsyncMock()
+        execute_result = MagicMock()
+        execute_result.scalar_one_or_none.return_value = signal_row
+        session.execute = AsyncMock(return_value=execute_result)
+        session.flush = AsyncMock()
+        session.add = MagicMock()
+        # delta=0.06, threshold=0.10 → below threshold → None
+        market = _make_market(mid_price=0.56, current_signal_id=FAKE_SIGNAL_ID)
+        result = await pipeline._clone_at_price(session, market, price_move_threshold=0.10)
+        assert result is None
 
 
 class TestParseSignalResponse:
@@ -312,17 +437,22 @@ class TestSignalPipelineAnalyze:
         doc_ids = [d.id for d in docs]
         new_hash = compute_retrieval_hash(doc_ids)
 
-        # Session: should_skip query returns current_signal_hash (or None)
+        # Session: set up execute side_effect for sequential calls:
+        #   call 1 — should_skip: scalar_one_or_none returns current_signal_hash
+        #   call 2 — _clone_at_price (if hash matched): scalar_one_or_none returns None
+        #             (no SignalRow found → clone path returns None, skips cleanly)
+        #           OR _write_signal update (if hash differed): result ignored
+        #   call 3+ — additional update statements; result ignored
         session = AsyncMock()
         session.flush = AsyncMock()
         session.commit = AsyncMock()
         session.add = MagicMock()
 
-        scalar_result = MagicMock()
-        scalar_result.scalar_one_or_none.return_value = current_signal_hash
-        execute_result = MagicMock()
-        execute_result.scalar_one_or_none.return_value = current_signal_hash
-        session.execute = AsyncMock(return_value=execute_result)
+        hash_result = MagicMock()
+        hash_result.scalar_one_or_none.return_value = current_signal_hash
+        fallback = MagicMock()
+        fallback.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(side_effect=[hash_result, fallback, fallback, fallback])
 
         session_factory = _make_session_factory(session)
 

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 import structlog
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.llm.client import LLMClient, LLMError
@@ -96,6 +96,19 @@ class SignalPipeline:
 
             # Step 5: skip if evidence unchanged since last signal
             if await should_skip(session, market.current_signal_id, new_hash):
+                # Evidence unchanged — but if price moved we can still create a
+                # new signal by cloning the current one at the new price (no LLM call).
+                cloned = await self._clone_at_price(session, market)
+                if cloned is not None:
+                    await session.commit()
+                    log.info(
+                        "signal.pipeline.price_reprice",
+                        market_id=market.id,
+                        signal_id=cloned.id,
+                        new_mid=market.mid_price,
+                        edge=cloned.edge,
+                    )
+                    return cloned
                 log.info(
                     "signal.pipeline.skip_unchanged",
                     market_id=market.id,
@@ -237,4 +250,86 @@ class SignalPipeline:
             trigger=trigger,
             created_at=now,
             raw_context=raw_context,
+        )
+
+    async def _clone_at_price(
+        self,
+        session: AsyncSession,
+        market: Market,
+        price_move_threshold: float = 0.05,
+    ) -> Signal | None:
+        """Clone the current signal at the new market price without calling the LLM.
+
+        Returns a new Signal if price has moved more than *price_move_threshold*
+        since the current signal, otherwise returns None (no action needed).
+        The new signal has the same probability/confidence/reasoning but
+        recalculated edge and updated market_mid_at_signal.
+        """
+        if market.current_signal_id is None:
+            return None
+
+        try:
+            signal_uuid = uuid.UUID(str(market.current_signal_id))
+        except (ValueError, AttributeError):
+            return None
+
+        result = await session.execute(
+            select(SignalRow).where(SignalRow.id == signal_uuid)
+        )
+        current = result.scalar_one_or_none()
+        if current is None:
+            return None
+
+        if abs(market.mid_price - current.market_mid_at_signal) <= price_move_threshold:
+            return None
+
+        now = datetime.now(timezone.utc)
+        new_id = uuid.uuid4()
+
+        if current.direction == "NO":
+            new_edge = market.mid_price - current.estimated_probability
+        else:
+            new_edge = current.estimated_probability - market.mid_price
+
+        signal_row = SignalRow(
+            id=new_id,
+            market_id=market.id,
+            estimated_probability=current.estimated_probability,
+            confidence=current.confidence,
+            edge=new_edge,
+            market_mid_at_signal=market.mid_price,
+            direction=current.direction,
+            reasoning=current.reasoning,
+            sources=current.sources,
+            retrieval_hash=current.retrieval_hash,
+            model_used=current.model_used,
+            prompt_version=current.prompt_version,
+            trigger="price_moved",
+            raw_context=current.raw_context,
+        )
+        session.add(signal_row)
+        await session.flush()
+
+        await session.execute(
+            update(MarketRow)
+            .where(MarketRow.id == market.id)
+            .values(current_signal_id=new_id)
+        )
+
+        return Signal(
+            id=str(new_id),
+            market_id=market.id,
+            estimated_probability=current.estimated_probability,
+            confidence=current.confidence,
+            edge=new_edge,
+            market_mid_at_signal=market.mid_price,
+            direction=current.direction,
+            reasoning=current.reasoning,
+            sources=list(current.sources),
+            retrieval_hash=current.retrieval_hash,
+            model_used=current.model_used,
+            prompt_version=current.prompt_version,
+            trigger="price_moved",
+            created_at=now,
+            raw_context=current.raw_context,
         )
