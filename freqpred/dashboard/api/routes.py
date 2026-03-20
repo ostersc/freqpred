@@ -56,10 +56,6 @@ def _daily_cap(request: Request) -> float:
     return float(request.app.state.daily_cap_usd)
 
 
-def _redis_url(request: Request) -> str | None:
-    return request.app.state.redis_url
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -329,9 +325,7 @@ async def get_llm_cost(
 async def health(
     session: Annotated[AsyncSession, Depends(get_db)],
     daily_cap: Annotated[float, Depends(_daily_cap)],
-    redis_url: Annotated[str | None, Depends(_redis_url)],
 ) -> HealthResponse:
-    # DB check
     db_status = "connected"
     open_positions = 0
     llm_remaining = daily_cap
@@ -346,26 +340,11 @@ async def health(
         log.exception("health.db_check_failed")
         db_status = "error"
 
-    # Redis check
-    redis_status = "not_configured"
-    if redis_url:
-        try:
-            import redis.asyncio as aioredis
-
-            r = aioredis.from_url(redis_url)
-            await r.ping()
-            await r.aclose()
-            redis_status = "connected"
-        except Exception:
-            log.exception("health.redis_check_failed")
-            redis_status = "error"
-
     overall = "ok" if db_status == "connected" else "degraded"
 
     return HealthResponse(
         status=overall,
         db=db_status,
-        redis=redis_status,
         open_positions=open_positions,
         llm_daily_budget_remaining_usd=round(llm_remaining, 4),
     )

@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import select
@@ -14,13 +12,7 @@ from freqpred.markets.base import IMarketClient
 from freqpred.markets.models import MarketRow
 from freqpred.markets.repository import upsert_markets
 
-if TYPE_CHECKING:
-    from redis.asyncio import Redis
-
 log = structlog.get_logger(__name__)
-
-# Redis list key where market IDs are enqueued for signal re-analysis
-SIGNAL_TRIGGER_QUEUE = "signal_triggers"
 
 # Default price-move threshold in dollars (5 cents)
 PRICE_MOVE_THRESHOLD = 0.05
@@ -58,10 +50,9 @@ class MarketWatcher:
     Runs as a background asyncio task. On each cycle it:
     1. Fetches all open markets from Kalshi.
     2. Upserts prices and timestamps into the DB via the repository.
-    3. Enqueues market IDs into the ``signal_triggers`` Redis list when
-       mid_price has moved > ``price_move_threshold`` since the last signal.
-    4. Logs stale markets (last_fetched_at older than polling_interval × 3)
-       and skips them from signal triggering.
+    3. Checks which markets have moved > ``price_move_threshold`` since last signal
+       and logs them for visibility.
+    4. Logs stale markets (last_fetched_at older than polling_interval × 3).
     5. Emits a structured log summary of the cycle.
     """
 
@@ -69,13 +60,11 @@ class MarketWatcher:
         self,
         client: IMarketClient,
         session_factory: async_sessionmaker[AsyncSession],
-        redis: "Redis",
         polling_interval: int = 300,
         price_move_threshold: float = PRICE_MOVE_THRESHOLD,
     ) -> None:
         self._client = client
         self._session_factory = session_factory
-        self._redis = redis
         self._polling_interval = polling_interval
         self._price_move_threshold = price_move_threshold
 
@@ -105,7 +94,7 @@ class MarketWatcher:
         log.info(
             "market_watcher_cycle_complete",
             markets_polled=len(markets),
-            triggers_enqueued=triggered,
+            triggers_logged=triggered,
             stale_markets=len(stale_ids),
             elapsed_s=round((datetime.now(UTC) - cycle_start).total_seconds(), 2),
         )
@@ -117,18 +106,15 @@ class MarketWatcher:
         session: AsyncSession,
         markets: list,
     ) -> int:
-        """For each polled market with a signal, enqueue if price moved enough.
+        """For each polled market with a signal, log if price moved enough.
 
-        Returns the count of markets enqueued.
+        Returns the count of markets that have moved past the threshold.
         """
         if not markets:
             return 0
 
-        # Build a map of market_id → current mid_price from the just-fetched data
         current_mids: dict[str, float] = {m.id: m.mid_price for m in markets}
-        market_ids = list(current_mids.keys())
 
-        # Import here to avoid circular imports (signal models depend on markets)
         from freqpred.signal.models import SignalRow
 
         result = await session.execute(
@@ -138,9 +124,8 @@ class MarketWatcher:
         )
         rows = result.all()
 
-        enqueued = 0
+        triggered = 0
         for row in rows:
-            # Only trigger for markets present in the current poll batch.
             if row.id not in current_mids:
                 continue
             market_id: str = row.id
@@ -148,32 +133,21 @@ class MarketWatcher:
             signal_mid: float = row.market_mid_at_signal
 
             if price_moved(new_mid, signal_mid, self._price_move_threshold):
-                payload = json.dumps(
-                    {
-                        "market_id": market_id,
-                        "trigger": "price_moved",
-                        "current_mid": new_mid,
-                        "signal_mid": signal_mid,
-                        "delta": round(new_mid - signal_mid, 4),
-                    }
-                )
-                await self._redis.rpush(SIGNAL_TRIGGER_QUEUE, payload)
                 log.info(
-                    "signal_trigger_enqueued",
+                    "market_watcher.price_moved",
                     market_id=market_id,
                     current_mid=new_mid,
                     signal_mid=signal_mid,
                     delta=round(new_mid - signal_mid, 4),
                 )
-                enqueued += 1
+                triggered += 1
 
-        return enqueued
+        return triggered
 
     async def _detect_stale_markets(self, session: AsyncSession) -> list[str]:
         """Return IDs of markets in the DB whose last_fetched_at is stale.
 
         Stale = last_fetched_at older than now - polling_interval × 3.
-        These markets are logged but not enqueued for signal analysis.
         """
         now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=self._polling_interval * 3)

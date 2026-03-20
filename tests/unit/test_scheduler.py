@@ -1,6 +1,6 @@
 """Unit tests for freqpred/ingestion/scheduler.py.
 
-All external dependencies (fetchers, store, DB, Redis) are mocked.
+All external dependencies (fetchers, store, DB) are mocked.
 No real API calls or DB connections are made.
 """
 from __future__ import annotations
@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
 from freqpred.ingestion.scheduler import (
     _subreddits_for_category,
     run_cycle,
@@ -38,6 +39,19 @@ def _mock_gdelt(monkeypatch):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def mock_cursors(monkeypatch):
+    """Patch fetcher cursor helpers so tests don't need a real DB session."""
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.get_cursor",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.set_cursor",
+        AsyncMock(return_value=None),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -99,12 +113,6 @@ def _make_session() -> AsyncMock:
     return session
 
 
-def _make_redis() -> AsyncMock:
-    redis = AsyncMock()
-    redis.set = AsyncMock(return_value=True)
-    return redis
-
-
 def _make_embedder() -> MagicMock:
     embedder = MagicMock()
     embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
@@ -139,7 +147,6 @@ class TestRunCycleNoMarkets:
     @pytest.mark.asyncio
     async def test_empty_returns_zero_stats(self) -> None:
         session = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         with patch(
@@ -147,7 +154,7 @@ class TestRunCycleNoMarkets:
             new_callable=AsyncMock,
             return_value=[],
         ):
-            stats = await run_cycle(session, embedder, redis)
+            stats = await run_cycle(session, embedder)
 
         assert stats["markets_processed"] == 0
         assert stats["docs_fetched"] == 0
@@ -165,7 +172,6 @@ class TestRunCycleFetchersCalled:
     async def test_fetchers_called_with_query_text(self) -> None:
         """Fetchers must receive the catalyst query text, not category keywords."""
         session = _make_session()
-        redis = _make_redis()
         embedder = _make_embedder()
         doc = _make_document()
         raw_doc = _make_raw_doc()
@@ -202,7 +208,6 @@ class TestRunCycleFetchersCalled:
             await run_cycle(
                 session,
                 embedder,
-                redis,
                 tavily_api_key="tv-key",
                 newsapi_api_key="na-key",
             )
@@ -220,7 +225,6 @@ class TestRunCycleFetchersCalled:
     @pytest.mark.asyncio
     async def test_tavily_skipped_when_no_key(self) -> None:
         session = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         market_queries = [("MKT-1", "politics", ["some query"])]
@@ -247,14 +251,13 @@ class TestRunCycleFetchersCalled:
                 return_value=[],
             ),
         ):
-            await run_cycle(session, embedder, redis, tavily_api_key="")  # no key
+            await run_cycle(session, embedder, tavily_api_key="")  # no key
 
         mock_tavily.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_newsapi_skipped_when_no_key(self) -> None:
         session = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         market_queries = [("MKT-1", "politics", ["some query"])]
@@ -281,7 +284,7 @@ class TestRunCycleFetchersCalled:
                 return_value=[],
             ),
         ):
-            await run_cycle(session, embedder, redis, newsapi_api_key="")  # no key
+            await run_cycle(session, embedder, newsapi_api_key="")  # no key
 
         mock_newsapi.assert_not_called()
 
@@ -289,7 +292,6 @@ class TestRunCycleFetchersCalled:
     async def test_reddit_always_runs(self) -> None:
         """Reddit doesn't require a key and must always run."""
         session = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         market_queries = [("MKT-1", "politics", ["some query"])]
@@ -316,7 +318,7 @@ class TestRunCycleFetchersCalled:
                 return_value=[],
             ) as mock_reddit,
         ):
-            await run_cycle(session, embedder, redis, tavily_api_key="", newsapi_api_key="")
+            await run_cycle(session, embedder, tavily_api_key="", newsapi_api_key="")
 
         mock_reddit.assert_called_once()
 
@@ -331,7 +333,6 @@ class TestRunCycleErrorIsolation:
     async def test_tavily_failure_does_not_stop_newsapi_or_reddit(self) -> None:
         """If Tavily raises, NewsAPI and Reddit still run."""
         session = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         market_queries = [("MKT-1", "economics", ["query"])]
@@ -359,7 +360,7 @@ class TestRunCycleErrorIsolation:
             ) as mock_reddit,
         ):
             stats = await run_cycle(
-                session, embedder, redis, tavily_api_key="key", newsapi_api_key="key"
+                session, embedder, tavily_api_key="key", newsapi_api_key="key"
             )
 
         # NewsAPI and Reddit must still have been called
@@ -371,7 +372,6 @@ class TestRunCycleErrorIsolation:
     @pytest.mark.asyncio
     async def test_newsapi_failure_does_not_stop_reddit(self) -> None:
         session = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         market_queries = [("MKT-1", "economics", ["query"])]
@@ -399,7 +399,7 @@ class TestRunCycleErrorIsolation:
             ) as mock_reddit,
         ):
             stats = await run_cycle(
-                session, embedder, redis, tavily_api_key="key", newsapi_api_key="key"
+                session, embedder, tavily_api_key="key", newsapi_api_key="key"
             )
 
         mock_reddit.assert_called_once()
@@ -409,7 +409,6 @@ class TestRunCycleErrorIsolation:
     async def test_upsert_error_counted_not_raised(self) -> None:
         """A document store error increments docs_error without raising."""
         session = _make_session()
-        redis = _make_redis()
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
 
@@ -443,7 +442,7 @@ class TestRunCycleErrorIsolation:
             ),
         ):
             stats = await run_cycle(
-                session, embedder, redis, tavily_api_key="key"
+                session, embedder, tavily_api_key="key"
             )
 
         assert stats["docs_error"] == 1
@@ -453,7 +452,6 @@ class TestRunCycleErrorIsolation:
     async def test_document_skipped_not_counted_as_error(self) -> None:
         """DocumentSkipped (empty body) is silently ignored, not counted as an error."""
         session = _make_session()
-        redis = _make_redis()
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
 
@@ -487,26 +485,24 @@ class TestRunCycleErrorIsolation:
             ),
         ):
             stats = await run_cycle(
-                session, embedder, redis, tavily_api_key="key"
+                session, embedder, tavily_api_key="key"
             )
 
         assert stats["docs_error"] == 0
         assert stats["docs_stored"] == 0
 
 
-# ---------------------------------------------------------------------------
-# run_cycle — Redis key updated
-# ---------------------------------------------------------------------------
-
-
-class TestRunCycleRedis:
     @pytest.mark.asyncio
-    async def test_redis_key_set_after_market_cycle(self) -> None:
+    async def test_newsapi_rate_limit_sets_circuit_breaker(self) -> None:
+        """NewsAPIRateLimitError from the first query stops NewsAPI for the rest of the cycle."""
         session = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-42", "politics", ["query one"])]
+        # Two markets, each with one query — NewsAPI should only be attempted once.
+        market_queries = [
+            ("MKT-1", "economics", ["query-1"]),
+            ("MKT-2", "politics", ["query-2"]),
+        ]
 
         with (
             patch(
@@ -522,63 +518,35 @@ class TestRunCycleRedis:
             patch(
                 "freqpred.ingestion.scheduler.newsapi_fetcher.fetch",
                 new_callable=AsyncMock,
-                return_value=[],
-            ),
+                side_effect=NewsAPIRateLimitError("rate limited"),
+            ) as mock_newsapi,
             patch(
                 "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                 new_callable=AsyncMock,
                 return_value=[],
-            ),
+            ) as mock_reddit,
         ):
-            await run_cycle(session, embedder, redis)
+            stats = await run_cycle(
+                session, embedder, tavily_api_key="key", newsapi_api_key="key"
+            )
 
-        redis.set.assert_called_once()
-        call_args = redis.set.call_args
-        key = call_args.args[0] if call_args.args else call_args.kwargs.get("name")
-        assert key == "ingestion:last_run:MKT-42"
+        # NewsAPI attempted once, then circuit breaker stops it for the second market.
+        mock_newsapi.assert_called_once()
+        # Reddit still runs for both markets.
+        assert mock_reddit.call_count == 2
+        assert stats["markets_processed"] == 2
 
+
+# ---------------------------------------------------------------------------
+# run_cycle — multiple markets
+# ---------------------------------------------------------------------------
+
+
+class TestRunCycleMultipleMarkets:
     @pytest.mark.asyncio
-    async def test_redis_failure_does_not_abort_cycle(self) -> None:
-        """Redis errors are caught and logged; the cycle completes normally."""
+    async def test_markets_processed_count(self) -> None:
+        """markets_processed reflects number of distinct markets."""
         session = AsyncMock()
-        redis = AsyncMock()
-        redis.set = AsyncMock(side_effect=ConnectionError("Redis down"))
-        embedder = _make_embedder()
-
-        market_queries = [("MKT-1", "politics", ["query"])]
-
-        with (
-            patch(
-                "freqpred.ingestion.scheduler._load_active_market_queries",
-                new_callable=AsyncMock,
-                return_value=market_queries,
-            ),
-            patch(
-                "freqpred.ingestion.scheduler.tavily_fetcher.fetch",
-                new_callable=AsyncMock,
-                return_value=[],
-            ),
-            patch(
-                "freqpred.ingestion.scheduler.newsapi_fetcher.fetch",
-                new_callable=AsyncMock,
-                return_value=[],
-            ),
-            patch(
-                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
-                new_callable=AsyncMock,
-                return_value=[],
-            ),
-        ):
-            # Should not raise
-            stats = await run_cycle(session, embedder, redis)
-
-        assert stats["markets_processed"] == 1
-
-    @pytest.mark.asyncio
-    async def test_redis_key_set_per_market(self) -> None:
-        """One Redis SET call per market, not per query."""
-        session = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         market_queries = [
@@ -608,10 +576,8 @@ class TestRunCycleRedis:
                 return_value=[],
             ),
         ):
-            stats = await run_cycle(session, embedder, redis)
+            stats = await run_cycle(session, embedder)
 
-        # Two markets → two Redis SET calls
-        assert redis.set.await_count == 2
         assert stats["markets_processed"] == 2
 
 
@@ -624,7 +590,6 @@ class TestRunCycleStats:
     @pytest.mark.asyncio
     async def test_stats_counted_across_markets(self) -> None:
         session = _make_session()
-        redis = _make_redis()
         embedder = _make_embedder()
         doc = _make_document()
 
@@ -661,7 +626,7 @@ class TestRunCycleStats:
             ),
         ):
             stats = await run_cycle(
-                session, embedder, redis, tavily_api_key="k", newsapi_api_key="k"
+                session, embedder, tavily_api_key="k", newsapi_api_key="k"
             )
 
         # 2 markets × 2 docs each = 4 total
@@ -685,7 +650,6 @@ class TestRunScheduler:
         session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
         session_factory.return_value.__aexit__ = AsyncMock(return_value=None)
         session.commit = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         call_count = 0
@@ -705,7 +669,6 @@ class TestRunScheduler:
                 await run_scheduler(
                     session_factory,
                     embedder,
-                    redis,
                     interval_seconds=1,
                 )
 
@@ -719,7 +682,6 @@ class TestRunScheduler:
         session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
         session_factory.return_value.__aexit__ = AsyncMock(return_value=None)
         session.commit = AsyncMock()
-        redis = _make_redis()
         embedder = _make_embedder()
 
         call_count = 0
@@ -739,7 +701,6 @@ class TestRunScheduler:
                 await run_scheduler(
                     session_factory,
                     embedder,
-                    redis,
                     interval_seconds=1,
                 )
 

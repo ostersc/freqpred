@@ -13,6 +13,10 @@ from freqpred.ingestion.store import RawDocument
 log = structlog.get_logger()
 
 _GDELT_API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+
+
+class GDELTRateLimitError(Exception):
+    """Raised when GDELT returns a 429 response."""
 _GDELT_MIN_KEYWORD_LEN = 4  # GDELT rejects tokens shorter than this
 
 
@@ -97,6 +101,8 @@ async def fetch(
             log.warning("gdelt.fetch.error", query=query, error=type(exc).__name__)
             return []
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                raise GDELTRateLimitError(f"GDELT rate limited (429)") from exc
             log.warning("gdelt.fetch.error", query=query, status_code=exc.response.status_code)
             return []
         except Exception:

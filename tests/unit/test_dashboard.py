@@ -31,7 +31,7 @@ from freqpred.dashboard.api.routes import get_db
 def _make_app(session: AsyncMock, daily_cap: float = 10.0) -> object:
     """Create app with the real session factory replaced by a mock."""
     sf = MagicMock()
-    app = create_app(session_factory=sf, redis_url=None, daily_cap_usd=daily_cap)
+    app = create_app(session_factory=sf, daily_cap_usd=daily_cap)
 
     async def _override_get_db():
         yield session

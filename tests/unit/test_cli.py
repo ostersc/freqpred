@@ -21,13 +21,11 @@ NOW = datetime(2026, 3, 17, 12, 0, 0, tzinfo=timezone.utc)
 
 def _make_config(
     database_url: str = "postgresql+asyncpg://x:y@localhost/test",
-    redis_url: str = "redis://localhost",
     anthropic_api_key: str = "sk-test",
 ) -> MagicMock:
     cfg = MagicMock()
     cfg.log_level = "INFO"
     cfg.database.url = database_url
-    cfg.redis.url = redis_url
     cfg.anthropic.api_key = anthropic_api_key
     cfg.kalshi.api_key = ""
     cfg.kalshi.base_url = "https://api.kalshi.com"
@@ -425,7 +423,7 @@ class TestPaperTradingSignalLoop:
         """paper mode + non-SKIP signal → order_manager.submit() called."""
         from freqpred.cli import _run_main
 
-        config = _make_config(redis_url="")  # no redis → only signal_loop task
+        config = _make_config()
         market_row = _make_market_row("MKT-1")
         fake_signal = _make_fake_signal(direction="YES")
         mocks = _make_run_mocks(market_row, fake_signal)
@@ -452,8 +450,7 @@ class TestPaperTradingSignalLoop:
              patch("freqpred.trading.risk.RiskEngine", mock_risk_cls), \
              patch("freqpred.trading.order_manager.OrderManager", mock_om_cls), \
              patch("asyncio.sleep", side_effect=_cancel_on_sleep), \
-             patch("anthropic.AsyncAnthropic"), \
-             patch("redis.asyncio.from_url"):
+             patch("anthropic.AsyncAnthropic"):
             await _run_main(config, "TestStrategy", "paper")
 
         mock_om_instance.submit.assert_called_once()
@@ -463,7 +460,7 @@ class TestPaperTradingSignalLoop:
         """signal-only mode → OrderManager never constructed or called."""
         from freqpred.cli import _run_main
 
-        config = _make_config(redis_url="")
+        config = _make_config()
         market_row = _make_market_row("MKT-1")
         fake_signal = _make_fake_signal(direction="YES")
         mocks = _make_run_mocks(market_row, fake_signal)
@@ -482,8 +479,7 @@ class TestPaperTradingSignalLoop:
              patch("freqpred.markets.kalshi.KalshiClient", mocks["kalshi_cls"]), \
              patch("freqpred.trading.order_manager.OrderManager", mock_om_cls), \
              patch("asyncio.sleep", side_effect=_cancel_on_sleep), \
-             patch("anthropic.AsyncAnthropic"), \
-             patch("redis.asyncio.from_url"):
+             patch("anthropic.AsyncAnthropic"):
             await _run_main(config, "TestStrategy", "signal-only")
 
         mock_om_cls.assert_not_called()

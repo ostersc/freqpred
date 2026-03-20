@@ -8,10 +8,6 @@ database:
   # Overridden by DATABASE_URL env var
   url: ""
 
-redis:
-  # Overridden by REDIS_URL env var
-  url: ""
-
 kalshi:
   # Overridden by KALSHI_API_KEY env var
   api_key: ""

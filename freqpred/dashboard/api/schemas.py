@@ -133,6 +133,5 @@ class LLMCostResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str                          # "ok" | "degraded"
     db: str                              # "connected" | "error"
-    redis: str                           # "connected" | "not_configured" | "error"
     open_positions: int
     llm_daily_budget_remaining_usd: float

@@ -85,7 +85,6 @@ def run(ctx: click.Context, strategy: str, mode: str) -> None:
 
 async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     import anthropic
-    import redis.asyncio as aioredis
 
     import freqpred.ingestion.models  # noqa: F401
     import freqpred.signal.models  # noqa: F401
@@ -116,8 +115,6 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
 
     engine = make_engine(config.database.url)
     session_factory = make_session_factory(engine)
-
-    redis_client = aioredis.from_url(config.redis.url) if config.redis.url else None
 
     embedder = LocalEmbedder()
     llm_client = LLMClient(
@@ -298,35 +295,30 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         base_url=config.kalshi.base_url,
         private_key_path=config.kalshi.private_key_path,
     ) as kalshi_client:
-        if redis_client is not None:
-            watcher = MarketWatcher(
-                client=kalshi_client,
-                session_factory=session_factory,
-                redis=redis_client,
-                polling_interval=config.kalshi.polling_interval_seconds,
+        watcher = MarketWatcher(
+            client=kalshi_client,
+            session_factory=session_factory,
+            polling_interval=config.kalshi.polling_interval_seconds,
+        )
+        tasks.append(asyncio.create_task(watcher.run(), name="market_watcher"))
+        tasks.append(
+            asyncio.create_task(
+                run_scheduler(
+                    session_factory=session_factory,
+                    embedder=embedder,
+                    interval_seconds=config.ingestion.schedule_interval_seconds,
+                    strategy=strategy,
+                    llm_client=llm_client,
+                    tavily_api_key=config.tavily.api_key,
+                    newsapi_api_key=config.newsapi.api_key,
+                    truthsocial_enabled=config.ingestion.truthsocial.enabled,
+                    truthsocial_username=config.truthsocial.username,
+                    truthsocial_password=config.truthsocial.password,
+                    truthsocial_accounts=config.ingestion.truthsocial.accounts,
+                ),
+                name="ingestion_scheduler",
             )
-            tasks.append(asyncio.create_task(watcher.run(), name="market_watcher"))
-            tasks.append(
-                asyncio.create_task(
-                    run_scheduler(
-                        session_factory=session_factory,
-                        embedder=embedder,
-                        redis_client=redis_client,
-                        interval_seconds=config.ingestion.schedule_interval_seconds,
-                        strategy=strategy,
-                        llm_client=llm_client,
-                        tavily_api_key=config.tavily.api_key,
-                        newsapi_api_key=config.newsapi.api_key,
-                        truthsocial_enabled=config.ingestion.truthsocial.enabled,
-                        truthsocial_username=config.truthsocial.username,
-                        truthsocial_password=config.truthsocial.password,
-                        truthsocial_accounts=config.ingestion.truthsocial.accounts,
-                    ),
-                    name="ingestion_scheduler",
-                )
-            )
-        else:
-            click.echo("WARNING: REDIS_URL not configured — watcher and scheduler disabled.", err=True)
+        )
 
         tasks.append(asyncio.create_task(signal_loop(), name="signal_loop"))
         tasks.append(
@@ -342,8 +334,6 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            if redis_client is not None:
-                await redis_client.aclose()
             await engine.dispose()
             click.echo("Shutdown complete.")
 

@@ -30,6 +30,37 @@ except ImportError:  # pragma: no cover
         """Raised when truthbrush cannot authenticate."""
 
 
+class TruthSocialBlockedError(LoginErrorException):
+    """Raised when Cloudflare blocks a Truth Social API request (HTTP 1015 / JSON decode failure).
+
+    Subclasses LoginErrorException so the scheduler's existing login-failed
+    circuit breaker stops all Truth Social fetches for the rest of the cycle.
+    """
+
+
+def patch_api_for_block_detection(api: object) -> None:
+    """Monkey-patch a truthbrush Api instance to surface Cloudflare blocks.
+
+    truthbrush's _get() catches JSONDecodeError internally, logs it, and returns
+    None — meaning the caller sees an empty result with no exception. This patch
+    wraps _get so that a None return raises TruthSocialBlockedError instead,
+    giving the scheduler a signal to stop making further Truth Social requests.
+
+    Call once after creating the Api instance, before passing it to any fetcher.
+    """
+    _original_get = api._get  # type: ignore[union-attr]
+
+    def _patched_get(url: str, params: dict | None = None) -> object:
+        result = _original_get(url, params=params)
+        if result is None:
+            raise TruthSocialBlockedError(
+                "Cloudflare rate limit or JSON decode failure in truthbrush._get"
+            )
+        return result
+
+    api._get = _patched_get  # type: ignore[union-attr]
+
+
 class _HTMLStripper(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -154,6 +185,7 @@ async def fetch_account(
     api: object,
     username: str,
     created_after: datetime,
+    max_results: int = 40,
     excluded_domains: frozenset[str] = frozenset(),
 ) -> list[RawDocument]:
     """Fetch Truth Social posts from a specific account.
@@ -165,6 +197,8 @@ async def fetch_account(
         api:              truthbrush.Api instance (synchronous).
         username:         Truth Social username (without @).
         created_after:    Only fetch posts after this datetime.
+        max_results:      Maximum number of posts to fetch (caps pagination to
+                          avoid triggering Cloudflare rate limits). Default: 40.
         excluded_domains: URL domains to exclude.
 
     Returns:
@@ -173,7 +207,12 @@ async def fetch_account(
     now = datetime.now(UTC)
 
     def _sync_pull() -> list[dict]:
-        return list(api.pull_statuses(username, created_after=created_after))  # type: ignore[union-attr]
+        results: list[dict] = []
+        for post in api.pull_statuses(username, created_after=created_after):  # type: ignore[union-attr]
+            results.append(post)
+            if len(results) >= max_results:
+                break
+        return results
 
     try:
         raw_statuses = await asyncio.to_thread(_sync_pull)

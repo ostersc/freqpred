@@ -22,7 +22,6 @@ jobs:
         run: uv run pytest tests/unit/ -v
         env:
           DATABASE_URL: postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test
-          REDIS_URL: redis://localhost:6379
           ANTHROPIC_API_KEY: dummy
           KALSHI_API_KEY: dummy
           TAVILY_API_KEY: dummy
@@ -46,16 +45,6 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
 
@@ -75,7 +64,6 @@ jobs:
         run: uv run pytest tests/integration/ -v
         env:
           DATABASE_URL: postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test
-          REDIS_URL: redis://localhost:6379
           ANTHROPIC_API_KEY: dummy
           KALSHI_API_KEY: dummy
           TAVILY_API_KEY: dummy

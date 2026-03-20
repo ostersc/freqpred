@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import structlog
 from newsapi import NewsApiClient
+from newsapi.newsapi_exception import NewsAPIException
 
 from freqpred.ingestion.fetchers import is_domain_excluded
 from freqpred.ingestion.store import RawDocument
@@ -13,6 +14,10 @@ from freqpred.ingestion.store import RawDocument
 log = structlog.get_logger()
 
 _RATE_LIMIT_SLEEP = 1.0  # max 1 req/sec
+
+
+class NewsAPIRateLimitError(Exception):
+    """Raised when NewsAPI returns a rateLimited (429) response."""
 _DEFAULT_EXCLUDED_DOMAINS: frozenset[str] = frozenset({"kalshi.com"})
 
 
@@ -64,6 +69,11 @@ async def fetch(
             client.get_everything,
             **kwargs,
         )
+    except NewsAPIException as exc:
+        if exc.get_code() == "rateLimited":
+            raise NewsAPIRateLimitError(str(exc)) from exc
+        log.warning("newsapi.fetch.error", query=query, exc_info=True)
+        return []
     except Exception:
         log.warning("newsapi.fetch.error", query=query, exc_info=True)
         return []

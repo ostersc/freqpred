@@ -826,7 +826,7 @@ Signal trigger fires for a market
 
 *Account feed mode* (standing feeds, runs once per cycle):
 - Calls `api.pull_statuses(username, created_after=last_run)` for each configured account
-- `last_run` tracked in Redis at `ingestion:last_run:truthsocial:{username}`
+- `last_run` tracked in Postgres (`fetcher_cursors` table, keyed by `(fetcher, key)`)
 - Not tied to a specific market — broad ingestion, all categories benefit
 - Configured via `ingestion.truthsocial.accounts: [realDonaldTrump, ...]` in `config.yaml`
 
@@ -1075,7 +1075,7 @@ telegram:
 - [x] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy` strategies
 - [x] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy
 - [x] Catalyst Generator: LLM (Haiku) derives 3–5 search queries per selected market; writes `CatalystRun` + `CatalystQuery` to DB; RAG-informed on re-runs; deactivates on market close/deselection
-- [x] Ingestion Scheduler: reads latest active `CatalystQuery` rows from DB; drives fetchers; tracks last-run per market in Redis in Postgres
+- [x] Ingestion Scheduler: reads latest active `CatalystQuery` rows from DB; drives fetchers; tracks last-run per fetcher in Postgres (`fetcher_cursors` table)
 - [x] RAG retriever: vector search against Document store for a given market question
 - [x] LLM signal pipeline: retrieve docs → hash check → Claude analysis → Signal creation
 - [x] LLM audit logging (LLMQuery table — every call logged with cost)

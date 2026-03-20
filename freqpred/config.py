@@ -22,10 +22,6 @@ class DatabaseConfig(BaseModel):
     url: str = Field(default="")
 
 
-class RedisConfig(BaseModel):
-    url: str = Field(default="")
-
-
 class KalshiConfig(BaseModel):
     api_key: str = Field(default="")
     private_key_path: str = Field(default="")
@@ -114,7 +110,6 @@ class AlertsConfig(BaseModel):
 class Settings(BaseModel):
     log_level: str = Field(default="INFO")
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
-    redis: RedisConfig = Field(default_factory=RedisConfig)
     kalshi: KalshiConfig = Field(default_factory=KalshiConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     tavily: TavilyConfig = Field(default_factory=TavilyConfig)
@@ -141,7 +136,6 @@ class Settings(BaseModel):
 # Maps environment variable name → (section, field) path in Settings
 _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "DATABASE_URL": ("database", "url"),
-    "REDIS_URL": ("redis", "url"),
     "KALSHI_API_KEY": ("kalshi", "api_key"),
     "KALSHI_PRIVATE_KEY_PATH": ("kalshi", "private_key_path"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),

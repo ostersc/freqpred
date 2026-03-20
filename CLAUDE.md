@@ -68,8 +68,8 @@ uv sync
 # Copy and fill in config
 cp config/config.example.yaml config/config.yaml
 
-# Start local services (Postgres + Redis)
-docker-compose up -d db redis
+# Start local services (Postgres)
+docker-compose up -d db
 
 # Run migrations
 uv run alembic upgrade head
@@ -86,7 +86,6 @@ TAVILY_API_KEY=
 NEWSAPI_KEY=
 # Reddit uses the public JSON API — no credentials required
 DATABASE_URL=postgresql+asyncpg://...
-REDIS_URL=redis://...
 ```
 
 ---

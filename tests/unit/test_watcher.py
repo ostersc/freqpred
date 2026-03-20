@@ -1,15 +1,13 @@
 """Unit tests for freqpred.markets.watcher."""
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from freqpred.markets.watcher import (
     PRICE_MOVE_THRESHOLD,
-    SIGNAL_TRIGGER_QUEUE,
     MarketWatcher,
     is_stale,
     price_moved,
@@ -123,9 +121,8 @@ class TestDetectStaleMarkets:
 
 class TestCheckPriceMoveTriggers:
     @pytest.mark.asyncio
-    async def test_enqueues_market_when_price_moved(self) -> None:
-        redis = AsyncMock()
-        watcher = _make_watcher(redis=redis)
+    async def test_returns_one_when_price_moved(self) -> None:
+        watcher = _make_watcher()
 
         markets = [_make_market("MKT-1", mid_price=0.60)]
         # Signal mid was 0.50 → delta = 0.10 > threshold
@@ -134,17 +131,10 @@ class TestCheckPriceMoveTriggers:
         count = await watcher._check_price_move_triggers(session, markets)
 
         assert count == 1
-        redis.rpush.assert_awaited_once()
-        call_args = redis.rpush.call_args
-        assert call_args[0][0] == SIGNAL_TRIGGER_QUEUE
-        payload = json.loads(call_args[0][1])
-        assert payload["market_id"] == "MKT-1"
-        assert payload["trigger"] == "price_moved"
 
     @pytest.mark.asyncio
-    async def test_does_not_enqueue_when_price_stable(self) -> None:
-        redis = AsyncMock()
-        watcher = _make_watcher(redis=redis)
+    async def test_returns_zero_when_price_stable(self) -> None:
+        watcher = _make_watcher()
 
         markets = [_make_market("MKT-1", mid_price=0.52)]
         # Signal mid was 0.50 → delta = 0.02 < threshold
@@ -153,12 +143,10 @@ class TestCheckPriceMoveTriggers:
         count = await watcher._check_price_move_triggers(session, markets)
 
         assert count == 0
-        redis.rpush.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_enqueues_only_moved_markets_from_batch(self) -> None:
-        redis = AsyncMock()
-        watcher = _make_watcher(redis=redis)
+    async def test_counts_only_moved_markets_from_batch(self) -> None:
+        watcher = _make_watcher()
 
         markets = [
             _make_market("MKT-1", mid_price=0.60),  # moved (0.10 > 0.05)
@@ -174,34 +162,16 @@ class TestCheckPriceMoveTriggers:
         count = await watcher._check_price_move_triggers(session, markets)
 
         assert count == 2
-        assert redis.rpush.await_count == 2
 
     @pytest.mark.asyncio
     async def test_returns_zero_for_empty_markets_list(self) -> None:
-        redis = AsyncMock()
-        watcher = _make_watcher(redis=redis)
+        watcher = _make_watcher()
         session = AsyncMock()
 
         count = await watcher._check_price_move_triggers(session, [])
 
         assert count == 0
-        redis.rpush.assert_not_awaited()
         session.execute.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_payload_contains_delta(self) -> None:
-        redis = AsyncMock()
-        watcher = _make_watcher(redis=redis)
-
-        markets = [_make_market("MKT-1", mid_price=0.60)]
-        session = _make_session_with_signal_rows([("MKT-1", 0.60, 0.50)])
-
-        await watcher._check_price_move_triggers(session, markets)
-
-        payload = json.loads(redis.rpush.call_args[0][1])
-        assert payload["delta"] == pytest.approx(0.10, abs=1e-4)
-        assert payload["current_mid"] == pytest.approx(0.60)
-        assert payload["signal_mid"] == pytest.approx(0.50)
 
 
 # ---------------------------------------------------------------------------
@@ -209,16 +179,10 @@ class TestCheckPriceMoveTriggers:
 # ---------------------------------------------------------------------------
 
 
-def _make_watcher(
-    polling_interval: int = 300,
-    redis: AsyncMock | None = None,
-) -> MarketWatcher:
-    if redis is None:
-        redis = AsyncMock()
+def _make_watcher(polling_interval: int = 300) -> MarketWatcher:
     return MarketWatcher(
         client=AsyncMock(),
         session_factory=MagicMock(),
-        redis=redis,
         polling_interval=polling_interval,
     )
 

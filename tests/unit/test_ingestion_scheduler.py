@@ -20,6 +20,19 @@ def _mock_gdelt():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_cursors(monkeypatch):
+    """Patch fetcher cursor helpers so tests don't need a real DB session."""
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.get_cursor",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.set_cursor",
+        AsyncMock(return_value=None),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -172,7 +185,6 @@ class TestEnsureCatalysts:
         """run_cycle with newsapi_enabled=False must never call the NewsAPI fetcher."""
         session = AsyncMock()
         embedder = MagicMock()
-        redis_client = AsyncMock()
 
         with (
             patch(
@@ -198,7 +210,6 @@ class TestEnsureCatalysts:
             await run_cycle(
                 session=session,
                 embedder=embedder,
-                redis_client=redis_client,
                 newsapi_api_key="some-key",
                 newsapi_enabled=False,
             )

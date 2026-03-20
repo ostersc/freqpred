@@ -8,7 +8,7 @@ Each cycle:
   4. Deactivates catalysts for markets no longer selected.
   5. Runs Tavily + NewsAPI + Reddit fetchers against every active
      CatalystQuery and upserts results into the document store.
-  6. Updates ingestion:last_run:{market_id} in Redis.
+  6. Updates fetcher_cursors in Postgres for Truth Social account feeds.
 
 Public API:
     run_cycle(...)   — one full pass (steps 1-6).
@@ -18,18 +18,24 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from freqpred.ingestion.cursors import get_cursor, set_cursor
 from freqpred.ingestion.fetchers import gdelt as gdelt_fetcher
 from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
 from freqpred.ingestion.fetchers import reddit as reddit_fetcher
 from freqpred.ingestion.fetchers import tavily as tavily_fetcher
 from freqpred.ingestion.fetchers import truthsocial as truthsocial_fetcher
-from freqpred.ingestion.fetchers.truthsocial import LoginErrorException as TruthSocialLoginError
+from freqpred.ingestion.fetchers.gdelt import GDELTRateLimitError
+from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
+from freqpred.ingestion.fetchers.truthsocial import (
+    LoginErrorException as TruthSocialLoginError,
+    patch_api_for_block_detection,
+)
 from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.ingestion.quota import get_daily_count, increment_daily_count
@@ -43,7 +49,6 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_REDIS_KEY = "ingestion:last_run:{market_id}"
 _NEWSAPI_LOOKBACK_DAYS = 7
 
 # Category → subreddit mapping used for Reddit queries.
@@ -58,14 +63,7 @@ _SUBREDDIT_MAP: dict[str, list[str]] = {
 }
 
 
-_REDIS_KEY_TS_ACCOUNT = "ingestion:last_run:truthsocial:{username}"
-
-
-class _RedisClient(Protocol):
-    """Minimal async Redis interface required by the scheduler."""
-
-    async def set(self, name: str, value: str) -> None: ...
-    async def get(self, name: str) -> str | bytes | None: ...
+_TS_ACCOUNT_FETCHER = "truthsocial_account"
 
 
 def _subreddits_for_category(category: str) -> list[str]:
@@ -80,7 +78,6 @@ def _subreddits_for_category(category: str) -> list[str]:
 async def run_cycle(
     session: AsyncSession,
     embedder: LocalEmbedder,
-    redis_client: _RedisClient,
     strategy: "StrategyProtocol | None" = None,
     llm_client: "LLMClient | None" = None,
     tavily_api_key: str = "",
@@ -109,7 +106,6 @@ async def run_cycle(
     Args:
         session:                    Open async SQLAlchemy session (caller manages commit).
         embedder:                   Local embedder for document storage.
-        redis_client:               Async Redis client.
         strategy:                   Strategy used to filter markets. If None, all markets
                                     with active catalyst runs are processed.
         llm_client:                 LLM client for catalyst generation. If None, catalyst
@@ -164,7 +160,9 @@ async def run_cycle(
     # Circuit-breaker flags — set to True when a plan/quota limit is hit so we
     # don't log the same error once per query for the rest of the cycle.
     tavily_limit_hit = False
+    newsapi_limit_hit = False
     newsapi_limit_logged = False
+    gdelt_limit_hit = False
     truthsocial_login_failed = False
 
     # Build Truth Social Api object once for the cycle (avoids re-auth per call).
@@ -175,24 +173,16 @@ async def run_cycle(
         ts_api = TruthSocialApi(
             username=truthsocial_username, password=truthsocial_password
         )
+        patch_api_for_block_detection(ts_api)
 
     # --- Phase 2a: Truth Social account feeds (once per cycle, per account) ----
     if ts_api is not None and truthsocial_accounts:
         for ts_username in truthsocial_accounts:
             if truthsocial_login_failed:
                 break
-            redis_key = _REDIS_KEY_TS_ACCOUNT.format(username=ts_username)
             try:
-                last_run_raw = await redis_client.get(redis_key)
-                if last_run_raw:
-                    last_run_str = (
-                        last_run_raw.decode()
-                        if isinstance(last_run_raw, bytes)
-                        else last_run_raw
-                    )
-                    ts_created_after = datetime.fromisoformat(last_run_str)
-                else:
-                    ts_created_after = now - timedelta(hours=48)
+                last_run = await get_cursor(session, _TS_ACCOUNT_FETCHER, ts_username)
+                ts_created_after = last_run if last_run is not None else now - timedelta(hours=48)
 
                 docs = await truthsocial_fetcher.fetch_account(
                     api=ts_api,
@@ -215,7 +205,7 @@ async def run_cycle(
                         )
                         total_error += 1
                 total_fetched += len(docs)
-                await redis_client.set(redis_key, now.isoformat())
+                await set_cursor(session, _TS_ACCOUNT_FETCHER, ts_username, now)
                 log.info(
                     "scheduler.truthsocial_account_fetched",
                     username=ts_username,
@@ -256,7 +246,7 @@ async def run_cycle(
 
             # NewsAPI quota check requires a DB round-trip; do it before the gather.
             newsapi_fetched = False
-            if newsapi_api_key and newsapi_enabled:
+            if newsapi_api_key and newsapi_enabled and not newsapi_limit_hit:
                 daily_count = await get_daily_count(session, "newsapi", now.date())
                 if daily_count >= newsapi_max_daily_requests:
                     if not newsapi_limit_logged:
@@ -284,11 +274,12 @@ async def run_cycle(
                 user_agent=reddit_user_agent,
             ))
 
-            fetch_names.append("gdelt")
-            fetch_coros.append(gdelt_fetcher.fetch(
-                query=query_text,
-                excluded_domains=domain_blacklist,
-            ))
+            if not gdelt_limit_hit:
+                fetch_names.append("gdelt")
+                fetch_coros.append(gdelt_fetcher.fetch(
+                    query=query_text,
+                    excluded_domains=domain_blacklist,
+                ))
 
             if ts_api is not None and not truthsocial_login_failed:
                 fetch_names.append("truthsocial_search")
@@ -307,9 +298,24 @@ async def run_cycle(
                     if name == "tavily" and isinstance(result, (ForbiddenError, UsageLimitExceededError)):
                         tavily_limit_hit = True
                         log.warning("scheduler.tavily_limit_reached", reason=str(result))
+                    elif name == "newsapi" and isinstance(result, NewsAPIRateLimitError):
+                        newsapi_limit_hit = True
+                        newsapi_limit_logged = True
+                        log.warning("scheduler.newsapi_rate_limited", reason=str(result))
+                    elif name == "gdelt" and isinstance(result, GDELTRateLimitError):
+                        gdelt_limit_hit = True
+                        log.warning("scheduler.gdelt_rate_limited", reason=str(result))
                     elif name == "truthsocial_search" and isinstance(result, TruthSocialLoginError):
                         truthsocial_login_failed = True
-                        log.error("scheduler.truthsocial_login_failed", query=query_text, error=str(result))
+                        from freqpred.ingestion.fetchers.truthsocial import TruthSocialBlockedError  # noqa: PLC0415
+                        if isinstance(result, TruthSocialBlockedError):
+                            log.warning(
+                                "scheduler.truthsocial_cloudflare_blocked",
+                                query=query_text,
+                                hint="IP temporarily banned by Cloudflare (error 1015); skipping remaining Truth Social calls this cycle — will retry next cycle",
+                            )
+                        else:
+                            log.error("scheduler.truthsocial_login_failed", query=query_text, error=str(result))
                     else:
                         log.warning(
                             "scheduler.fetcher_error",
@@ -346,17 +352,6 @@ async def run_cycle(
                     )
                     market_error += 1
 
-        # Update Redis last-run timestamp.
-        try:
-            redis_key = _REDIS_KEY.format(market_id=market_id)
-            await redis_client.set(redis_key, now.isoformat())
-        except Exception:
-            log.warning(
-                "scheduler.redis_error",
-                market_id=market_id,
-                exc_info=True,
-            )
-
         log.info(
             "scheduler.market_cycle_complete",
             market_id=market_id,
@@ -385,7 +380,6 @@ async def run_cycle(
 async def run_scheduler(
     session_factory: async_sessionmaker[AsyncSession],
     embedder: LocalEmbedder,
-    redis_client: _RedisClient,
     interval_seconds: int = 1800,
     strategy: "StrategyProtocol | None" = None,
     llm_client: "LLMClient | None" = None,
@@ -407,8 +401,7 @@ async def run_scheduler(
 
     Args:
         session_factory:            Async SQLAlchemy session factory.
-        embedder:                   Voyage AI embedder.
-        redis_client:               Async Redis client.
+        embedder:                   Local embedder for document storage.
         interval_seconds:           Sleep duration between cycles (default 1800 = 30 min).
         strategy:                   Strategy used to filter markets for catalyst generation.
         llm_client:                 LLM client for catalyst generation.
@@ -423,7 +416,20 @@ async def run_scheduler(
         truthsocial_password:       Truth Social account password.
         truthsocial_accounts:       Standing account feeds to poll each cycle.
     """
-    log.info("scheduler.started", interval_seconds=interval_seconds)
+    active_fetchers = ["reddit", "gdelt"]
+    if tavily_api_key:
+        active_fetchers.insert(0, "tavily")
+    if newsapi_api_key and newsapi_enabled:
+        active_fetchers.insert(0 if not tavily_api_key else 1, "newsapi")
+    if truthsocial_enabled and truthsocial_username:
+        active_fetchers.append("truthsocial")
+
+    log.info(
+        "scheduler.started",
+        interval_seconds=interval_seconds,
+        fetchers=active_fetchers,
+        newsapi_daily_cap=newsapi_max_daily_requests if newsapi_api_key and newsapi_enabled else None,
+    )
 
     while True:
         try:
@@ -431,7 +437,6 @@ async def run_scheduler(
                 await run_cycle(
                     session=session,
                     embedder=embedder,
-                    redis_client=redis_client,
                     strategy=strategy,
                     llm_client=llm_client,
                     tavily_api_key=tavily_api_key,

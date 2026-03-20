@@ -79,12 +79,6 @@ def mock_embedder():
     return embedder
 
 
-@pytest.fixture
-def mock_redis():
-    redis = AsyncMock()
-    redis.set = AsyncMock(return_value=True)
-    redis.get = AsyncMock(return_value=None)
-    return redis
 
 
 def _make_raw_docs(urls: list[str]) -> list[RawDocument]:
@@ -168,7 +162,7 @@ async def _seed_catalyst_queries(
 
 
 @pytest.mark.asyncio
-async def test_scheduler_cycle_increases_document_count(session, mock_embedder, mock_redis):
+async def test_scheduler_cycle_increases_document_count(session, mock_embedder):
     """Seeding a market with 1 active run + 2 queries then running one cycle
     must increase the documents table count."""
     market_id = "SCHED-TEST-MKT"
@@ -221,7 +215,6 @@ async def test_scheduler_cycle_increases_document_count(session, mock_embedder, 
         stats = await run_cycle(
             session,
             mock_embedder,
-            mock_redis,
             tavily_api_key="test-key",
         )
         await session.commit()
@@ -234,7 +227,7 @@ async def test_scheduler_cycle_increases_document_count(session, mock_embedder, 
 
 
 @pytest.mark.asyncio
-async def test_inactive_catalyst_run_market_excluded(session, mock_embedder, mock_redis):
+async def test_inactive_catalyst_run_market_excluded(session, mock_embedder):
     """Markets whose latest CatalystRun has is_active=False must not be fetched."""
     market_id = "SCHED-INACTIVE-MKT"
     await _seed_market(session, market_id)
@@ -264,7 +257,7 @@ async def test_inactive_catalyst_run_market_excluded(session, mock_embedder, moc
             return_value=[],
         ),
     ):
-        stats = await run_cycle(session, mock_embedder, mock_redis, tavily_api_key="key")
+        stats = await run_cycle(session, mock_embedder, tavily_api_key="key")
 
     # Fetcher must not have been called — market excluded
     mock_tavily.assert_not_called()
@@ -272,9 +265,9 @@ async def test_inactive_catalyst_run_market_excluded(session, mock_embedder, moc
 
 
 @pytest.mark.asyncio
-async def test_redis_key_written_after_cycle(session, mock_embedder, mock_redis):
-    """After a successful cycle, Redis key ``ingestion:last_run:{market_id}`` must be set."""
-    market_id = "SCHED-REDIS-TEST"
+async def test_cycle_completes_without_error(session, mock_embedder):
+    """A successful cycle with active queries must complete and report stats."""
+    market_id = "SCHED-BASIC-TEST"
     await _seed_market(session, market_id)
     run = await _seed_catalyst_run(session, market_id, is_active=True)
     await _seed_catalyst_queries(session, run.id, ["query one"])
@@ -302,15 +295,13 @@ async def test_redis_key_written_after_cycle(session, mock_embedder, mock_redis)
             return_value=[],
         ),
     ):
-        await run_cycle(session, mock_embedder, mock_redis)
+        stats = await run_cycle(session, mock_embedder)
 
-    mock_redis.set.assert_called_once()
-    key = mock_redis.set.call_args.args[0]
-    assert key == f"ingestion:last_run:{market_id}"
+    assert stats["markets_processed"] == 1
 
 
 @pytest.mark.asyncio
-async def test_duplicate_docs_not_reembedded(session, mock_embedder, mock_redis):
+async def test_duplicate_docs_not_reembedded(session, mock_embedder):
     """Running the scheduler twice with the same documents must not
     call embed_text a second time for identical content."""
     market_id = "SCHED-DEDUP-TEST"
@@ -343,11 +334,11 @@ async def test_duplicate_docs_not_reembedded(session, mock_embedder, mock_redis)
             return_value=[],
         ),
     ):
-        await run_cycle(session, mock_embedder, mock_redis, tavily_api_key="key")
+        await run_cycle(session, mock_embedder, tavily_api_key="key")
         await session.commit()
         first_embed_count = mock_embedder.embed_text.await_count
 
-        await run_cycle(session, mock_embedder, mock_redis, tavily_api_key="key")
+        await run_cycle(session, mock_embedder, tavily_api_key="key")
         await session.commit()
         second_embed_count = mock_embedder.embed_text.await_count
 
