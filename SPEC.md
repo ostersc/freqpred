@@ -3,8 +3,8 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-03-17
-**Status:** Phase 1 complete — signal engine running; Phase 2 (paper trading) in progress
+**Last updated:** 2026-03-19
+**Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
 
@@ -25,9 +25,9 @@ freqpred is to prediction markets what [freqtrade](https://github.com/freqtrade/
 
 - [x] Fetch active prediction markets from Kalshi and score them with an LLM signal pipeline
 - [x] Implement a code-driven strategy plugin interface (`IPredictionStrategy`)
-- [ ] Track paper trades and measure real-world calibration over time
+- [x] Track paper trades and measure real-world calibration over time
 - [ ] Execute live trades on Kalshi with hard risk controls
-- [ ] Provide a web dashboard and Telegram/Discord alerts
+- [x] Provide a web dashboard and Telegram/Discord alerts
 - [ ] Run continuously on AWS as an always-on service
 
 ## 3. Non-Goals (v1)
@@ -1069,8 +1069,8 @@ telegram:
 - [x] Document store schema (Postgres + pgvector extension)
 - [x] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (sentence-transformers) → store
 - [x] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
-- [ ] GDELT fetcher: Doc API query → parallel article body fetch → store (T32)
-- [ ] Truth Social fetcher: search mode (per catalyst query) + account feed mode (per cycle) via `truthbrush` (T33)
+- [x] GDELT fetcher: Doc API query → parallel article body fetch → store (T32)
+- [x] Truth Social fetcher: search mode (per catalyst query) + account feed mode (per cycle) via `truthbrush` (T33)
 - [ ] Twitter/X fetcher (optional — gated on API cost decision)
 - [x] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy` strategies
 - [x] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy
@@ -1088,22 +1088,22 @@ telegram:
 
 ---
 
-### Phase 2: Paper Trading + Calibration
+### Phase 2: Paper Trading + Calibration ✅
 *Goal: validate signal quality with simulated trades*
 
 **Ingestion improvements (address before running at scale):**
 - [x] NewsAPI rate limiting (T15): `config.newsapi.enabled` flag to disable fetcher; daily request quota tracked in `api_daily_counters` Postgres table (default cap: 90/day).
 
 **RAG improvements:**
-- [ ] `document_market_links.relevance_score` is currently a rank-based proxy (`1/rank`). Swap to actual cosine similarity scores from pgvector so calibration analysis can weight document influence by true semantic relevance.
+- [x] `document_market_links.relevance_score` — swapped to actual cosine similarity scores from pgvector (T16).
 
-- [ ] Order Manager (paper mode)
-- [ ] Ledger (positions, resolutions, P&L)
-- [ ] Strategy exit interface — `should_exit()`, `custom_exit()`, `stoploss`, `minimal_roi`, `trailing_stop` on `IPredictionStrategy` and `StrategyConfig`
-- [ ] Position monitor — background loop checking all open positions on each price poll; simulates paper exits when stoploss/ROI/signal conditions are met; logs `exit_reason`
-- [ ] Calibration metrics (Brier score, calibration curve)
-- [ ] Web dashboard (signal feed + ledger views)
-- [ ] Telegram alerts
+- [x] Order Manager (paper mode) (T19)
+- [x] Ledger (positions, resolutions, P&L) (T18)
+- [x] Strategy exit interface — `should_exit()`, `custom_exit()`, `stoploss`, `minimal_roi`, `trailing_stop` on `IPredictionStrategy` and `StrategyConfig` (T25)
+- [x] Position monitor — background loop checking all open positions on each price poll; simulates paper exits when stoploss/ROI/signal conditions are met; logs `exit_reason` (T26)
+- [x] Calibration metrics (Brier score, calibration curve) (T21)
+- [x] Web dashboard (signal feed + ledger views) (T24)
+- [x] Telegram alerts (T23)
 
 **Done when:** 100+ markets resolved or exited with logged signals. Calibration score measured. Exit behavior observable from ledger. Decision made: is the signal real?
 
@@ -1117,6 +1117,8 @@ telegram:
 ### Phase 3: Live Trading
 *Goal: real capital, controlled risk*
 
+- [ ] Full dashboard (all pages)
+- [ ] Kalshi client base URL configurable (`kalshi.base_url`) — supports switching between demo (`https://demo-api.kalshi.co/trade-api/v2`) and production; demo account requires separate credentials
 - [ ] Kalshi order execution (real API) — entry orders via REST
 - [ ] Real exit order execution — when position monitor fires an exit condition, submit a sell order via Kalshi REST API instead of simulating it
 - [ ] Hard cap enforcement in Order Manager
@@ -1124,7 +1126,6 @@ telegram:
 - [ ] Position Watcher: `market_lifecycle` subscription for resolution events — closes positions at settlement price
 - [ ] Production AWS deployment (ECS, RDS, Secrets Manager)
 - [ ] GitHub Actions CI/CD pipeline
-- [ ] Full dashboard (all pages)
 - [ ] Circuit breakers + runbook for incidents
 
 **Done when:** System executes real trades automatically with enforced risk limits, monitored via dashboard and Telegram.
@@ -1133,7 +1134,7 @@ telegram:
 
 ## 14. Open Questions
 
-1. **Kalshi sandbox API** — Does Kalshi offer a paper trading / sandbox environment? If not, paper trading will simulate orders against real prices without submitting to the exchange.
+1. **Kalshi sandbox API** ✅ — Kalshi offers a full demo environment at `https://demo-api.kalshi.co/trade-api/v2` (web: https://demo.kalshi.co). Credentials are separate from production — a distinct demo account is required. Funds are simulated. freqpred's internal `mode="paper"` simulates locally without touching Kalshi; for end-to-end order flow testing, the Kalshi client base URL can be pointed at the demo API with demo credentials.
 2. **LLM look-ahead bias mitigation** — Even with time-locked news retrieval, Claude's training data includes past market resolutions. How much does this inflate signal quality in paper trading? Consider running a "naive baseline" strategy (always bet with the market) to measure true alpha.
 3. **Rate limits** — Kalshi API rate limits for market data polling. What's the sustainable polling interval?
 4. **Strategy versioning** — When a strategy's parameters change, how do we attribute P&L? Track `(strategy_name, strategy_version)` per position.
