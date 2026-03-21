@@ -59,6 +59,7 @@ class LLMClient:
         market_id: str | None = None,
         signal_id: str | None = None,
         strategy: str | None = None,
+        prompt_version: str | None = None,
         max_tokens: int = 1024,
     ) -> LLMResponse:
         """Call the Anthropic messages API and return an ``LLMResponse``.
@@ -83,6 +84,7 @@ class LLMClient:
             ``LLMError`` on Anthropic API failure.
         """
         strategy_name = strategy or self._default_strategy
+        effective_prompt_version = prompt_version or self._prompt_version
 
         if self._daily_spend_cap_usd is not None:
             async with self._session_factory() as session:
@@ -113,6 +115,7 @@ class LLMClient:
         except Exception as exc:
             latency_ms = int((time.monotonic() - start) * 1000)
             await self._write_audit(
+                prompt_version=effective_prompt_version,
                 strategy=strategy_name,
                 query_type=query_type,
                 model_used=model,
@@ -136,6 +139,7 @@ class LLMClient:
         cost = calculate_cost(model, tokens_in, tokens_out)
 
         llm_query_id = await self._write_audit(
+            prompt_version=effective_prompt_version,
             strategy=strategy_name,
             query_type=query_type,
             model_used=model,
@@ -169,12 +173,12 @@ class LLMClient:
             llm_query_id=llm_query_id,
         )
 
-    async def _write_audit(self, **kwargs) -> int:
+    async def _write_audit(self, prompt_version: str, **kwargs) -> int:
         """Open a short-lived session and write one llm_queries row."""
         async with self._session_factory() as session:
             llm_query_id = await log_llm_query(
                 session,
-                prompt_version=self._prompt_version,
+                prompt_version=prompt_version,
                 **kwargs,
             )
             await session.commit()

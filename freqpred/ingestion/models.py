@@ -69,6 +69,7 @@ class CatalystQueryRow(Base):
         UUID(as_uuid=True), ForeignKey("catalyst_runs.id"), nullable=False, index=True
     )
     query_text: Mapped[str] = mapped_column(Text, nullable=False)
+    tv_query: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default="now()"
     )
@@ -136,3 +137,4 @@ class CatalystQuery:
     run_id: str
     query_text: str
     created_at: datetime
+    tv_query: str | None = None

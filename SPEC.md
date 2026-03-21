@@ -405,7 +405,8 @@ class CatalystRun:
 class CatalystQuery:
     id: str                      # UUID
     run_id: str                  # FK → CatalystRun
-    query_text: str              # the actual search string, e.g. "February CPI release 2026"
+    query_text: str              # natural-language web search string, e.g. "February CPI release 2026"
+    tv_query: str | None         # Solr/Lucene boolean query for TV archive search, e.g. 'trump AND ("communist" OR "communism")'; None if not applicable
     created_at: datetime
 ```
 
@@ -413,13 +414,15 @@ class CatalystQuery:
 - A `CatalystRun` is created when a market is first selected (generation=1) and then daily (generation increments).
 - On each new run, the previous run's `is_active` flag is left as-is; only the latest run is used for scheduling.
 - `CatalystRun.is_active` is set to `False` when: (a) the market's `close_time` has passed, or (b) all registered strategies return `False` from `is_market_interesting()` for that market.
-- Ingestion scheduler query: `SELECT cq.query_text FROM catalyst_queries cq JOIN catalyst_runs cr ON cr.id = cq.run_id WHERE cr.is_active = TRUE AND cr.id IN (SELECT MAX(id)... per market)`.
+- Ingestion scheduler query: `SELECT cq.query_text, cq.tv_query FROM catalyst_queries cq JOIN catalyst_runs cr ON cr.id = cq.run_id WHERE cr.is_active = TRUE AND cr.id IN (SELECT MAX(id)... per market)`.
 
 **Catalyst generation context (LLM prompt inputs):**
 - **Generation 1:** market question + market metadata (close_time, category, description from Kalshi)
 - **Generation 2+:** same as above, plus the top-K documents most recently retrieved for this market's existing catalyst queries (RAG pull). This lets the LLM refine or add catalysts based on what has actually been appearing in the news.
 
 **Catalyst generation model:** Claude Haiku (cheap) — this is a reasoning task, not primary signal analysis. Logged to `llm_queries` with `query_type="catalyst_generation"`.
+
+**Dual-format query generation:** The catalyst generator prompt asks Haiku to produce both a `query_text` (natural-language web search string for Tavily/NewsAPI/GDELT/Reddit) and a `tv_query` (Solr/Lucene boolean syntax for the Internet Archive TV search). The LLM response is a JSON array of objects with both fields. `tv_query` may be `null` for catalysts where TV transcripts are not a useful signal. The TV query uses AND/OR/phrase syntax to precisely target what needs to be *said* on air, not just discussed in text — particularly valuable for word-mention markets and markets about public statements by named individuals.
 
 ### DocumentMarketLink (join table)
 
@@ -809,6 +812,7 @@ Signal trigger fires for a market
 | **NewsAPI** | Structured article archive for less-breaking topics | Secondary |
 | **Kalshi market metadata** | Market description + linked sources from the exchange | Always included |
 | **GDELT** | High-volume global news index; free, no key required | Supplementary |
+| **Internet Archive TV News Archive** | Closed-caption transcripts from 163+ U.S. TV stations; current to present day; free, no key required | Supplementary — especially valuable for word-mention markets and markets about public statements |
 
 **GDELT implementation:**
 - Query the GDELT Doc API (`api.gdeltproject.org/api/v2/doc/doc`) with the catalyst query text and a `timespan=1d` parameter per cycle
@@ -1082,6 +1086,7 @@ telegram:
 - [x] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
 - [x] GDELT fetcher: Doc API query → parallel article body fetch → store (T32)
 - [x] Truth Social fetcher: search mode (per catalyst query) + account feed mode (per cycle) via `truthbrush` (T33)
+- [ ] Internet Archive TV fetcher: catalyst `tv_query` → transcript clip search → store (see `docs/tv_archive_fetcher.md`)
 - [ ] Twitter/X fetcher (optional — gated on API cost decision)
 - [x] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy` strategies
 - [x] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy

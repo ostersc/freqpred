@@ -203,11 +203,12 @@ class TestEnsureCatalysts:
         session = AsyncMock()
         embedder = MagicMock()
 
+        close_time = datetime.now(UTC) + timedelta(days=7)
         with (
             patch(
                 "freqpred.ingestion.scheduler._load_active_market_queries",
                 new_callable=AsyncMock,
-                return_value=[("MKT-1", "politics", ["query one"])],
+                return_value=[("MKT-1", "politics", close_time, [("query one", None)])],
             ),
             patch(
                 "freqpred.ingestion.scheduler.newsapi_fetcher.fetch",

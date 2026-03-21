@@ -32,6 +32,7 @@ from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
 from freqpred.ingestion.fetchers import reddit as reddit_fetcher
 from freqpred.ingestion.fetchers import tavily as tavily_fetcher
 from freqpred.ingestion.fetchers import truthsocial as truthsocial_fetcher
+from freqpred.ingestion.fetchers import tv_archive as tv_archive_fetcher
 from freqpred.ingestion.fetchers.gdelt import GDELTRateLimitError
 from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
 from freqpred.ingestion.fetchers.truthsocial import (
@@ -101,7 +102,7 @@ async def run_cycle(
       3. Generate catalyst queries for selected markets with no active run.
       4. Deactivate catalysts for markets no longer selected.
       5. Fetch documents for every market with active catalyst queries.
-      6. Update Redis last-run timestamps.
+      6. Update postgres last-run timestamps.
 
     Fetcher errors are caught per-fetcher; one failure does not abort others.
 
@@ -169,6 +170,7 @@ async def run_cycle(
     newsapi_limit_logged: bool = newsapi_limit_hit
     gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
     truthsocial_login_failed: bool = backoff_state.get("truthsocial", False)
+    tv_archive_limit_hit: bool = backoff_state.get("tv_archive", False)
 
     # Track which services had a successful call this cycle so we only write
     # record_success once per service (it's idempotent but avoids extra DB hits).
@@ -249,13 +251,13 @@ async def run_cycle(
                     exc_info=True,
                 )
 
-    for market_id, category, query_texts in market_queries:
+    for market_id, category, close_time, query_pairs in market_queries:
         market_start = time.monotonic()
         market_fetched = 0
         market_stored = 0
         market_error = 0
 
-        for query_text in query_texts:
+        for query_text, tv_query in query_pairs:
             # --- Build non-GDELT fetch coroutines to run in parallel ---
             # GDELT (doc + TV) are run sequentially afterwards because they share
             # a 1 req/5 s rate limit across all their API endpoints. Running them
@@ -308,6 +310,13 @@ async def run_cycle(
                     api=ts_api,
                     query=query_text,
                     excluded_domains=domain_blacklist,
+                ))
+
+            if tv_query and not tv_archive_limit_hit:
+                fetch_names.append("tv_archive")
+                fetch_coros.append(tv_archive_fetcher.fetch(
+                    query=tv_query,
+                    close_time=close_time,
                 ))
 
             # --- Run non-GDELT fetchers in parallel ---
@@ -410,7 +419,7 @@ async def run_cycle(
             "scheduler.market_cycle_complete",
             market_id=market_id,
             elapsed_s=round(time.monotonic() - market_start, 2),
-            queries=len(query_texts),
+            queries=len(query_pairs),
             docs_fetched=market_fetched,
             docs_stored=market_stored,
             docs_error=market_error,
@@ -632,8 +641,8 @@ def _market_row_to_domain(row: MarketRow) -> Market:
 
 async def _load_active_market_queries(
     session: AsyncSession,
-) -> list[tuple[str, str, list[str]]]:
-    """Return (market_id, category, [query_text, ...]) for all active catalyst runs.
+) -> list[tuple[str, str, datetime, list[tuple[str, str | None]]]]:
+    """Return (market_id, category, close_time, [(query_text, tv_query), ...]) for all active catalyst runs.
 
     Only the latest active CatalystRun per market is considered.
     Markets whose latest run has is_active=False are excluded.
@@ -651,7 +660,14 @@ async def _load_active_market_queries(
 
     # Join runs → markets → queries.
     result = await session.execute(
-        select(CatalystRunRow.id, MarketRow.id, MarketRow.category, CatalystQueryRow.query_text)
+        select(
+            CatalystRunRow.id,
+            MarketRow.id,
+            MarketRow.category,
+            MarketRow.close_time,
+            CatalystQueryRow.query_text,
+            CatalystQueryRow.tv_query,
+        )
         .join(
             latest_subq,
             (CatalystRunRow.market_id == latest_subq.c.market_id)
@@ -664,10 +680,10 @@ async def _load_active_market_queries(
     rows = result.all()
 
     # Group by market_id preserving insertion order.
-    grouped: dict[str, tuple[str, list[str]]] = {}
-    for _run_id, market_id, category, query_text in rows:
+    grouped: dict[str, tuple[str, datetime, list[tuple[str, str | None]]]] = {}
+    for _run_id, market_id, category, close_time, query_text, tv_query in rows:
         if market_id not in grouped:
-            grouped[market_id] = (category, [])
-        grouped[market_id][1].append(query_text)
+            grouped[market_id] = (category, close_time, [])
+        grouped[market_id][2].append((query_text, tv_query))
 
-    return [(mid, cat, queries) for mid, (cat, queries) in grouped.items()]
+    return [(mid, cat, ct, queries) for mid, (cat, ct, queries) in grouped.items()]

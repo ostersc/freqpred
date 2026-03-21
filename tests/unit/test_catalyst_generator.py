@@ -107,21 +107,45 @@ def _make_session(prior_run_row=None) -> AsyncMock:
 
 
 class TestParseQueries:
-    def test_clean_json_array(self) -> None:
-        queries, err = _parse_queries('["query one", "query two", "query three"]')
-        assert queries == ["query one", "query two", "query three"]
+    # New object format (preferred)
+
+    def test_object_array_returns_pairs(self) -> None:
+        text = '[{"query_text": "q one", "tv_query": "q AND one"}, {"query_text": "q two", "tv_query": null}]'
+        pairs, err = _parse_queries(text)
+        assert pairs == [("q one", "q AND one"), ("q two", None)]
         assert err is None
 
-    def test_json_with_leading_text(self) -> None:
+    def test_object_array_empty_tv_query_coerced_to_none(self) -> None:
+        text = '[{"query_text": "query", "tv_query": "  "}]'
+        pairs, err = _parse_queries(text)
+        assert pairs == [("query", None)]
+        assert err is None
+
+    def test_object_array_missing_tv_query_key(self) -> None:
+        text = '[{"query_text": "query"}]'
+        pairs, err = _parse_queries(text)
+        assert pairs == [("query", None)]
+        assert err is None
+
+    # Legacy plain-string format (still supported)
+
+    def test_legacy_string_array_returns_pairs_with_none_tv(self) -> None:
+        queries, err = _parse_queries('["query one", "query two", "query three"]')
+        assert queries == [("query one", None), ("query two", None), ("query three", None)]
+        assert err is None
+
+    def test_legacy_json_with_leading_text(self) -> None:
         text = 'Here are the queries:\n["q1", "q2"]'
         queries, err = _parse_queries(text)
-        assert queries == ["q1", "q2"]
+        assert queries == [("q1", None), ("q2", None)]
         assert err is None
 
-    def test_empty_strings_filtered_out(self) -> None:
+    def test_legacy_empty_strings_filtered_out(self) -> None:
         queries, err = _parse_queries('["q1", "", "  ", "q2"]')
-        assert queries == ["q1", "q2"]
+        assert queries == [("q1", None), ("q2", None)]
         assert err is None
+
+    # Error cases
 
     def test_invalid_json_returns_error(self) -> None:
         queries, err = _parse_queries("not json at all")

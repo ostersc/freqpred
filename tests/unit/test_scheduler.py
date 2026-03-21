@@ -22,6 +22,7 @@ from freqpred.ingestion.store import DocumentSkipped, RawDocument
 from freqpred.rag.models import Document
 
 NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
+CLOSE_TIME = datetime(2026, 3, 30, 0, 0, 0, tzinfo=timezone.utc)
 FAKE_EMBEDDING = [0.1] * 384
 
 
@@ -193,7 +194,7 @@ class TestRunCycleFetchersCalled:
         doc = _make_document()
         raw_doc = _make_raw_doc()
 
-        market_queries = [("MKT-1", "economics", ["Fed rate decision March 2026"])]
+        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("Fed rate decision March 2026", None)])]
 
         with (
             patch(
@@ -244,7 +245,7 @@ class TestRunCycleFetchersCalled:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "politics", ["some query"])]
+        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("some query", None)])]
 
         with (
             patch(
@@ -277,7 +278,7 @@ class TestRunCycleFetchersCalled:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "politics", ["some query"])]
+        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("some query", None)])]
 
         with (
             patch(
@@ -311,7 +312,7 @@ class TestRunCycleFetchersCalled:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "politics", ["some query"])]
+        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("some query", None)])]
 
         with (
             patch(
@@ -352,7 +353,7 @@ class TestRunCycleErrorIsolation:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "economics", ["query"])]
+        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
 
         with (
             patch(
@@ -391,7 +392,7 @@ class TestRunCycleErrorIsolation:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "economics", ["query"])]
+        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
 
         with (
             patch(
@@ -429,7 +430,7 @@ class TestRunCycleErrorIsolation:
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
 
-        market_queries = [("MKT-1", "economics", ["query"])]
+        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
 
         with (
             patch(
@@ -472,7 +473,7 @@ class TestRunCycleErrorIsolation:
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
 
-        market_queries = [("MKT-1", "economics", ["query"])]
+        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
 
         with (
             patch(
@@ -517,8 +518,8 @@ class TestRunCycleErrorIsolation:
 
         # Two markets, each with one query — NewsAPI should only be attempted once.
         market_queries = [
-            ("MKT-1", "economics", ["query-1"]),
-            ("MKT-2", "politics", ["query-2"]),
+            ("MKT-1", "economics", CLOSE_TIME, [("query-1", None)]),
+            ("MKT-2", "politics", CLOSE_TIME, [("query-2", None)]),
         ]
 
         with (
@@ -567,8 +568,8 @@ class TestRunCycleMultipleMarkets:
         embedder = _make_embedder()
 
         market_queries = [
-            ("MKT-A", "politics", ["q1", "q2"]),
-            ("MKT-B", "economics", ["q3"]),
+            ("MKT-A", "politics", CLOSE_TIME, [("q1", None), ("q2", None)]),
+            ("MKT-B", "economics", CLOSE_TIME, [("q3", None)]),
         ]
 
         with (
@@ -611,8 +612,8 @@ class TestRunCycleStats:
         doc = _make_document()
 
         market_queries = [
-            ("MKT-A", "politics", ["query-a"]),
-            ("MKT-B", "economics", ["query-b"]),
+            ("MKT-A", "politics", CLOSE_TIME, [("query-a", None)]),
+            ("MKT-B", "economics", CLOSE_TIME, [("query-b", None)]),
         ]
 
         with (

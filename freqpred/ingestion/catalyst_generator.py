@@ -32,7 +32,7 @@ log = structlog.get_logger(__name__)
 
 # Model used for catalyst generation — cheap reasoning task, not primary signal.
 _CATALYST_MODEL = "claude-haiku-4-5-20251001"
-_PROMPT_VERSION = "catalyst-v1"
+_PROMPT_VERSION = "catalyst-v2"
 
 # Number of RAG documents to include as context on re-runs.
 _RAG_CONTEXT_DOCS = 5
@@ -90,6 +90,7 @@ async def generate_catalysts(
             "catalyst_generation",
             market_id=market.id,
             strategy="system",
+            prompt_version=_PROMPT_VERSION,
         )
     except LLMError as exc:
         raise CatalystGenerationError(
@@ -115,12 +116,13 @@ async def generate_catalysts(
     session.add(run_row)
     await session.flush()  # get run_row.id for FK
 
-    for query_text in queries:
+    for query_text, tv_query in queries:
         session.add(
             CatalystQueryRow(
                 id=uuid.uuid4(),
                 run_id=run_row.id,
                 query_text=query_text,
+                tv_query=tv_query,
             )
         )
     await session.flush()
@@ -251,12 +253,21 @@ def _build_prompt(market: Market, rag_docs: list[Document]) -> str:
 
     lines += [
         "",
-        "Return a JSON array of search query strings only. Queries must target",
-        "PREDICTIVE signals — base rates, recent behavior, context, and conditions",
-        "that inform the probability. Not transcripts or outcomes.",
-        'Example for a word-mention market: ["how often does Trump mention golf in speeches", "Trump golf references public remarks history"]',
-        'Example for a price market: ["Bitcoin price forecast March 2026", "BTC ETF inflows trend"]',
-        'Example for a policy market: ["Fed interest rate cut probability 2026", "inflation data Fed decision"]',
+        "Return a JSON array of objects, each with two keys:",
+        '  "query_text": a natural-language web search string (used by Tavily, NewsAPI, Reddit, GDELT)',
+        '  "tv_query":   a Solr/Lucene boolean query for the Internet Archive TV News Archive',
+        "               (finds spoken-word evidence in TV transcripts), or null if TV is not relevant.",
+        "",
+        "TV query rules: use AND/OR/AND NOT/( )/\" \" boolean syntax. Quote multi-word phrases.",
+        "Good TV queries find people *saying* things on air — keep them tight.",
+        'TV null is fine for data/price markets where TV transcripts add little signal.',
+        "",
+        'Example for a word-mention market (Trump says "communist"):',
+        '[{"query_text": "how often does Trump use word communist in speeches", "tv_query": "trump AND (\\"communist\\" OR \\"communism\\")"}]',
+        'Example for a price market:',
+        '[{"query_text": "Bitcoin price forecast March 2026", "tv_query": null}, {"query_text": "BTC ETF inflows trend", "tv_query": null}]',
+        'Example for a Fed policy market:',
+        '[{"query_text": "Fed interest rate cut probability 2026", "tv_query": "\\"federal reserve\\" AND (\\"rate cut\\" OR \\"interest rates\\")"}]',
         "",
         "Return the JSON array and nothing else.",
     ]
@@ -265,20 +276,24 @@ def _build_prompt(market: Market, rag_docs: list[Document]) -> str:
 
 
 
-def _parse_queries(text: str) -> tuple[list[str], str | None]:
-    """Extract a JSON array of strings from the LLM response text.
+def _parse_queries(text: str) -> tuple[list[tuple[str, str | None]], str | None]:
+    """Extract a JSON array of {query_text, tv_query} objects from the LLM response.
+
+    Returns a list of (query_text, tv_query) pairs and an optional error string.
 
     Handles:
-    - Clean JSON array
+    - Clean JSON array of objects (preferred)
+    - Plain JSON array of strings (legacy — tv_query defaults to None)
     - Markdown code fences (```json ... ``` or ``` ... ```)
     - Leading explanation text before the array
     """
+    import re as _re
+
     text = text.strip()
 
     # Strip markdown code fences if present.
     if "```" in text:
-        import re
-        text = re.sub(r"```(?:json)?\s*", "", text).strip()
+        text = _re.sub(r"```(?:json)?\s*", "", text).strip()
 
     for candidate in (text, text[text.find("["):] if "[" in text else ""):
         if not candidate:
@@ -288,10 +303,30 @@ def _parse_queries(text: str) -> tuple[list[str], str | None]:
             candidate = candidate[: candidate.rfind("]") + 1]
         try:
             parsed = json.loads(candidate)
-            if isinstance(parsed, list) and all(isinstance(q, str) for q in parsed):
-                queries = [q.strip() for q in parsed if q.strip()]
-                if queries:
-                    return queries, None
+            if not isinstance(parsed, list) or not parsed:
+                continue
+
+            # New format: array of {query_text, tv_query} objects.
+            if all(isinstance(q, dict) for q in parsed):
+                pairs: list[tuple[str, str | None]] = []
+                for item in parsed:
+                    qt = (item.get("query_text") or "").strip()
+                    tv = item.get("tv_query")
+                    if isinstance(tv, str):
+                        tv = tv.strip() or None
+                    else:
+                        tv = None
+                    if qt:
+                        pairs.append((qt, tv))
+                if pairs:
+                    return pairs, None
+
+            # Legacy format: plain array of strings (tv_query absent).
+            if all(isinstance(q, str) for q in parsed):
+                pairs = [(q.strip(), None) for q in parsed if q.strip()]
+                if pairs:
+                    return pairs, None
+
         except json.JSONDecodeError:
             continue
     return [], f"Could not parse JSON array from response: {text[:200]!r}"
@@ -343,7 +378,7 @@ async def _retrieve_recent_docs(
             session=session,
             embedder=embedder,
             question=market.question,
-            category=market.category,
+            market_id=market.id,
             top_k=top_k,
             max_age_days=7,
         )

@@ -344,3 +344,68 @@ async def test_duplicate_docs_not_reembedded(session, mock_embedder):
 
     # Second run with same content must not trigger additional embeddings
     assert second_embed_count == first_embed_count
+
+
+@pytest.mark.asyncio
+async def test_tv_archive_fetcher_stores_transcript_docs(session, mock_embedder):
+    """When a catalyst query has a tv_query set, the scheduler calls the TV archive
+    fetcher and stores the returned transcript clips as documents."""
+    market_id = "SCHED-TV-TEST"
+    await _seed_market(session, market_id)
+    run = await _seed_catalyst_run(session, market_id, is_active=True)
+
+    # Seed one query with a tv_query set (word-mention market pattern).
+    tv_query_row = CatalystQueryRow(
+        id=uuid.uuid4(),
+        run_id=run.id,
+        query_text='how often does Trump say "communist" on TV',
+        tv_query='trump AND ("communist" OR "communism")',
+    )
+    session.add(tv_query_row)
+    await session.flush()
+    await session.commit()
+
+    transcript_urls = [
+        "https://archive.org/details/CNN_20260310/start/120/end/180?q=trump+communist",
+        "https://archive.org/details/MSNBC_20260312/start/300/end/360?q=trump+communist",
+    ]
+    transcript_docs = [
+        RawDocument(
+            source_url=url,
+            title=f"CNN NewsRoom : March {10 + i}, 2026",
+            body=f"trump mentioned communism on air at this timestamp {i}.",
+            source_type="tv_transcript",
+            source_name="TVArchive",
+            category="",
+            tags=["trump", "communism"],
+            published_at=NOW,
+            fetched_at=NOW,
+        )
+        for i, url in enumerate(transcript_urls)
+    ]
+
+    before = (await session.execute(select(func.count()).select_from(DocumentRow))).scalar()
+
+    with (
+        patch("freqpred.ingestion.scheduler.tavily_fetcher.fetch", new_callable=AsyncMock, return_value=[]),
+        patch("freqpred.ingestion.scheduler.newsapi_fetcher.fetch", new_callable=AsyncMock, return_value=[]),
+        patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch", new_callable=AsyncMock, return_value=[]),
+        patch("freqpred.ingestion.scheduler.gdelt_fetcher.fetch", new_callable=AsyncMock, return_value=[]),
+        patch(
+            "freqpred.ingestion.scheduler.tv_archive_fetcher.fetch",
+            new_callable=AsyncMock,
+            return_value=transcript_docs,
+        ) as mock_tv,
+    ):
+        stats = await run_cycle(session, mock_embedder)
+        await session.commit()
+
+    after = (await session.execute(select(func.count()).select_from(DocumentRow))).scalar()
+
+    # TV archive fetcher was called with the Solr tv_query string.
+    mock_tv.assert_called_once()
+    assert mock_tv.call_args.kwargs["query"] == 'trump AND ("communist" OR "communism")'
+
+    # Transcript clips were stored.
+    assert after == before + 2
+    assert stats["docs_stored"] == 2
