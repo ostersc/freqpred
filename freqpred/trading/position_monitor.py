@@ -144,12 +144,22 @@ class PositionMonitor:
                 continue
 
             exit_reason, exit_price = result
+            # Infer YES/NO resolution from the final contract price.
+            # When Kalshi settles a market, contract prices snap to ~1.0 or ~0.0.
+            # Account for direction: for NO positions, exit_price is the NO contract
+            # price, which is near 1.0 when NO wins and near 0.0 when YES wins.
+            resolution: int | None = None
+            if exit_price >= 0.99:
+                resolution = 1 if position.direction == "YES" else 0
+            elif exit_price <= 0.01:
+                resolution = 0 if position.direction == "YES" else 1
             async with self._session_factory() as session:
                 closed_position = await ledger.close_position(
                     session,
                     position.id,
                     exit_price=exit_price,
                     exit_reason=exit_reason,
+                    resolution=resolution,
                 )
             # Clean up trackers
             self._peak_prices.pop(position.id, None)
@@ -229,10 +239,9 @@ class PositionMonitor:
             if strategy.should_exit(position, fresh_signal, market):
                 return ("signal", current_price)
 
-        # 6. Market resolution — market close_time has passed
-        if market.close_time <= now:
-            # Paper: we don't know the resolution, use current price as proxy.
-            # Real resolution is handled by the WebSocket lifecycle subscription (future).
+        # 6. Market resolution — Kalshi status is "resolved" OR close_time has passed
+        kalshi_status = market.metadata.get("status", "")
+        if kalshi_status == "resolved" or market.close_time <= now:
             return ("market_resolved", current_price)
 
         return _NO_EXIT

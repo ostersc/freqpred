@@ -49,6 +49,7 @@ from freqpred.rag.embedder import LocalEmbedder
 if TYPE_CHECKING:
     from freqpred.llm.client import LLMClient
     from freqpred.ingestion.selector import StrategyProtocol
+    from freqpred.config import TruthSocialAccountConfig
 
 log = structlog.get_logger(__name__)
 
@@ -92,7 +93,7 @@ async def run_cycle(
     truthsocial_enabled: bool = False,
     truthsocial_username: str = "",
     truthsocial_password: str = "",
-    truthsocial_accounts: list[str] | None = None,
+    truthsocial_accounts: "list[TruthSocialAccountConfig] | None" = None,
 ) -> dict[str, int]:
     """Run one full ingestion cycle.
 
@@ -125,7 +126,8 @@ async def run_cycle(
         truthsocial_enabled:        When True, Truth Social fetchers are active.
         truthsocial_username:       Truth Social account username (env: TRUTHSOCIAL_USERNAME).
         truthsocial_password:       Truth Social account password (env: TRUTHSOCIAL_PASSWORD).
-        truthsocial_accounts:       Standing account feeds to poll each cycle.
+        truthsocial_accounts:       Account feeds to poll each cycle, with category mappings
+                                    used to link fetched docs to active markets.
     Returns:
         Stats dict with keys: markets_processed, catalysts_generated,
         docs_fetched, docs_stored, docs_error.
@@ -187,8 +189,14 @@ async def run_cycle(
         patch_api_for_block_detection(ts_api)
 
     # --- Phase 2a: Truth Social account feeds (once per cycle, per account) ----
+    # Build a category → [market_id] index from the already-loaded active markets.
+    _category_markets: dict[str, list[str]] = {}
+    for _mid, _cat, _ct, _qpairs in market_queries:
+        _category_markets.setdefault(_cat.lower(), []).append(_mid)
+
     if ts_api is not None and truthsocial_accounts:
-        for ts_username in truthsocial_accounts:
+        for ts_account in truthsocial_accounts:
+            ts_username = ts_account.username
             if truthsocial_login_failed:
                 break
             try:
@@ -201,10 +209,18 @@ async def run_cycle(
                     created_after=ts_created_after,
                     excluded_domains=domain_blacklist,
                 )
+
+                # Collect the market IDs this account's categories map to.
+                account_market_ids: list[str] = []
+                for cat in ts_account.categories:
+                    account_market_ids.extend(_category_markets.get(cat.lower(), []))
+
                 for raw_doc in docs:
                     try:
                         async with session.begin_nested():
-                            await upsert_document(session, embedder, raw_doc)
+                            doc = await upsert_document(session, embedder, raw_doc)
+                            for mid in account_market_ids:
+                                await link_document_to_market(session, doc.id, mid)
                         total_stored += 1
                     except DocumentSkipped:
                         pass
@@ -224,6 +240,7 @@ async def run_cycle(
                     "scheduler.truthsocial_account_fetched",
                     username=ts_username,
                     docs_fetched=len(docs),
+                    markets_linked=len(account_market_ids),
                 )
             except TruthSocialLoginError as exc:
                 truthsocial_login_failed = True
@@ -304,14 +321,6 @@ async def run_cycle(
                 user_agent=reddit_user_agent,
             ))
 
-            if ts_api is not None and not truthsocial_login_failed:
-                fetch_names.append("truthsocial_search")
-                fetch_coros.append(truthsocial_fetcher.fetch_search(
-                    api=ts_api,
-                    query=query_text,
-                    excluded_domains=domain_blacklist,
-                ))
-
             if tv_query and not tv_archive_limit_hit:
                 fetch_names.append("tv_archive")
                 fetch_coros.append(tv_archive_fetcher.fetch(
@@ -334,19 +343,6 @@ async def run_cycle(
                         newsapi_limit_logged = True
                         skip_cycles = await record_rate_limit(session, "newsapi")
                         log.warning("scheduler.newsapi_rate_limited", reason=str(result), skip_cycles=skip_cycles)
-                    elif name == "truthsocial_search" and isinstance(result, TruthSocialLoginError):
-                        truthsocial_login_failed = True
-                        from freqpred.ingestion.fetchers.truthsocial import TruthSocialBlockedError  # noqa: PLC0415
-                        skip_cycles = await record_rate_limit(session, "truthsocial")
-                        if isinstance(result, TruthSocialBlockedError):
-                            log.warning(
-                                "scheduler.truthsocial_cloudflare_blocked",
-                                query=query_text,
-                                skip_cycles=skip_cycles,
-                                hint="IP temporarily banned by Cloudflare (error 1015); backing off",
-                            )
-                        else:
-                            log.error("scheduler.truthsocial_login_failed", query=query_text, skip_cycles=skip_cycles, error=str(result))
                     else:
                         log.warning(
                             "scheduler.fetcher_error",
@@ -360,11 +356,9 @@ async def run_cycle(
                     if name == "newsapi" and newsapi_fetched:
                         await increment_daily_count(session, "newsapi", now.date())
                     # Clear backoff on first success this cycle for this service.
-                    # Map truthsocial_search → truthsocial to match the service key.
-                    svc = "truthsocial" if name == "truthsocial_search" else name
-                    if svc not in success_recorded:
-                        await record_success(session, svc)
-                        success_recorded.add(svc)
+                    if name not in success_recorded:
+                        await record_success(session, name)
+                        success_recorded.add(name)
 
             # --- Run GDELT fetcher ---
             # Runs sequentially after the parallel gather (has its own rate-limit sleep).
@@ -456,7 +450,7 @@ async def run_scheduler(
     truthsocial_enabled: bool = False,
     truthsocial_username: str = "",
     truthsocial_password: str = "",
-    truthsocial_accounts: list[str] | None = None,
+    truthsocial_accounts: "list[TruthSocialAccountConfig] | None" = None,
 ) -> None:
     """Async loop: runs run_cycle every *interval_seconds*.
 

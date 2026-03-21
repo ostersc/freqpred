@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DatabaseConfig(BaseModel):
@@ -54,9 +54,22 @@ class TruthSocialConfig(BaseModel):
     password: str = Field(default="")
 
 
+class TruthSocialAccountConfig(BaseModel):
+    username: str
+    categories: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_from_string(cls, v: Any) -> Any:
+        """Allow plain string shorthand: `- realDonaldTrump` → {username: realDonaldTrump}."""
+        if isinstance(v, str):
+            return {"username": v}
+        return v
+
+
 class TruthSocialIngestionConfig(BaseModel):
     enabled: bool = Field(default=False)
-    accounts: list[str] = Field(default_factory=list)
+    accounts: list[TruthSocialAccountConfig] = Field(default_factory=list)
 
 
 class IngestionConfig(BaseModel):

@@ -409,6 +409,39 @@ class TestEvaluateExit:
         assert result is not None
         assert result[0] == "market_resolved"
 
+    def test_market_resolved_when_kalshi_status_resolved(self) -> None:
+        """Fires market_resolved when Kalshi marks status='resolved', even if close_time is future."""
+        strategy = _make_strategy(minimal_roi={})
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        # close_time is in the future — wouldn't trigger via time check alone
+        market = _make_market(mid_price=0.99, close_time=NOW + timedelta(days=5))
+        market.metadata["status"] = "resolved"
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=market,
+            current_price=0.99,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "market_resolved"
+
+    def test_no_market_resolved_when_status_open_and_close_time_future(self) -> None:
+        strategy = _make_strategy(minimal_roi={})
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        market = _make_market(mid_price=0.52, close_time=NOW + timedelta(days=5))
+        market.metadata["status"] = "open"
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=market,
+            current_price=0.52,
+            strategy=strategy,
+        )
+        assert result is None
+
     def test_no_exit_when_conditions_not_met(self) -> None:
         strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.30})
         monitor = self._monitor(strategy)
@@ -543,6 +576,77 @@ class TestCheckAllPositions:
             pos_id,
             exit_price=0.38,
             exit_reason="stoploss",
+        )
+
+    @pytest.mark.asyncio
+    async def test_resolution_inferred_from_settled_price(self) -> None:
+        """When position exits at YES contract price ~1.0, resolution=1 is passed to close_position."""
+        strategy = _make_strategy(minimal_roi={})
+        pos = _make_position(entry_price=0.50, strategy_name="TestStrategy", direction="YES")
+        pos_id = pos.id
+
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        session_factory = MagicMock()
+        session_factory.return_value = session
+
+        monitor = PositionMonitor(
+            session_factory=session_factory,
+            strategies={"TestStrategy": strategy},
+        )
+
+        closed_pos = Position(
+            **{**pos.__dict__, "status": "closed", "exit_price": 0.99, "exit_reason": "market_resolved", "resolution": 1, "pnl": 49.0, "pnl_pct": 0.98}
+        )
+
+        # Market is Kalshi-resolved at YES price = 0.99
+        market = _make_market(mid_price=0.99, close_time=NOW + timedelta(days=5))
+        market.metadata["status"] = "resolved"
+
+        with (
+            patch(
+                "freqpred.trading.position_monitor.ledger.get_open_positions",
+                new_callable=AsyncMock,
+                return_value=[pos],
+            ),
+            patch(
+                "freqpred.trading.position_monitor.ledger.close_position",
+                new_callable=AsyncMock,
+                return_value=closed_pos,
+            ) as mock_close,
+        ):
+            scalars_mock = MagicMock()
+            scalars_mock.scalars.return_value.all.return_value = [
+                MagicMock(
+                    id=market.id,
+                    platform=market.platform,
+                    question=market.question,
+                    category=market.category,
+                    close_time=market.close_time,
+                    yes_bid=market.yes_bid,
+                    yes_ask=market.yes_ask,
+                    mid_price=market.mid_price,
+                    volume_24h=market.volume_24h,
+                    open_interest=market.open_interest,
+                    last_fetched_at=market.last_fetched_at,
+                    price_updated_at=market.price_updated_at,
+                    metadata_fetched_at=market.metadata_fetched_at,
+                    current_signal_id=None,
+                    metadata_={"status": "resolved"},
+                )
+            ]
+            session.execute = AsyncMock(return_value=scalars_mock)
+
+            result = await monitor.check_all_positions()
+
+        assert len(result) == 1
+        mock_close.assert_awaited_once_with(
+            session,
+            pos_id,
+            exit_price=0.99,
+            exit_reason="market_resolved",
+            resolution=1,
         )
 
     @pytest.mark.asyncio

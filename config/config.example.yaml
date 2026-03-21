@@ -42,14 +42,12 @@ truthsocial:
 
 ingestion:
   schedule_interval_seconds: 1800  # 30 minutes
-  categories:
-    - politics
-    - technology
   truthsocial:
     enabled: false
     accounts: []
     # accounts:
-    #   - realDonaldTrump
+    #   - username: realDonaldTrump
+    #     categories: [politics]
 
 signal:
   top_k_documents: 10

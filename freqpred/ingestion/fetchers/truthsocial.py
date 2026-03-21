@@ -163,13 +163,12 @@ async def fetch_search(
         created_after = now - _DEFAULT_LOOKBACK
 
     def _sync_search() -> list[dict]:
-        results: list[dict] = []
-        for page in api.search(searchtype="statuses", query=query, limit=max_results):  # type: ignore[union-attr]
-            statuses = (page or {}).get("statuses", [])
-            results.extend(statuses)
-            if len(results) >= max_results:
-                break
-        return results[:max_results]
+        # Fetch one page only. truthbrush's search() never increments its
+        # internal page counter, so iterating the generator makes unbounded
+        # HTTP requests. One page is sufficient for catalyst-driven queries.
+        gen = api.search(searchtype="statuses", query=query, limit=max_results)  # type: ignore[union-attr]
+        page = next(gen, None)
+        return (page or {}).get("statuses", [])[:max_results]
 
     try:
         raw_statuses = await asyncio.to_thread(_sync_search)
