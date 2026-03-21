@@ -153,6 +153,28 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 
 ---
 
+## GitHub issues and SPEC
+
+**SPEC.md is the source of truth for what will be built.** GitHub issues contain the implementation detail for each task. The two must stay in sync.
+
+### Task numbering
+Every planned task has a `T{N}` identifier in SPEC.md that matches its GitHub issue number. For example, T37 = issue #37. Never create a new task without creating a matching issue, and never create an issue without a matching SPEC entry. If a task is added mid-phase (e.g. discovered scope), pick the next available issue number and use that as the task ID.
+
+### Issue format
+Each issue must follow this structure (see issues #37–#48 as reference):
+- **`## Context`** — what problem this solves and why it is needed; note any `**Depends on:**` tasks
+- **`## Implementation scope`** — specific files to change, key function signatures, code sketches
+- **`## New tests`** — named test cases with what each verifies
+- **`## Acceptance criteria`** — checkbox list; these are the gates that must pass before closing the issue
+
+### Workflow
+- When starting a task, read the GitHub issue before writing any code
+- Check off acceptance criteria as they are met; close the issue only when all boxes are checked
+- If scope changes during implementation, update both the issue body and SPEC.md before proceeding
+- When adding a new Phase 3 task: add the row to the Phase 3 table in SPEC.md (with issue link), create the issue, then implement
+
+---
+
 ## Definition of done
 
 Before declaring any task complete, verify every acceptance criterion listed in the GitHub issue was actually met — not just that the code was written.

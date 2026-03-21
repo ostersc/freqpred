@@ -239,6 +239,11 @@ class KalshiClient(IMarketClient):
         now = datetime.now(UTC)
         s: KalshiMarketSchema = schema
         close_time = datetime.fromisoformat(s.close_time.replace("Z", "+00:00"))
+        open_time = (
+            datetime.fromisoformat(s.open_time.replace("Z", "+00:00"))
+            if s.open_time
+            else now
+        )
 
         return Market(
             id=s.ticker,
@@ -249,15 +254,20 @@ class KalshiClient(IMarketClient):
                 s.rules_secondary or None,
             ])),
             category=category,
+            status=s.status or "active",
+            result=s.result or None,
             close_time=close_time,
             yes_bid=s.yes_bid,
             yes_ask=s.yes_ask,
             mid_price=s.mid_price,
+            last_price=s.last_price,
             volume_24h=float(s.volume_24h),
             open_interest=float(s.open_interest),
+            liquidity=s.liquidity,
             last_fetched_at=now,
             price_updated_at=now,
             metadata_fetched_at=now,
+            open_time=open_time,
             metadata={
                 "event_ticker": s.event_ticker,
                 "subtitle": s.subtitle,

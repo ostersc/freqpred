@@ -1134,19 +1134,49 @@ telegram:
 ### Phase 3: Live Trading
 *Goal: real capital, controlled risk*
 
-- [ ] **T35** — Kalshi demo environment: `KALSHI_BASE_URL` env override + demo credentials in config; supports switching between demo (`https://demo-api.kalshi.co/trade-api/v2`) and production without editing config.yaml
-- [ ] **T36** — KalshiClient live order placement: implement `_post()` transport + `place_order()`, `get_positions()`, `get_balance()` (currently `NotImplementedError` stubs)
-- [ ] **T37** — OrderManager live branch: call `KalshiClient.place_order()` when `mode="live"` + `LIVE_TRADING_ENABLED=true`; record positions as `status="pending"` until fill confirmed
-- [ ] **T38** — PositionMonitor live exits: submit real sell orders (IOC) to Kalshi when exit conditions fire for live positions; close in ledger only after exchange confirms
-- [ ] **T39** — PositionWatcher WebSocket `ticker`: persistent connection for markets with open live positions; sub-second price updates; triggers position monitor on each tick; exponential backoff reconnect (see §6a)
-- [ ] **T40** — PositionWatcher `market_lifecycle`: subscribe to resolution events; settle positions at $1.00/$0.00 on `settled`; REST poll fallback for missed events during reconnect windows
-- [ ] **T41** — Dashboard: Strategy Config + System Health API endpoints (GET/PUT strategy parameters at runtime; circuit breaker state, WebSocket status, pending order count)
-- [ ] **T42** — Production AWS deployment: ECS Fargate, RDS Postgres 16 + pgvector, Secrets Manager, CloudWatch alarms, deployment runbook
-- [ ] **T43** — GitHub Actions CI/CD: lint → test (with real Postgres in CI) → build Docker image → push to ECR → run Alembic migrations → deploy to ECS
-- [ ] **T44** — React dashboard frontend: all 7 pages (Signal Feed, Positions, Ledger, Calibration, LLM Cost & Audit, Strategy Config, System Health); served as static files by FastAPI
-- [ ] **T45** — Circuit breaker hardening: implement drawdown circuit breaker (missing from code); verify all four breakers fire correctly; consistent Telegram alert format; incident runbook (`docs/runbook.md`)
+Each task has a linked GitHub issue (same number) with full implementation scope, test plan, and acceptance criteria.
 
-**Dependency order:** T35 → T36 → T37, T38 → T39 → T40. T41–T45 can proceed in parallel once T36 is done. T42 is a prerequisite for T43. T41 is a prerequisite for T44.
+| Task | Issue | Summary | Depends on |
+|------|-------|---------|------------|
+| **T35** | [#35](https://github.com/ostersc/freqpred/issues/35) | Kalshi demo environment — `KALSHI_BASE_URL` override; switch between demo and production without editing config | — |
+| **T36** | [#36](https://github.com/ostersc/freqpred/issues/36) | KalshiClient live order placement — `_post()` transport, `place_order()` with limit/market support and `client_expiration_time`, `get_positions()`, `get_balance()` | T35 |
+| **T37** | [#37](https://github.com/ostersc/freqpred/issues/37) | OrderManager live branch — route to `KalshiClient.place_order()` when `mode=live`; apply T47/T48 order type routing; record positions as `pending` until fill confirmed | T36, T47 |
+| **T38** | [#38](https://github.com/ostersc/freqpred/issues/38) | PositionMonitor live exits — submit real sell orders on exit; market IOC for stoploss/emergency; limit for ROI/trailing if `exit=limit`; ledger close only after exchange confirms | T36, T48 |
+| **T39** | [#39](https://github.com/ostersc/freqpred/issues/39) | PositionWatcher WebSocket `ticker` — persistent connection per open live position; sub-second price updates; triggers position monitor on each tick; exponential backoff reconnect | T37, T38 |
+| **T40** | [#40](https://github.com/ostersc/freqpred/issues/40) | PositionWatcher `market_lifecycle` — subscribe to resolution events; settle at $1/$0 on `settled`; REST poll fallback for missed events | T39 |
+| **T41** | [#41](https://github.com/ostersc/freqpred/issues/41) | Dashboard — Strategy Config + System Health API endpoints; GET/PUT strategy params at runtime; circuit breaker state, WebSocket status, pending order count | T36 |
+| **T42** | [#42](https://github.com/ostersc/freqpred/issues/42) | Production AWS deployment — ECS Fargate, RDS Postgres 16 + pgvector, Secrets Manager, CloudWatch alarms, deployment runbook | T36 |
+| **T43** | [#43](https://github.com/ostersc/freqpred/issues/43) | GitHub Actions CI/CD — lint → test → build Docker → push to ECR → migrate → deploy to ECS | T42 |
+| **T44** | [#44](https://github.com/ostersc/freqpred/issues/44) | React dashboard frontend — all 7 pages (Signal Feed, Positions, Ledger, Calibration, LLM Cost & Audit, Strategy Config, System Health) | T41 |
+| **T45** | [#45](https://github.com/ostersc/freqpred/issues/45) | Circuit breaker hardening — drawdown breaker implementation; all four breakers verified; Telegram alert format; incident runbook | T36 |
+| **T47** | [#47](https://github.com/ostersc/freqpred/issues/47) | `OrderTypes` config + limit order entry — `OrderTypes` dataclass on `StrategyConfig`; `custom_entry_price()` hook; entry at `estimated_prob - min_edge`; pending position fill-check + timeout cancellation; paper mode only | — |
+| **T48** | [#48](https://github.com/ostersc/freqpred/issues/48) | Limit order exits + exchange-hosted stoploss — `exit=limit` posts resting ROI/trailing targets; `custom_exit_price()` hook; `stoploss_on_exchange` with interval refresh; emergency/circuit-breaker always market; in-memory stoploss fallback always active | T47 |
+
+**`OrderTypes` interface** (strategy-level, all fields have defaults — existing strategies unchanged):
+```python
+order_types = OrderTypes(
+    entry="market",                        # "limit" | "market"
+    exit="market",                         # "limit" | "market"
+    emergency_exit="market",               # always market; circuit-breaker / force-exit paths
+    stoploss="market",                     # "limit" | "market"
+    stoploss_on_exchange=False,            # post resting stoploss on Kalshi exchange
+    stoploss_on_exchange_interval=60,      # seconds between refreshing exchange stoploss price
+    stoploss_on_exchange_limit_ratio=0.99, # limit price = trigger_price × ratio
+)
+```
+
+**Price hooks on `IPredictionStrategy`** (optional — default behaviour applies when not overridden):
+```python
+def custom_entry_price(self, signal: Signal, market: Market) -> float | None:
+    """Custom limit entry price. None → default (estimated_probability - min_edge)."""
+    return None
+
+def custom_exit_price(self, position: Position, signal: Signal | None, market: Market, exit_reason: str) -> float | None:
+    """Custom limit exit price. None → default (ROI / trailing-stop target price)."""
+    return None
+```
+
+`emergency_exit` is always market — safety constraint, not overridable by strategy.
 
 **Done when:** System executes real trades automatically with enforced risk limits, monitored via dashboard and Telegram.
 

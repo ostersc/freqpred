@@ -13,8 +13,8 @@ class StrategyConfig:
     kelly_fraction: float
     categories: list[str]
     min_volume_24h: float
-    max_days_to_close: int
-    min_days_to_close: int
+    max_days_to_close: float
+    min_days_to_close: float
 
     # Exit management
     stoploss: float = -0.20

@@ -17,7 +17,7 @@ from freqpred.ingestion.fetchers.truthsocial import (
 )
 from freqpred.ingestion.store import RawDocument
 
-_NOW = datetime(2026, 3, 19, 12, 0, 0, tzinfo=UTC)
+_NOW = datetime.now(UTC)
 _RECENT_DT = _NOW - timedelta(hours=1)
 _OLD_DT = _NOW - timedelta(hours=72)
 

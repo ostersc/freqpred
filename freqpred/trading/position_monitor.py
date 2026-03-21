@@ -144,12 +144,14 @@ class PositionMonitor:
                 continue
 
             exit_reason, exit_price = result
-            # Infer YES/NO resolution from the final contract price.
-            # When Kalshi settles a market, contract prices snap to ~1.0 or ~0.0.
-            # Account for direction: for NO positions, exit_price is the NO contract
-            # price, which is near 1.0 when NO wins and near 0.0 when YES wins.
+            # Derive YES/NO resolution from market.result set by Kalshi.
+            # Falls back to price-threshold inference if result not yet populated.
             resolution: int | None = None
-            if exit_price >= 0.99:
+            if market.result == "yes":
+                resolution = 1 if position.direction == "YES" else 0
+            elif market.result == "no":
+                resolution = 0 if position.direction == "YES" else 1
+            elif exit_price >= 0.99:
                 resolution = 1 if position.direction == "YES" else 0
             elif exit_price <= 0.01:
                 resolution = 0 if position.direction == "YES" else 1
@@ -239,9 +241,8 @@ class PositionMonitor:
             if strategy.should_exit(position, fresh_signal, market):
                 return ("signal", current_price)
 
-        # 6. Market resolution — Kalshi status is "resolved" OR close_time has passed
-        kalshi_status = market.metadata.get("status", "")
-        if kalshi_status == "resolved" or market.close_time <= now:
+        # 6. Market resolution — Kalshi status is "finalized"/"resolved" OR close_time has passed
+        if market.status in ("finalized", "resolved") or market.close_time <= now:
             return ("market_resolved", current_price)
 
         return _NO_EXIT
@@ -377,15 +378,20 @@ def _market_row_to_domain(row: MarketRow) -> Market:
         platform=row.platform,
         question=row.question,
         category=row.category,
+        status=row.status,
+        result=row.result,
         close_time=row.close_time,
         yes_bid=row.yes_bid,
         yes_ask=row.yes_ask,
         mid_price=row.mid_price,
+        last_price=row.last_price,
         volume_24h=row.volume_24h,
         open_interest=row.open_interest,
+        liquidity=row.liquidity,
         last_fetched_at=row.last_fetched_at,
         price_updated_at=row.price_updated_at,
         metadata_fetched_at=row.metadata_fetched_at,
         current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
         metadata=row.metadata_ or {},
+        open_time=row.open_time,
     )

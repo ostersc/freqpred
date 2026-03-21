@@ -242,10 +242,22 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             mode="paper",
         )
 
+    from freqpred.strategy.loader import _BUILTIN_STRATEGIES
     from freqpred.trading.position_monitor import PositionMonitor
+
+    # Load all built-in strategies so the monitor can evaluate exits for
+    # positions entered under a previous strategy (e.g. after a strategy switch).
+    all_strategies = {}
+    for name in _BUILTIN_STRATEGIES:
+        try:
+            all_strategies[name] = load_strategy(name)
+        except Exception:
+            pass  # don't let a broken built-in prevent startup
+    all_strategies[strategy_name] = strategy  # active strategy always wins
+
     position_monitor = PositionMonitor(
         session_factory=session_factory,
-        strategies={strategy_name: strategy},
+        strategies=all_strategies,
         alert_dispatcher=alert_dispatcher,
     )
 
@@ -278,17 +290,22 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                         platform=row.platform,
                         question=row.question,
                         category=row.category,
+                        status=row.status,
+                        result=row.result,
                         close_time=row.close_time,
                         yes_bid=row.yes_bid,
                         yes_ask=row.yes_ask,
                         mid_price=row.mid_price,
+                        last_price=row.last_price,
                         volume_24h=row.volume_24h,
                         open_interest=row.open_interest,
+                        liquidity=row.liquidity,
                         last_fetched_at=row.last_fetched_at,
                         price_updated_at=row.price_updated_at,
                         metadata_fetched_at=row.metadata_fetched_at,
                         current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
                         metadata=dict(row.metadata_),
+                        open_time=row.open_time,
                     )
                     for row in market_rows
                 ]
@@ -602,17 +619,22 @@ async def _ingestion_run(
             platform=mrow.platform,
             question=mrow.question,
             category=mrow.category,
+            status=mrow.status,
+            result=mrow.result,
             close_time=mrow.close_time,
             yes_bid=mrow.yes_bid,
             yes_ask=mrow.yes_ask,
             mid_price=mrow.mid_price,
+            last_price=mrow.last_price,
             volume_24h=mrow.volume_24h,
             open_interest=mrow.open_interest,
+            liquidity=mrow.liquidity,
             last_fetched_at=mrow.last_fetched_at,
             price_updated_at=mrow.price_updated_at,
             metadata_fetched_at=mrow.metadata_fetched_at,
             current_signal_id=str(mrow.current_signal_id) if mrow.current_signal_id else None,
             metadata=dict(mrow.metadata_),
+            open_time=mrow.open_time,
         )
 
         click.echo(f"\n{'─'*70}")
@@ -780,17 +802,22 @@ async def _signal_analyze(config: object, market_id: str) -> None:
             platform=row.platform,
             question=row.question,
             category=row.category,
+            status=row.status,
+            result=row.result,
             close_time=row.close_time,
             yes_bid=row.yes_bid,
             yes_ask=row.yes_ask,
             mid_price=row.mid_price,
+            last_price=row.last_price,
             volume_24h=row.volume_24h,
             open_interest=row.open_interest,
+            liquidity=row.liquidity,
             last_fetched_at=row.last_fetched_at,
             price_updated_at=row.price_updated_at,
             metadata_fetched_at=row.metadata_fetched_at,
             current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
             metadata=dict(row.metadata_),
+            open_time=row.open_time,
         )
 
         click.echo(f"Analyzing: {market.question}")

@@ -12,6 +12,11 @@ from freqpred.markets.base import IMarketClient
 from freqpred.markets.models import MarketRow
 from freqpred.markets.repository import upsert_markets
 
+# How far back to look for recently-closed-but-not-yet-resolved markets.
+_RESOLVED_SWEEP_LOOKBACK = timedelta(days=7)
+# Max markets to re-fetch per sweep cycle (rate-limit safety).
+_RESOLVED_SWEEP_BATCH = 20
+
 log = structlog.get_logger(__name__)
 
 # Default price-move threshold in dollars (5 cents)
@@ -91,15 +96,82 @@ class MarketWatcher:
             triggered = await self._check_price_move_triggers(session, markets)
             stale_ids = await self._detect_stale_markets(session)
 
+        resolved = await self._sweep_closed_markets()
+
         log.info(
             "market_watcher_cycle_complete",
             markets_polled=len(markets),
             triggers_logged=triggered,
             stale_markets=len(stale_ids),
+            resolved_swept=resolved,
             elapsed_s=round((datetime.now(UTC) - cycle_start).total_seconds(), 2),
         )
         if stale_ids:
             log.warning("market_watcher_stale_markets", count=len(stale_ids))
+
+    async def _sweep_closed_markets(self) -> int:
+        """Re-fetch markets that have passed close_time or gone stale but aren't marked resolved.
+
+        Kalshi's list_markets() only returns open markets, so resolved markets
+        stop appearing in the feed.  This sweep handles two cases:
+
+        1. close_time has passed — normal resolution path.
+        2. Market is stale (not returned by list_markets() recently) AND has an open
+           position — Kalshi may have closed/cancelled it early, leaving our stored
+           close_time in the future.  Without this sweep those positions would be stuck.
+
+        Returns the number of markets successfully updated.
+        """
+        from sqlalchemy import and_, or_
+        from freqpred.markets.models import PositionRow
+
+        now = datetime.now(UTC)
+        lookback = now - _RESOLVED_SWEEP_LOOKBACK
+        stale_cutoff = now - timedelta(seconds=self._polling_interval * 3)
+
+        async with self._session_factory() as session:
+            # Subquery: market_ids that have at least one open position.
+            open_position_market_ids = (
+                select(PositionRow.market_id)
+                .where(PositionRow.status == "open")
+                .scalar_subquery()
+            )
+            result = await session.execute(
+                select(MarketRow.id).where(
+                    MarketRow.status.notin_(["resolved", "finalized"]),
+                    MarketRow.close_time >= lookback,
+                    or_(
+                        # Normal path: close_time has passed.
+                        MarketRow.close_time <= now,
+                        # Early-close path: stale AND has an open position.
+                        and_(
+                            MarketRow.last_fetched_at < stale_cutoff,
+                            MarketRow.id.in_(open_position_market_ids),
+                        ),
+                    ),
+                ).limit(_RESOLVED_SWEEP_BATCH)
+            )
+            market_ids = [row.id for row in result.all()]
+
+        if not market_ids:
+            return 0
+
+        updated = 0
+        markets_to_upsert = []
+        for market_id in market_ids:
+            try:
+                market = await self._client.get_market(market_id)
+                markets_to_upsert.append(market)
+            except Exception:
+                log.exception("market_watcher.resolved_sweep_error", market_id=market_id)
+
+        if markets_to_upsert:
+            async with self._session_factory() as session:
+                await upsert_markets(session, markets_to_upsert)
+            updated = len(markets_to_upsert)
+            log.info("market_watcher.resolved_sweep", updated=updated)
+
+        return updated
 
     async def _check_price_move_triggers(
         self,

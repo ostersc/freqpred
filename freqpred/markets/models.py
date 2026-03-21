@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import (
@@ -41,13 +41,22 @@ class MarketRow(Base):
     close_time: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
     )
+    open_time: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
+    # Market state
+    status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="active")
+    result: Mapped[str | None] = mapped_column(VARCHAR(10), nullable=True)
 
     # Price snapshot
     yes_bid: Mapped[float] = mapped_column(Float, nullable=False)
     yes_ask: Mapped[float] = mapped_column(Float, nullable=False)
     mid_price: Mapped[float] = mapped_column(Float, nullable=False)
+    last_price: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     volume_24h: Mapped[float] = mapped_column(Float, nullable=False)
     open_interest: Mapped[float] = mapped_column(Float, nullable=False)
+    liquidity: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
 
     # Cache control
     last_fetched_at: Mapped[datetime] = mapped_column(
@@ -181,6 +190,12 @@ class Market:
     current_signal_id: str | None = None
 
     metadata: dict = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=timezone.utc))
+    open_time: datetime | None = None
+    status: str = "active"
+    result: str | None = None
+    last_price: float = 0.0
+    liquidity: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -209,15 +224,23 @@ class KalshiMarketSchema(BaseModel):
     rules_primary: str = ""
     rules_secondary: str = ""
     status: str = ""
+    result: str = ""
     close_time: str  # ISO-8601 string; converted downstream
+    open_time: str = ""  # when the market opened for trading; converted downstream
     yes_bid_dollars: str = "0.0000"
     yes_ask_dollars: str = "0.0000"
     no_bid_dollars: str = "0.0000"
     no_ask_dollars: str = "0.0000"
+    last_price_dollars: str = "0.0000"
+    liquidity_dollars: str = "0.0000"
     volume_24h: float = Field(default=0.0, alias="volume_24h_fp")
     open_interest: float = Field(default=0.0, alias="open_interest_fp")
 
-    @field_validator("yes_bid_dollars", "yes_ask_dollars", "no_bid_dollars", "no_ask_dollars", mode="before")
+    @field_validator(
+        "yes_bid_dollars", "yes_ask_dollars", "no_bid_dollars", "no_ask_dollars",
+        "last_price_dollars", "liquidity_dollars",
+        mode="before",
+    )
     @classmethod
     def coerce_dollar_string(cls, v: object) -> str:
         """Accept numeric values as well as strings."""
@@ -232,6 +255,14 @@ class KalshiMarketSchema(BaseModel):
     @property
     def yes_ask(self) -> float:
         return float(self.yes_ask_dollars)
+
+    @property
+    def last_price(self) -> float:
+        return float(self.last_price_dollars)
+
+    @property
+    def liquidity(self) -> float:
+        return float(self.liquidity_dollars)
 
     @property
     def mid_price(self) -> float:

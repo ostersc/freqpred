@@ -398,17 +398,22 @@ def _market_row_to_domain(row: MarketRow) -> Market:
         platform=row.platform,
         question=row.question,
         category=row.category,
+        status=row.status,
+        result=row.result,
         close_time=row.close_time,
         yes_bid=row.yes_bid,
         yes_ask=row.yes_ask,
         mid_price=row.mid_price,
+        last_price=row.last_price,
         volume_24h=row.volume_24h,
         open_interest=row.open_interest,
+        liquidity=row.liquidity,
         last_fetched_at=row.last_fetched_at,
         price_updated_at=row.price_updated_at,
         metadata_fetched_at=row.metadata_fetched_at,
         current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
         metadata=dict(row.metadata_),
+        open_time=row.open_time,
     )
 
 

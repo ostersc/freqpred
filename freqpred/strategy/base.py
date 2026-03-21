@@ -59,7 +59,7 @@ class IPredictionStrategy(ABC):
         days-to-close). Override for custom market selection logic.
         """
         now = datetime.now(tz=timezone.utc)
-        days_to_close = (market.close_time - now).days
+        days_to_close = (market.close_time - now).total_seconds() / 86400
         return (
             (not self.config.categories or market.category in self.config.categories)
             and market.volume_24h >= self.config.min_volume_24h

@@ -416,7 +416,7 @@ class TestEvaluateExit:
         pos = _make_position(entry_price=0.50)
         # close_time is in the future — wouldn't trigger via time check alone
         market = _make_market(mid_price=0.99, close_time=NOW + timedelta(days=5))
-        market.metadata["status"] = "resolved"
+        market.status = "resolved"
 
         result = monitor.evaluate_exit(
             position=pos,
@@ -602,7 +602,8 @@ class TestCheckAllPositions:
 
         # Market is Kalshi-resolved at YES price = 0.99
         market = _make_market(mid_price=0.99, close_time=NOW + timedelta(days=5))
-        market.metadata["status"] = "resolved"
+        market.status = "resolved"
+        market.result = "yes"
 
         with (
             patch(
@@ -623,17 +624,21 @@ class TestCheckAllPositions:
                     platform=market.platform,
                     question=market.question,
                     category=market.category,
+                    status="resolved",
+                    result="yes",
                     close_time=market.close_time,
                     yes_bid=market.yes_bid,
                     yes_ask=market.yes_ask,
                     mid_price=market.mid_price,
+                    last_price=0.0,
                     volume_24h=market.volume_24h,
                     open_interest=market.open_interest,
+                    liquidity=0.0,
                     last_fetched_at=market.last_fetched_at,
                     price_updated_at=market.price_updated_at,
                     metadata_fetched_at=market.metadata_fetched_at,
                     current_signal_id=None,
-                    metadata_={"status": "resolved"},
+                    metadata_={},
                 )
             ]
             session.execute = AsyncMock(return_value=scalars_mock)

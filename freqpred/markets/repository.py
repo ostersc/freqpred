@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import case
+from sqlalchemy import case, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,17 +22,22 @@ def _build_row(market: Market, now: datetime) -> dict:
         "platform": market.platform,
         "question": market.question,
         "category": market.category,
+        "status": market.status,
+        "result": market.result,
         "close_time": market.close_time,
         "yes_bid": market.yes_bid,
         "yes_ask": market.yes_ask,
         "mid_price": market.mid_price,
+        "last_price": market.last_price,
         "volume_24h": market.volume_24h,
         "open_interest": market.open_interest,
+        "liquidity": market.liquidity,
         "last_fetched_at": now,
         "price_updated_at": now,  # overridden by CASE on conflict
         "metadata_fetched_at": market.metadata_fetched_at,
         "metadata": market.metadata,
         "current_signal_id": None,
+        "open_time": market.open_time,
     }
 
 
@@ -61,16 +66,21 @@ async def _upsert_batch(session: AsyncSession, rows: list[dict], now: datetime) 
         set_={
             "question": stmt.excluded.question,
             "category": stmt.excluded.category,
+            "status": stmt.excluded.status,
+            "result": func.coalesce(func.nullif(stmt.excluded.result, ""), tbl.c.result),
             "close_time": stmt.excluded.close_time,
             "yes_bid": stmt.excluded.yes_bid,
             "yes_ask": stmt.excluded.yes_ask,
             "mid_price": stmt.excluded.mid_price,
+            "last_price": stmt.excluded.last_price,
             "volume_24h": stmt.excluded.volume_24h,
             "open_interest": stmt.excluded.open_interest,
+            "liquidity": stmt.excluded.liquidity,
             "last_fetched_at": stmt.excluded.last_fetched_at,
             "price_updated_at": price_updated_at_expr,
             "metadata_fetched_at": stmt.excluded.metadata_fetched_at,
             "metadata": stmt.excluded.metadata,
+            "open_time": func.coalesce(tbl.c.open_time, stmt.excluded.open_time),
         },
     )
     await session.execute(stmt)
