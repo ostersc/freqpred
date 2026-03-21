@@ -48,10 +48,9 @@ freqpred/
 - **FastAPI** — dashboard API
 - **SQLAlchemy 2.0** (async) + **Alembic** — ORM + migrations
 - **PostgreSQL 16 + pgvector** — main DB + vector search
-- **Redis** — signal cache, ingestion dedup
 - **sentence-transformers** (`all-MiniLM-L6-v2`, 384-dim) — local document embeddings, no API key required
 - **Anthropic SDK** — Claude for signal analysis + social pre-summarizer
-- **PRAW** — Reddit API client
+- **httpx** — async HTTP client; Reddit fetcher uses the public JSON API directly (no PRAW)
 - **Tavily SDK** — web search
 - **pytest + pytest-asyncio** — testing
 - **Pydantic v2** — config validation and data models
@@ -78,15 +77,7 @@ uv run alembic upgrade head
 uv run freqpred run --strategy ConservativeDefault --mode signal-only
 ```
 
-Required environment variables (set in `.env` or AWS Secrets Manager in prod):
-```
-KALSHI_API_KEY=
-ANTHROPIC_API_KEY=
-TAVILY_API_KEY=
-NEWSAPI_KEY=
-# Reddit uses the public JSON API — no credentials required
-DATABASE_URL=postgresql+asyncpg://...
-```
+Required environment variables (set in `.env` or AWS Secrets Manager in prod): see `config.py` — it defines a full `_ENV_OVERRIDES` map of every env var the system reads and which config key it maps to.
 
 ---
 
@@ -141,7 +132,7 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 ## Testing conventions
 
 - Unit tests in `tests/unit/` — no DB, no external APIs. Mock everything external.
-- Integration tests in `tests/integration/` — require running Postgres + Redis (via docker-compose). Use a test database.
+- Integration tests in `tests/integration/` — require running Postgres (via docker-compose). Use a test database.
 - Never use the production DB in tests. `DATABASE_URL` for tests should point to `freqpred_test`.
 - Fixtures for common objects (Market, Signal, Document) live in `tests/conftest.py`.
 - Every new module gets a corresponding test file. Aim for coverage on all public functions.

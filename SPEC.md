@@ -245,7 +245,7 @@ class Signal:
     retrieval_hash: str              # hash of retrieved Document IDs — same hash = no new evidence in store
 
     # --- Provenance ---
-    model_used: str                  # e.g. "claude-3-5-sonnet-20241022"
+    model_used: str                  # e.g. "claude-sonnet-4-6"
     prompt_version: str              # e.g. "politics-v2" — for tracking prompt changes
     trigger: str                     # "scheduled" | "price_moved" | "new_evidence" | "manual"
     created_at: datetime
@@ -364,7 +364,8 @@ class Document:
     title: str
     body: str                        # cleaned full text (HTML stripped)
     summary: str | None              # LLM-generated summary (populated lazily on first use)
-    source_type: str                 # "news" | "reddit" | "twitter" | "kalshi_comment" | "manifold"
+    source_type: str                 # "news" | "reddit" | "social" | "twitter" | "kalshi_comment" | "manifold"
+                                     # "social" is used for Truth Social posts
     source_name: str                 # e.g. "Reuters", "r/politics", "Kalshi"
 
     # --- Classification ---
@@ -396,7 +397,7 @@ class CatalystRun:
     id: str                      # UUID
     market_id: str               # FK → Market
     generation: int              # monotonically increasing per market (1, 2, 3 ...)
-    llm_query_id: int            # FK → LLMQuery — audit trail for the catalyst LLM call
+    llm_query_id: int | None     # FK → LLMQuery — audit trail for the catalyst LLM call (nullable)
     is_active: bool              # False when market closed or no strategy is interested
     created_at: datetime
 
@@ -461,7 +462,7 @@ class LLMQuery:
     signal_id: str | None            # FK → Signal if this query produced one
 
     # --- Full request/response (immutable audit record) ---
-    model_used: str                  # e.g. "claude-3-5-sonnet-20241022"
+    model_used: str                  # e.g. "claude-sonnet-4-6"
     prompt_version: str              # versioned prompt template identifier
     prompt: str                      # full prompt sent to LLM
     response: str                    # full raw LLM response
@@ -890,7 +891,7 @@ This two-pass approach keeps social signal cost-efficient: a cheap summarization
 
 ### LLM Configuration
 
-- **Primary model:** `claude-3-5-sonnet` — best reasoning/cost tradeoff
+- **Primary model:** `claude-sonnet-4-6`; cheap model: `claude-haiku-4-5` — best reasoning/cost tradeoff
 - **Output format:** Structured JSON via tool use (not free-form text parsing)
 - **Prompt versioning:** Prompts are versioned and stored; every signal logs the prompt version used
 - **Caching:** Signal results cached by `(market_id, prompt_version, retrieval_hash)` — same market won't be re-analyzed unless new evidence is retrieved
@@ -1086,7 +1087,7 @@ telegram:
 - [x] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
 - [x] GDELT fetcher: Doc API query → parallel article body fetch → store (T32)
 - [x] Truth Social fetcher: search mode (per catalyst query) + account feed mode (per cycle) via `truthbrush` (T33)
-- [ ] Internet Archive TV fetcher: catalyst `tv_query` → transcript clip search → store (see `docs/tv_archive_fetcher.md`)
+- [x] Internet Archive TV fetcher: catalyst `tv_query` → transcript clip search → store
 - [ ] Twitter/X fetcher (optional — gated on API cost decision)
 - [x] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy` strategies
 - [x] Market Selector: reads active markets, calls `strategy.is_market_interesting()` per registered strategy
@@ -1133,16 +1134,19 @@ telegram:
 ### Phase 3: Live Trading
 *Goal: real capital, controlled risk*
 
-- [ ] Full dashboard (all pages)
-- [ ] Kalshi client base URL configurable (`kalshi.base_url`) — supports switching between demo (`https://demo-api.kalshi.co/trade-api/v2`) and production; demo account requires separate credentials
-- [ ] Kalshi order execution (real API) — entry orders via REST
-- [ ] Real exit order execution — when position monitor fires an exit condition, submit a sell order via Kalshi REST API instead of simulating it
-- [ ] Hard cap enforcement in Order Manager
-- [ ] Position Watcher: Kalshi WebSocket `ticker` subscription drives real-time position monitor for open positions — replaces the poll-based paper monitor with low-latency price feed; same exit logic, real sell orders (see §6a)
-- [ ] Position Watcher: `market_lifecycle` subscription for resolution events — closes positions at settlement price
-- [ ] Production AWS deployment (ECS, RDS, Secrets Manager)
-- [ ] GitHub Actions CI/CD pipeline
-- [ ] Circuit breakers + runbook for incidents
+- [ ] **T35** — Kalshi demo environment: `KALSHI_BASE_URL` env override + demo credentials in config; supports switching between demo (`https://demo-api.kalshi.co/trade-api/v2`) and production without editing config.yaml
+- [ ] **T36** — KalshiClient live order placement: implement `_post()` transport + `place_order()`, `get_positions()`, `get_balance()` (currently `NotImplementedError` stubs)
+- [ ] **T37** — OrderManager live branch: call `KalshiClient.place_order()` when `mode="live"` + `LIVE_TRADING_ENABLED=true`; record positions as `status="pending"` until fill confirmed
+- [ ] **T38** — PositionMonitor live exits: submit real sell orders (IOC) to Kalshi when exit conditions fire for live positions; close in ledger only after exchange confirms
+- [ ] **T39** — PositionWatcher WebSocket `ticker`: persistent connection for markets with open live positions; sub-second price updates; triggers position monitor on each tick; exponential backoff reconnect (see §6a)
+- [ ] **T40** — PositionWatcher `market_lifecycle`: subscribe to resolution events; settle positions at $1.00/$0.00 on `settled`; REST poll fallback for missed events during reconnect windows
+- [ ] **T41** — Dashboard: Strategy Config + System Health API endpoints (GET/PUT strategy parameters at runtime; circuit breaker state, WebSocket status, pending order count)
+- [ ] **T42** — Production AWS deployment: ECS Fargate, RDS Postgres 16 + pgvector, Secrets Manager, CloudWatch alarms, deployment runbook
+- [ ] **T43** — GitHub Actions CI/CD: lint → test (with real Postgres in CI) → build Docker image → push to ECR → run Alembic migrations → deploy to ECS
+- [ ] **T44** — React dashboard frontend: all 7 pages (Signal Feed, Positions, Ledger, Calibration, LLM Cost & Audit, Strategy Config, System Health); served as static files by FastAPI
+- [ ] **T45** — Circuit breaker hardening: implement drawdown circuit breaker (missing from code); verify all four breakers fire correctly; consistent Telegram alert format; incident runbook (`docs/runbook.md`)
+
+**Dependency order:** T35 → T36 → T37, T38 → T39 → T40. T41–T45 can proceed in parallel once T36 is done. T42 is a prerequisite for T43. T41 is a prerequisite for T44.
 
 **Done when:** System executes real trades automatically with enforced risk limits, monitored via dashboard and Telegram.
 
