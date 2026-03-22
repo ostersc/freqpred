@@ -41,7 +41,7 @@ from freqpred.ingestion.fetchers.truthsocial import (
 )
 from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
-from freqpred.ingestion.quota import get_daily_count, increment_daily_count
+from freqpred.ingestion.quota import current_window, get_window_count, increment_window_count
 from freqpred.ingestion.store import DocumentSkipped, link_document_to_market, upsert_document
 from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.embedder import LocalEmbedder
@@ -87,7 +87,7 @@ async def run_cycle(
     tavily_api_key: str = "",
     newsapi_api_key: str = "",
     newsapi_enabled: bool = True,
-    newsapi_max_daily_requests: int = 90,
+    newsapi_max_window_requests: int = 45,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
     truthsocial_enabled: bool = False,
@@ -116,10 +116,10 @@ async def run_cycle(
                                     generation is skipped.
         tavily_api_key:             Tavily API key. Tavily is skipped if empty.
         newsapi_api_key:            NewsAPI key. NewsAPI is skipped if empty.
-        newsapi_enabled:            When False, the NewsAPI fetcher is skipped entirely
-                                    even if newsapi_api_key is set (default: True).
-        newsapi_max_daily_requests: Daily request cap tracked in Postgres
-                                    ``api_daily_counters`` (default: 90).
+        newsapi_enabled:             When False, the NewsAPI fetcher is skipped entirely
+                                     even if newsapi_api_key is set (default: True).
+        newsapi_max_window_requests: Per-12-hour-window request cap tracked in Postgres
+                                     ``api_daily_counters`` (default: 45; NewsAPI allows 50).
         reddit_user_agent:          User-Agent for Reddit requests.
         domain_blacklist:           Domains to exclude from Tavily and NewsAPI results.
                                     Matched as a substring of each URL (default: kalshi.com).
@@ -160,6 +160,7 @@ async def run_cycle(
     total_error = 0
     now = datetime.now(UTC)
     newsapi_from = now - timedelta(days=_NEWSAPI_LOOKBACK_DAYS)
+    newsapi_window_date, newsapi_hour_slot = current_window(now)
 
     # Load persistent backoff state from DB (ticks down all counters by 1).
     # Returns {service: is_backed_off} for services with existing rows.
@@ -294,14 +295,15 @@ async def run_cycle(
             # NewsAPI quota check requires a DB round-trip; do it before the gather.
             newsapi_fetched = False
             if newsapi_api_key and newsapi_enabled and not newsapi_limit_hit:
-                daily_count = await get_daily_count(session, "newsapi", now.date())
-                if daily_count >= newsapi_max_daily_requests:
+                window_count = await get_window_count(session, "newsapi", newsapi_window_date, newsapi_hour_slot)
+                if window_count >= newsapi_max_window_requests:
                     if not newsapi_limit_logged:
                         log.warning(
-                            "newsapi_daily_limit_reached",
-                            date=now.date().isoformat(),
-                            count=daily_count,
-                            max_daily_requests=newsapi_max_daily_requests,
+                            "newsapi_window_limit_reached",
+                            window_date=newsapi_window_date.isoformat(),
+                            hour_slot=newsapi_hour_slot,
+                            count=window_count,
+                            max_window_requests=newsapi_max_window_requests,
                         )
                         newsapi_limit_logged = True
                 else:
@@ -354,7 +356,7 @@ async def run_cycle(
                 else:
                     raw_docs.extend(result)
                     if name == "newsapi" and newsapi_fetched:
-                        await increment_daily_count(session, "newsapi", now.date())
+                        await increment_window_count(session, "newsapi", newsapi_window_date, newsapi_hour_slot)
                     # Clear backoff on first success this cycle for this service.
                     if name not in success_recorded:
                         await record_success(session, name)
@@ -444,7 +446,7 @@ async def run_scheduler(
     tavily_api_key: str = "",
     newsapi_api_key: str = "",
     newsapi_enabled: bool = True,
-    newsapi_max_daily_requests: int = 90,
+    newsapi_max_window_requests: int = 45,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
     truthsocial_enabled: bool = False,
@@ -466,7 +468,7 @@ async def run_scheduler(
         tavily_api_key:             Tavily API key.
         newsapi_api_key:            NewsAPI key.
         newsapi_enabled:            When False, NewsAPI fetcher is skipped entirely.
-        newsapi_max_daily_requests: Daily request cap for the NewsAPI fetcher.
+        newsapi_max_window_requests: Per-12-hour-window request cap for the NewsAPI fetcher.
         reddit_user_agent:          User-Agent for Reddit requests.
         domain_blacklist:           Domains to exclude from Tavily and NewsAPI results.
         truthsocial_enabled:        When True, Truth Social fetchers are active.
@@ -486,7 +488,7 @@ async def run_scheduler(
         "scheduler.started",
         interval_seconds=interval_seconds,
         fetchers=active_fetchers,
-        newsapi_daily_cap=newsapi_max_daily_requests if newsapi_api_key and newsapi_enabled else None,
+        newsapi_window_cap=newsapi_max_window_requests if newsapi_api_key and newsapi_enabled else None,
     )
 
     while True:
@@ -500,7 +502,7 @@ async def run_scheduler(
                     tavily_api_key=tavily_api_key,
                     newsapi_api_key=newsapi_api_key,
                     newsapi_enabled=newsapi_enabled,
-                    newsapi_max_daily_requests=newsapi_max_daily_requests,
+                    newsapi_max_window_requests=newsapi_max_window_requests,
                     reddit_user_agent=reddit_user_agent,
                     domain_blacklist=domain_blacklist,
                     truthsocial_enabled=truthsocial_enabled,

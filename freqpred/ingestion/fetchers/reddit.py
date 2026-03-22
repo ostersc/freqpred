@@ -45,7 +45,11 @@ async def fetch(
     async with httpx.AsyncClient(base_url=_BASE_URL, headers=headers, timeout=15.0) as client:
         for subreddit_name in subreddits:
             try:
-                response = await client.get(
+                # Use streaming so we can inspect the status code before reading the body.
+                # Reddit sends 429 and then closes the connection, causing a ReadError if
+                # we try to read the body — streaming lets us bail out cleanly first.
+                async with client.stream(
+                    "GET",
                     _SEARCH_PATH.format(subreddit=subreddit_name),
                     params={
                         "q": query,
@@ -53,87 +57,86 @@ async def fetch(
                         "limit": limit,
                         "restrict_sr": 1,
                     },
-                )
-                response.raise_for_status()
-                data = response.json()
+                ) as response:
+                    status = response.status_code
+                    if status in (403, 404, 429):
+                        # 403: subreddit restricted/private
+                        # 404: subreddit doesn't exist
+                        # 429: rate limited
+                        log.debug(
+                            "reddit.fetch.skip",
+                            subreddit=subreddit_name,
+                            status=status,
+                        )
+                        continue
+                    response.raise_for_status()
+                    await response.aread()
+                    data = response.json()
+
+                    posts = data.get("data", {}).get("children", [])
+                    for post in posts:
+                        p = post.get("data", {})
+
+                        score: int = p.get("score", 0)
+                        created_utc: float = p.get("created_utc", 0.0)
+                        permalink: str = p.get("permalink", "")
+                        title: str = (p.get("title") or "").strip()
+
+                        published_at = datetime.fromtimestamp(created_utc, tz=timezone.utc)
+
+                        if score < _MIN_SCORE:
+                            log.debug(
+                                "reddit.fetch.skip",
+                                reason="low_score",
+                                score=score,
+                                permalink=permalink,
+                            )
+                            continue
+
+                        if published_at < cutoff:
+                            log.debug(
+                                "reddit.fetch.skip",
+                                reason="too_old",
+                                published_at=published_at.isoformat(),
+                                permalink=permalink,
+                            )
+                            continue
+
+                        body = (p.get("selftext") or title).strip()
+                        if not body:
+                            log.warning(
+                                "reddit.fetch.skip", reason="empty_body", permalink=permalink
+                            )
+                            continue
+
+                        display_name: str = p.get("subreddit", subreddit_name)
+
+                        docs.append(
+                            RawDocument(
+                                source_url=f"https://reddit.com{permalink}",
+                                title=title,
+                                body=body,
+                                source_type="reddit",
+                                source_name=f"r/{display_name}",
+                                category="",
+                                tags=[],
+                                published_at=published_at,
+                                fetched_at=now,
+                            )
+                        )
             except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                if status in (403, 404, 429):
-                    # 403: subreddit restricted/private or rate-limited
-                    # 404: subreddit doesn't exist
-                    # 429: rate limited
-                    log.debug(
-                        "reddit.fetch.skip",
-                        subreddit=subreddit_name,
-                        status=status,
-                    )
-                else:
-                    log.warning(
-                        "reddit.fetch.error",
-                        subreddit=subreddit_name,
-                        query=query,
-                        status=status,
-                    )
-                continue
+                log.warning(
+                    "reddit.fetch.error",
+                    subreddit=subreddit_name,
+                    query=query,
+                    status=exc.response.status_code,
+                )
             except Exception:
                 log.warning(
                     "reddit.fetch.error",
                     subreddit=subreddit_name,
                     query=query,
                     exc_info=True,
-                )
-                continue
-
-            posts = data.get("data", {}).get("children", [])
-            for post in posts:
-                p = post.get("data", {})
-
-                score: int = p.get("score", 0)
-                created_utc: float = p.get("created_utc", 0.0)
-                permalink: str = p.get("permalink", "")
-                title: str = (p.get("title") or "").strip()
-
-                published_at = datetime.fromtimestamp(created_utc, tz=timezone.utc)
-
-                if score < _MIN_SCORE:
-                    log.debug(
-                        "reddit.fetch.skip",
-                        reason="low_score",
-                        score=score,
-                        permalink=permalink,
-                    )
-                    continue
-
-                if published_at < cutoff:
-                    log.debug(
-                        "reddit.fetch.skip",
-                        reason="too_old",
-                        published_at=published_at.isoformat(),
-                        permalink=permalink,
-                    )
-                    continue
-
-                body = (p.get("selftext") or title).strip()
-                if not body:
-                    log.warning(
-                        "reddit.fetch.skip", reason="empty_body", permalink=permalink
-                    )
-                    continue
-
-                display_name: str = p.get("subreddit", subreddit_name)
-
-                docs.append(
-                    RawDocument(
-                        source_url=f"https://reddit.com{permalink}",
-                        title=title,
-                        body=body,
-                        source_type="reddit",
-                        source_name=f"r/{display_name}",
-                        category="",
-                        tags=[],
-                        published_at=published_at,
-                        fetched_at=now,
-                    )
                 )
 
     return docs

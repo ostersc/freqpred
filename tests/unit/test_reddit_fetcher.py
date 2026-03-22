@@ -17,7 +17,7 @@ from freqpred.ingestion.store import RawDocument
 _SUBREDDITS = ["politics"]
 _QUERY = "election results"
 
-_NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime.now(timezone.utc)
 _RECENT_TS = (_NOW - timedelta(days=1)).timestamp()
 _OLD_TS = (_NOW - timedelta(days=_MAX_AGE_DAYS + 1)).timestamp()
 
@@ -47,24 +47,38 @@ def _make_response(posts: list[dict]) -> dict:
     return {"data": {"children": posts}}
 
 
+def _make_http_response(posts: list[dict], status_code: int = 200) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = _make_response(posts)
+    resp.raise_for_status = MagicMock()
+    resp.aread = AsyncMock()
+    return resp
+
+
+def _make_stream_cm(resp: MagicMock) -> MagicMock:
+    """Wrap a response mock in an async context manager for client.stream()."""
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=resp)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
 @pytest.fixture()
 def mock_httpx(monkeypatch):
     """Patch httpx.AsyncClient and return a mock that yields a configured instance."""
     mock_client = AsyncMock()
+    # stream() is not awaited — it returns an async context manager directly.
+    # Replace the AsyncMock attribute with a plain MagicMock so calling it
+    # returns a context manager rather than a coroutine.
+    mock_client.stream = MagicMock()
+
     mock_cm = MagicMock()
     mock_cm.__aenter__ = AsyncMock(return_value=mock_client)
     mock_cm.__aexit__ = AsyncMock(return_value=False)
 
     with patch("freqpred.ingestion.fetchers.reddit.httpx.AsyncClient", return_value=mock_cm):
         yield mock_client
-
-
-def _make_http_response(posts: list[dict], status_code: int = 200) -> MagicMock:
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.json.return_value = _make_response(posts)
-    resp.raise_for_status = MagicMock()
-    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +88,10 @@ def _make_http_response(posts: list[dict], status_code: int = 200) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_fetch_returns_raw_documents(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([
         _make_post(permalink="/r/politics/comments/1/a/"),
         _make_post(permalink="/r/politics/comments/2/b/"),
-    ])
+    ]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -87,7 +101,7 @@ async def test_fetch_returns_raw_documents(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_sets_source_type_reddit(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([_make_post()])
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([_make_post()]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -96,7 +110,9 @@ async def test_fetch_sets_source_type_reddit(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_sets_source_name_with_subreddit(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([_make_post(subreddit="politics")])
+    mock_httpx.stream.return_value = _make_stream_cm(
+        _make_http_response([_make_post(subreddit="politics")])
+    )
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -105,9 +121,9 @@ async def test_fetch_sets_source_name_with_subreddit(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_sets_source_url_from_permalink(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([
         _make_post(permalink="/r/politics/comments/abc/test/")
-    ])
+    ]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -116,9 +132,9 @@ async def test_fetch_sets_source_url_from_permalink(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_body_uses_selftext(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([
         _make_post(selftext="Self text content.", title="Title")
-    ])
+    ]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -127,9 +143,9 @@ async def test_fetch_body_uses_selftext(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_body_falls_back_to_title(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([
         _make_post(selftext="", title="Just a link title")
-    ])
+    ]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -138,12 +154,12 @@ async def test_fetch_body_falls_back_to_title(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_published_at_is_utc(mock_httpx):
-    ts = datetime(2026, 3, 15, 8, 0, 0, tzinfo=timezone.utc).timestamp()
-    mock_httpx.get.return_value = _make_http_response([_make_post(created_utc=ts)])
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([_make_post(created_utc=_RECENT_TS)]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
-    assert docs[0].published_at == datetime(2026, 3, 15, 8, 0, 0, tzinfo=timezone.utc)
+    expected = datetime.fromtimestamp(_RECENT_TS, tz=timezone.utc)
+    assert docs[0].published_at == expected
 
 
 # ---------------------------------------------------------------------------
@@ -153,10 +169,10 @@ async def test_fetch_published_at_is_utc(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_skips_low_score(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([
         _make_post(score=_MIN_SCORE - 1, permalink="/r/p/comments/low/"),
         _make_post(score=_MIN_SCORE, permalink="/r/p/comments/high/"),
-    ])
+    ]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -166,7 +182,7 @@ async def test_fetch_skips_low_score(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_includes_exact_min_score(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([_make_post(score=_MIN_SCORE)])
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([_make_post(score=_MIN_SCORE)]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -180,10 +196,10 @@ async def test_fetch_includes_exact_min_score(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_skips_old_posts(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([
         _make_post(created_utc=_OLD_TS, permalink="/r/p/comments/old/"),
         _make_post(created_utc=_RECENT_TS, permalink="/r/p/comments/new/"),
-    ])
+    ]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -198,10 +214,10 @@ async def test_fetch_skips_old_posts(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_skips_empty_body(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([
         _make_post(selftext="", title=""),
         _make_post(selftext="Has content.", permalink="/r/p/comments/valid/"),
-    ])
+    ]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -216,11 +232,10 @@ async def test_fetch_skips_empty_body(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_aggregates_across_subreddits(mock_httpx):
-    responses = [
-        _make_http_response([_make_post(permalink="/r/a/comments/1/", subreddit="a")]),
-        _make_http_response([_make_post(permalink="/r/b/comments/2/", subreddit="b")]),
+    mock_httpx.stream.side_effect = [
+        _make_stream_cm(_make_http_response([_make_post(permalink="/r/a/comments/1/", subreddit="a")])),
+        _make_stream_cm(_make_http_response([_make_post(permalink="/r/b/comments/2/", subreddit="b")])),
     ]
-    mock_httpx.get.side_effect = responses
 
     docs = await fetch(["a", "b"], _QUERY)
 
@@ -229,12 +244,13 @@ async def test_fetch_aggregates_across_subreddits(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_calls_correct_subreddit_path(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([])
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([]))
 
     await fetch(["worldnews"], _QUERY)
 
-    call_args = mock_httpx.get.call_args
-    assert "worldnews" in call_args[0][0]
+    call_args = mock_httpx.stream.call_args
+    # stream("GET", path, ...) — path is the second positional arg
+    assert "worldnews" in call_args[0][1]
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +260,7 @@ async def test_fetch_calls_correct_subreddit_path(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_returns_empty_on_http_error(mock_httpx):
-    mock_httpx.get.side_effect = Exception("connection refused")
+    mock_httpx.stream.side_effect = Exception("connection refused")
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -253,9 +269,9 @@ async def test_fetch_returns_empty_on_http_error(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_skips_subreddit_on_http_error_continues(mock_httpx):
-    mock_httpx.get.side_effect = [
+    mock_httpx.stream.side_effect = [
         Exception("rate limited"),
-        _make_http_response([_make_post(permalink="/r/b/comments/2/")]),
+        _make_stream_cm(_make_http_response([_make_post(permalink="/r/b/comments/2/")])),
     ]
 
     docs = await fetch(["a", "b"], _QUERY)
@@ -267,30 +283,22 @@ async def test_fetch_skips_subreddit_on_http_error_continues(mock_httpx):
 async def test_fetch_empty_subreddits_returns_empty(mock_httpx):
     docs = await fetch([], _QUERY)
     assert docs == []
-    mock_httpx.get.assert_not_called()
+    mock_httpx.stream.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_fetch_empty_posts_returns_empty(mock_httpx):
-    mock_httpx.get.return_value = _make_http_response([])
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([]))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
     assert docs == []
 
 
-def _make_http_status_error(status_code: int) -> httpx.HTTPStatusError:
-    request = httpx.Request("GET", "https://www.reddit.com/r/test/search.json")
-    response = httpx.Response(status_code, request=request)
-    return httpx.HTTPStatusError("error", request=request, response=response)
-
-
 @pytest.mark.asyncio
 async def test_fetch_403_returns_empty_silently(mock_httpx):
     """403s should be swallowed quietly (subreddit restricted/rate-limited)."""
-    resp = _make_http_response([])
-    resp.raise_for_status.side_effect = _make_http_status_error(403)
-    mock_httpx.get.return_value = resp
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([], status_code=403))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -299,9 +307,7 @@ async def test_fetch_403_returns_empty_silently(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_404_returns_empty_silently(mock_httpx):
-    resp = _make_http_response([])
-    resp.raise_for_status.side_effect = _make_http_status_error(404)
-    mock_httpx.get.return_value = resp
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([], status_code=404))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -310,9 +316,7 @@ async def test_fetch_404_returns_empty_silently(mock_httpx):
 
 @pytest.mark.asyncio
 async def test_fetch_429_returns_empty_silently(mock_httpx):
-    resp = _make_http_response([])
-    resp.raise_for_status.side_effect = _make_http_status_error(429)
-    mock_httpx.get.return_value = resp
+    mock_httpx.stream.return_value = _make_stream_cm(_make_http_response([], status_code=429))
 
     docs = await fetch(_SUBREDDITS, _QUERY)
 
@@ -322,11 +326,10 @@ async def test_fetch_429_returns_empty_silently(mock_httpx):
 @pytest.mark.asyncio
 async def test_fetch_continues_after_403(mock_httpx):
     """403 on first subreddit should not prevent fetching from the second."""
-    bad_resp = _make_http_response([])
-    bad_resp.raise_for_status.side_effect = _make_http_status_error(403)
-    good_resp = _make_http_response([_make_post(permalink="/r/b/comments/1/")])
-
-    mock_httpx.get.side_effect = [bad_resp, good_resp]
+    mock_httpx.stream.side_effect = [
+        _make_stream_cm(_make_http_response([], status_code=403)),
+        _make_stream_cm(_make_http_response([_make_post(permalink="/r/b/comments/1/")])),
+    ]
 
     docs = await fetch(["restricted", "b"], _QUERY)
 

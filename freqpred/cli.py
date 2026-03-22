@@ -10,7 +10,7 @@ import structlog
 from freqpred.config import load_config
 
 
-def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int = 14) -> None:
+def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int = 14, log_module_levels: dict[str, str] | None = None) -> None:
     """Set up structlog with stdlib integration at the given level.
 
     Uses ProcessorFormatter so that console output gets colors while the
@@ -31,13 +31,17 @@ def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int 
         structlog.processors.StackInfoRenderer(),
     ]
 
+    # Use DEBUG as the structlog-level floor so that per-module stdlib level overrides
+    # work. Actual filtering is done by stdlib's logger hierarchy: the root logger is
+    # set to `level` (INFO by default), so debug output from other modules is dropped
+    # before reaching any handler. Only loggers explicitly set to DEBUG below will emit.
     structlog.configure(
         processors=[
             *shared_processors,
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.make_filtering_bound_logger(level),
+        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
         cache_logger_on_first_use=True,
     )
 
@@ -79,6 +83,11 @@ def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int 
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+    # Per-module level overrides from config
+    for module, module_level in (log_module_levels or {}).items():
+        logging.getLogger(module).setLevel(getattr(logging, module_level))
+
+
 
 # Module-level log buffer shared between _configure_logging and _run_main.
 _log_buffer: "LogBuffer | None" = None
@@ -105,7 +114,7 @@ def main(ctx: click.Context) -> None:
     """freqpred — LLM-driven prediction market trading framework."""
     ctx.ensure_object(dict)
     config = load_config()
-    _configure_logging(config.log_level, log_file=config.log_file, log_backup_days=config.log_backup_days)
+    _configure_logging(config.log_level, log_file=config.log_file, log_backup_days=config.log_backup_days, log_module_levels=config.log_module_levels)
     ctx.obj["config"] = config
 
 
@@ -385,6 +394,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     llm_client=llm_client,
                     tavily_api_key=config.tavily.api_key,
                     newsapi_api_key=config.newsapi.api_key,
+                    newsapi_enabled=config.newsapi.enabled,
+                    newsapi_max_window_requests=config.newsapi.max_window_requests,
                     truthsocial_enabled=config.ingestion.truthsocial.enabled,
                     truthsocial_username=config.truthsocial.username,
                     truthsocial_password=config.truthsocial.password,

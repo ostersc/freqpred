@@ -59,11 +59,11 @@ def mock_cursors(monkeypatch):
 def mock_quota(monkeypatch):
     """Patch quota helpers so scheduler tests don't need a real DB session."""
     monkeypatch.setattr(
-        "freqpred.ingestion.scheduler.get_daily_count",
+        "freqpred.ingestion.scheduler.get_window_count",
         AsyncMock(return_value=0),
     )
     monkeypatch.setattr(
-        "freqpred.ingestion.scheduler.increment_daily_count",
+        "freqpred.ingestion.scheduler.increment_window_count",
         AsyncMock(return_value=None),
     )
 

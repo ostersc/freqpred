@@ -3,6 +3,8 @@
 # Secrets (API keys) must come from environment variables — never put them here.
 
 log_level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+# log_module_levels:  # per-module overrides; env: LOG_MODULE_LEVELS=module=LEVEL,module=LEVEL
+#   freqpred.ingestion.fetchers.gdelt: DEBUG
 
 database:
   # Overridden by DATABASE_URL env var

@@ -42,7 +42,7 @@ class TavilyConfig(BaseModel):
 class NewsAPIConfig(BaseModel):
     api_key: str = Field(default="")
     enabled: bool = Field(default=True)
-    max_daily_requests: int = Field(default=90)
+    max_window_requests: int = Field(default=45, description="Max requests per 12-hour window (NewsAPI allows 50).")
 
 
 class RedditConfig(BaseModel):
@@ -126,6 +126,10 @@ class Settings(BaseModel):
     log_level: str = Field(default="INFO")
     log_file: str = Field(default="logs/freqpred.log", description="Path to rolling log file. Set to '' to disable.")
     log_backup_days: int = Field(default=14, description="Number of daily log files to retain.")
+    log_module_levels: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-module log level overrides, e.g. {freqpred.ingestion.fetchers.gdelt: DEBUG}.",
+    )
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     kalshi: KalshiConfig = Field(default_factory=KalshiConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
@@ -149,6 +153,12 @@ class Settings(BaseModel):
             raise ValueError(f"log_level must be one of {valid}, got: {v!r}")
         return upper
 
+    @field_validator("log_module_levels")
+    @classmethod
+    def validate_log_module_levels(cls, v: dict[str, str]) -> dict[str, str]:
+        valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        return {module: level.upper() for module, level in v.items() if level.upper() in valid}
+
 
 # Maps environment variable name → (section, field) path in Settings
 _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
@@ -170,6 +180,11 @@ _ENV_LIST_OVERRIDES: dict[str, tuple[str, str]] = {
     "TELEGRAM_AUTHORIZED_USERS": ("alerts", "telegram_authorized_users"),
 }
 
+# Env vars whose values are MODULE=LEVEL,MODULE=LEVEL dicts.
+_ENV_DICT_OVERRIDES: dict[str, str] = {
+    "LOG_MODULE_LEVELS": "log_module_levels",
+}
+
 
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     for env_var, (section, key) in _ENV_OVERRIDES.items():
@@ -184,6 +199,17 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
             if section not in data:
                 data[section] = {}
             data[section][key] = [v.strip() for v in value.split(",") if v.strip()]
+    for env_var, field in _ENV_DICT_OVERRIDES.items():
+        value = os.environ.get(env_var)
+        if value:
+            parsed: dict[str, str] = {}
+            for pair in value.split(","):
+                pair = pair.strip()
+                if "=" in pair:
+                    k, _, v = pair.partition("=")
+                    parsed[k.strip()] = v.strip()
+            if parsed:
+                data[field] = parsed
     return data
 
 

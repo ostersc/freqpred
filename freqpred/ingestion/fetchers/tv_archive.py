@@ -99,6 +99,9 @@ async def fetch(
         except httpx.TimeoutException:
             log.warning("tv_archive.fetch.timeout", query=query)
             return []
+        except httpx.ConnectError as exc:
+            log.warning("tv_archive.fetch.connect_error", query=query, error=str(exc))
+            return []
         except httpx.HTTPStatusError as exc:
             log.warning(
                 "tv_archive.fetch.http_error",

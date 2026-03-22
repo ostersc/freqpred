@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -10,7 +11,10 @@ import structlog
 from freqpred.ingestion.fetchers import is_domain_excluded
 from freqpred.ingestion.store import RawDocument
 
-log = structlog.get_logger()
+log = structlog.get_logger(__name__)
+
+# Monotonic timestamp of the last GDELT Doc API request fired (for gap logging).
+_last_api_fire_time: float = 0.0
 
 _GDELT_API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
@@ -46,6 +50,11 @@ async def _fetch_article_body(client: httpx.AsyncClient, url: str) -> str | None
     """Fetch article body from *url* with a timeout. Returns None on any failure."""
     try:
         response = await client.get(url, timeout=_ARTICLE_FETCH_TIMEOUT, follow_redirects=True)
+        final_url = str(response.url)
+        if final_url != url:
+            log.debug("gdelt.fetch_article.redirected", original_url=url, final_url=final_url)
+            if "gdeltproject.org" in final_url:
+                log.warning("gdelt.fetch_article.redirected_to_gdelt", original_url=url, final_url=final_url)
         response.raise_for_status()
         return response.text
     except Exception:
@@ -91,9 +100,25 @@ async def fetch(
         "maxrecords": max_results,
     }
 
+    global _last_api_fire_time
+    elapsed_since_last = time.monotonic() - _last_api_fire_time if _last_api_fire_time else None
+    log.debug(
+        "gdelt.fetch.pre_sleep",
+        query=query,
+        sleep_seconds=_RATE_LIMIT_SLEEP,
+        elapsed_since_last_request=round(elapsed_since_last, 2) if elapsed_since_last is not None else None,
+    )
     await asyncio.sleep(_RATE_LIMIT_SLEEP)
 
     async with httpx.AsyncClient() as client:
+        fire_time = time.monotonic()
+        gap_since_last = fire_time - _last_api_fire_time if _last_api_fire_time else None
+        log.debug(
+            "gdelt.fetch.api_request",
+            query=query,
+            gap_since_last_request_seconds=round(gap_since_last, 2) if gap_since_last is not None else None,
+        )
+        _last_api_fire_time = fire_time
         try:
             response = await client.get(_GDELT_API_URL, params=params, timeout=_API_TIMEOUT)
             response.raise_for_status()
@@ -121,6 +146,7 @@ async def fetch(
             return []
 
         articles = data.get("articles") or []
+        log.debug("gdelt.fetch.api_response", query=query, article_count=len(articles))
         if not articles:
             return []
 
@@ -138,9 +164,26 @@ async def fetch(
         if not candidates:
             return []
 
+        candidate_urls = [a["url"] for a in candidates]
+        gdelt_urls = [u for u in candidate_urls if "gdeltproject.org" in u]
+        log.debug(
+            "gdelt.fetch.fetching_bodies",
+            query=query,
+            candidate_count=len(candidates),
+            gdelt_domain_urls=gdelt_urls or None,
+        )
+
         # Fetch article bodies in parallel.
+        body_start = time.monotonic()
         bodies: list[str | None] = list(
             await asyncio.gather(*[_fetch_article_body(client, a["url"]) for a in candidates])
+        )
+        log.debug(
+            "gdelt.fetch.bodies_done",
+            query=query,
+            elapsed_seconds=round(time.monotonic() - body_start, 2),
+            fetched=sum(1 for b in bodies if b),
+            failed=sum(1 for b in bodies if not b),
         )
 
     docs: list[RawDocument] = []
