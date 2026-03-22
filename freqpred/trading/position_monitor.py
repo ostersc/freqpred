@@ -50,11 +50,13 @@ class PositionMonitor:
         strategies: dict[str, IPredictionStrategy],
         poll_interval_seconds: float = 60.0,
         alert_dispatcher: "AlertDispatcher | None" = None,
+        mode: str = "paper",
     ) -> None:
         self._session_factory = session_factory
         self._strategies = strategies
         self._poll_interval = poll_interval_seconds
         self._alert_dispatcher = alert_dispatcher
+        self._mode = mode
         # position_id → best mid_price seen since entry (used by trailing stop)
         self._peak_prices: dict[str, float] = {}
         # position_id → best/worst effective P&L delta seen (for MAE/MFE)
@@ -94,7 +96,7 @@ class PositionMonitor:
         closed: list[Position] = []
 
         async with self._session_factory() as session:
-            positions = await ledger.get_open_positions(session)
+            positions = await ledger.get_open_positions(session, mode=self._mode)
             if not positions:
                 return closed
 

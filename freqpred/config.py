@@ -99,15 +99,7 @@ class RiskConfig(BaseModel):
 
 
 class TradingConfig(BaseModel):
-    mode: str = Field(default="paper")
     bankroll_usd: float = Field(default=1000.0)
-
-    @field_validator("mode")
-    @classmethod
-    def validate_mode(cls, v: str) -> str:
-        if v not in ("paper", "live"):
-            raise ValueError(f"mode must be 'paper' or 'live', got: {v!r}")
-        return v
 
 
 class DashboardConfig(BaseModel):
@@ -170,6 +162,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "KALSHI_PRIVATE_KEY_PATH": ("kalshi", "private_key_path"),
     "KALSHI_DEMO_API_KEY": ("kalshi", "demo_api_key"),
     "KALSHI_DEMO_PRIVATE_KEY_PATH": ("kalshi", "demo_private_key_path"),
+    "KALSHI_POLLING_INTERVAL_SECONDS": ("kalshi", "polling_interval_seconds"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
     "NEWSAPI_KEY": ("newsapi", "api_key"),

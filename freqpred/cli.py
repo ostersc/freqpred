@@ -238,11 +238,11 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         mode=mode,
     )
 
+    from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
+    from freqpred.trading.order_manager import OrderManager
+
     order_manager = None
     if mode == "paper":
-        from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
-        from freqpred.trading.order_manager import OrderManager
-
         risk_engine = RiskEngine(config.risk)
         order_manager = OrderManager(
             risk=risk_engine,
@@ -268,6 +268,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         session_factory=session_factory,
         strategies=all_strategies,
         alert_dispatcher=alert_dispatcher,
+        mode=mode,
     )
 
     async def signal_loop() -> None:
@@ -322,13 +323,13 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 interesting = strategy.filter_markets(markets)
                 log.info("signal_loop.cycle", total_markets=len(markets), selected=len(interesting))
 
-                # Circuit breaker check at the top of each cycle (paper mode only)
+                # Circuit breaker check at the top of each cycle
                 circuit_breaker_active = False
                 if order_manager is not None:
                     try:
                         async with session_factory() as cb_session:
                             await order_manager._risk.check_circuit_breakers(
-                                cb_session, order_manager._bankroll
+                                cb_session, order_manager._bankroll, mode=order_manager._mode
                             )
                     except TradingCircuitBreakerError as exc:
                         log.warning("signal_loop.circuit_breaker_fired", reason=str(exc))
@@ -337,6 +338,9 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
 
                 for market in interesting:
                     signal = await pipeline.analyze(market, trigger="scheduled")
+                    if signal is None:
+                        async with session_factory() as synth_session:
+                            signal = await strategy.synthesize_signal(synth_session, market)
                     if signal:
                         click.echo(
                             f"[SIGNAL] market={market.id} "
@@ -363,6 +367,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                     direction=signal.direction,
                                 )
                                 await alert_dispatcher.trade_alert(position, market)
+                            else:
+                                strategy.on_order_failed(market)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -378,6 +384,40 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         base_url=config.kalshi.base_url,
         private_key_path=config.kalshi.private_key_path,
     ) as kalshi_client:
+        if mode == "live":
+            import structlog as _sl
+            _log = _sl.get_logger("freqpred.cli")
+            balance = await kalshi_client.get_balance()
+            if balance < config.trading.bankroll_usd:
+                _log.error(
+                    "startup.balance_below_bankroll",
+                    balance_usd=balance,
+                    bankroll_usd=config.trading.bankroll_usd,
+                )
+                click.echo(
+                    f"ERROR: Kalshi balance ${balance:.2f} is below configured "
+                    f"bankroll ${config.trading.bankroll_usd:.2f}. Aborting.",
+                    err=True,
+                )
+                await alert_dispatcher.circuit_breaker_alert(
+                    f"Startup aborted: Kalshi balance ${balance:.2f} < "
+                    f"bankroll ${config.trading.bankroll_usd:.2f}"
+                )
+                return
+            _log.info(
+                "startup.balance_ok",
+                balance_usd=balance,
+                bankroll_usd=config.trading.bankroll_usd,
+            )
+            risk_engine = RiskEngine(config.risk)
+            order_manager = OrderManager(
+                risk=risk_engine,
+                session_factory=session_factory,
+                bankroll=config.trading.bankroll_usd,
+                mode="live",
+                kalshi_client=kalshi_client,
+            )
+
         watcher = MarketWatcher(
             client=kalshi_client,
             session_factory=session_factory,

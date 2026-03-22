@@ -556,7 +556,8 @@ class TestPlaceOrder:
         assert body["ticker"] == "KXPRES-25-DEM"
         assert body["side"] == "yes"
         assert body["count"] == 10
-        assert body["limit_price"] == 45  # 0.45 → 45 cents
+        assert body["yes_price"] == 45  # YES direction → yes_price in cents (0.45 → 45)
+        assert "limit_price" not in body
         assert body["action"] == "buy"
         assert body["type"] == "limit"
 

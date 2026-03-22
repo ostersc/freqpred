@@ -14,6 +14,7 @@ _BUILTIN_STRATEGIES: dict[str, str] = {
     "PoliticsEdgeStrategy": "freqpred.strategy.defaults.politics",
     "TechNewsStrategy": "freqpred.strategy.defaults.tech",
     "FreshMarketStrategy": "freqpred.strategy.defaults.fresh_market",
+    "DemoHarness": "freqpred.strategy.defaults.demo_harness",
 }
 
 

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.markets.models import Market, Position
+from freqpred.markets.models import Market, Order, Position
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
@@ -133,6 +133,7 @@ def _make_order_manager(
     risk: RiskEngine | None = None,
     bankroll: float = BANKROLL,
     mode: str = "paper",
+    kalshi_client: object = None,
 ) -> tuple[OrderManager, MagicMock]:
     """Return (OrderManager, session_factory_mock)."""
     session_factory = MagicMock()
@@ -156,6 +157,7 @@ def _make_order_manager(
         bankroll=bankroll,
         mode=mode,
         strategy_version="1.0",
+        kalshi_client=kalshi_client,
     )
     return om, session_factory
 
@@ -325,3 +327,146 @@ async def test_circuit_breaker_errors_propagate() -> None:
         await om.submit(_make_signal(), _make_market(), strategy)
 
     risk.check_position.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Live mode tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_live_mode_blocked_without_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mode='live', LIVE_TRADING_ENABLED not set → returns None, logs live_blocked."""
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock()
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(), _make_market(), strategy)
+
+    assert result is None
+    mock_kalshi.place_order.assert_not_called()
+    mock_ledger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_live_mode_calls_place_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mode='live', LIVE_TRADING_ENABLED=true → KalshiClient.place_order() called."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    expected_position = _make_position(contracts=178, entry_price=0.56)
+    expected_position.exchange_order_id = "ORD-123"
+
+    filled_order = Order(
+        market_id=MARKET_ID,
+        direction="YES",
+        contracts=178,
+        price=0.56,
+        mode="live",
+        exchange_order_id="ORD-123",
+        status="resting",
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ):
+        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.56), strategy)
+
+    assert result is expected_position
+    mock_kalshi.place_order.assert_called_once()
+    submitted_order: Order = mock_kalshi.place_order.call_args.args[0]
+    assert submitted_order.direction == "YES"
+    assert submitted_order.contracts == math.floor(100.0 / 0.56)
+    assert submitted_order.price == pytest.approx(0.56)
+    assert submitted_order.mode == "live"
+
+
+@pytest.mark.asyncio
+async def test_live_mode_records_pending_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mode='live' → ledger.open_position() called with status='pending' and exchange_order_id set."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    filled_order = Order(
+        market_id=MARKET_ID,
+        direction="YES",
+        contracts=178,
+        price=0.56,
+        mode="live",
+        exchange_order_id="ORD-456",
+        status="resting",
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+
+    pending_position = _make_position(contracts=178, entry_price=0.56)
+    pending_position.status = "pending"
+    pending_position.exchange_order_id = "ORD-456"
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=pending_position,
+    ) as mock_ledger:
+        await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.56), strategy)
+
+    mock_ledger.assert_called_once()
+    kwargs = mock_ledger.call_args.kwargs
+    assert kwargs["status"] == "pending"
+    assert kwargs["exchange_order_id"] == "ORD-456"
+    assert kwargs["mode"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_paper_mode_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Paper mode submits with status='open' and no exchange_order_id."""
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+    expected_position = _make_position(contracts=178, entry_price=0.56)
+    om, _ = _make_order_manager(mode="paper")
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.56), strategy)
+
+    assert result is expected_position
+    kwargs = mock_ledger.call_args.kwargs
+    assert kwargs["status"] == "open"
+    assert kwargs.get("exchange_order_id") is None
+    assert kwargs["mode"] == "paper"
+
+
+@pytest.mark.asyncio
+async def test_live_mode_risk_check_still_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RiskEngine.check_position() returning allowed=False prevents place_order() call."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_position = AsyncMock(
+        return_value=RiskDecision(allowed=False, reason="exposure limit", capped_size=0.0)
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock()
+
+    om, _ = _make_order_manager(risk=risk, mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=200.0)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(), _make_market(), strategy)
+
+    assert result is None
+    mock_kalshi.place_order.assert_not_called()
+    mock_ledger.assert_not_called()

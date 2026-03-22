@@ -27,12 +27,13 @@ class CalibrationReport:
     buckets: list[CalibrationBucket] = field(default_factory=list)
 
 
-async def compute_calibration(session: AsyncSession) -> CalibrationReport:
+async def compute_calibration(session: AsyncSession, mode: str = "paper") -> CalibrationReport:
     """
     Join signals → positions (closed only) and compute:
     - Brier score: mean((estimated_prob - actual_outcome)^2)
     - Naive baseline: mean((market_mid_at_signal - actual_outcome)^2)
     - Calibration buckets: 10 equal-width bins over [0, 1]
+    Only positions matching *mode* are considered.
     Requires at least 1 resolved position; returns CalibrationReport.
     """
     stmt = (
@@ -46,6 +47,7 @@ async def compute_calibration(session: AsyncSession) -> CalibrationReport:
             and_(
                 PositionRow.status == "closed",
                 PositionRow.resolution.is_not(None),
+                PositionRow.mode == mode,
             )
         )
     )

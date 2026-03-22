@@ -144,6 +144,9 @@ class PositionRow(Base):
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Exchange order reference (live mode only)
+    exchange_order_id: Mapped[str | None] = mapped_column(VARCHAR(255), nullable=True)
+
     # Excursion tracking — signed price deltas (multiply by contracts for $ impact)
     mae: Mapped[float | None] = mapped_column(Float, nullable=True)  # max adverse excursion
     mfe: Mapped[float | None] = mapped_column(Float, nullable=True)  # max favorable excursion
@@ -343,3 +346,4 @@ class Position:
     pnl_pct: float | None = None
     mae: float | None = None  # max adverse excursion (signed price delta)
     mfe: float | None = None  # max favorable excursion (signed price delta)
+    exchange_order_id: str | None = None  # Kalshi order ID (live mode only)

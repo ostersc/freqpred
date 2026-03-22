@@ -183,9 +183,10 @@ When asked "what's next", "what should we work on", or told to start the next ta
 
 ### Completing a task
 When all acceptance criteria are met and tests pass, in this order:
-1. Mark the task's checkbox in the Phase 3 list in SPEC.md as `[x]`
-2. Commit and push the code
-3. Close the GitHub issue (`gh issue close <N>`) — always **after** pushing, never before
+1. **Summarize** what was implemented (files changed, key design decisions) and list the manual validation steps from the issue's acceptance criteria that require runtime verification (e.g. "run with --mode live and observe X"). Present this to the user and wait for them to confirm manual validation is done before proceeding.
+2. Mark the task's checkbox in the Phase 3 list in SPEC.md as `[x]`
+3. Commit and push the code
+4. Close the GitHub issue (`gh issue close <N>`) — always **after** pushing, never before
 
 ---
 

@@ -264,7 +264,7 @@ def register_system_commands(
             result = await session.execute(
                 select(PositionRow, MarketRow.question, MarketRow.mid_price)
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                .where(PositionRow.status == "open")
+                .where(PositionRow.status == "open", PositionRow.mode == mode)
                 .order_by(PositionRow.entry_time.desc())
             )
             rows = result.all()
@@ -303,7 +303,9 @@ def register_system_commands(
 
         async with session_factory() as session:
             result = await session.execute(
-                select(func.count()).select_from(PositionRow).where(PositionRow.status == "open")
+                select(func.count()).select_from(PositionRow).where(
+                    PositionRow.status == "open", PositionRow.mode == mode,
+                )
             )
             open_count: int = result.scalar_one()
 
@@ -328,7 +330,7 @@ def register_system_commands(
             result = await session.execute(
                 select(PositionRow, MarketRow.question)
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                .where(PositionRow.status == "closed")
+                .where(PositionRow.status == "closed", PositionRow.mode == mode)
                 .order_by(PositionRow.exit_time.desc())
                 .limit(n)
             )

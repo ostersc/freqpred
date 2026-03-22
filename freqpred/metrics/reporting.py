@@ -51,7 +51,7 @@ async def generate_daily_digest(
             func.coalesce(
                 func.sum(PositionRow.contracts * PositionRow.entry_price), 0.0
             ),
-        ).where(PositionRow.status == "open")
+        ).where(PositionRow.status == "open", PositionRow.mode == trading_mode)
     )
     open_count, total_exposure = open_result.one()
     open_count = int(open_count)
@@ -68,7 +68,7 @@ async def generate_daily_digest(
             MarketRow.mid_price,
         )
         .join(MarketRow, PositionRow.market_id == MarketRow.id)
-        .where(PositionRow.status == "open")
+        .where(PositionRow.status == "open", PositionRow.mode == trading_mode)
     )
     unrealized_pnl = 0.0
     net_exposure = 0.0
@@ -96,6 +96,7 @@ async def generate_daily_digest(
             PositionRow.status == "closed",
             PositionRow.exit_time >= yesterday_start,
             PositionRow.exit_time < yesterday_end,
+            PositionRow.mode == trading_mode,
         )
     )
     yesterday_pnl = float(pnl_result.scalar_one())
@@ -112,7 +113,7 @@ async def generate_daily_digest(
     today_llm_spend = await get_daily_spend_usd(session)
 
     # --- Calibration ---
-    calibration = await compute_calibration(session)
+    calibration = await compute_calibration(session, mode=trading_mode)
 
     # --- LLM errors (last 24h) ---
     llm_error_result = await session.execute(

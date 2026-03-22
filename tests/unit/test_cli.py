@@ -38,7 +38,6 @@ def _make_config(
     cfg.newsapi.api_key = ""
     cfg.signal.top_k_documents = 10
     cfg.signal.interval_seconds = 1800
-    cfg.trading.mode = "paper"
     cfg.trading.bankroll_usd = 1000.0
     cfg.risk.max_daily_llm_spend_usd = 10.0
     return cfg
@@ -487,6 +486,91 @@ class TestPaperTradingSignalLoop:
             await _run_main(config, "TestStrategy", "signal-only")
 
         mock_om_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# T37: Live mode startup balance guard
+# ---------------------------------------------------------------------------
+
+
+class TestLiveModeStartupGuard:
+    @pytest.mark.asyncio
+    async def test_startup_aborts_if_balance_below_bankroll(self) -> None:
+        """mode='live' + balance < bankroll → _run_main returns early, no tasks started."""
+        from freqpred.cli import _run_main
+
+        config = _make_config()
+        config.trading.bankroll_usd = 1000.0
+        mocks = _make_run_mocks(_make_market_row(), None)
+
+        mock_kalshi_instance = AsyncMock()
+        mock_kalshi_instance.get_balance = AsyncMock(return_value=500.0)
+        mock_kalshi_ctx = MagicMock()
+        mock_kalshi_ctx.__aenter__ = AsyncMock(return_value=mock_kalshi_instance)
+        mock_kalshi_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_kalshi_cls = MagicMock(return_value=mock_kalshi_ctx)
+
+        mock_om_cls = MagicMock()
+
+        with patch("freqpred.db.make_engine", return_value=mocks["engine"]), \
+             patch("freqpred.db.make_session_factory", return_value=mocks["factory"]), \
+             patch("freqpred.strategy.loader.load_strategy", return_value=mocks["strategy"]), \
+             patch("freqpred.signal.pipeline.SignalPipeline", mocks["pipeline_cls"]), \
+             patch("freqpred.rag.embedder.LocalEmbedder"), \
+             patch("freqpred.llm.client.LLMClient"), \
+             patch("freqpred.markets.kalshi.KalshiClient", mock_kalshi_cls), \
+             patch("freqpred.trading.order_manager.OrderManager", mock_om_cls), \
+             patch("anthropic.AsyncAnthropic"):
+            await _run_main(config, "TestStrategy", "live")
+
+        # OrderManager never constructed — startup aborted before task creation
+        mock_om_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_startup_logs_balance_and_bankroll_when_ok(self) -> None:
+        """mode='live' + balance >= bankroll → OrderManager created with mode='live'."""
+        from freqpred.cli import _run_main
+
+        config = _make_config()
+        config.trading.bankroll_usd = 1000.0
+        mocks = _make_run_mocks(_make_market_row(), None)
+
+        mock_kalshi_instance = AsyncMock()
+        mock_kalshi_instance.get_balance = AsyncMock(return_value=2000.0)
+        mock_kalshi_ctx = MagicMock()
+        mock_kalshi_ctx.__aenter__ = AsyncMock(return_value=mock_kalshi_instance)
+        mock_kalshi_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_kalshi_cls = MagicMock(return_value=mock_kalshi_ctx)
+
+        mock_om_instance = AsyncMock()
+        mock_om_instance.submit = AsyncMock(return_value=None)
+        mock_om_instance._risk = AsyncMock()
+        mock_om_instance._risk.check_circuit_breakers = AsyncMock(return_value=None)
+        mock_om_instance._bankroll = 1000.0
+        mock_om_cls = MagicMock(return_value=mock_om_instance)
+
+        mock_risk_cls = MagicMock(return_value=MagicMock())
+
+        async def _cancel_on_sleep(_: float) -> None:
+            raise asyncio.CancelledError()
+
+        with patch("freqpred.db.make_engine", return_value=mocks["engine"]), \
+             patch("freqpred.db.make_session_factory", return_value=mocks["factory"]), \
+             patch("freqpred.strategy.loader.load_strategy", return_value=mocks["strategy"]), \
+             patch("freqpred.signal.pipeline.SignalPipeline", mocks["pipeline_cls"]), \
+             patch("freqpred.rag.embedder.LocalEmbedder"), \
+             patch("freqpred.llm.client.LLMClient"), \
+             patch("freqpred.markets.kalshi.KalshiClient", mock_kalshi_cls), \
+             patch("freqpred.trading.risk.RiskEngine", mock_risk_cls), \
+             patch("freqpred.trading.order_manager.OrderManager", mock_om_cls), \
+             patch("asyncio.sleep", side_effect=_cancel_on_sleep), \
+             patch("anthropic.AsyncAnthropic"):
+            await _run_main(config, "TestStrategy", "live")
+
+        mock_om_cls.assert_called_once()
+        call_kwargs = mock_om_cls.call_args.kwargs
+        assert call_kwargs["mode"] == "live"
+        assert call_kwargs["kalshi_client"] is mock_kalshi_instance
 
 
 # ---------------------------------------------------------------------------

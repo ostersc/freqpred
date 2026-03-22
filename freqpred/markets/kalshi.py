@@ -386,14 +386,15 @@ class KalshiClient(IMarketClient):
         Maps Order fields to the Kalshi API request format and returns the Order
         with exchange_order_id and status populated from the response.
         """
+        price_cents = int(round(order.price * 100))
         body: dict[str, Any] = {
             "ticker": order.market_id,
             "action": "buy",
             "side": order.direction.lower(),  # "yes" | "no"
             "type": "limit",
             "count": order.contracts,
-            "limit_price": int(round(order.price * 100)),  # convert to integer cents
-            "time_in_force": "GTC",
+            # Kalshi requires exactly one of yes_price/no_price (integer cents).
+            "yes_price" if order.direction == "YES" else "no_price": price_cents,
         }
         data = await self._post("/portfolio/orders", body)
         exchange_order = data.get("order", data)

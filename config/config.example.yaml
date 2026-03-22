@@ -72,8 +72,7 @@ risk:
   max_daily_llm_spend_usd: 10.0  # LLM budget circuit breaker
 
 trading:
-  mode: "paper"  # "paper" | "live"  (live also requires LIVE_TRADING_ENABLED=true)
-  bankroll_usd: 1000.0   # starting paper bankroll
+  bankroll_usd: 1000.0   # capital budget for this deployment; trading mode is set via --mode CLI flag
 
 dashboard:
   host: "0.0.0.0"

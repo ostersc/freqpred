@@ -42,6 +42,7 @@ class RiskEngine:
         bankroll: float,
         market_id: str,
         max_market_exposure: float,
+        mode: str = "paper",
     ) -> RiskDecision:
         """Enforce all hard caps. Returns RiskDecision(allowed=False) if any
         limit is breached. Never raises — callers check .allowed.
@@ -76,6 +77,7 @@ class RiskEngine:
             select(func.sum(PositionRow.contracts * PositionRow.entry_price)).where(
                 PositionRow.status == "open",
                 PositionRow.market_id == market_id,
+                PositionRow.mode == mode,
             )
         )
         existing_market_exposure: float = market_exposure_result.scalar_one() or 0.0
@@ -101,7 +103,8 @@ class RiskEngine:
         # 4. Max open positions check
         open_count_result = await session.execute(
             select(func.count()).select_from(PositionRow).where(
-                PositionRow.status == "open"
+                PositionRow.status == "open",
+                PositionRow.mode == mode,
             )
         )
         open_count: int = open_count_result.scalar_one()
@@ -120,7 +123,8 @@ class RiskEngine:
         # 5. Total exposure check
         exposure_result = await session.execute(
             select(func.sum(PositionRow.contracts * PositionRow.entry_price)).where(
-                PositionRow.status == "open"
+                PositionRow.status == "open",
+                PositionRow.mode == mode,
             )
         )
         total_exposure: float = exposure_result.scalar_one() or 0.0
@@ -148,6 +152,7 @@ class RiskEngine:
             select(func.sum(PositionRow.pnl)).where(
                 PositionRow.status == "closed",
                 PositionRow.exit_time >= today_start,
+                PositionRow.mode == mode,
             )
         )
         daily_pnl: float = daily_pnl_result.scalar_one() or 0.0
@@ -179,10 +184,12 @@ class RiskEngine:
         self,
         session: AsyncSession,
         bankroll: float,
+        mode: str = "paper",
     ) -> None:
         """Query current state and raise TradingCircuitBreakerError if:
         - daily loss > config.max_daily_loss_pct * bankroll
         - total drawdown > 30% (all-time high vs current)
+        Only positions matching ``mode`` are considered.
         Called at the start of each signal loop cycle.
         """
         # Daily loss circuit breaker
@@ -193,6 +200,7 @@ class RiskEngine:
             select(func.sum(PositionRow.pnl)).where(
                 PositionRow.status == "closed",
                 PositionRow.exit_time >= today_start,
+                PositionRow.mode == mode,
             )
         )
         daily_pnl: float = daily_pnl_result.scalar_one() or 0.0
@@ -207,9 +215,11 @@ class RiskEngine:
 
         # Drawdown circuit breaker
         # ATH approximation: current bankroll + absolute value of total losses ever.
-        # If cumulative P&L is negative, ATH was higher by that delta.
         all_pnl_result = await session.execute(
-            select(func.sum(PositionRow.pnl)).where(PositionRow.status == "closed")
+            select(func.sum(PositionRow.pnl)).where(
+                PositionRow.status == "closed",
+                PositionRow.mode == mode,
+            )
         )
         all_pnl: float = all_pnl_result.scalar_one() or 0.0
         ath_bankroll = bankroll + max(0.0, -all_pnl)

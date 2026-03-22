@@ -153,12 +153,15 @@ def register_position_commands(
         )
 
     async def _close_all_positions() -> str:
-        """Close all open positions at current market mid price."""
+        """Close all open positions (matching current mode) at current market mid price."""
         async with session_factory() as session:
             result = await session.execute(
                 select(PositionRow, MarketRow.mid_price)
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                .where(PositionRow.status == "open")
+                .where(
+                    PositionRow.status == "open",
+                    PositionRow.mode == mode,
+                )
             )
             rows = result.all()
 

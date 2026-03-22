@@ -232,7 +232,7 @@ async def test_get_open_positions_excludes_closed() -> None:
     session = MagicMock()
     session.execute = AsyncMock(return_value=result_mock)
 
-    positions = await get_open_positions(session)
+    positions = await get_open_positions(session, mode="paper")
 
     assert len(positions) == 1
     assert positions[0].status == "open"
@@ -266,7 +266,7 @@ async def test_portfolio_summary_totals() -> None:
     session = MagicMock()
     session.execute = _execute
 
-    summary = await get_portfolio_summary(session)
+    summary = await get_portfolio_summary(session, mode="paper")
 
     assert summary["open_count"] == 2
     assert summary["total_exposure_usd"] == pytest.approx(84.0)
@@ -305,7 +305,7 @@ async def test_portfolio_summary_excursions_weighted() -> None:
     session = MagicMock()
     session.execute = _execute
 
-    summary = await get_portfolio_summary(session)
+    summary = await get_portfolio_summary(session, mode="paper")
 
     # Portfolio MAE $ = 100*(-0.08) + 1*(-0.20) = -8.20
     # Portfolio MAE % = -8.20 / 101 ≈ -0.08119
@@ -354,7 +354,7 @@ async def test_daily_pnl_excludes_yesterday() -> None:
     session = MagicMock()
     session.execute = AsyncMock(return_value=result_mock)
 
-    pnl = await get_daily_pnl(session)
+    pnl = await get_daily_pnl(session, mode="paper")
 
     assert pnl == pytest.approx(30.0)
     # Verify that execute was called (the filtering happens inside the ORM query)

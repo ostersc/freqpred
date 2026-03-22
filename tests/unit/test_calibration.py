@@ -40,7 +40,7 @@ def _make_session(rows: list[tuple[float, float, int]]) -> AsyncMock:
 async def test_perfect_calibration_brier_zero() -> None:
     """estimated=1.0, resolution=1 → Brier=0.0."""
     session = _make_session([(1.0, 0.5, 1)])
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
     assert report.brier_score == pytest.approx(0.0)
     assert report.n_samples == 1
 
@@ -49,7 +49,7 @@ async def test_perfect_calibration_brier_zero() -> None:
 async def test_worst_calibration_brier_one() -> None:
     """estimated=1.0, resolution=0 → Brier=1.0."""
     session = _make_session([(1.0, 0.5, 0)])
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
     assert report.brier_score == pytest.approx(1.0)
     assert report.n_samples == 1
 
@@ -65,7 +65,7 @@ async def test_brier_score_formula() -> None:
     ]
     # mean = (0.04 + 0.09 + 0.16) / 3 = 0.29 / 3
     session = _make_session(rows)
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
     assert report.brier_score == pytest.approx(0.29 / 3, rel=1e-6)
     assert report.n_samples == 3
 
@@ -83,7 +83,7 @@ async def test_naive_baseline_uses_market_mid() -> None:
         (0.9, 0.6, 0),   # naive: (0.6 - 0)^2 = 0.36, model: (0.9-0)^2=0.81
     ]
     session = _make_session(rows)
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
     expected_naive = (0.36 + 0.36) / 2
     expected_model = (0.01 + 0.81) / 2
     assert report.naive_brier_score == pytest.approx(expected_naive, rel=1e-6)
@@ -99,7 +99,7 @@ async def test_naive_baseline_uses_market_mid() -> None:
 async def test_calibration_buckets_cover_full_range() -> None:
     """All 10 buckets present, lower/upper correct."""
     session = _make_session([(0.5, 0.5, 1)])
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
     assert len(report.buckets) == 10
     for i, bucket in enumerate(report.buckets):
         assert bucket.lower == pytest.approx(i / 10.0)
@@ -116,7 +116,7 @@ async def test_buckets_count_samples_correctly() -> None:
         (0.10, 0.5, 0),   # bucket 1: [0.1, 0.2)
     ]
     session = _make_session(rows)
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
 
     # bucket indices
     bucket_by_lower = {round(b.lower, 1): b for b in report.buckets}
@@ -137,7 +137,7 @@ async def test_bucket_resolution_rate() -> None:
         (0.67, 0.5, 0),   # bucket 6
     ]
     session = _make_session(rows)
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
 
     b = report.buckets[6]  # [0.6, 0.7)
     assert b.count == 2
@@ -154,7 +154,7 @@ async def test_bucket_resolution_rate() -> None:
 async def test_empty_positions_returns_zero_samples() -> None:
     """Graceful handling with 0 resolved positions — n_samples=0."""
     session = _make_session([])
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
     assert report.n_samples == 0
     assert report.brier_score == pytest.approx(0.0)
     assert report.naive_brier_score == pytest.approx(0.0)
@@ -168,5 +168,5 @@ async def test_empty_positions_returns_zero_samples() -> None:
 async def test_prob_exactly_one_goes_to_last_bucket() -> None:
     """estimated_prob=1.0 should land in bucket 9 (not overflow)."""
     session = _make_session([(1.0, 0.5, 1)])
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode="paper")
     assert report.buckets[9].count == 1

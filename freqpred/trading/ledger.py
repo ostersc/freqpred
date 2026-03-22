@@ -22,8 +22,14 @@ async def open_position(
     contracts: int,
     entry_price: float,
     mode: str,
+    status: str = "open",
+    exchange_order_id: str | None = None,
 ) -> Position:
-    """Insert a new Position row with status='open'. Commits the session."""
+    """Insert a new Position row. Commits the session.
+
+    ``status`` is "open" for paper trades and "pending" for live orders awaiting fill.
+    ``exchange_order_id`` is populated for live orders after ``place_order()`` returns.
+    """
     row = PositionRow(
         id=uuid.uuid4(),
         market_id=market.id,
@@ -38,7 +44,8 @@ async def open_position(
         entry_price=entry_price,
         entry_time=datetime.now(tz=timezone.utc),
         mode=mode,
-        status="open",
+        status=status,
+        exchange_order_id=exchange_order_id,
     )
     session.add(row)
     await session.commit()
@@ -90,18 +97,18 @@ async def update_position_excursions(
     await session.commit()
 
 
-async def get_open_positions(session: AsyncSession) -> list[Position]:
-    """Return all positions with status='open', ordered by entry_time desc."""
+async def get_open_positions(session: AsyncSession, mode: str = "paper") -> list[Position]:
+    """Return all positions with status='open' for *mode*, ordered by entry_time desc."""
     result = await session.execute(
         select(PositionRow)
-        .where(PositionRow.status == "open")
+        .where(PositionRow.status == "open", PositionRow.mode == mode)
         .order_by(PositionRow.entry_time.desc())
     )
     return [_row_to_position(row) for row in result.scalars().all()]
 
 
-async def get_daily_pnl(session: AsyncSession) -> float:
-    """Sum of pnl for all positions closed today (UTC). Returns 0.0 if none."""
+async def get_daily_pnl(session: AsyncSession, mode: str = "paper") -> float:
+    """Sum of pnl for all positions closed today (UTC) matching *mode*. Returns 0.0 if none."""
     today_start = datetime.now(tz=timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -109,15 +116,19 @@ async def get_daily_pnl(session: AsyncSession) -> float:
         select(func.coalesce(func.sum(PositionRow.pnl), 0.0)).where(
             PositionRow.status == "closed",
             PositionRow.exit_time >= today_start,
+            PositionRow.mode == mode,
         )
     )
     return float(result.scalar_one())
 
 
-async def get_portfolio_summary(session: AsyncSession) -> dict:
-    """Return portfolio summary with open count, exposure, and P&L totals."""
+async def get_portfolio_summary(session: AsyncSession, mode: str = "paper") -> dict:
+    """Return portfolio summary with open count, exposure, and P&L totals for *mode*."""
     open_count_result = await session.execute(
-        select(func.count()).where(PositionRow.status == "open")
+        select(func.count()).where(
+            PositionRow.status == "open",
+            PositionRow.mode == mode,
+        )
     )
     open_count = int(open_count_result.scalar_one())
 
@@ -126,15 +137,19 @@ async def get_portfolio_summary(session: AsyncSession) -> dict:
             func.coalesce(
                 func.sum(PositionRow.contracts * PositionRow.entry_price), 0.0
             )
-        ).where(PositionRow.status == "open")
+        ).where(
+            PositionRow.status == "open",
+            PositionRow.mode == mode,
+        )
     )
     total_exposure = float(exposure_result.scalar_one())
 
-    daily_pnl = await get_daily_pnl(session)
+    daily_pnl = await get_daily_pnl(session, mode=mode)
 
     all_time_result = await session.execute(
         select(func.coalesce(func.sum(PositionRow.pnl), 0.0)).where(
-            PositionRow.status == "closed"
+            PositionRow.status == "closed",
+            PositionRow.mode == mode,
         )
     )
     all_time_pnl = float(all_time_result.scalar_one())
@@ -152,7 +167,10 @@ async def get_portfolio_summary(session: AsyncSession) -> dict:
             MarketRow.mid_price,
         )
         .join(MarketRow, PositionRow.market_id == MarketRow.id)
-        .where(PositionRow.status == "open")
+        .where(
+            PositionRow.status == "open",
+            PositionRow.mode == mode,
+        )
     )
     unrealized_pnl = 0.0
     long_exposure = 0.0
@@ -219,4 +237,5 @@ def _row_to_position(row: PositionRow) -> Position:
         pnl_pct=row.pnl_pct,
         mae=row.mae,
         mfe=row.mfe,
+        exchange_order_id=row.exchange_order_id,
     )

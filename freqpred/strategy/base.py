@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from freqpred.markets.models import Market, Position
     from freqpred.signal.models import Signal
     from freqpred.strategy.config import StrategyConfig
@@ -96,6 +98,30 @@ class IPredictionStrategy(ABC):
         Default: None (no custom exit).
         """
         return None
+
+    async def synthesize_signal(
+        self, session: "AsyncSession", market: "Market"
+    ) -> "Signal | None":
+        """Optional hook: generate and persist a synthetic signal when the pipeline has no docs.
+
+        Called by the run loop as a fallback when ``pipeline.analyze()`` returns ``None``.
+        The returned Signal must already be committed to the DB (FK constraint on positions).
+
+        Default: returns ``None`` (no-op for all production strategies).
+        Only override this in testing/demo strategies.
+        """
+        return None
+
+    def on_order_failed(self, market: "Market") -> None:
+        """Optional hook called when order placement fails for a market.
+
+        Called by the signal loop when ``order_manager.submit()`` returns None
+        after an exchange-side error (e.g. market_closed, market_not_found).
+        Allows strategies to immediately abandon a bad market rather than
+        waiting for a timeout.
+
+        Default: no-op.
+        """
 
     def on_resolution(self, position: Position) -> None:
         """Optional hook called when a market resolves."""

@@ -244,12 +244,12 @@ async def test_blocks_when_daily_loss_exceeded() -> None:
 
 @pytest.mark.asyncio
 async def test_circuit_breaker_fires_on_daily_loss() -> None:
-    # 15% of 2000 = 300; daily loss = -320 → should raise
+    # 15% of 2000 = 300; daily loss = -320 → should raise (paper or live)
     engine = RiskEngine(_make_config(max_daily_loss_pct=0.15))
     session = _make_circuit_session(daily_pnl=-320.0, all_pnl=-320.0)
 
     with pytest.raises(TradingCircuitBreakerError, match="daily loss"):
-        await engine.check_circuit_breakers(session, bankroll=BANKROLL)
+        await engine.check_circuit_breakers(session, bankroll=BANKROLL, mode="paper")
 
 
 @pytest.mark.asyncio
@@ -262,7 +262,18 @@ async def test_circuit_breaker_fires_on_drawdown() -> None:
     current_bankroll = 1300.0  # 2000 - 700
 
     with pytest.raises(TradingCircuitBreakerError, match="drawdown"):
-        await engine.check_circuit_breakers(session, bankroll=current_bankroll)
+        await engine.check_circuit_breakers(session, bankroll=current_bankroll, mode="live")
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_fires_on_drawdown_paper_mode() -> None:
+    # Drawdown CB runs in paper mode too — only paper P&L is considered.
+    engine = RiskEngine(_make_config())
+    session = _make_circuit_session(daily_pnl=0.0, all_pnl=-700.0)
+    current_bankroll = 1300.0
+
+    with pytest.raises(TradingCircuitBreakerError, match="drawdown"):
+        await engine.check_circuit_breakers(session, bankroll=current_bankroll, mode="paper")
 
 
 @pytest.mark.asyncio
@@ -272,4 +283,4 @@ async def test_circuit_breaker_silent_when_within_limits() -> None:
     session = _make_circuit_session(daily_pnl=-10.0, all_pnl=-10.0)
 
     # Should not raise
-    await engine.check_circuit_breakers(session, bankroll=BANKROLL)
+    await engine.check_circuit_breakers(session, bankroll=BANKROLL, mode="live")

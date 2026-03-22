@@ -118,7 +118,10 @@ def register_metrics_commands(
             cutoff = datetime.now(UTC) - timedelta(days=n_days)
 
         async with session_factory() as session:
-            stmt = select(PositionRow).where(PositionRow.status == "closed")
+            stmt = select(PositionRow).where(
+                PositionRow.status == "closed",
+                PositionRow.mode == mode,
+            )
             if cutoff:
                 stmt = stmt.where(PositionRow.exit_time >= cutoff)
             result = await session.execute(stmt)
@@ -131,6 +134,7 @@ def register_metrics_commands(
                 .where(
                     PositionRow.status == "closed",
                     PositionRow.resolution.is_not(None),
+                    PositionRow.mode == mode,
                 )
             )
             if cutoff:
@@ -207,6 +211,7 @@ def register_metrics_commands(
                 select(PositionRow).where(
                     PositionRow.status == "closed",
                     PositionRow.exit_time >= cutoff,
+                    PositionRow.mode == mode,
                 )
             )
             rows = result.scalars().all()
@@ -259,6 +264,7 @@ def register_metrics_commands(
                 select(PositionRow).where(
                     PositionRow.status == "closed",
                     PositionRow.exit_time >= cutoff,
+                    PositionRow.mode == mode,
                 )
             )
             rows = result.scalars().all()
@@ -311,6 +317,7 @@ def register_metrics_commands(
                 select(PositionRow).where(
                     PositionRow.status == "closed",
                     PositionRow.exit_time >= cutoff,
+                    PositionRow.mode == mode,
                 )
             )
             rows = result.scalars().all()
@@ -352,7 +359,10 @@ def register_metrics_commands(
 
         async with session_factory() as session:
             result = await session.execute(
-                select(PositionRow).where(PositionRow.status == "closed")
+                select(PositionRow).where(
+                    PositionRow.status == "closed",
+                    PositionRow.mode == mode,
+                )
             )
             rows = result.scalars().all()
 
@@ -422,7 +432,7 @@ def register_metrics_commands(
         bankroll = config.trading.bankroll_usd
 
         async with session_factory() as session:
-            summary = await get_portfolio_summary(session)
+            summary = await get_portfolio_summary(session, mode=mode)
 
         all_time_pnl = summary["all_time_pnl_usd"]
         net_value = bankroll + all_time_pnl
@@ -536,7 +546,7 @@ def register_metrics_commands(
 
     async def handle_calibration(chat_id: int, args: list[str]) -> str:
         async with session_factory() as session:
-            report = await compute_calibration(session)
+            report = await compute_calibration(session, mode=mode)
 
         if report.n_samples == 0:
             return "No resolved positions yet — calibration unavailable."

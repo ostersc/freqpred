@@ -12,7 +12,7 @@ from freqpred.config import Settings, load_config
 
 def test_default_settings_are_valid() -> None:
     settings = Settings()
-    assert settings.trading.mode == "paper"
+    assert settings.trading.bankroll_usd == 1000.0
     assert settings.risk.max_position_pct == 0.05
     assert settings.risk.max_open_positions == 20
     assert settings.signal.top_k_documents == 10
@@ -23,19 +23,19 @@ def test_load_config_no_file_returns_defaults(tmp_path: Path) -> None:
     missing = tmp_path / "nonexistent.yaml"
     settings = load_config(missing)
     assert isinstance(settings, Settings)
-    assert settings.trading.mode == "paper"
+    assert settings.trading.bankroll_usd == 1000.0
 
 
 def test_load_config_from_yaml(tmp_path: Path) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(yaml.dump({
-        "trading": {"mode": "paper"},
+        "trading": {"bankroll_usd": 500.0},
         "risk": {"max_open_positions": 5},
         "signal": {"top_k_documents": 20},
     }))
 
     settings = load_config(config_file)
-    assert settings.trading.mode == "paper"
+    assert settings.trading.bankroll_usd == 500.0
     assert settings.risk.max_open_positions == 5
     assert settings.signal.top_k_documents == 20
 
@@ -54,13 +54,6 @@ def test_env_var_sets_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     settings = load_config(tmp_path / "missing.yaml")
     assert settings.anthropic.api_key == "sk-test-123"
 
-
-def test_invalid_trading_mode_raises(tmp_path: Path) -> None:
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text(yaml.dump({"trading": {"mode": "invalid"}}))
-
-    with pytest.raises(Exception):
-        load_config(config_file)
 
 
 def test_kalshi_base_url_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
