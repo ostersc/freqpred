@@ -389,13 +389,17 @@ class KalshiClient(IMarketClient):
         price_cents = int(round(order.price * 100))
         body: dict[str, Any] = {
             "ticker": order.market_id,
-            "action": "buy",
+            "action": order.action,  # "buy" | "sell"
             "side": order.direction.lower(),  # "yes" | "no"
             "type": "limit",
             "count": order.contracts,
             # Kalshi requires exactly one of yes_price/no_price (integer cents).
             "yes_price" if order.direction == "YES" else "no_price": price_cents,
         }
+        # Only send time_in_force when non-default; omitting the field lets Kalshi
+        # apply its default (GTC). Kalshi accepts "fill_or_kill" for immediate exits.
+        if order.time_in_force.upper() != "GTC":
+            body["time_in_force"] = order.time_in_force
         data = await self._post("/portfolio/orders", body)
         exchange_order = data.get("order", data)
         fee_cents = (exchange_order.get("maker_fees") or 0) + (exchange_order.get("taker_fees") or 0)

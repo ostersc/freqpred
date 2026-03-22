@@ -314,6 +314,8 @@ class Order:
     exchange_order_id: str | None = None
     status: str = "pending"
     fee_usd: float = 0.0  # Exchange fee paid on fill (live mode only)
+    time_in_force: str = "GTC"  # "GTC" | "fill_or_kill"
+    action: str = "buy"  # "buy" | "sell"
 
 
 @dataclass

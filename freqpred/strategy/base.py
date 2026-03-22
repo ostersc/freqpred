@@ -90,8 +90,22 @@ class IPredictionStrategy(ABC):
             and signal.confidence >= self.config.min_confidence
         )
 
-    def custom_exit(self, position: Position, signal: Signal, market: Market) -> str | None:
-        """Custom exit hook.
+    def force_exit(self, position: "Position", market: "Market") -> str | None:
+        """Signal-independent exit hook. Called on every PositionMonitor tick.
+
+        Return a non-None exit reason string to force exit regardless of signal
+        state. Return None to proceed with normal exit logic.
+
+        Use this when a strategy needs to exit on its own initiative — e.g.
+        immediately after entry in demo/test strategies, or on a time-based rule
+        that doesn't depend on LLM re-analysis.
+
+        Default: None (no forced exit).
+        """
+        return None
+
+    def custom_exit(self, position: "Position", signal: "Signal", market: "Market") -> str | None:
+        """Signal-informed custom exit hook.
 
         Return a non-None exit reason tag to force exit.
         Return None to proceed with normal logic.

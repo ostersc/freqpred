@@ -269,6 +269,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         strategies=all_strategies,
         alert_dispatcher=alert_dispatcher,
         mode=mode,
+        kalshi_client=None,  # set to kalshi_client below once the client is open
     )
 
     async def signal_loop() -> None:
@@ -418,6 +419,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 mode="live",
                 kalshi_client=kalshi_client,
             )
+
+        position_monitor._kalshi_client = kalshi_client
 
         watcher = MarketWatcher(
             client=kalshi_client,

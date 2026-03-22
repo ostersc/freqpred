@@ -4,9 +4,10 @@ Exit priority order (per SPEC §8):
   1. Hard stoploss        — framework-enforced, cannot be overridden by strategy
   2. Trailing stoploss    — trails from best mid-price since entry
   3. Minimal ROI          — time-based profit targets
-  4. Custom exit          — strategy.custom_exit() hook
-  5. Signal exit          — strategy.should_exit(), only when a fresh signal is passed in
-  6. Market resolution    — market close_time passed (paper: simulated at current price)
+  4. Force exit           — strategy.force_exit(), signal-independent, every tick
+  5. Custom exit          — strategy.custom_exit(), requires fresh signal
+  6. Signal exit          — strategy.should_exit(), only when a fresh signal is passed in
+  7. Market resolution    — market close_time passed (paper: simulated at current price)
 """
 from __future__ import annotations
 
@@ -18,11 +19,13 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from freqpred.markets.models import Market, MarketRow, Position
+from freqpred.markets.kalshi import KalshiAPIError
+from freqpred.markets.models import Market, MarketRow, Order, Position
 from freqpred.trading import ledger
 
 if TYPE_CHECKING:
     from freqpred.alerts.dispatcher import AlertDispatcher
+    from freqpred.markets.kalshi import KalshiClient
     from freqpred.signal.models import Signal
     from freqpred.strategy.base import IPredictionStrategy
     from freqpred.strategy.config import StrategyConfig
@@ -51,12 +54,14 @@ class PositionMonitor:
         poll_interval_seconds: float = 60.0,
         alert_dispatcher: "AlertDispatcher | None" = None,
         mode: str = "paper",
+        kalshi_client: "KalshiClient | None" = None,
     ) -> None:
         self._session_factory = session_factory
         self._strategies = strategies
         self._poll_interval = poll_interval_seconds
         self._alert_dispatcher = alert_dispatcher
         self._mode = mode
+        self._kalshi_client = kalshi_client
         # position_id → best mid_price seen since entry (used by trailing stop)
         self._peak_prices: dict[str, float] = {}
         # position_id → best/worst effective P&L delta seen (for MAE/MFE)
@@ -158,13 +163,22 @@ class PositionMonitor:
             elif exit_price <= 0.01:
                 resolution = 0 if position.direction == "YES" else 1
             async with self._session_factory() as session:
-                closed_position = await ledger.close_position(
-                    session,
-                    position.id,
-                    exit_price=exit_price,
+                closed_position = await self._execute_exit(
+                    session=session,
+                    position=position,
+                    market=market,
                     exit_reason=exit_reason,
+                    exit_price=exit_price,
                     resolution=resolution,
                 )
+            if closed_position is None:
+                # Live exit failed — position stays open; skip cleanup and alert
+                logger.warning(
+                    "position_monitor.live_exit_skipped",
+                    position_id=position.id,
+                    exit_reason=exit_reason,
+                )
+                continue
             # Clean up trackers
             self._peak_prices.pop(position.id, None)
             self._peak_deltas.pop(position.id, None)
@@ -232,13 +246,18 @@ class PositionMonitor:
         if result:
             return result
 
-        # 4. Custom exit hook
+        # 4. Force exit (signal-independent — strategy's own initiative)
+        tag = strategy.force_exit(position, market)
+        if tag is not None:
+            return (f"force_exit:{tag}", current_price)
+
+        # 5. Custom exit hook (signal-informed)
         if fresh_signal is not None:
             tag = strategy.custom_exit(position, fresh_signal, market)
             if tag is not None:
                 return (f"custom_exit:{tag}", current_price)
 
-        # 5. Signal exit (only when a fresh signal is provided)
+        # 6. Signal exit (only when a fresh signal is provided)
         if fresh_signal is not None:
             if strategy.should_exit(position, fresh_signal, market):
                 return ("signal", current_price)
@@ -252,6 +271,122 @@ class PositionMonitor:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _execute_exit(
+        self,
+        *,
+        session: AsyncSession,
+        position: Position,
+        market: Market,
+        exit_reason: str,
+        exit_price: float,
+        resolution: int | None,
+    ) -> Position | None:
+        """Route to live or paper exit branch."""
+        if position.mode == "live":
+            return await self._execute_live_exit(
+                session=session,
+                position=position,
+                market=market,
+                exit_reason=exit_reason,
+                resolution=resolution,
+            )
+        return await self._execute_paper_exit(
+            session=session,
+            position=position,
+            exit_reason=exit_reason,
+            exit_price=exit_price,
+            resolution=resolution,
+        )
+
+    async def _execute_paper_exit(
+        self,
+        *,
+        session: AsyncSession,
+        position: Position,
+        exit_reason: str,
+        exit_price: float,
+        resolution: int | None,
+    ) -> Position:
+        """Close position in the ledger directly — no exchange interaction."""
+        return await ledger.close_position(
+            session,
+            position.id,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+            resolution=resolution,
+        )
+
+    async def _execute_live_exit(
+        self,
+        *,
+        session: AsyncSession,
+        position: Position,
+        market: Market,
+        exit_reason: str,
+        resolution: int | None,
+    ) -> Position | None:
+        """Submit an IOC sell order to Kalshi, then close the position in the ledger.
+
+        Submits a sell order for the same side as the position (sell YES to exit a YES
+        position, sell NO to exit a NO position).  The order is IOC so it either fills
+        immediately or is cancelled — no resting exit orders are left.
+
+        On KalshiAPIError:
+        - Position stays open in DB (caller skips ledger close).
+        - Telegram alert is sent so the operator can intervene manually.
+        """
+        assert self._kalshi_client is not None, "kalshi_client required for live exits"
+
+        # Sell the same side we hold; price at the bid for best IOC fill probability
+        if position.direction == "YES":
+            limit_price = round(market.yes_bid, 4)
+        else:
+            limit_price = round(1.0 - market.yes_ask, 4)
+
+        exit_order = Order(
+            market_id=position.market_id,
+            direction=position.direction,
+            contracts=position.contracts,
+            price=limit_price,
+            mode="live",
+            time_in_force="fill_or_kill",
+            action="sell",
+        )
+
+        try:
+            filled_order = await self._kalshi_client.place_order(exit_order)
+        except KalshiAPIError as exc:
+            logger.error(
+                "position_monitor.live_exit_failed",
+                position_id=position.id,
+                market_id=position.market_id,
+                exit_reason=exit_reason,
+                status_code=exc.status_code,
+                body=exc.body,
+            )
+            if self._alert_dispatcher is not None:
+                try:
+                    await self._alert_dispatcher.send(
+                        f"Failed to submit exit order for {market.question} "
+                        f"(position {position.id}, reason: {exit_reason}). "
+                        "Manual intervention required."
+                    )
+                except Exception:
+                    logger.exception(
+                        "position_monitor.alert_failed", position_id=position.id
+                    )
+            return None
+
+        # Use the confirmed fill price from the exchange response
+        confirmed_exit_price = filled_order.price
+        return await ledger.close_position(
+            session,
+            position.id,
+            exit_price=confirmed_exit_price,
+            exit_reason=exit_reason,
+            resolution=resolution,
+        )
 
     def _update_peak(self, position: Position, current_price: float) -> None:
         """Advance peak price if current_price is better than recorded peak."""

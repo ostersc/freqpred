@@ -16,7 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.markets.models import Market, Position
+from freqpred.markets.kalshi import KalshiAPIError
+from freqpred.markets.models import Market, Order, Position
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
@@ -48,6 +49,8 @@ def _make_position(
     entry_time: datetime | None = None,
     position_id: str | None = None,
     strategy_name: str = "TestStrategy",
+    mode: str = "paper",
+    contracts: int = 100,
 ) -> Position:
     return Position(
         id=position_id or str(uuid.uuid4()),
@@ -59,10 +62,10 @@ def _make_position(
         signal_edge=0.15,
         signal_estimated_prob=0.65,
         direction=direction,
-        contracts=100,
+        contracts=contracts,
         entry_price=entry_price,
         entry_time=entry_time or NOW,
-        mode="paper",
+        mode=mode,
         status="open",
     )
 
@@ -711,3 +714,202 @@ class TestPeakPriceTracking:
         # Before any update, peak is entry_price
         peak = monitor._peak_prices.get(pos.id, pos.entry_price)
         assert peak == pytest.approx(0.50)
+
+
+# ---------------------------------------------------------------------------
+# Live exit — T38
+# ---------------------------------------------------------------------------
+
+class TestLiveExit:
+    """Tests for _execute_live_exit and the live/paper branching in _execute_exit."""
+
+    def _make_monitor(
+        self,
+        kalshi_client: MagicMock | None = None,
+        alert_dispatcher: MagicMock | None = None,
+    ) -> PositionMonitor:
+        return PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": _make_strategy()},
+            mode="live",
+            kalshi_client=kalshi_client,
+            alert_dispatcher=alert_dispatcher,
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_exit_calls_place_order(self) -> None:
+        """Live exit submits an IOC order in the opposite direction to close the position."""
+        pos = _make_position(direction="YES", contracts=50, mode="live")
+        market = _make_market(mid_price=0.65)
+
+        kalshi_client = MagicMock()
+        filled_order = Order(
+            market_id=pos.market_id,
+            direction="YES",
+            contracts=50,
+            price=market.yes_bid,
+            mode="live",
+            status="executed",
+        )
+        kalshi_client.place_order = AsyncMock(return_value=filled_order)
+
+        monitor = self._make_monitor(kalshi_client=kalshi_client)
+        session = AsyncMock()
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
+        ):
+            await monitor._execute_live_exit(
+                session=session,
+                position=pos,
+                market=market,
+                exit_reason="stoploss",
+                resolution=None,
+            )
+
+        kalshi_client.place_order.assert_awaited_once()
+        submitted: Order = kalshi_client.place_order.call_args.args[0]
+        assert submitted.direction == "YES"         # same side as position
+        assert submitted.action == "sell"
+        assert submitted.contracts == 50
+        assert submitted.time_in_force == "fill_or_kill"
+        assert submitted.market_id == pos.market_id
+
+    @pytest.mark.asyncio
+    async def test_live_exit_uses_filled_price_for_pnl(self) -> None:
+        """ledger.close_position() is called with the price from the exchange response."""
+        pos = _make_position(direction="YES", mode="live")
+        market = _make_market(mid_price=0.65)
+
+        filled_price = 0.72
+        kalshi_client = MagicMock()
+        filled_order = Order(
+            market_id=pos.market_id,
+            direction="YES",
+            contracts=pos.contracts,
+            price=filled_price,
+            mode="live",
+            status="executed",
+            action="sell",
+        )
+        kalshi_client.place_order = AsyncMock(return_value=filled_order)
+
+        monitor = self._make_monitor(kalshi_client=kalshi_client)
+        session = AsyncMock()
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
+        ) as mock_close:
+            await monitor._execute_live_exit(
+                session=session,
+                position=pos,
+                market=market,
+                exit_reason="roi",
+                resolution=None,
+            )
+
+        mock_close.assert_awaited_once()
+        _, call_kwargs = mock_close.call_args
+        assert call_kwargs["exit_price"] == pytest.approx(filled_price)
+
+    @pytest.mark.asyncio
+    async def test_live_exit_does_not_close_on_api_error(self) -> None:
+        """On KalshiAPIError: position stays open, alert is sent, ledger not called."""
+        pos = _make_position(direction="YES", mode="live")
+        market = _make_market(mid_price=0.65)
+
+        kalshi_client = MagicMock()
+        kalshi_client.place_order = AsyncMock(
+            side_effect=KalshiAPIError(503, "service unavailable")
+        )
+
+        alert_dispatcher = MagicMock()
+        alert_dispatcher.send = AsyncMock()
+
+        monitor = self._make_monitor(
+            kalshi_client=kalshi_client, alert_dispatcher=alert_dispatcher
+        )
+        session = AsyncMock()
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+        ) as mock_close:
+            result = await monitor._execute_live_exit(
+                session=session,
+                position=pos,
+                market=market,
+                exit_reason="stoploss",
+                resolution=None,
+            )
+
+        assert result is None
+        mock_close.assert_not_awaited()
+        alert_dispatcher.send.assert_awaited_once()
+        # Alert message should mention the market question
+        alert_msg: str = alert_dispatcher.send.call_args.args[0]
+        assert pos.market_id in alert_msg or market.question in alert_msg
+
+    @pytest.mark.asyncio
+    async def test_paper_exit_unchanged(self) -> None:
+        """Paper mode calls ledger.close_position() directly — no Kalshi API call."""
+        pos = _make_position(direction="YES", mode="paper")
+        market = _make_market(mid_price=0.65)
+
+        kalshi_client = MagicMock()
+        kalshi_client.place_order = AsyncMock()
+
+        monitor = PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": _make_strategy()},
+            mode="paper",
+            kalshi_client=kalshi_client,
+        )
+        session = AsyncMock()
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
+        ) as mock_close:
+            await monitor._execute_exit(
+                session=session,
+                position=pos,
+                market=market,
+                exit_reason="roi",
+                exit_price=0.65,
+                resolution=None,
+            )
+
+        mock_close.assert_awaited_once()
+        kalshi_client.place_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_exit_submits_no_order(self) -> None:
+        """When evaluate_exit returns None, place_order is never called."""
+        strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.30})
+        pos = _make_position(entry_price=0.50, entry_time=NOW, mode="live")
+
+        kalshi_client = MagicMock()
+        kalshi_client.place_order = AsyncMock()
+
+        monitor = PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": strategy},
+            mode="live",
+            kalshi_client=kalshi_client,
+        )
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.55),  # only +10%, no exit fires
+            current_price=0.55,
+            strategy=strategy,
+        )
+
+        assert result is None
+        kalshi_client.place_order.assert_not_awaited()

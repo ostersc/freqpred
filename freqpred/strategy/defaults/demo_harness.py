@@ -26,8 +26,11 @@ if TYPE_CHECKING:
     from freqpred.markets.models import Market, Position
     from freqpred.signal.models import Signal
 
-# Markets fetched more than this long ago are probably stale/resolved in demo API.
-_FRESHNESS_LIMIT = timedelta(hours=2)
+
+# Markets not updated within this window were not seen in the last watcher cycle
+# and therefore don't exist (or are resolved) in the current API environment.
+# Set to 2× the default watcher poll interval (300s) plus a small buffer.
+_FRESHNESS_LIMIT = timedelta(seconds=700)
 # Reuse an existing synthetic signal if it is younger than this (avoids spamming the signals table).
 _SIGNAL_REUSE_WINDOW = timedelta(minutes=2)
 
@@ -59,6 +62,7 @@ class DemoHarness(IPredictionStrategy):
     def __init__(self) -> None:
         self._pinned_market_id: str | None = None
         self._failed_markets: set[str] = set()
+        self._has_open_position: bool = False
 
     def is_market_interesting(self, market: "Market") -> bool:
         if market.id in self._failed_markets:
@@ -79,20 +83,23 @@ class DemoHarness(IPredictionStrategy):
                 self._pinned_market_id = market.id
         return market.id == self._pinned_market_id
 
+    def force_exit(self, position: "Position", market: "Market") -> str | None:
+        """Exit the demo position on the first confirmed (open) tick.
+
+        PositionMonitor only passes status='open' positions here, so any call
+        means the entry fill is confirmed. Return immediately to close.
+        """
+        return "demo_immediate_exit"
+
     async def on_position_opened(
         self,
         position: "Position",
         market: "Market",
         session_factory: "Any",
     ) -> None:
-        """Mark market as done so DemoHarness doesn't re-enter.
-
-        TODO (T38): in live mode, place an IOC sell order here to immediately
-        close the position on the exchange, then let ledger.close_position()
-        record the exit once the sell fill is confirmed.
-        """
-        self._failed_markets.add(market.id)
-        self._pinned_market_id = None
+        """Record that a position is open; keep the market pinned so synthesize_signal
+        can detect closure via the DB and re-enable entry."""
+        self._has_open_position = True
 
     def on_order_failed(self, market: "Market") -> None:
         """Immediately abandon a market that rejected our order at the exchange."""
@@ -100,11 +107,11 @@ class DemoHarness(IPredictionStrategy):
         if self._pinned_market_id == market.id:
             self._pinned_market_id = None
 
-    def should_trade(self, signal: "Signal", market: "Market") -> bool:
+    def should_trade(self, _signal: "Signal", _market: "Market") -> bool:
         return True
 
-    def position_size(self, signal: "Signal", bankroll: float) -> float:
-        return 1.0
+    def position_size(self, _signal: "Signal", _bankroll: float) -> float:
+        return 0.0 if self._has_open_position else 1.0
 
     async def synthesize_signal(
         self, session: "AsyncSession", market: "Market"
@@ -128,17 +135,21 @@ class DemoHarness(IPredictionStrategy):
         from freqpred.markets.models import MarketRow, PositionRow
         from freqpred.signal.models import Signal, SignalRow
 
-        # If there's already an open/pending position for this market, we're done.
+        # Wait for any open DemoHarness position to be closed by the PositionMonitor.
         pos_count = (
             await session.execute(
                 select(func.count()).where(
-                    PositionRow.market_id == market.id,
+                    PositionRow.strategy_name == "DemoHarness",
                     PositionRow.status.in_(["open", "pending"]),
                 )
             )
         ).scalar_one()
         if pos_count > 0:
             return None
+        # All positions closed — reset state so the next cycle can open a new one.
+        self._has_open_position = False
+        self._failed_markets.add(market.id)
+        self._pinned_market_id = None
 
         # Check for an existing synthetic signal for this market.
         existing_result = await session.execute(
