@@ -26,6 +26,8 @@ class KalshiConfig(BaseModel):
     api_key: str = Field(default="")
     private_key_path: str = Field(default="")
     base_url: str = Field(default="https://api.elections.kalshi.com/trade-api/v2")
+    demo_api_key: str = Field(default="")
+    demo_private_key_path: str = Field(default="")
     polling_interval_seconds: int = Field(default=300)
 
 
@@ -163,8 +165,11 @@ class Settings(BaseModel):
 # Maps environment variable name → (section, field) path in Settings
 _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "DATABASE_URL": ("database", "url"),
+    "KALSHI_BASE_URL": ("kalshi", "base_url"),
     "KALSHI_API_KEY": ("kalshi", "api_key"),
     "KALSHI_PRIVATE_KEY_PATH": ("kalshi", "private_key_path"),
+    "KALSHI_DEMO_API_KEY": ("kalshi", "demo_api_key"),
+    "KALSHI_DEMO_PRIVATE_KEY_PATH": ("kalshi", "demo_private_key_path"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
     "NEWSAPI_KEY": ("newsapi", "api_key"),

@@ -305,6 +305,7 @@ class Order:
     price: float
     mode: str        # "paper" | "live"
     id: str | None = None
+    exchange_order_id: str | None = None
     status: str = "pending"
 
 

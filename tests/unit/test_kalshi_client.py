@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from freqpred.markets.kalshi import KalshiClient, _infer_category
-from freqpred.markets.models import Market
+from freqpred.markets.kalshi import KalshiAPIError, KalshiClient, _infer_category
+from freqpred.markets.models import Market, Order
 
 BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
 
@@ -488,6 +488,186 @@ class TestAuthHeaders:
         assert "KALSHI-ACCESS-TIMESTAMP" in headers
         assert "KALSHI-ACCESS-SIGNATURE" in headers
         assert headers["KALSHI-ACCESS-KEY"] == "my-api-key"
+
+
+# ---------------------------------------------------------------------------
+# _post — transport
+# ---------------------------------------------------------------------------
+
+class TestPost:
+    @pytest.mark.asyncio
+    async def test_post_uses_rsa_auth_headers(self, tmp_path) -> None:
+        """_post() calls _make_auth_headers with method='POST'."""
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, NoEncryption, PrivateFormat,
+        )
+
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        key_pem = private_key.private_bytes(Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption())
+        key_file = tmp_path / "test.key"
+        key_file.write_bytes(key_pem)
+
+        client = KalshiClient(api_key="my-key", base_url=BASE_URL, private_key_path=str(key_file))
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response({"order": {"order_id": "ORD-1", "status": "resting"}})
+            with patch.object(client, "_make_auth_headers", wraps=client._make_auth_headers) as mock_auth:
+                await client._post("/portfolio/orders", {"ticker": "TEST"})
+
+        mock_auth.assert_called_once()
+        call_args = mock_auth.call_args
+        assert call_args.args[0] == "POST" or call_args[0][0] == "POST"
+
+    @pytest.mark.asyncio
+    async def test_post_raises_on_non_2xx(self) -> None:
+        """_post() raises KalshiAPIError on non-2xx response."""
+        client = _make_client()
+        resp_429 = MagicMock(spec=httpx.Response)
+        resp_429.status_code = 429
+        resp_429.text = "rate limited"
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = resp_429
+            with pytest.raises(KalshiAPIError) as exc_info:
+                await client._post("/portfolio/orders", {})
+
+        assert exc_info.value.status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# place_order
+# ---------------------------------------------------------------------------
+
+class TestPlaceOrder:
+    @pytest.mark.asyncio
+    async def test_place_order_constructs_correct_payload(self) -> None:
+        """place_order() maps direction, contracts, price correctly (price in cents)."""
+        client = _make_client()
+        order = Order(market_id="KXPRES-25-DEM", direction="YES", contracts=10, price=0.45, mode="live")
+        resp_data = {"order": {"order_id": "ORD-123", "status": "resting"}}
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(resp_data)
+            await client.place_order(order)
+
+        call_kwargs = mock_post.call_args.kwargs
+        body = call_kwargs.get("json") or mock_post.call_args.args[1]
+        assert body["ticker"] == "KXPRES-25-DEM"
+        assert body["side"] == "yes"
+        assert body["count"] == 10
+        assert body["limit_price"] == 45  # 0.45 → 45 cents
+        assert body["action"] == "buy"
+        assert body["type"] == "limit"
+
+    @pytest.mark.asyncio
+    async def test_place_order_returns_order_with_exchange_id(self) -> None:
+        """place_order() returns an Order with exchange_order_id and status from response."""
+        client = _make_client()
+        order = Order(market_id="KXPRES-25-DEM", direction="NO", contracts=5, price=0.55, mode="live")
+        resp_data = {"order": {"order_id": "ORD-456", "status": "resting"}}
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(resp_data)
+            result = await client.place_order(order)
+
+        assert result.exchange_order_id == "ORD-456"
+        assert result.status == "resting"
+        assert result.market_id == "KXPRES-25-DEM"
+        assert result.direction == "NO"
+        assert result.contracts == 5
+
+
+# ---------------------------------------------------------------------------
+# get_balance
+# ---------------------------------------------------------------------------
+
+class TestGetBalance:
+    @pytest.mark.asyncio
+    async def test_get_balance_returns_float(self) -> None:
+        """get_balance() converts cents integer to USD float."""
+        client = _make_client()
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response({"balance": 1523})
+            result = await client.get_balance()
+
+        assert result == pytest.approx(15.23)
+
+    @pytest.mark.asyncio
+    async def test_get_balance_zero(self) -> None:
+        client = _make_client()
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response({"balance": 0})
+            result = await client.get_balance()
+
+        assert result == 0.0
+
+
+# ---------------------------------------------------------------------------
+# get_positions
+# ---------------------------------------------------------------------------
+
+class TestGetPositions:
+    @pytest.mark.asyncio
+    async def test_get_positions_returns_list(self) -> None:
+        """get_positions() returns a list of Position objects from exchange data."""
+        client = _make_client()
+        resp_data = {
+            "market_positions": [
+                {"ticker": "KXPRES-25-DEM", "market_id": "KXPRES-25-DEM", "position": 5},
+            ],
+            "event_positions": [],
+            "cursor": "",
+        }
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_positions()
+
+        assert len(result) == 1
+        pos = result[0]
+        assert pos.market_id == "KXPRES-25-DEM"
+        assert pos.contracts == 5
+        assert pos.direction == "YES"
+
+    @pytest.mark.asyncio
+    async def test_get_positions_negative_is_no(self) -> None:
+        """Negative position (net) maps to direction='NO'."""
+        client = _make_client()
+        resp_data = {
+            "market_positions": [
+                {"ticker": "KXTECH-25-AI", "market_id": "KXTECH-25-AI", "position": -3},
+            ],
+            "event_positions": [],
+            "cursor": "",
+        }
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_positions()
+
+        assert result[0].direction == "NO"
+        assert result[0].contracts == 3
+
+    @pytest.mark.asyncio
+    async def test_get_positions_skips_zero(self) -> None:
+        """Positions with net=0 are excluded from results."""
+        client = _make_client()
+        resp_data = {
+            "market_positions": [
+                {"ticker": "KXPRES-25-DEM", "market_id": "KXPRES-25-DEM", "position": 0},
+            ],
+            "event_positions": [],
+            "cursor": "",
+        }
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_positions()
+
+        assert result == []
 
 
 # ---------------------------------------------------------------------------

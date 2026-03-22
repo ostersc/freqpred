@@ -11,12 +11,20 @@ database:
   url: ""
 
 kalshi:
-  # Overridden by KALSHI_API_KEY env var
-  api_key: ""
-  # Path to your RSA private key (.key file downloaded from Kalshi account settings)
-  # Overridden by KALSHI_PRIVATE_KEY_PATH env var
-  private_key_path: ""
+  # Production endpoint (default). Overridden by KALSHI_BASE_URL env var.
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  # Demo endpoint (simulated funds, separate credentials required):
+  # base_url: "https://demo-api.kalshi.co/trade-api/v2"
+
+  # Production credentials. Overridden by KALSHI_API_KEY / KALSHI_PRIVATE_KEY_PATH env vars.
+  api_key: ""
+  private_key_path: ""  # path to RSA private key (.pem) from Kalshi account settings
+
+  # Demo credentials (separate Kalshi demo account required).
+  # Overridden by KALSHI_DEMO_API_KEY / KALSHI_DEMO_PRIVATE_KEY_PATH env vars.
+  demo_api_key: ""
+  demo_private_key_path: ""
+
   polling_interval_seconds: 300
 
 anthropic:

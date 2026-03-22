@@ -181,6 +181,22 @@ Markets **without** open positions are REST-only. The WebSocket subscription set
 - Requires `websockets` or `httpx-ws` dependency (to be added when implemented — Phase 3).
 - In paper mode, the WebSocket is still useful for accurate price tracking even though no real orders are submitted.
 
+### Kalshi ↔ DB position reconciliation
+
+The operator may place manual trades on Kalshi outside freqpred (e.g. hedging, manual signals). Kalshi returns **net** contracts per ticker from `get_positions()` — there is no per-order breakdown, so manually-added contracts are indistinguishable from freqpred's. The reconciliation strategy accepts this:
+
+**Triggered at startup and on WebSocket reconnect:**
+
+| DB (open/pending live position) | Kalshi net | Action |
+|---|---|---|
+| `contracts = N` | `position = M`, M ≠ N | Update `PositionRow.contracts` to M and log |
+| `contracts = N` | not present / 0 | Auto-close position in DB at current mid price; log warning |
+| not present | `position = M` | Log info and skip — manual-only trade, no DB record to manage |
+
+**At exit time:** the exit order is submitted for the Kalshi net position size (from the most recent reconciliation snapshot), not the DB `contracts` value. This ensures a manually-augmented position is fully closed.
+
+**P&L note:** entry price is taken from the DB (freqpred's original entry). If the operator manually added contracts at a different price, the average entry will be slightly wrong. This is accepted — the DB is not a full order blotter, just a position tracker.
+
 ---
 
 ## 7. Core Data Models
@@ -927,6 +943,13 @@ If `data_quality` is `"low"` (insufficient news context), the signal is discarde
 | Min edge to trade | 10% | Absolute floor; strategy can raise, not lower |
 | Max open positions | 20 | Prevents overextension |
 
+### Bankroll vs. Kalshi Account Balance
+
+`trading.bankroll_usd` in config is the system's self-imposed deployment budget — it can be less than the actual Kalshi account balance, allowing the operator to reserve funds for manual trading. The system enforces the following at startup in live mode:
+
+- **Startup guard**: `get_balance()` is called against Kalshi. If the account balance is less than the configured bankroll, startup aborts with an error. If balance ≥ bankroll, both values are logged (structlog INFO).
+- **Kelly sizing uses `bankroll_usd`**, not the Kalshi account balance. The operator controls deployment size through config.
+
 ### Position Sizing
 
 Default: **fractional Kelly criterion**
@@ -1138,7 +1161,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 
 | Task | Issue | Summary | Depends on |
 |------|-------|---------|------------|
-| **T35** | [#35](https://github.com/ostersc/freqpred/issues/35) | Kalshi demo environment — `KALSHI_BASE_URL` override; switch between demo and production without editing config | — |
+| **T35** | [#35](https://github.com/ostersc/freqpred/issues/35) | Kalshi demo environment — `KALSHI_BASE_URL`, `KALSHI_DEMO_API_KEY`, `KALSHI_DEMO_PRIVATE_KEY_PATH` env var overrides; `demo_api_key`/`demo_private_key_path` fields in `KalshiConfig` for one-off test scripts. No runtime demo mode — demo credentials exist for manual API testing only; the Kalshi demo API has no real liquidity so it cannot be used for meaningful signal testing. | — |
 | **T36** | [#36](https://github.com/ostersc/freqpred/issues/36) | KalshiClient live order placement — `_post()` transport, `place_order()` with limit/market support and `client_expiration_time`, `get_positions()`, `get_balance()` | T35 |
 | **T37** | [#37](https://github.com/ostersc/freqpred/issues/37) | OrderManager live branch — route to `KalshiClient.place_order()` when `mode=live`; apply T47/T48 order type routing; record positions as `pending` until fill confirmed | T36, T47 |
 | **T38** | [#38](https://github.com/ostersc/freqpred/issues/38) | PositionMonitor live exits — submit real sell orders on exit; market IOC for stoploss/emergency; limit for ROI/trailing if `exit=limit`; ledger close only after exchange confirms | T36, T48 |
@@ -1184,7 +1207,7 @@ def custom_exit_price(self, position: Position, signal: Signal | None, market: M
 
 ## 14. Open Questions
 
-1. **Kalshi sandbox API** ✅ — Kalshi offers a full demo environment at `https://demo-api.kalshi.co/trade-api/v2` (web: https://demo.kalshi.co). Credentials are separate from production — a distinct demo account is required. Funds are simulated. freqpred's internal `mode="paper"` simulates locally without touching Kalshi; for end-to-end order flow testing, the Kalshi client base URL can be pointed at the demo API with demo credentials.
+1. **Kalshi sandbox API** ✅ — Kalshi offers a demo environment at `https://demo-api.kalshi.co/trade-api/v2` with separate credentials. Investigation found the demo API has the same 42k tickers as production but zero real liquidity (synthetic seed prices, no trades). It is not useful as a runtime mode — signals and signal calibration would be meaningless. Decision: demo credentials are stored in config (`demo_api_key`, `demo_private_key_path`) for one-off API smoke tests (e.g. verifying `place_order()` returns a valid response) but freqpred has no `--mode demo` runtime. Testing live order flow is done at small position sizes directly against production.
 2. **LLM look-ahead bias mitigation** — Even with time-locked news retrieval, Claude's training data includes past market resolutions. How much does this inflate signal quality in paper trading? Consider running a "naive baseline" strategy (always bet with the market) to measure true alpha.
 3. **Rate limits** — Kalshi API rate limits for market data polling. What's the sustainable polling interval?
 4. **Strategy versioning** — When a strategy's parameters change, how do we attribute P&L? Track `(strategy_name, strategy_version)` per position.

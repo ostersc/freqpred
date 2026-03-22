@@ -61,3 +61,18 @@ def test_invalid_trading_mode_raises(tmp_path: Path) -> None:
 
     with pytest.raises(Exception):
         load_config(config_file)
+
+
+def test_kalshi_base_url_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    demo_url = "https://demo-api.kalshi.co/trade-api/v2"
+    monkeypatch.setenv("KALSHI_BASE_URL", demo_url)
+    settings = load_config(tmp_path / "missing.yaml")
+    assert settings.kalshi.base_url == demo_url
+
+
+def test_kalshi_demo_credentials_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KALSHI_DEMO_API_KEY", "demo-key-id")
+    monkeypatch.setenv("KALSHI_DEMO_PRIVATE_KEY_PATH", "/tmp/demo.pem")
+    settings = load_config(tmp_path / "missing.yaml")
+    assert settings.kalshi.demo_api_key == "demo-key-id"
+    assert settings.kalshi.demo_private_key_path == "/tmp/demo.pem"

@@ -25,6 +25,15 @@ from freqpred.markets.models import (
 
 log = structlog.get_logger(__name__)
 
+
+class KalshiAPIError(Exception):
+    """Raised when the Kalshi API returns a non-2xx response."""
+
+    def __init__(self, status_code: int, body: str) -> None:
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"Kalshi API error {status_code}: {body}")
+
 # Known Kalshi event_ticker prefixes → our category label.
 # The event_ticker first segment (before the first '-') is the series ticker,
 # which encodes the market type.  This avoids the impractical /series approach
@@ -136,6 +145,12 @@ class KalshiClient(IMarketClient):
         self._http = httpx.AsyncClient(timeout=30.0)
         self._min_interval = 1.0 / max(read_rps, 1)
         self._last_request_at: float = 0.0
+        log.info(
+            "kalshi.client.init",
+            base_url=self._base_url,
+            api_key_configured=bool(self._api_key),
+            private_key_configured=bool(self._private_key),
+        )
 
     # ------------------------------------------------------------------
     # Auth helpers
@@ -195,6 +210,20 @@ class KalshiClient(IMarketClient):
             return resp.json()
 
         raise RuntimeError(f"Kalshi GET {path} failed after {_MAX_RETRIES} retries")
+
+    async def _post(self, path: str, body: dict[str, Any]) -> Any:
+        """Authenticated POST request to Kalshi API.
+
+        Uses the same RSA-PSS signing as _get() — method="POST".
+        Raises KalshiAPIError on non-2xx response (no retry — POSTs are not idempotent).
+        """
+        url = self._base_url + path
+        headers = self._make_auth_headers("POST", self._base_path + path)
+        headers["Content-Type"] = "application/json"
+        resp = await self._http.post(url, json=body, headers=headers)
+        if resp.status_code >= 400:
+            raise KalshiAPIError(resp.status_code, resp.text)
+        return resp.json()
 
     async def _paginate_markets(self, params: dict[str, Any]) -> list[Any]:
         """Fetch all pages from GET /markets and return validated KalshiMarketSchema list."""
@@ -352,13 +381,85 @@ class KalshiClient(IMarketClient):
         return {"yes_bid": yes_bid, "yes_ask": yes_ask}
 
     async def place_order(self, order: Order) -> Order:
-        raise NotImplementedError("Order placement is handled by the trading module")
+        """Submit a limit order to Kalshi.
+
+        Maps Order fields to the Kalshi API request format and returns the Order
+        with exchange_order_id and status populated from the response.
+        """
+        body: dict[str, Any] = {
+            "ticker": order.market_id,
+            "action": "buy",
+            "side": order.direction.lower(),  # "yes" | "no"
+            "type": "limit",
+            "count": order.contracts,
+            "limit_price": int(round(order.price * 100)),  # convert to integer cents
+            "time_in_force": "GTC",
+        }
+        data = await self._post("/portfolio/orders", body)
+        exchange_order = data.get("order", data)
+        log.info(
+            "kalshi.place_order",
+            market_id=order.market_id,
+            direction=order.direction,
+            contracts=order.contracts,
+            exchange_order_id=exchange_order.get("order_id"),
+            status=exchange_order.get("status"),
+        )
+        return Order(
+            market_id=order.market_id,
+            direction=order.direction,
+            contracts=order.contracts,
+            price=order.price,
+            mode=order.mode,
+            id=order.id,
+            exchange_order_id=exchange_order.get("order_id"),
+            status=exchange_order.get("status", "resting"),
+        )
 
     async def get_positions(self) -> list[Position]:
-        raise NotImplementedError("Position fetching is handled by the trading module")
+        """Fetch all open positions from Kalshi for reconciliation with the local DB."""
+        data = await self._get("/portfolio/positions")
+        # Kalshi v2 returns market_positions (per-contract) and event_positions (aggregated).
+        # We use market_positions for per-ticker reconciliation.
+        raw_positions: list[Any] = data.get("market_positions", [])
+        result: list[Position] = []
+        now = datetime.now(UTC)
+        for p in raw_positions:
+            net = int(p.get("position", 0))
+            if net == 0:
+                continue
+            direction = "YES" if net > 0 else "NO"
+            result.append(
+                Position(
+                    id=p.get("market_id", p.get("ticker", "")),
+                    market_id=p.get("ticker", p.get("market_id", "")),
+                    signal_id="",
+                    strategy_name="exchange_reconciliation",
+                    strategy_version="0",
+                    signal_confidence=0.0,
+                    signal_edge=0.0,
+                    signal_estimated_prob=0.0,
+                    direction=direction,
+                    contracts=abs(net),
+                    entry_price=0.0,
+                    entry_time=now,
+                    mode="live",
+                    status="open",
+                )
+            )
+        log.info("kalshi.get_positions", count=len(result))
+        return result
 
     async def get_balance(self) -> float:
-        raise NotImplementedError("Balance fetching is handled by the trading module")
+        """Return current available balance in USD.
+
+        Kalshi returns the balance as an integer number of cents.
+        """
+        data = await self._get("/portfolio/balance")
+        cents: int = data.get("balance", 0)
+        balance_usd = cents / 100.0
+        log.info("kalshi.get_balance", balance_usd=balance_usd)
+        return balance_usd
 
     # ------------------------------------------------------------------
     # Lifecycle
