@@ -398,6 +398,8 @@ class KalshiClient(IMarketClient):
         }
         data = await self._post("/portfolio/orders", body)
         exchange_order = data.get("order", data)
+        fee_cents = (exchange_order.get("maker_fees") or 0) + (exchange_order.get("taker_fees") or 0)
+        fee_usd = fee_cents / 100
         log.info(
             "kalshi.place_order",
             market_id=order.market_id,
@@ -405,6 +407,7 @@ class KalshiClient(IMarketClient):
             contracts=order.contracts,
             exchange_order_id=exchange_order.get("order_id"),
             status=exchange_order.get("status"),
+            fee_usd=fee_usd,
         )
         return Order(
             market_id=order.market_id,
@@ -415,6 +418,7 @@ class KalshiClient(IMarketClient):
             id=order.id,
             exchange_order_id=exchange_order.get("order_id"),
             status=exchange_order.get("status", "resting"),
+            fee_usd=fee_usd,
         )
 
     async def get_positions(self) -> list[Position]:

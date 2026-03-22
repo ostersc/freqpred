@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -111,6 +111,21 @@ class IPredictionStrategy(ABC):
         Only override this in testing/demo strategies.
         """
         return None
+
+    async def on_position_opened(
+        self,
+        position: "Position",
+        market: "Market",
+        session_factory: Any,
+    ) -> None:
+        """Optional async hook called immediately after a position is opened.
+
+        Called by the signal loop after ``order_manager.submit()`` returns a
+        non-None Position. Use this to trigger immediate exits (e.g. in demo/test
+        strategies) or to record supplemental data.
+
+        Default: no-op.
+        """
 
     def on_order_failed(self, market: "Market") -> None:
         """Optional hook called when order placement fails for a market.

@@ -367,6 +367,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                     direction=signal.direction,
                                 )
                                 await alert_dispatcher.trade_alert(position, market)
+                                await strategy.on_position_opened(position, market, session_factory)
                             else:
                                 strategy.on_order_failed(market)
             except asyncio.CancelledError:
@@ -1227,14 +1228,15 @@ async def _alerts_test(config: object, channel: str) -> None:
 @main.command()
 @click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind.")
 @click.option("--port", default=8000, show_default=True, help="Port to listen on.")
+@click.option("--mode", default="paper", type=click.Choice(["paper", "live"]), show_default=True, help="Trading mode to display.")
 @click.pass_context
-def dashboard(ctx: click.Context, host: str, port: int) -> None:
+def dashboard(ctx: click.Context, host: str, port: int, mode: str) -> None:
     """Start the dashboard API server (read-only JSON API)."""
     config = ctx.obj["config"]
-    asyncio.run(_dashboard(config, host, port))
+    asyncio.run(_dashboard(config, host, port, mode))
 
 
-async def _dashboard(config: object, host: str, port: int) -> None:
+async def _dashboard(config: object, host: str, port: int, mode: str = "paper") -> None:
     import uvicorn
 
     import freqpred.ingestion.models  # noqa: F401
@@ -1255,6 +1257,7 @@ async def _dashboard(config: object, host: str, port: int) -> None:
     app = create_app(
         session_factory=session_factory,
         daily_cap_usd=config.risk.max_daily_llm_spend_usd,
+        mode=mode,
     )
 
     click.echo(f"Starting dashboard on http://{host}:{port}")

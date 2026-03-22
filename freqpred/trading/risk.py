@@ -184,7 +184,7 @@ class RiskEngine:
         self,
         session: AsyncSession,
         bankroll: float,
-        mode: str = "paper",
+        mode: str,
     ) -> None:
         """Query current state and raise TradingCircuitBreakerError if:
         - daily loss > config.max_daily_loss_pct * bankroll

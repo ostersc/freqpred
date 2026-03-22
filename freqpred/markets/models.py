@@ -147,6 +147,9 @@ class PositionRow(Base):
     # Exchange order reference (live mode only)
     exchange_order_id: Mapped[str | None] = mapped_column(VARCHAR(255), nullable=True)
 
+    # Exchange fee paid on fill (live mode only; 0.0 for paper)
+    entry_fee_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0", default=0.0)
+
     # Excursion tracking — signed price deltas (multiply by contracts for $ impact)
     mae: Mapped[float | None] = mapped_column(Float, nullable=True)  # max adverse excursion
     mfe: Mapped[float | None] = mapped_column(Float, nullable=True)  # max favorable excursion
@@ -310,6 +313,7 @@ class Order:
     id: str | None = None
     exchange_order_id: str | None = None
     status: str = "pending"
+    fee_usd: float = 0.0  # Exchange fee paid on fill (live mode only)
 
 
 @dataclass
@@ -347,3 +351,4 @@ class Position:
     mae: float | None = None  # max adverse excursion (signed price delta)
     mfe: float | None = None  # max favorable excursion (signed price delta)
     exchange_order_id: str | None = None  # Kalshi order ID (live mode only)
+    entry_fee_usd: float = 0.0  # Exchange fee paid on fill (live mode only)

@@ -163,6 +163,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "KALSHI_DEMO_API_KEY": ("kalshi", "demo_api_key"),
     "KALSHI_DEMO_PRIVATE_KEY_PATH": ("kalshi", "demo_private_key_path"),
     "KALSHI_POLLING_INTERVAL_SECONDS": ("kalshi", "polling_interval_seconds"),
+    "SIGNAL_INTERVAL_SECONDS": ("signal", "interval_seconds"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
     "NEWSAPI_KEY": ("newsapi", "api_key"),

@@ -19,9 +19,11 @@ from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from freqpred.markets.models import Market
+    from freqpred.markets.models import Market, Position
     from freqpred.signal.models import Signal
 
 # Markets fetched more than this long ago are probably stale/resolved in demo API.
@@ -55,13 +57,6 @@ class DemoHarness(IPredictionStrategy):
     )
 
     def __init__(self) -> None:
-        base_url = os.environ.get("KALSHI_BASE_URL", "")
-        if "demo" not in base_url.lower():
-            raise RuntimeError(
-                "DemoHarness refused to start: "
-                f"KALSHI_BASE_URL={base_url!r} does not contain 'demo'. "
-                "Set KALSHI_BASE_URL to the Kalshi demo endpoint before using this strategy."
-            )
         self._pinned_market_id: str | None = None
         self._failed_markets: set[str] = set()
 
@@ -84,6 +79,21 @@ class DemoHarness(IPredictionStrategy):
                 self._pinned_market_id = market.id
         return market.id == self._pinned_market_id
 
+    async def on_position_opened(
+        self,
+        position: "Position",
+        market: "Market",
+        session_factory: "Any",
+    ) -> None:
+        """Mark market as done so DemoHarness doesn't re-enter.
+
+        TODO (T38): in live mode, place an IOC sell order here to immediately
+        close the position on the exchange, then let ledger.close_position()
+        record the exit once the sell fill is confirmed.
+        """
+        self._failed_markets.add(market.id)
+        self._pinned_market_id = None
+
     def on_order_failed(self, market: "Market") -> None:
         """Immediately abandon a market that rejected our order at the exchange."""
         self._failed_markets.add(market.id)
@@ -101,11 +111,20 @@ class DemoHarness(IPredictionStrategy):
     ) -> "Signal | None":
         """Create or reuse a synthetic signal so the order path can be exercised.
 
-        - Returns None immediately if there is already an open/pending live position.
+        - Returns None immediately if there is already an open/pending position.
         - Reuses an existing demo_harness signal to avoid spamming the signals table.
-        - Abandons the pinned market and tries a new one if no position was created
-          within _ORDER_TIMEOUT of synthesizing the signal (indicates a bad market).
+        - Refuses to synthesize if KALSHI_BASE_URL does not contain "demo".
         """
+        base_url = os.environ.get("KALSHI_BASE_URL", "")
+        if "demo" not in base_url.lower():
+            import structlog
+            structlog.get_logger(__name__).warning(
+                "demo_harness.synthesize_signal_blocked",
+                reason="KALSHI_BASE_URL does not contain 'demo'",
+                base_url=base_url,
+            )
+            return None
+
         from freqpred.markets.models import MarketRow, PositionRow
         from freqpred.signal.models import Signal, SignalRow
 
@@ -114,7 +133,6 @@ class DemoHarness(IPredictionStrategy):
             await session.execute(
                 select(func.count()).where(
                     PositionRow.market_id == market.id,
-                    PositionRow.mode == "live",
                     PositionRow.status.in_(["open", "pending"]),
                 )
             )

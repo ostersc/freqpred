@@ -39,8 +39,9 @@ class AlertDispatcher:
         await self.send(msg)
 
     async def trade_alert(self, position: Position, market: Market) -> None:
+        label = "LIVE TRADE" if position.mode == "live" else "PAPER TRADE"
         msg = (
-            f"PAPER TRADE: {position.direction} on {market.question}\n"
+            f"{label}: {position.direction} on {market.question}\n"
             f"@ ${position.entry_price:.4f}  |  {position.contracts} contracts  |  "
             f"Edge: {position.signal_edge:+.3f}"
         )

@@ -56,6 +56,10 @@ def _daily_cap(request: Request) -> float:
     return float(request.app.state.daily_cap_usd)
 
 
+def _mode(request: Request) -> str:
+    return str(request.app.state.mode)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -193,10 +197,13 @@ async def get_signal(
 @router.get("/positions", response_model=PositionListResponse)
 async def list_positions(
     session: Annotated[AsyncSession, Depends(get_db)],
+    app_mode: Annotated[str, Depends(_mode)],
     status: str = Query(default="all", pattern="^(open|closed|all)$"),
+    mode: str = Query(default="", pattern="^(paper|live|)$"),
 ) -> PositionListResponse:
-    stmt = select(PositionRow).order_by(PositionRow.entry_time.desc())
-    count_stmt = select(func.count()).select_from(PositionRow)
+    effective_mode = mode or app_mode
+    stmt = select(PositionRow).where(PositionRow.mode == effective_mode).order_by(PositionRow.entry_time.desc())
+    count_stmt = select(func.count()).select_from(PositionRow).where(PositionRow.mode == effective_mode)
 
     if status != "all":
         stmt = stmt.where(PositionRow.status == status)
@@ -238,8 +245,9 @@ async def get_position(
 @router.get("/ledger", response_model=LedgerResponse)
 async def get_ledger(
     session: Annotated[AsyncSession, Depends(get_db)],
+    app_mode: Annotated[str, Depends(_mode)],
 ) -> LedgerResponse:
-    summary = await get_portfolio_summary(session)
+    summary = await get_portfolio_summary(session, mode=app_mode)
     return LedgerResponse(
         open_count=summary["open_count"],
         total_exposure_usd=summary["total_exposure_usd"],
@@ -256,8 +264,9 @@ async def get_ledger(
 @router.get("/calibration", response_model=CalibrationResponse)
 async def get_calibration(
     session: Annotated[AsyncSession, Depends(get_db)],
+    app_mode: Annotated[str, Depends(_mode)],
 ) -> CalibrationResponse:
-    report = await compute_calibration(session)
+    report = await compute_calibration(session, mode=app_mode)
     return CalibrationResponse(
         brier_score=report.brier_score,
         naive_brier_score=report.naive_brier_score,
@@ -325,13 +334,14 @@ async def get_llm_cost(
 async def health(
     session: Annotated[AsyncSession, Depends(get_db)],
     daily_cap: Annotated[float, Depends(_daily_cap)],
+    app_mode: Annotated[str, Depends(_mode)],
 ) -> HealthResponse:
     db_status = "connected"
     open_positions = 0
     llm_remaining = daily_cap
     try:
         open_result = await session.execute(
-            select(func.count()).where(PositionRow.status == "open")
+            select(func.count()).where(PositionRow.status == "open", PositionRow.mode == app_mode)
         )
         open_positions = int(open_result.scalar_one())
         daily_spend = await get_daily_spend_usd(session)

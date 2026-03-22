@@ -85,12 +85,12 @@ def register_position_commands(
             result = await session.execute(
                 select(PositionRow, MarketRow.mid_price)
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                .where(PositionRow.id == pos_uuid)
+                .where(PositionRow.id == pos_uuid, PositionRow.mode == mode)
             )
             row = result.one_or_none()
 
             if row is None:
-                return f"Position {position_id} not found."
+                return f"Position {position_id} not found (or belongs to a different mode)."
 
             pos, mid_price = row
             if pos.status != "open":
@@ -126,12 +126,12 @@ def register_position_commands(
             result = await session.execute(
                 select(PositionRow, MarketRow.mid_price)
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                .where(PositionRow.id == pos_uuid)
+                .where(PositionRow.id == pos_uuid, PositionRow.mode == mode)
             )
             row = result.one_or_none()
 
             if row is None:
-                return f"Position {position_id} not found."
+                return f"Position {position_id} not found (or belongs to a different mode)."
 
             pos, mid_price = row
             if pos.status != "open":
@@ -192,15 +192,15 @@ def register_position_commands(
 
         async with session_factory() as session:
             result = await session.execute(
-                select(PositionRow).where(PositionRow.id == pos_uuid)
+                select(PositionRow).where(PositionRow.id == pos_uuid, PositionRow.mode == "paper")
             )
             row = result.scalar_one_or_none()
 
             if row is None:
-                return f"Position {position_id} not found."
+                return f"Paper position {position_id} not found (live positions cannot be deleted)."
 
             await session.execute(
-                sa_delete(PositionRow).where(PositionRow.id == pos_uuid)
+                sa_delete(PositionRow).where(PositionRow.id == pos_uuid, PositionRow.mode == "paper")
             )
             await session.commit()
 

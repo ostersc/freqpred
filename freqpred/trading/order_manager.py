@@ -201,6 +201,10 @@ class OrderManager:
                 body=exc.body,
             )
             return None
+        # "executed" means immediately filled; "resting" means GTC order sitting on the book.
+        position_status = "open" if filled_order.status == "executed" else "pending"
+        # Effective entry cost per contract including exchange fee.
+        effective_entry = order.price + (filled_order.fee_usd / order.contracts if order.contracts else 0)
         logger.info(
             "order_manager.live_order_submitted",
             exchange_order_id=filled_order.exchange_order_id,
@@ -208,6 +212,9 @@ class OrderManager:
             direction=order.direction,
             contracts=order.contracts,
             price=order.price,
+            fee_usd=filled_order.fee_usd,
+            effective_entry_price=round(effective_entry, 6),
+            position_status=position_status,
         )
         return await ledger.open_position(
             session,
@@ -219,8 +226,9 @@ class OrderManager:
             contracts=order.contracts,
             entry_price=order.price,
             mode=self._mode,
-            status="pending",
+            status=position_status,
             exchange_order_id=filled_order.exchange_order_id,
+            entry_fee_usd=filled_order.fee_usd,
         )
 
     async def reconcile_pending_orders(self, session: AsyncSession) -> None:

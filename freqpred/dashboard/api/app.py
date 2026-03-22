@@ -10,12 +10,14 @@ from .routes import router
 def create_app(
     session_factory: async_sessionmaker[AsyncSession],
     daily_cap_usd: float = 10.0,
+    mode: str = "paper",
 ) -> FastAPI:
     """Create and configure the dashboard FastAPI application.
 
     Args:
         session_factory: Async SQLAlchemy session factory.
         daily_cap_usd:    LLM daily spend cap from config, used in /api/llm/cost.
+        mode:             Trading mode ("paper" or "live") — filters position/ledger queries.
     """
     app = FastAPI(
         title="freqpred dashboard",
@@ -24,6 +26,7 @@ def create_app(
     )
     app.state.session_factory = session_factory
     app.state.daily_cap_usd = daily_cap_usd
+    app.state.mode = mode
 
     app.include_router(router, prefix="/api")
     return app

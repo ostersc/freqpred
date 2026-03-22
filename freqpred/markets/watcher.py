@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.base import IMarketClient
+from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import MarketRow
 from freqpred.markets.repository import upsert_markets
 
@@ -162,6 +163,21 @@ class MarketWatcher:
             try:
                 market = await self._client.get_market(market_id)
                 markets_to_upsert.append(market)
+            except KalshiAPIError as exc:
+                if exc.status_code == 404:
+                    # Market doesn't exist in this environment (e.g. demo market in prod).
+                    log.warning(
+                        "market_watcher.resolved_sweep_not_found",
+                        market_id=market_id,
+                        hint="market may belong to a different Kalshi environment",
+                    )
+                else:
+                    log.error(
+                        "market_watcher.resolved_sweep_error",
+                        market_id=market_id,
+                        status_code=exc.status_code,
+                        body=exc.body,
+                    )
             except Exception:
                 log.exception("market_watcher.resolved_sweep_error", market_id=market_id)
 

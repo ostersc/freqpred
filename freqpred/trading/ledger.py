@@ -24,11 +24,13 @@ async def open_position(
     mode: str,
     status: str = "open",
     exchange_order_id: str | None = None,
+    entry_fee_usd: float = 0.0,
 ) -> Position:
     """Insert a new Position row. Commits the session.
 
-    ``status`` is "open" for paper trades and "pending" for live orders awaiting fill.
-    ``exchange_order_id`` is populated for live orders after ``place_order()`` returns.
+    ``status`` is "open" for paper trades and immediately-filled live orders;
+    "pending" for live GTC orders awaiting fill confirmation (T39 will flip these).
+    ``exchange_order_id`` and ``entry_fee_usd`` are populated for live orders.
     """
     row = PositionRow(
         id=uuid.uuid4(),
@@ -46,6 +48,7 @@ async def open_position(
         mode=mode,
         status=status,
         exchange_order_id=exchange_order_id,
+        entry_fee_usd=entry_fee_usd,
     )
     session.add(row)
     await session.commit()
@@ -66,8 +69,11 @@ async def close_position(
     )
     row: PositionRow = result.scalar_one()
 
-    pnl = (exit_price - row.entry_price) * row.contracts
-    pnl_pct = pnl / (row.entry_price * row.contracts)
+    fee = row.entry_fee_usd or 0.0
+    gross_pnl = (exit_price - row.entry_price) * row.contracts
+    pnl = gross_pnl - fee
+    cost_basis = row.entry_price * row.contracts + fee
+    pnl_pct = pnl / cost_basis if cost_basis else 0.0
 
     row.exit_price = exit_price
     row.exit_time = datetime.now(tz=timezone.utc)
@@ -238,4 +244,5 @@ def _row_to_position(row: PositionRow) -> Position:
         mae=row.mae,
         mfe=row.mfe,
         exchange_order_id=row.exchange_order_id,
+        entry_fee_usd=row.entry_fee_usd or 0.0,
     )
