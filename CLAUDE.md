@@ -169,9 +169,15 @@ Each issue must follow this structure (see issues #37–#48 as reference):
 
 ### Workflow
 - When starting a task, read the GitHub issue before writing any code
-- Check off acceptance criteria as they are met; close the issue only when all boxes are checked
+- Check off acceptance criteria in the issue as they are met
 - If scope changes during implementation, update both the issue body and SPEC.md before proceeding
-- When adding a new Phase 3 task: add the row to the Phase 3 table in SPEC.md (with issue link), create the issue, then implement
+- When adding a new Phase 3 task: add a checkbox entry to the Phase 3 list in SPEC.md (with issue link), create the issue, then implement
+
+### Completing a task
+When all acceptance criteria are met and tests pass, in this order:
+1. Mark the task's checkbox in the Phase 3 list in SPEC.md as `[x]`
+2. Commit and push the code
+3. Close the GitHub issue (`gh issue close <N>`) — always **after** pushing, never before
 
 ---
 
