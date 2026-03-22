@@ -167,6 +167,14 @@ Each issue must follow this structure (see issues #37–#48 as reference):
 - **`## New tests`** — named test cases with what each verifies
 - **`## Acceptance criteria`** — checkbox list; these are the gates that must pass before closing the issue
 
+### Determining what to work on next
+When asked "what's next", "what should we work on", or told to start the next task:
+1. Read the Phase 3 checkbox list in SPEC.md — identify all unchecked tasks
+2. Run `gh issue list --state open` and compare against SPEC.md checkboxes — flag any discrepancy (e.g. SPEC says done but issue still open, or vice versa) and resolve it before proceeding
+3. From the unchecked tasks, identify which are unblocked (all dependencies are checked in SPEC.md)
+4. Recommend the highest-priority unblocked task, stating its T-number, title, and why it's next in dependency order
+5. **Ask for confirmation before starting any implementation**
+
 ### Workflow
 - When starting a task, read the GitHub issue before writing any code
 - Check off acceptance criteria in the issue as they are met
