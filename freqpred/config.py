@@ -29,6 +29,8 @@ class KalshiConfig(BaseModel):
     demo_api_key: str = Field(default="")
     demo_private_key_path: str = Field(default="")
     polling_interval_seconds: int = Field(default=300)
+    ws_url: str = Field(default="wss://api.elections.kalshi.com/trade-api/ws/v2")
+    ws_demo_url: str = Field(default="wss://demo-api.kalshi.co/trade-api/ws/v2")
 
 
 class AnthropicConfig(BaseModel):
@@ -163,6 +165,8 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "KALSHI_DEMO_API_KEY": ("kalshi", "demo_api_key"),
     "KALSHI_DEMO_PRIVATE_KEY_PATH": ("kalshi", "demo_private_key_path"),
     "KALSHI_POLLING_INTERVAL_SECONDS": ("kalshi", "polling_interval_seconds"),
+    "KALSHI_WS_URL": ("kalshi", "ws_url"),
+    "KALSHI_WS_DEMO_URL": ("kalshi", "ws_demo_url"),
     "SIGNAL_INTERVAL_SECONDS": ("signal", "interval_seconds"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),

@@ -340,9 +340,20 @@ class PositionMonitor:
 
         # Sell the same side we hold; price at the bid for best IOC fill probability
         if position.direction == "YES":
-            limit_price = round(market.yes_bid, 4)
+            limit_price = round(market.yes_bid or 0.0, 4)
         else:
-            limit_price = round(1.0 - market.yes_ask, 4)
+            limit_price = round(1.0 - (market.yes_ask or 1.0), 4)
+
+        if limit_price <= 0:
+            # Market is resolved or closed to trading — Kalshi will settle it.
+            # Leave the DB position open; reconciliation will handle the payout.
+            logger.warning(
+                "position_monitor.exit_skip_zero_bid",
+                position_id=position.id,
+                market_id=position.market_id,
+                exit_reason=exit_reason,
+            )
+            return None
 
         exit_order = Order(
             market_id=position.market_id,

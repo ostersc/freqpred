@@ -242,6 +242,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     from freqpred.trading.order_manager import OrderManager
 
     order_manager = None
+    position_watcher = None
     if mode == "paper":
         risk_engine = RiskEngine(config.risk)
         order_manager = OrderManager(
@@ -369,6 +370,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                 )
                                 await alert_dispatcher.trade_alert(position, market)
                                 await strategy.on_position_opened(position, market, session_factory)
+                                if position_watcher is not None:
+                                    await position_watcher.subscribe(position.market_id)
                             else:
                                 strategy.on_order_failed(market)
             except asyncio.CancelledError:
@@ -420,6 +423,20 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 kalshi_client=kalshi_client,
             )
 
+            from freqpred.markets.position_watcher import PositionWatcher
+            _ws_url = (
+                config.kalshi.ws_demo_url
+                if "demo" in config.kalshi.base_url.lower()
+                else config.kalshi.ws_url
+            )
+            position_watcher = PositionWatcher(
+                kalshi_client=kalshi_client,
+                ws_url=_ws_url,
+                session_factory=session_factory,
+                position_monitor=position_monitor,
+                order_manager=order_manager,
+            )
+
         position_monitor._kalshi_client = kalshi_client
 
         watcher = MarketWatcher(
@@ -451,6 +468,10 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
 
         tasks.append(asyncio.create_task(signal_loop(), name="signal_loop"))
         tasks.append(asyncio.create_task(position_monitor.run(), name="position_monitor"))
+        if position_watcher is not None:
+            tasks.append(
+                asyncio.create_task(position_watcher.run(), name="position_watcher")
+            )
         tasks.append(
             asyncio.create_task(telegram_cmd_handler.run(), name="telegram_commands")
         )

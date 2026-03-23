@@ -73,7 +73,7 @@ class DemoHarness(IPredictionStrategy):
             if (
                 market.status == "active"
                 and market.yes_ask is not None
-                and 0.01 <= market.yes_ask <= 0.99
+                and 0.05 <= market.yes_ask <= 0.85
                 and market.volume_24h > 0
                 and market.last_fetched_at is not None
                 and (now - market.last_fetched_at) < _FRESHNESS_LIMIT

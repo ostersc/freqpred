@@ -6,10 +6,11 @@ import os
 from typing import TYPE_CHECKING
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.kalshi import KalshiAPIError
-from freqpred.markets.models import Market, Order, Position
+from freqpred.markets.models import Market, Order, Position, PositionRow
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.trading import ledger
@@ -232,7 +233,47 @@ class OrderManager:
         )
 
     async def reconcile_pending_orders(self, session: AsyncSession) -> None:
-        """Query Kalshi for status of all pending orders; update positions accordingly.
+        """Query Kalshi for status of all pending live orders; update positions.
 
-        Stub — implemented in T39 once PositionWatcher is available.
+        For each 'pending' live PositionRow:
+          - If Kalshi holds a non-zero net position for that market → flip to 'open'.
+          - Otherwise → mark 'cancelled' (order did not fill).
+
+        Called by PositionWatcher on startup and after every reconnect.
         """
+        if self._kalshi_client is None:
+            return
+
+        result = await session.execute(
+            select(PositionRow).where(
+                PositionRow.status == "pending",
+                PositionRow.mode == "live",
+            )
+        )
+        pending = result.scalars().all()
+        if not pending:
+            return
+
+        kalshi_positions = await self._kalshi_client.get_positions()
+        kalshi_by_market: dict[str, int] = {
+            p.market_id: p.contracts for p in kalshi_positions
+        }
+
+        for row in pending:
+            if kalshi_by_market.get(row.market_id, 0) > 0:
+                row.status = "open"
+                logger.info(
+                    "order_manager.pending_filled",
+                    position_id=str(row.id),
+                    market_id=row.market_id,
+                    kalshi_contracts=kalshi_by_market[row.market_id],
+                )
+            else:
+                row.status = "cancelled"
+                logger.warning(
+                    "order_manager.pending_not_filled",
+                    position_id=str(row.id),
+                    market_id=row.market_id,
+                )
+
+        await session.commit()
