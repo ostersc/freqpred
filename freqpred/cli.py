@@ -423,21 +423,24 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 kalshi_client=kalshi_client,
             )
 
-            from freqpred.markets.position_watcher import PositionWatcher
-            _ws_url = (
-                config.kalshi.ws_demo_url
-                if "demo" in config.kalshi.base_url.lower()
-                else config.kalshi.ws_url
-            )
-            position_watcher = PositionWatcher(
-                kalshi_client=kalshi_client,
-                ws_url=_ws_url,
-                session_factory=session_factory,
-                position_monitor=position_monitor,
-                order_manager=order_manager,
-            )
-
         position_monitor._kalshi_client = kalshi_client
+
+        # PositionWatcher runs in ALL modes — paper positions need the same
+        # sub-second WS tick feed as live positions so TA/algo exits work.
+        # Reconciliation inside PositionWatcher is already live-only.
+        from freqpred.markets.position_watcher import PositionWatcher
+        _ws_url = (
+            config.kalshi.ws_demo_url
+            if "demo" in config.kalshi.base_url.lower()
+            else config.kalshi.ws_url
+        )
+        position_watcher = PositionWatcher(
+            kalshi_client=kalshi_client,
+            ws_url=_ws_url,
+            session_factory=session_factory,
+            position_monitor=position_monitor,
+            order_manager=order_manager,
+        )
 
         watcher = MarketWatcher(
             client=kalshi_client,

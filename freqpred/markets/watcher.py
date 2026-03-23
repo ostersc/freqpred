@@ -5,7 +5,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.base import IMarketClient
@@ -13,10 +13,8 @@ from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import MarketRow
 from freqpred.markets.repository import upsert_markets
 
-# How far back to look for recently-closed-but-not-yet-resolved markets.
-_RESOLVED_SWEEP_LOOKBACK = timedelta(days=7)
 # Max markets to re-fetch per sweep cycle (rate-limit safety).
-_RESOLVED_SWEEP_BATCH = 20
+_RESOLVED_SWEEP_BATCH = 200
 
 log = structlog.get_logger(__name__)
 
@@ -127,7 +125,6 @@ class MarketWatcher:
         from freqpred.markets.models import PositionRow
 
         now = datetime.now(UTC)
-        lookback = now - _RESOLVED_SWEEP_LOOKBACK
         stale_cutoff = now - timedelta(seconds=self._polling_interval * 3)
 
         async with self._session_factory() as session:
@@ -140,9 +137,9 @@ class MarketWatcher:
             result = await session.execute(
                 select(MarketRow.id).where(
                     MarketRow.status.notin_(["resolved", "finalized"]),
-                    MarketRow.close_time >= lookback,
                     or_(
-                        # Normal path: close_time has passed.
+                        # Normal path: close_time has passed — sweep all expired
+                        # markets regardless of age (no lookback limit).
                         MarketRow.close_time <= now,
                         # Early-close path: stale AND has an open position.
                         and_(
@@ -165,12 +162,20 @@ class MarketWatcher:
                 markets_to_upsert.append(market)
             except KalshiAPIError as exc:
                 if exc.status_code == 404:
-                    # Market doesn't exist in this environment (e.g. demo market in prod).
+                    # Market no longer exists on Kalshi — mark it finalized so
+                    # the resolved sweep never queries it again.
                     log.warning(
                         "market_watcher.resolved_sweep_not_found",
                         market_id=market_id,
-                        hint="market may belong to a different Kalshi environment",
+                        hint="marking finalized so it is not retried",
                     )
+                    async with self._session_factory() as session:
+                        await session.execute(
+                            update(MarketRow)
+                            .where(MarketRow.id == market_id)
+                            .values(status="finalized")
+                        )
+                        await session.commit()
                 else:
                     log.error(
                         "market_watcher.resolved_sweep_error",

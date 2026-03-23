@@ -434,7 +434,11 @@ class TestEvaluateExit:
         strategy = _make_strategy(minimal_roi={})
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50)
-        market = _make_market(mid_price=0.52, close_time=NOW + timedelta(days=5))
+        # Use real now so this test doesn't break as calendar time advances.
+        market = _make_market(
+            mid_price=0.52,
+            close_time=datetime.now(tz=timezone.utc) + timedelta(days=5),
+        )
         market.metadata["status"] = "open"
 
         result = monitor.evaluate_exit(

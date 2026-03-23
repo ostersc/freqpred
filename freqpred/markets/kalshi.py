@@ -206,7 +206,8 @@ class KalshiClient(IMarketClient):
                 await asyncio.sleep(backoff)
                 continue
 
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                raise KalshiAPIError(resp.status_code, resp.text)
             return resp.json()
 
         raise RuntimeError(f"Kalshi GET {path} failed after {_MAX_RETRIES} retries")

@@ -72,6 +72,25 @@ class PositionMonitor:
     # Public API
     # ------------------------------------------------------------------
 
+    def on_tick(
+        self,
+        market_id: str,
+        yes_bid: float,
+        yes_ask: float,
+        ts: "datetime",
+    ) -> None:
+        """Forward a WebSocket tick to every IAlgoStrategy in the registry.
+
+        Sync (non-async) so it can be called from PositionWatcher's async
+        handler without an extra await.  No-op for plain IPredictionStrategy
+        instances.
+        """
+        from freqpred.strategy.algo_base import IAlgoStrategy  # local — avoids circular
+
+        for strategy in self._strategies.values():
+            if isinstance(strategy, IAlgoStrategy):
+                strategy.ingest_tick(market_id, yes_bid, yes_ask, ts)
+
     async def run(self) -> None:
         """Async background loop. Runs until cancelled."""
         logger.info("position_monitor.started", poll_interval=self._poll_interval)

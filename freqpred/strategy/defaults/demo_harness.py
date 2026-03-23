@@ -15,12 +15,13 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select, update
 
-from freqpred.strategy.base import IPredictionStrategy
+from freqpred.strategy.algo_base import IAlgoStrategy
 from freqpred.strategy.config import StrategyConfig
 
 if TYPE_CHECKING:
     from typing import Any
 
+    import pandas as pd
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from freqpred.markets.models import Market, Position
@@ -35,8 +36,14 @@ _FRESHNESS_LIMIT = timedelta(seconds=700)
 _SIGNAL_REUSE_WINDOW = timedelta(minutes=2)
 
 
-class DemoHarness(IPredictionStrategy):
+class DemoHarness(IAlgoStrategy):
     """Live-path validation strategy.
+
+    Extends ``IAlgoStrategy`` to demonstrate the algo exit pattern.  The
+    ``populate_exit_trend`` implementation always sets ``exit_long=True``,
+    but ``force_exit`` is overridden to return ``"demo_immediate_exit"``
+    on the first confirmed tick so the demo loop completes quickly without
+    waiting for 2 complete candles.
 
     - Only runs if KALSHI_BASE_URL contains "demo" (hard abort otherwise).
     - Pins the first affordable, fresh, liquid market it encounters.
@@ -60,6 +67,7 @@ class DemoHarness(IPredictionStrategy):
     )
 
     def __init__(self) -> None:
+        super().__init__()  # initialises IAlgoStrategy tick buffers
         self._pinned_market_id: str | None = None
         self._failed_markets: set[str] = set()
         self._has_open_position: bool = False
@@ -83,11 +91,23 @@ class DemoHarness(IPredictionStrategy):
                 self._pinned_market_id = market.id
         return market.id == self._pinned_market_id
 
+    def populate_exit_trend(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+        """Always signal exit — demo harness exits on every complete candle.
+
+        In practice DemoHarness overrides force_exit to exit immediately
+        (before 2 complete candles accumulate), so this method is here to
+        satisfy the IAlgoStrategy abstract contract and to demonstrate the
+        pattern.
+        """
+        df["exit_long"] = True
+        return df
+
     def force_exit(self, position: "Position", market: "Market") -> str | None:
         """Exit the demo position on the first confirmed (open) tick.
 
         PositionMonitor only passes status='open' positions here, so any call
-        means the entry fill is confirmed. Return immediately to close.
+        means the entry fill is confirmed. Return immediately to close without
+        waiting for 2 complete candles (as IAlgoStrategy.force_exit requires).
         """
         return "demo_immediate_exit"
 

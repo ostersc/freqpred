@@ -237,6 +237,9 @@ class PositionWatcher:
             )
         self._last_mid[market_id] = new_mid
 
+        # Forward raw tick to algo strategies before evaluating exits.
+        self._position_monitor.on_tick(market_id, yes_bid, yes_ask, now)
+
         # Trigger exit evaluation for all open positions.
         await self._position_monitor.check_all_positions()
 
@@ -330,10 +333,14 @@ class PositionWatcher:
     # ------------------------------------------------------------------
 
     async def _get_open_market_ids(self, session: AsyncSession) -> set[str]:
-        """Return market_ids for all open/pending live positions."""
+        """Return market_ids for all open/pending positions (paper and live).
+
+        Paper positions subscribe to the same ticker feed as live positions so
+        that TA/algo strategies receive the same sub-second price updates in
+        both modes.  Reconciliation (live-only) is handled separately.
+        """
         result = await session.execute(
             select(PositionRow.market_id).where(
-                PositionRow.mode == "live",
                 PositionRow.status.in_(["open", "pending"]),
             )
         )
