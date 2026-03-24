@@ -78,6 +78,8 @@ class TruthSocialIngestionConfig(BaseModel):
 
 class IngestionConfig(BaseModel):
     schedule_interval_seconds: int = Field(default=1800)
+    realtime_interval_seconds: int = Field(default=300, description="Interval for the realtime scheduler (chyrons, Truth Social). Default 5 min.")
+    tv_chyron_enabled: bool = Field(default=True, description="Enable Third Eye TV chyron fetching in the realtime scheduler.")
     categories: list[str] = Field(default_factory=lambda: ["politics", "technology"])
     truthsocial: TruthSocialIngestionConfig = Field(default_factory=TruthSocialIngestionConfig)
 

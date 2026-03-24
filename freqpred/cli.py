@@ -150,6 +150,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
 
     from freqpred.db import make_engine, make_session_factory
     from freqpred.ingestion.scheduler import run_scheduler
+    from freqpred.ingestion.realtime_scheduler import run_realtime_scheduler
     from freqpred.llm.client import LLMClient
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.markets.models import Market, MarketRow
@@ -460,12 +461,23 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     newsapi_api_key=config.newsapi.api_key,
                     newsapi_enabled=config.newsapi.enabled,
                     newsapi_max_window_requests=config.newsapi.max_window_requests,
+                ),
+                name="ingestion_scheduler",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                run_realtime_scheduler(
+                    session_factory=session_factory,
+                    embedder=embedder,
+                    interval_seconds=config.ingestion.realtime_interval_seconds,
+                    tv_chyron_enabled=config.ingestion.tv_chyron_enabled,
                     truthsocial_enabled=config.ingestion.truthsocial.enabled,
                     truthsocial_username=config.truthsocial.username,
                     truthsocial_password=config.truthsocial.password,
                     truthsocial_accounts=config.ingestion.truthsocial.accounts,
                 ),
-                name="ingestion_scheduler",
+                name="realtime_scheduler",
             )
         )
 

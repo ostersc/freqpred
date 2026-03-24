@@ -121,7 +121,8 @@ Other categories (macro/Fed, geopolitics, sports) are supported by the architect
 | **Market Selector** | Reads active markets from DB; calls `strategy.is_market_interesting()` on each registered strategy; passes selected markets to Catalyst Generator |
 | **Catalyst Generator** | LLM call (Haiku) per selected market: derives 3–5 specific search queries (catalysts) representing events that could materially shift probability. Stored as first-class DB entities. Re-runs daily, RAG-informed on subsequent passes. |
 | **Position Watcher** | Streams live price updates via Kalshi WebSocket for markets with open positions |
-| **Ingestion Scheduler** | Reads the latest active catalyst queries per market from DB; runs Tavily + NewsAPI + Reddit fetchers against those queries; upserts results into Document store |
+| **Ingestion Scheduler** | Reads the latest active catalyst queries per market from DB; runs Tavily + NewsAPI + Reddit + GDELT + TV Archive fetchers against those queries (every 30 min); upserts results into Document store |
+| **Realtime Scheduler** | Polls cursor-based near-real-time sources on a faster cadence (default 5 min): TV chyrons via Internet Archive Third Eye API; Truth Social account feeds. Uses `fetcher_cursors` for dedup so frequent polling does not double-process. |
 | **Signal Pipeline** | Retrieves news context via RAG, runs LLM analysis, returns probability estimate |
 | **Strategy Engine** | Applies `IPredictionStrategy` plugins to signal output, decides trade/size/skip |
 | **IMarketClient** | Abstract interface over Kalshi (and future platforms); handles orders, positions, balance |
@@ -754,9 +755,18 @@ Market Watcher upserts active markets into DB
          ▼
 ┌─────────────────┐
 │  Ingestion      │  Reads latest active CatalystQuery rows from DB.
-│  Scheduler      │  For each query: runs Tavily + NewsAPI + Reddit.
-│  (every 30 min) │  Tracks last-run per market in Postgres.
-│                 │  One fetcher failing does not stop others.
+│  Scheduler      │  For each query: runs Tavily + NewsAPI + Reddit
+│  (every 30 min) │  + GDELT + TV Archive (tv_query). Tracks backoff
+│                 │  per fetcher in Postgres. One failure ≠ abort.
+└────────┬────────┘
+         │
+         │  (parallel fast path)
+         │
+┌─────────────────┐
+│  Realtime       │  Bulk-pulls TV chyrons (Third Eye API, ?last=1)
+│  Scheduler      │  and Truth Social account feeds; filters chyrons
+│  (every 5 min)  │  by market tv_query AND-groups; deduplicates via
+│                 │  fetcher_cursors. Backoff isolated per scheduler.
 └────────┬────────┘
          │
          ▼
@@ -830,6 +840,7 @@ Signal trigger fires for a market
 | **Kalshi market metadata** | Market description + linked sources from the exchange | Always included |
 | **GDELT** | High-volume global news index; free, no key required | Supplementary |
 | **Internet Archive TV News Archive** | Closed-caption transcripts from 163+ U.S. TV stations; current to present day; free, no key required | Supplementary — especially valuable for word-mention markets and markets about public statements |
+| **Internet Archive Third Eye (TV chyrons)** | OCR-extracted lower-third ticker text from live US TV (CNN, Fox News, MSNBC, BBC); near-real-time; free, no key required | High-signal for breaking news markets — a chyron like `FED CUTS RATES` often appears minutes before full transcripts. Runs in realtime_scheduler every 5 min. |
 
 **GDELT implementation:**
 - Query the GDELT Doc API (`api.gdeltproject.org/api/v2/doc/doc`) with the catalyst query text and a `timespan=1d` parameter per cycle
@@ -838,6 +849,15 @@ Signal trigger fires for a market
 - Wired into the per-query loop in the scheduler alongside Tavily/NewsAPI
 - No API key required; no quota tracking needed
 - `source_type="news"`, `source_name="GDELT"`
+
+**TV Chyron (Third Eye) implementation:**
+- Bulk-pull endpoint: `GET https://archive.org/services/third-eye.php?last=1` (whole-number hours only)
+- Response: tab-separated TSV with columns `date_time_(UTC)`, `channel`, `duration`, `identifier_path`, `text`
+- Architecture: **bulk-pull + local-filter** — fetch all chyrons once per realtime cycle, then distribute matches to each market using its `tv_query` AND-groups
+- `parse_and_groups(tv_query)` splits Solr/Lucene boolean syntax into AND-groups of OR'd terms; a chyron matches if every group has at least one term (case-insensitive substring)
+- Deduplication via `fetcher_cursors` row `('tv_chyron', 'global')` — only chyrons with `dt > last_cursor` are stored
+- `source_type="tv_chyron"`, `source_name="TVThirdEye"`
+- Controlled by `ingestion.tv_chyron_enabled` config flag (default: `true`)
 
 #### Social & Community Signals
 | Source | Use Case | Notes |
@@ -856,11 +876,12 @@ Signal trigger fires for a market
 - Results stored as-is — no pre-summarization (posts are short)
 - `source_type="social"`, `source_name="TruthSocial"`
 
-*Account feed mode* (standing feeds, runs once per cycle):
+*Account feed mode* (standing feeds, runs in **realtime_scheduler** every 5 min):
 - Calls `api.pull_statuses(username, created_after=last_run)` for each configured account
 - `last_run` tracked in Postgres (`fetcher_cursors` table, keyed by `(fetcher, key)`)
 - Not tied to a specific market — broad ingestion, all categories benefit
 - Configured via `ingestion.truthsocial.accounts: [realDonaldTrump, ...]` in `config.yaml`
+- Runs in the realtime scheduler (not the main 30-min scheduler) so breaking posts are ingested within minutes
 
 **Truth Social error handling:**
 - `LoginErrorException` → log error + disable Truth Social for the rest of the cycle (circuit-breaker, same pattern as Tavily plan limit)
@@ -1174,7 +1195,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [ ] **T48** [#48](https://github.com/ostersc/freqpred/issues/48) — Limit order exits + exchange-hosted stoploss: `exit=limit` posts resting ROI/trailing targets; `custom_exit_price()` hook; `stoploss_on_exchange` with interval refresh; emergency/circuit-breaker always market. Depends on: T47.
 - [x] **T49** [#49](https://github.com/ostersc/freqpred/issues/49) — `IAlgoStrategy`: DataFrame-driven exits via WebSocket tick data; freqtrade-style `populate_indicators()` + `populate_exit_trend()` hooks; OHLC candle buffer per market; `force_exit()` reads `exit_long` column; `PositionMonitor.on_tick()` feeds ticks to algo strategy buffers. Depends on: T39.
 - [ ] **T50** [#50](https://github.com/ostersc/freqpred/issues/50) — LLM-assisted exit analysis: `should_request_llm_exit()` predicate + `llm_exit_check()` async hook on `IAlgoStrategy`; PositionMonitor calls LLM when predicate fires; prompt includes candle metrics + P&L; response logged to `llm_queries`. Depends on: T49.
-- [ ] **T51** [#51](https://github.com/ostersc/freqpred/issues/51) — TV chyron ingestion via Internet Archive Third Eye API: bulk-pull chyron TSV each scheduler cycle, filter against active catalyst `tv_query` AND-groups, store matches as `tv_chyron` documents linked to markets.
+- [x] **T51** [#51](https://github.com/ostersc/freqpred/issues/51) — TV chyron ingestion via Internet Archive Third Eye API + realtime scheduler: `tv_chyron.py` fetcher (`fetch_all`, `parse_and_groups`, `filter_chyrons`); new `realtime_scheduler.py` runs chyrons and Truth Social account feeds every 5 min (moved from main scheduler); `backoff.py` `tick_and_load` gains `services` filter so each scheduler manages its own counters independently; `ingestion.tv_chyron_enabled` and `ingestion.realtime_interval_seconds` config keys added.
 
 **`OrderTypes` interface** (strategy-level, all fields have defaults — existing strategies unchanged):
 ```python
@@ -1233,12 +1254,15 @@ freqpred/
 │   ├── ingestion/
 │   │   ├── selector.py          # market selector: calls strategy.is_market_interesting()
 │   │   ├── catalyst_generator.py# LLM (Haiku) derives catalyst queries per market; manages CatalystRun/CatalystQuery
-│   │   ├── scheduler.py         # background ingestion job: reads catalyst queries, drives fetchers
+│   │   ├── scheduler.py         # main ingestion scheduler (30 min): catalyst queries → Tavily/NewsAPI/Reddit/GDELT/TV Archive
+│   │   ├── realtime_scheduler.py# fast scheduler (5 min): TV chyrons (Third Eye) + Truth Social account feeds
 │   │   ├── fetchers/
 │   │   │   ├── tavily.py        # Tavily Search API fetcher
 │   │   │   ├── newsapi.py       # NewsAPI fetcher
 │   │   │   ├── gdelt.py         # GDELT Doc API fetcher + article body fetch
 │   │   │   ├── reddit.py        # Reddit API fetcher
+│   │   │   ├── tv_archive.py    # Internet Archive TV transcript search fetcher
+│   │   │   ├── tv_chyron.py     # Internet Archive Third Eye chyron fetcher (bulk-pull + local-filter)
 │   │   │   ├── truthsocial.py   # Truth Social fetcher (search + account feeds via truthbrush)
 │   │   │   └── twitter.py       # Twitter/X API fetcher (optional)
 │   │   ├── store.py             # dedup, embed (sentence-transformers), insert into Document store

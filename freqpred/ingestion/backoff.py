@@ -31,26 +31,41 @@ log = structlog.get_logger(__name__)
 _MAX_SKIP_CYCLES = 32
 
 
-async def tick_and_load(session: AsyncSession) -> dict[str, bool]:
-    """Decrement all backed-off services by 1 cycle, then return their state.
+async def tick_and_load(
+    session: AsyncSession,
+    services: frozenset[str] | None = None,
+) -> dict[str, bool]:
+    """Decrement backed-off services by 1 cycle, then return their state.
 
     Called once at the start of each ingestion cycle. Returns a dict mapping
     service name → is_backed_off (True means skip this cycle).
 
     Only services that have a row in the table are included in the result.
     Services with no row are not backed off (default / never tripped state).
+
+    Args:
+        services: If provided, only tick and return state for these service
+                  names. Pass the set of services owned by the calling
+                  scheduler so that multiple schedulers running at different
+                  intervals do not drain each other's backoff counters.
     """
-    # Decrement all services that are still waiting.
-    await session.execute(
+    # Decrement services that are still waiting (optionally scoped).
+    tick_stmt = (
         update(FetcherRateLimitRow)
         .where(FetcherRateLimitRow.skip_cycles_remaining > 0)
         .values(skip_cycles_remaining=FetcherRateLimitRow.skip_cycles_remaining - 1)
     )
+    if services is not None:
+        tick_stmt = tick_stmt.where(FetcherRateLimitRow.service.in_(services))
+    await session.execute(tick_stmt)
     await session.flush()
 
-    result = await session.execute(
-        select(FetcherRateLimitRow.service, FetcherRateLimitRow.skip_cycles_remaining)
+    load_stmt = select(
+        FetcherRateLimitRow.service, FetcherRateLimitRow.skip_cycles_remaining
     )
+    if services is not None:
+        load_stmt = load_stmt.where(FetcherRateLimitRow.service.in_(services))
+    result = await session.execute(load_stmt)
     state: dict[str, bool] = {
         service: (remaining > 0)
         for service, remaining in result.all()

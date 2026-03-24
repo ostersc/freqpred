@@ -6,12 +6,14 @@ Each cycle:
   3. Generates catalyst queries for markets that have none yet
      (or whose last run is stale) via generate_catalysts.
   4. Deactivates catalysts for markets no longer selected.
-  5. Runs Tavily + NewsAPI + Reddit fetchers against every active
-     CatalystQuery and upserts results into the document store.
-  6. Updates fetcher_cursors in Postgres for Truth Social account feeds.
+  5. Runs Tavily + NewsAPI + Reddit + GDELT + TV Archive fetchers against every
+     active CatalystQuery and upserts results into the document store.
+
+Near-real-time sources (TV chyrons, Truth Social account feeds) run on their
+own faster cadence in ``realtime_scheduler.py``.
 
 Public API:
-    run_cycle(...)   — one full pass (steps 1-6).
+    run_cycle(...)   — one full pass (steps 1-5).
     run_scheduler(…) — async loop that calls run_cycle every N seconds.
 """
 from __future__ import annotations
@@ -26,19 +28,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.ingestion.backoff import record_rate_limit, record_success, tick_and_load
-from freqpred.ingestion.cursors import get_cursor, set_cursor
 from freqpred.ingestion.fetchers import gdelt as gdelt_fetcher
 from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
 from freqpred.ingestion.fetchers import reddit as reddit_fetcher
 from freqpred.ingestion.fetchers import tavily as tavily_fetcher
-from freqpred.ingestion.fetchers import truthsocial as truthsocial_fetcher
 from freqpred.ingestion.fetchers import tv_archive as tv_archive_fetcher
 from freqpred.ingestion.fetchers.gdelt import GDELTRateLimitError
 from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
-from freqpred.ingestion.fetchers.truthsocial import (
-    LoginErrorException as TruthSocialLoginError,
-    patch_api_for_block_detection,
-)
 from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.ingestion.quota import current_window, get_window_count, increment_window_count
@@ -49,7 +45,10 @@ from freqpred.rag.embedder import LocalEmbedder
 if TYPE_CHECKING:
     from freqpred.llm.client import LLMClient
     from freqpred.ingestion.selector import StrategyProtocol
-    from freqpred.config import TruthSocialAccountConfig
+
+# Backoff services owned by this scheduler — passed to tick_and_load so the
+# realtime scheduler's counters (truthsocial) are not affected.
+_MAIN_SCHEDULER_SERVICES: frozenset[str] = frozenset({"tavily", "newsapi", "gdelt", "tv_archive"})
 
 log = structlog.get_logger(__name__)
 
@@ -66,8 +65,6 @@ _SUBREDDIT_MAP: dict[str, list[str]] = {
     "climate":    ["climate", "environment"],
 }
 
-
-_TS_ACCOUNT_FETCHER = "truthsocial_account"
 
 
 def _subreddits_for_category(category: str) -> list[str]:
@@ -90,10 +87,6 @@ async def run_cycle(
     newsapi_max_window_requests: int = 45,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
-    truthsocial_enabled: bool = False,
-    truthsocial_username: str = "",
-    truthsocial_password: str = "",
-    truthsocial_accounts: "list[TruthSocialAccountConfig] | None" = None,
 ) -> dict[str, int]:
     """Run one full ingestion cycle.
 
@@ -103,9 +96,9 @@ async def run_cycle(
       3. Generate catalyst queries for selected markets with no active run.
       4. Deactivate catalysts for markets no longer selected.
       5. Fetch documents for every market with active catalyst queries.
-      6. Update postgres last-run timestamps.
 
     Fetcher errors are caught per-fetcher; one failure does not abort others.
+    Near-real-time sources (chyrons, Truth Social) run in realtime_scheduler.py.
 
     Args:
         session:                    Open async SQLAlchemy session (caller manages commit).
@@ -123,11 +116,6 @@ async def run_cycle(
         reddit_user_agent:          User-Agent for Reddit requests.
         domain_blacklist:           Domains to exclude from Tavily and NewsAPI results.
                                     Matched as a substring of each URL (default: kalshi.com).
-        truthsocial_enabled:        When True, Truth Social fetchers are active.
-        truthsocial_username:       Truth Social account username (env: TRUTHSOCIAL_USERNAME).
-        truthsocial_password:       Truth Social account password (env: TRUTHSOCIAL_PASSWORD).
-        truthsocial_accounts:       Account feeds to poll each cycle, with category mappings
-                                    used to link fetched docs to active markets.
     Returns:
         Stats dict with keys: markets_processed, catalysts_generated,
         docs_fetched, docs_stored, docs_error.
@@ -162,9 +150,9 @@ async def run_cycle(
     newsapi_from = now - timedelta(days=_NEWSAPI_LOOKBACK_DAYS)
     newsapi_window_date, newsapi_hour_slot = current_window(now)
 
-    # Load persistent backoff state from DB (ticks down all counters by 1).
+    # Load persistent backoff state from DB (ticks down this scheduler's counters).
     # Returns {service: is_backed_off} for services with existing rows.
-    backoff_state = await tick_and_load(session)
+    backoff_state = await tick_and_load(session, services=_MAIN_SCHEDULER_SERVICES)
 
     # In-memory flags for within-cycle short-circuit. Initialized from DB
     # state so a restart respects backoff that was set in a previous cycle.
@@ -172,102 +160,11 @@ async def run_cycle(
     newsapi_limit_hit: bool = backoff_state.get("newsapi", False)
     newsapi_limit_logged: bool = newsapi_limit_hit
     gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
-    truthsocial_login_failed: bool = backoff_state.get("truthsocial", False)
     tv_archive_limit_hit: bool = backoff_state.get("tv_archive", False)
 
     # Track which services had a successful call this cycle so we only write
     # record_success once per service (it's idempotent but avoids extra DB hits).
     success_recorded: set[str] = set()
-
-    # Build Truth Social Api object once for the cycle (avoids re-auth per call).
-    ts_api: object | None = None
-    if truthsocial_enabled and truthsocial_username:
-        from truthbrush.api import Api as TruthSocialApi  # noqa: PLC0415
-
-        ts_api = TruthSocialApi(
-            username=truthsocial_username, password=truthsocial_password
-        )
-        patch_api_for_block_detection(ts_api)
-
-    # --- Phase 2a: Truth Social account feeds (once per cycle, per account) ----
-    # Build a category → [market_id] index from the already-loaded active markets.
-    _category_markets: dict[str, list[str]] = {}
-    for _mid, _cat, _ct, _qpairs in market_queries:
-        _category_markets.setdefault(_cat.lower(), []).append(_mid)
-
-    if ts_api is not None and truthsocial_accounts:
-        for ts_account in truthsocial_accounts:
-            ts_username = ts_account.username
-            if truthsocial_login_failed:
-                break
-            try:
-                last_run = await get_cursor(session, _TS_ACCOUNT_FETCHER, ts_username)
-                ts_created_after = last_run if last_run is not None else now - timedelta(hours=48)
-
-                docs = await truthsocial_fetcher.fetch_account(
-                    api=ts_api,
-                    username=ts_username,
-                    created_after=ts_created_after,
-                    excluded_domains=domain_blacklist,
-                )
-
-                # Collect the market IDs this account's categories map to.
-                account_market_ids: list[str] = []
-                for cat in ts_account.categories:
-                    account_market_ids.extend(_category_markets.get(cat.lower(), []))
-
-                for raw_doc in docs:
-                    try:
-                        async with session.begin_nested():
-                            doc = await upsert_document(session, embedder, raw_doc)
-                            for mid in account_market_ids:
-                                await link_document_to_market(session, doc.id, mid)
-                        total_stored += 1
-                    except DocumentSkipped:
-                        pass
-                    except Exception:
-                        log.warning(
-                            "scheduler.upsert_error",
-                            source_url=raw_doc.source_url,
-                            exc_info=True,
-                        )
-                        total_error += 1
-                total_fetched += len(docs)
-                await set_cursor(session, _TS_ACCOUNT_FETCHER, ts_username, now)
-                if "truthsocial" not in success_recorded:
-                    await record_success(session, "truthsocial")
-                    success_recorded.add("truthsocial")
-                log.info(
-                    "scheduler.truthsocial_account_fetched",
-                    username=ts_username,
-                    docs_fetched=len(docs),
-                    markets_linked=len(account_market_ids),
-                )
-            except TruthSocialLoginError as exc:
-                truthsocial_login_failed = True
-                skip_cycles = await record_rate_limit(session, "truthsocial")
-                from freqpred.ingestion.fetchers.truthsocial import TruthSocialBlockedError  # noqa: PLC0415
-                if isinstance(exc, TruthSocialBlockedError):
-                    log.warning(
-                        "scheduler.truthsocial_cloudflare_blocked",
-                        username=ts_username,
-                        skip_cycles=skip_cycles,
-                        hint="IP temporarily banned by Cloudflare (error 1015); backing off",
-                    )
-                else:
-                    log.error(
-                        "scheduler.truthsocial_login_failed",
-                        username=ts_username,
-                        skip_cycles=skip_cycles,
-                        exc_info=True,
-                    )
-            except Exception:
-                log.warning(
-                    "scheduler.fetcher_error",
-                    fetcher="truthsocial_account",
-                    username=ts_username,
-                    exc_info=True,
-                )
 
     for market_id, category, close_time, query_pairs in market_queries:
         market_start = time.monotonic()
@@ -449,10 +346,6 @@ async def run_scheduler(
     newsapi_max_window_requests: int = 45,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
-    truthsocial_enabled: bool = False,
-    truthsocial_username: str = "",
-    truthsocial_password: str = "",
-    truthsocial_accounts: "list[TruthSocialAccountConfig] | None" = None,
 ) -> None:
     """Async loop: runs run_cycle every *interval_seconds*.
 
@@ -471,18 +364,12 @@ async def run_scheduler(
         newsapi_max_window_requests: Per-12-hour-window request cap for the NewsAPI fetcher.
         reddit_user_agent:          User-Agent for Reddit requests.
         domain_blacklist:           Domains to exclude from Tavily and NewsAPI results.
-        truthsocial_enabled:        When True, Truth Social fetchers are active.
-        truthsocial_username:       Truth Social account username.
-        truthsocial_password:       Truth Social account password.
-        truthsocial_accounts:       Standing account feeds to poll each cycle.
     """
     active_fetchers = ["reddit", "gdelt"]
     if tavily_api_key:
         active_fetchers.insert(0, "tavily")
     if newsapi_api_key and newsapi_enabled:
         active_fetchers.insert(0 if not tavily_api_key else 1, "newsapi")
-    if truthsocial_enabled and truthsocial_username:
-        active_fetchers.append("truthsocial")
 
     log.info(
         "scheduler.started",
@@ -505,10 +392,6 @@ async def run_scheduler(
                     newsapi_max_window_requests=newsapi_max_window_requests,
                     reddit_user_agent=reddit_user_agent,
                     domain_blacklist=domain_blacklist,
-                    truthsocial_enabled=truthsocial_enabled,
-                    truthsocial_username=truthsocial_username,
-                    truthsocial_password=truthsocial_password,
-                    truthsocial_accounts=truthsocial_accounts,
                 )
                 await session.commit()
         except Exception:

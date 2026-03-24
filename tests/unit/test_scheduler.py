@@ -42,18 +42,6 @@ def _mock_gdelt(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def mock_cursors(monkeypatch):
-    """Patch fetcher cursor helpers so tests don't need a real DB session."""
-    monkeypatch.setattr(
-        "freqpred.ingestion.scheduler.get_cursor",
-        AsyncMock(return_value=None),
-    )
-    monkeypatch.setattr(
-        "freqpred.ingestion.scheduler.set_cursor",
-        AsyncMock(return_value=None),
-    )
-
 
 @pytest.fixture(autouse=True)
 def mock_quota(monkeypatch):
