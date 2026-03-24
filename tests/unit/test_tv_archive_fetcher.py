@@ -93,7 +93,8 @@ def test_build_filter_map_uses_close_time():
     close = datetime(2026, 3, 30, tzinfo=timezone.utc)
     fm = _build_filter_map(close)
     assert fm["language"] == {"English": "inc"}
-    assert fm["program"] == {"News": "inc"}
+    assert "collection" in fm
+    assert all(v == "inc" for v in fm["collection"].values())
     # end month should be 2026-03 (March, since close is in March)
     assert "2026-03" in fm["date"].values() or "2026-03" in fm["date"]
 

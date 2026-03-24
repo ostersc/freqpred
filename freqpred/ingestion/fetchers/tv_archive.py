@@ -35,6 +35,40 @@ _API_TIMEOUT = 45.0  # cache misses can be slow (~30s); add margin
 
 _HIGHLIGHT_MARKER_RE = re.compile(r"\{\{\{|\}\}\}")
 
+# Collection allowlist: US news sources known to be indexed.
+# Excludes foreign state media (RT, PressTV) which dominate the unfiltered index
+# for recent content.  Multiple "inc" values are OR-ed by the API.
+_US_COLLECTIONS: dict[str, str] = {
+    # Curated multi-network archive
+    "trumparchive": "inc",      # Trump Archive — clips across Fox, CSPAN, etc.
+    # National cable news
+    "TV-CNN": "inc",
+    "TV-CNNW": "inc",           # CNN West Coast feed
+    "TV-FOXNEWS": "inc",
+    "TV-FOXNEWSW": "inc",       # Fox News West Coast feed
+    "TV-MSNBC": "inc",
+    "TV-MSNBCW": "inc",         # MSNBC West Coast feed
+    "TV-CNBC": "inc",
+    "TV-FBC": "inc",            # Fox Business Channel
+    "TV-BLOOMBERG": "inc",
+    "TV-HLN": "inc",            # CNN Headline News
+    # Public affairs
+    "TV-CSPAN": "inc",
+    "TV-CSPAN2": "inc",
+    "TV-CSPAN3": "inc",
+    # Washington D.C. local affiliates (strong national political coverage)
+    "TV-WRC": "inc",            # NBC D.C.
+    "TV-WJLA": "inc",           # ABC D.C.
+    "TV-WUSA": "inc",           # CBS D.C.
+    "TV-WTTG": "inc",           # Fox D.C.
+    "TV-WETA": "inc",           # PBS D.C.
+    # New York flagship stations (national broadcast news)
+    "TV-WABC": "inc",
+    "TV-WNBC": "inc",
+    "TV-WCBS": "inc",
+    "TV-WNYW": "inc",           # Fox New York
+}
+
 
 def _strip_highlight_markers(text: str) -> str:
     """Remove {{{ }}} emphasis markers from highlight.text excerpts."""
@@ -45,7 +79,9 @@ def _build_filter_map(close_time: datetime | None) -> dict[str, Any]:
     """Build the filter_map for the archive.org TV search API.
 
     Scopes the search to the 60 days leading up to *close_time* (or today
-    if close_time is None/past), English-language news programs only.
+    if close_time is None/past).  Results are limited to the US collection
+    allowlist to avoid foreign state media (RT, PressTV) which dominate the
+    unfiltered index for recent content.
 
     Date format must be YYYY-MM (month-level) for range operators to work.
     """
@@ -59,7 +95,7 @@ def _build_filter_map(close_time: datetime | None) -> dict[str, Any]:
     return {
         "date": {start_str: "gte", end_str: "lte"},
         "language": {"English": "inc"},
-        "program": {"News": "inc"},
+        "collection": _US_COLLECTIONS,
     }
 
 

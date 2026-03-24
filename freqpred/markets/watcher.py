@@ -115,37 +115,26 @@ class MarketWatcher:
         stop appearing in the feed.  This sweep handles two cases:
 
         1. close_time has passed — normal resolution path.
-        2. Market is stale (not returned by list_markets() recently) AND has an open
-           position — Kalshi may have closed/cancelled it early, leaving our stored
-           close_time in the future.  Without this sweep those positions would be stuck.
+        2. Market is stale (not returned by list_markets() recently) — Kalshi may
+           have closed/cancelled it early.  Re-fetching gets the true current status
+           and drains the stale backlog over successive cycles.
 
         Returns the number of markets successfully updated.
         """
-        from sqlalchemy import and_, or_
-        from freqpred.markets.models import PositionRow
+        from sqlalchemy import or_
 
         now = datetime.now(UTC)
         stale_cutoff = now - timedelta(seconds=self._polling_interval * 3)
 
         async with self._session_factory() as session:
-            # Subquery: market_ids that have at least one open position.
-            open_position_market_ids = (
-                select(PositionRow.market_id)
-                .where(PositionRow.status == "open")
-                .scalar_subquery()
-            )
             result = await session.execute(
                 select(MarketRow.id).where(
                     MarketRow.status.notin_(["resolved", "finalized"]),
                     or_(
-                        # Normal path: close_time has passed — sweep all expired
-                        # markets regardless of age (no lookback limit).
+                        # Normal path: close_time has passed.
                         MarketRow.close_time <= now,
-                        # Early-close path: stale AND has an open position.
-                        and_(
-                            MarketRow.last_fetched_at < stale_cutoff,
-                            MarketRow.id.in_(open_position_market_ids),
-                        ),
+                        # Stale path: not returned by list_markets() recently.
+                        MarketRow.last_fetched_at < stale_cutoff,
                     ),
                 ).limit(_RESOLVED_SWEEP_BATCH)
             )
@@ -248,6 +237,7 @@ class MarketWatcher:
             select(MarketRow.id).where(
                 MarketRow.last_fetched_at < cutoff,
                 MarketRow.close_time > now,
+                MarketRow.status.notin_(["resolved", "finalized"]),
             )
         )
         return [row.id for row in result.all()]
