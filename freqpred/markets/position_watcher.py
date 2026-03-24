@@ -177,11 +177,13 @@ class PositionWatcher:
         elif msg_type == "ticker":
             inner = msg.get("msg", {})
             market_id = inner.get("market_ticker")
-            yes_bid_raw = inner.get("yes_bid_dollars")
-            yes_ask_raw = inner.get("yes_ask_dollars")
+            # Kalshi WebSocket v2 sends yes_bid/yes_ask as integer cents (0–100),
+            # not the yes_bid_dollars dollar-string used by the REST API.
+            yes_bid_raw = inner.get("yes_bid")
+            yes_ask_raw = inner.get("yes_ask")
             if market_id and yes_bid_raw is not None and yes_ask_raw is not None:
-                yes_bid = float(yes_bid_raw)
-                yes_ask = float(yes_ask_raw)
+                yes_bid = float(yes_bid_raw) / 100  # cents → dollars
+                yes_ask = float(yes_ask_raw) / 100  # cents → dollars
                 # Only process ticks for markets where we hold positions.
                 if market_id in self._subscribed:
                     await self._on_ticker_update(market_id, yes_bid, yes_ask)
