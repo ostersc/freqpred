@@ -182,6 +182,85 @@ async def test_position_monitor_called_on_tick() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _handle_message ticker parsing tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_message_ticker_parses_cents_to_dollars() -> None:
+    """Kalshi WS sends yes_bid/yes_ask as integer cents; _handle_message converts to dollars."""
+    watcher, _, _, _, _ = _make_watcher(open_market_ids={"MKT-1"})
+
+    calls: list[tuple[str, float, float]] = []
+
+    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float) -> None:
+        calls.append((market_id, yes_bid, yes_ask))
+
+    watcher._on_ticker_update = fake_on_ticker  # type: ignore[method-assign]
+
+    await watcher._handle_message({
+        "type": "ticker",
+        "msg": {
+            "market_ticker": "MKT-1",
+            "yes_bid": 62,   # 62 cents
+            "yes_ask": 66,   # 66 cents
+        },
+    })
+
+    assert len(calls) == 1
+    market_id, yes_bid, yes_ask = calls[0]
+    assert market_id == "MKT-1"
+    assert yes_bid == pytest.approx(0.62)
+    assert yes_ask == pytest.approx(0.66)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_ticker_ignores_old_dollars_field() -> None:
+    """Messages using the old yes_bid_dollars field name are silently ignored."""
+    watcher, _, _, _, _ = _make_watcher(open_market_ids={"MKT-1"})
+
+    calls: list[tuple] = []
+
+    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float) -> None:
+        calls.append((market_id, yes_bid, yes_ask))
+
+    watcher._on_ticker_update = fake_on_ticker  # type: ignore[method-assign]
+
+    # Message uses old field name that no longer exists in WS API
+    await watcher._handle_message({
+        "type": "ticker",
+        "msg": {
+            "market_ticker": "MKT-1",
+            "yes_bid_dollars": "0.6200",
+            "yes_ask_dollars": "0.6600",
+        },
+    })
+
+    # Should not trigger an update — wrong field names, real WS sends yes_bid/yes_ask
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_handle_message_ticker_skips_unsubscribed_market() -> None:
+    """Ticker for a market not in _subscribed is not forwarded to _on_ticker_update."""
+    watcher, _, _, _, _ = _make_watcher(open_market_ids={"MKT-OTHER"})
+
+    calls: list[tuple] = []
+
+    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float) -> None:
+        calls.append((market_id, yes_bid, yes_ask))
+
+    watcher._on_ticker_update = fake_on_ticker  # type: ignore[method-assign]
+
+    await watcher._handle_message({
+        "type": "ticker",
+        "msg": {"market_ticker": "MKT-1", "yes_bid": 62, "yes_ask": 66},
+    })
+
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
 # Reconnect backoff tests
 # ---------------------------------------------------------------------------
 
