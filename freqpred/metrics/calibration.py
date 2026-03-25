@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.markets.models import PositionRow
+from freqpred.markets.models import MarketRow
 from freqpred.signal.models import SignalRow
 
 
@@ -24,36 +25,45 @@ class CalibrationReport:
     brier_score: float
     market_brier_score: float   # market's own score: using mid price at signal time
     n_samples: int
+    lookback_days: int | None = None
     buckets: list[CalibrationBucket] = field(default_factory=list)
 
 
-async def compute_calibration(session: AsyncSession, mode: str = "paper") -> CalibrationReport:
+async def compute_calibration(
+    session: AsyncSession,
+    mode: str = "paper",  # kept for API compat; signals are mode-agnostic
+    lookback_days: int | None = None,
+) -> CalibrationReport:
+    """Compute Brier score over all signals for finalized markets.
+
+    Each signal is scored independently (per-signal, not per-market), so
+    multiple estimates for the same market all contribute — this measures
+    prediction quality at each point in time rather than one score per market.
+
+    Args:
+        session: Async DB session.
+        mode: Unused; kept for API compatibility with callers that pass mode.
+        lookback_days: Only include signals created within the last N days.
+                       None means all-time.
     """
-    Join signals → positions (closed only) and compute:
-    - Brier score: mean((estimated_prob - actual_outcome)^2)
-    - Naive baseline: mean((market_mid_at_signal - actual_outcome)^2)
-    - Calibration buckets: 10 equal-width bins over [0, 1]
-    Only positions matching *mode* are considered.
-    Requires at least 1 resolved position; returns CalibrationReport.
-    """
-    # Group by market so multiple positions in the same market (e.g. from the
-    # re-entry bug) count as one sample. estimated_probability and
-    # market_mid_at_signal are averaged across all positions for that market.
+    resolution_expr = case((MarketRow.result == "yes", 1), else_=0).label("resolution")
+
+    where_clauses: list = [
+        MarketRow.status == "finalized",
+        MarketRow.result.is_not(None),
+    ]
+    if lookback_days is not None:
+        cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+        where_clauses.append(SignalRow.created_at >= cutoff)
+
     stmt = (
         select(
-            func.avg(SignalRow.estimated_probability).label("avg_prob"),
-            func.avg(SignalRow.market_mid_at_signal).label("avg_mid"),
-            PositionRow.resolution,
+            SignalRow.estimated_probability,
+            SignalRow.market_mid_at_signal,
+            resolution_expr,
         )
-        .join(SignalRow, SignalRow.id == PositionRow.signal_id)
-        .where(
-            and_(
-                PositionRow.status == "closed",
-                PositionRow.resolution.is_not(None),
-                PositionRow.mode == mode,
-            )
-        )
-        .group_by(PositionRow.market_id, PositionRow.resolution)
+        .join(MarketRow, MarketRow.id == SignalRow.market_id)
+        .where(and_(*where_clauses))
     )
     result = await session.execute(stmt)
     rows = result.all()
@@ -64,6 +74,7 @@ async def compute_calibration(session: AsyncSession, mode: str = "paper") -> Cal
             brier_score=0.0,
             market_brier_score=0.0,
             n_samples=0,
+            lookback_days=lookback_days,
             buckets=_empty_buckets(),
         )
 
@@ -113,6 +124,7 @@ async def compute_calibration(session: AsyncSession, mode: str = "paper") -> Cal
         brier_score=brier_sum / n,
         market_brier_score=naive_sum / n,
         n_samples=n,
+        lookback_days=lookback_days,
         buckets=buckets,
     )
 

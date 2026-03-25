@@ -173,15 +173,31 @@ async def test_prob_exactly_one_goes_to_last_bucket() -> None:
 
 
 @pytest.mark.asyncio
-async def test_multiple_positions_same_market_averaged() -> None:
-    """SQL groups by market_id; the mock simulates that by returning one averaged
-    row. Verify that (0.8+0.6)/2=0.7 averaged against resolution=1 yields the
-    correct Brier score and n_samples=1, not 2."""
-    # The GROUP BY in production collapses these to one row: avg_prob=0.7, avg_mid=0.5
-    session = _make_session([(0.7, 0.5, 1)])
+async def test_two_signals_same_market_count_independently() -> None:
+    """Each signal is scored independently — two signals for the same market
+    produce n_samples=2, not 1."""
+    rows = [
+        (0.8, 0.5, 1),   # signal 1: (0.8 - 1)^2 = 0.04
+        (0.6, 0.5, 1),   # signal 2: (0.6 - 1)^2 = 0.16
+    ]
+    session = _make_session(rows)
     report = await compute_calibration(session, mode="paper")
 
-    # One market, one sample
-    assert report.n_samples == 1
-    # Brier = (0.7 - 1)^2 = 0.09
-    assert report.brier_score == pytest.approx(0.09, rel=1e-6)
+    assert report.n_samples == 2
+    assert report.brier_score == pytest.approx((0.04 + 0.16) / 2, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_lookback_days_stored_in_report() -> None:
+    """lookback_days is passed through and stored on the report."""
+    session = _make_session([(0.7, 0.5, 1)])
+    report = await compute_calibration(session, mode="paper", lookback_days=7)
+    assert report.lookback_days == 7
+
+
+@pytest.mark.asyncio
+async def test_no_lookback_stored_as_none() -> None:
+    """lookback_days=None (all-time) is stored on the report."""
+    session = _make_session([(0.7, 0.5, 1)])
+    report = await compute_calibration(session, mode="paper")
+    assert report.lookback_days is None
