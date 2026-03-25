@@ -85,32 +85,15 @@ Other categories (macro/Fed, geopolitics, sports) are supported by the architect
 
 ## 6. System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        freqpred                              │
-│                                                              │
-│  ┌──────────────┐   ┌──────────────┐   ┌─────────────────┐ │
-│  │  Market      │   │  Signal      │   │  Strategy       │ │
-│  │  Watcher     │──▶│  Pipeline    │──▶│  Engine         │ │
-│  │              │   │  (RAG+LLM)   │   │  (plugins)      │ │
-│  └──────┬───────┘   └──────────────┘   └────────┬────────┘ │
-│         │                                         │          │
-│         ▼                                         ▼          │
-│  ┌──────────────┐                       ┌─────────────────┐ │
-│  │  IMarketClient│                      │  Order Manager  │ │
-│  │  (Kalshi)    │◀──────────────────────│  (paper/live)   │ │
-│  └──────────────┘                       └────────┬────────┘ │
-│                                                   │          │
-│                                         ┌─────────▼────────┐ │
-│                                         │  Ledger + DB     │ │
-│                                         │  (RDS Postgres)  │ │
-│                                         └────────┬────────┘ │
-│                                                   │          │
-│                                         ┌─────────▼────────┐ │
-│                                         │  Dashboard +     │ │
-│                                         │  Alerts          │ │
-│                                         └──────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    MW[Market Watcher] --> SP[Signal Pipeline - RAG + LLM]
+    SP --> SE[Strategy Engine - plugins]
+    MW --> IMC[IMarketClient - Kalshi]
+    SE --> OM[Order Manager - paper / live]
+    OM -->|orders| IMC
+    OM --> L[Ledger + DB - RDS Postgres]
+    L --> DA[Dashboard + Alerts]
 ```
 
 ### Component Responsibilities
@@ -757,106 +740,30 @@ Runs on a schedule independent of signal generation. Fetches new content and sto
 
 Ingestion is **catalyst-driven**, not category-driven. Instead of broad keyword searches per category, the scheduler fetches news and social content targeted at the specific events and hypotheses that matter for each selected market.
 
-```
-Market Watcher upserts active markets into DB
-      │
-      ▼
-┌─────────────────┐
-│  Market         │  Reads all active markets from DB.
-│  Selector       │  Calls strategy.is_market_interesting(market)
-│                 │  on each registered strategy. Selects markets
-│                 │  where any strategy returns True.
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Catalyst       │  For each selected market:
-│  Generator      │  - First seen: LLM (Haiku) derives 3-5 search
-│                 │    queries from market question + metadata.
-│                 │  - Daily re-run: same, but also pulls recent docs
-│                 │    from RAG (what has been found so far) so the
-│                 │    LLM can refine or add catalysts.
-│                 │  Writes CatalystRun + CatalystQuery rows to DB.
-│                 │  Logs to llm_queries (query_type=catalyst_generation).
-│                 │  Deactivates catalysts for closed/unselected markets.
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Ingestion      │  Reads latest active CatalystQuery rows from DB.
-│  Scheduler      │  For each query: runs Tavily + NewsAPI + Reddit
-│  (every 30 min) │  + GDELT + TV Archive (tv_query). Tracks backoff
-│                 │  per fetcher in Postgres. One failure ≠ abort.
-└────────┬────────┘
-         │
-         │  (parallel fast path)
-         │
-┌─────────────────┐
-│  Realtime       │  Bulk-pulls TV chyrons (Third Eye API, ?last=1)
-│  Scheduler      │  and Truth Social account feeds; filters chyrons
-│  (every 5 min)  │  by market tv_query AND-groups; deduplicates via
-│                 │  fetcher_cursors. Backoff isolated per scheduler.
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Dedup &        │  Check source_url against Document store.
-│  Store          │  Skip if URL known + content_hash unchanged.
-│                 │  New/changed docs: clean, generate embedding
-│                 │  (sentence-transformers), insert into Document store.
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Social         │  For Reddit posts only: cheap LLM pass (Haiku)
-│  Pre-summarizer │  compresses raw posts into structured sentiment
-│  (if social)    │  summary before storing.
-└─────────────────┘
+```mermaid
+flowchart TD
+    DB([Market Watcher upserts active markets into DB])
+    DB --> MS[Market Selector]
+    MS --> CG[Catalyst Generator - LLM Haiku]
+    CG --> IS[Ingestion Scheduler - every 30 min]
+    CG --> RS[Realtime Scheduler - every 5 min]
+    IS --> DS[Dedup and Store]
+    RS --> DS
+    DS --> SS[Social Pre-summarizer - Reddit only]
 ```
 
 ### Phase 2: Signal Analysis (triggered)
 
 Runs when a signal refresh trigger fires (scheduled, price moved, new evidence, manual). This is where the expensive LLM call happens.
 
-```
-Signal trigger fires for a market
-      │
-      ▼
-┌─────────────────┐
-│  Hybrid Search  │  Embed the market question (sentence-transformers).
-│  (RAG retrieval)│  Searches only documents pre-linked to this market
-│                 │  (written at ingestion time by the scheduler).
-│                 │  Two independent passes, then merged:
-│                 │  1. Cosine similarity (pgvector) — top-K by vector
-│                 │  2. BM25 full-text (ts_rank) — all linked docs
-│                 │  Final score = 0.7 * cosine + 0.3 * bm25 (normalised)
-│                 │  Select: top-K by blended score (default K=10)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Retrieval Hash │  Hash the IDs of top-K retrieved documents.
-│  Check          │  If hash == last Signal's retrieval_hash:
-│                 │  no new evidence → skip, no LLM call needed.
-└────────┬────────┘
-         │ (hash changed — new evidence exists)
-         ▼
-┌─────────────────┐
-│  LLM Analysis   │  Structured prompt with retrieved docs as context.
-│  (Claude Sonnet)│  Asks for:
-│                 │  - Probability estimate (0.0-1.0)
-│                 │  - Confidence score (0.0-1.0)
-│                 │  - Key supporting evidence (with doc citations)
-│                 │  - Key counter-evidence
-│                 │  - Reasoning summary
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Signal         │  Validate output, compute edge vs market price,
-│  Creation       │  write Signal + DocumentMarketLinks, update
-│                 │  Market.current_signal_id.
-└─────────────────┘
+```mermaid
+flowchart TD
+    T([Signal trigger fires for a market])
+    T --> HS[Hybrid Search - RAG retrieval]
+    HS --> RH{Retrieval Hash Check}
+    RH -->|no new evidence| SKIP([Skip - no LLM call])
+    RH -->|hash changed| LLM[LLM Analysis - Claude Sonnet]
+    LLM --> SC[Signal Creation]
 ```
 
 ### Retrieval Sources
@@ -930,25 +837,12 @@ Signal trigger fires for a market
 
 Social content is noisier than structured news and requires preprocessing before it reaches the LLM:
 
-```
-Raw posts (Reddit/Twitter)
-         │
-         ▼
-┌─────────────────┐
-│  Aggregator     │  Filter by recency, upvotes/engagement,
-│                 │  deduplicate, remove low-signal content
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Pre-summarizer │  Lightweight LLM pass to compress 50 posts
-│  (cheap model)  │  into a structured sentiment summary:
-│                 │  {sentiment, key_claims, notable_threads}
-└────────┬────────┘
-         │
-         ▼
-  Included as one context block in main LLM analysis
-  (alongside news articles and Kalshi metadata)
+```mermaid
+flowchart TD
+    RP([Raw posts - Reddit / Twitter])
+    RP --> AGG[Aggregator]
+    AGG --> PS[Pre-summarizer - Haiku]
+    PS --> CTX([One context block in main LLM analysis])
 ```
 
 This two-pass approach keeps social signal cost-efficient: a cheap summarization pass (haiku/mini) collapses noisy social data before it hits the primary reasoning model. The main LLM sees a structured social summary, not raw posts.

@@ -231,6 +231,12 @@ Before declaring any task complete, verify every acceptance criterion listed in 
 
 ---
 
+## Diagrams
+
+Always use Mermaid diagrams instead of ASCII art. Wrap them in ` ```mermaid ` fences. Keep node labels concise — `\n` does not work in Mermaid; use plain text labels and let surrounding prose carry the detail. Never draw boxes with `┌─┐│└┘` characters. This applies to SPEC.md, GitHub issues, and any other documentation.
+
+---
+
 ## Code style
 
 - Type hints everywhere — no untyped functions
