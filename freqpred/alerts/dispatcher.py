@@ -75,3 +75,12 @@ class AlertDispatcher:
 
     async def digest_alert(self, digest_text: str) -> None:
         await self.send(digest_text)
+
+    async def startup_alert(self, strategy_name: str, mode: str, run_state: str) -> None:
+        msg = f"freqpred started | strategy={strategy_name} | mode={mode} | state={run_state}"
+        if run_state != "running":
+            msg += (
+                f"\n*** WARNING: run_state='{run_state}' — "
+                "signal loop is INACTIVE. Use /start to resume. ***"
+            )
+        await self.send(msg)

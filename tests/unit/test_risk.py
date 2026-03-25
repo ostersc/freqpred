@@ -294,6 +294,36 @@ async def test_circuit_breaker_silent_when_within_limits() -> None:
     await engine.check_circuit_breakers(session, bankroll=BANKROLL, mode="live")
 
 
+@pytest.mark.asyncio
+async def test_circuit_breaker_reset_clears_drawdown() -> None:
+    """After a reset, losses before drawdown_reset_at are excluded from the query.
+    The session mock returns all_pnl=0.0 (simulating only post-reset positions),
+    so drawdown should be 0% even though historical losses were large."""
+    engine = RiskEngine(_make_config())
+    reset_at = datetime(2026, 3, 25, 0, 0, 0, tzinfo=timezone.utc)
+    # Post-reset P&L is 0 (no closed positions since reset)
+    session = _make_circuit_session(daily_pnl=0.0, all_pnl=0.0)
+
+    # Should NOT raise — drawdown since reset is 0%
+    await engine.check_circuit_breakers(
+        session, bankroll=1300.0, mode="paper", drawdown_reset_at=reset_at
+    )
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_still_fires_if_losses_since_reset_exceed_limit() -> None:
+    """If losses since the reset still breach the limit, the CB still fires."""
+    engine = RiskEngine(_make_config())
+    reset_at = datetime(2026, 3, 25, 0, 0, 0, tzinfo=timezone.utc)
+    # 700 loss since reset: ATH = 1300 + 700 = 2000; drawdown = 35% > 30%
+    session = _make_circuit_session(daily_pnl=0.0, all_pnl=-700.0)
+
+    with pytest.raises(TradingCircuitBreakerError, match="drawdown"):
+        await engine.check_circuit_breakers(
+            session, bankroll=1300.0, mode="paper", drawdown_reset_at=reset_at
+        )
+
+
 # ---------------------------------------------------------------------------
 # stoploss re-entry guard tests
 # ---------------------------------------------------------------------------

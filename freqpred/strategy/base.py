@@ -35,8 +35,8 @@ class IPredictionStrategy(ABC):
                 return signal.edge >= self.config.min_edge
 
             def position_size(self, signal, bankroll):
-                kelly = signal.edge / (1 - signal.estimated_probability)
-                return bankroll * kelly * self.config.kelly_fraction
+                # Uses the default confidence-blended Kelly sizing from IPredictionStrategy.
+                return super().position_size(signal, bankroll)
     """
 
     config: StrategyConfig
@@ -46,10 +46,35 @@ class IPredictionStrategy(ABC):
         """Return True if this signal warrants opening a position."""
         ...
 
-    @abstractmethod
     def position_size(self, signal: Signal, bankroll: float) -> float:
-        """Return dollar amount to risk on this position."""
-        ...
+        """Confidence-blended Kelly sizing, capped at max_exposure_per_market.
+
+        Uses the correct Kelly formula for binary prediction market contracts:
+            B     = (1 - p_market) / p_market   # net payout odds
+            p_adj = confidence * p_est + (1 - confidence) * p_market
+            f*    = (B * p_adj - (1 - p_adj)) / B
+
+        p_market is recovered from the signal fields:
+            YES: p_market = estimated_probability - edge
+            NO:  p_market = 1 - (estimated_probability + edge)
+
+        Override for custom sizing logic.
+        """
+        if signal.direction == "NO":
+            p_market = 1.0 - (signal.estimated_probability + signal.edge)
+            p_est = 1.0 - signal.estimated_probability
+        else:
+            p_market = signal.estimated_probability - signal.edge
+            p_est = signal.estimated_probability
+        b = (1.0 - p_market) / p_market
+        p_adj = signal.confidence * p_est + (1.0 - signal.confidence) * p_market
+        f_star = (b * p_adj - (1.0 - p_adj)) / b
+        if f_star <= 0.0:
+            return 0.0
+        # max_exposure_per_market is the per-market budget; Kelly scales within it.
+        # Max possible position = kelly_fraction × max_exposure × bankroll.
+        market_budget = bankroll * self.config.max_exposure_per_market
+        return f_star * self.config.kelly_fraction * market_budget
 
     def is_market_interesting(self, market: Market) -> bool:
         """Return True if this strategy wants the ingestion pipeline to monitor this market.

@@ -289,18 +289,32 @@ async def test_count_returns_open_and_max():
 @pytest.mark.asyncio
 async def test_status_no_open_positions():
     session_factory, session = _async_session_ctx()
-    result_mock = MagicMock()
-    result_mock.all = MagicMock(return_value=[])
-    session.execute = AsyncMock(return_value=result_mock)
+
+    # execute() calls in order:
+    # 1. get_run_state → scalar_one_or_none() → None (defaults to "running")
+    # 2. get_drawdown_reset_at → scalar_one_or_none() → None (no reset)
+    # 3. drawdown P&L query → scalar_one() → 0.0
+    # 4. open positions query → all() → []
+    run_state_mock = MagicMock()
+    run_state_mock.scalar_one_or_none.return_value = None
+    reset_at_mock = MagicMock()
+    reset_at_mock.scalar_one_or_none.return_value = None
+    pnl_mock = MagicMock()
+    pnl_mock.scalar_one.return_value = 0.0
+    positions_mock = MagicMock()
+    positions_mock.all.return_value = []
+    session.execute = AsyncMock(side_effect=[run_state_mock, reset_at_mock, pnl_mock, positions_mock])
 
     cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
     register_system_commands(cmd_handler, session_factory, MagicMock(
+        trading=MagicMock(bankroll_usd=1000.0),
         risk=MagicMock(min_edge_floor=0.1, max_position_pct=0.05,
                        max_daily_llm_spend_usd=10.0, max_open_positions=20)
     ), mode="paper", strategy_name="Test")
 
     reply = await cmd_handler._handlers["status"](42, [])
     assert "No open positions" in reply
+    assert "drawdown=" in reply
 
 
 # ---------------------------------------------------------------------------

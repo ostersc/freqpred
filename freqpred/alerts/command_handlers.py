@@ -29,7 +29,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.alerts.run_state import get_run_state, set_run_state
+from freqpred.alerts.run_state import get_run_state, reset_drawdown, set_run_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Awaitable
@@ -143,6 +143,19 @@ def register_system_commands(
             await set_run_state(session, "stopped")
         log.info("telegram.stop", chat_id=chat_id)
         return "Run loop stopped. Signal analysis halted. Use /start to resume."
+
+    # ------------------------------------------------------------------ #
+    # /reset_drawdown — reset drawdown circuit breaker start date          #
+    # ------------------------------------------------------------------ #
+
+    async def handle_reset_drawdown(chat_id: int, args: list[str]) -> str:
+        async with session_factory() as session:
+            reset_at = await reset_drawdown(session)
+        log.info("telegram.reset_drawdown", chat_id=chat_id, reset_at=reset_at.isoformat())
+        return (
+            f"Drawdown circuit breaker reset. "
+            f"Drawdown will now be calculated from {reset_at.strftime('%Y-%m-%d %H:%M UTC')} forward."
+        )
 
     # ------------------------------------------------------------------ #
     # /show_config                                                          #
@@ -260,7 +273,28 @@ def register_system_commands(
             return "\n".join(lines)
 
         # List all open positions
+        from sqlalchemy import func as _func  # noqa: PLC0415
+        from freqpred.alerts.run_state import get_drawdown_reset_at  # noqa: PLC0415
+
         async with session_factory() as session:
+            current_state = await get_run_state(session)
+            reset_at = await get_drawdown_reset_at(session)
+
+            # Drawdown calculation (mirrors check_circuit_breakers)
+            drawdown_where = [
+                PositionRow.status == "closed",
+                PositionRow.mode == mode,
+            ]
+            if reset_at is not None:
+                drawdown_where.append(PositionRow.exit_time >= reset_at)
+            pnl_result = await session.execute(
+                select(_func.sum(PositionRow.pnl)).where(*drawdown_where)
+            )
+            pnl_since_reset: float = pnl_result.scalar_one() or 0.0
+            bankroll = config.trading.bankroll_usd
+            ath = bankroll + max(0.0, -pnl_since_reset)
+            drawdown_pct = (ath - bankroll) / ath * 100 if ath > 0 else 0.0
+
             result = await session.execute(
                 select(PositionRow, MarketRow.question, MarketRow.mid_price)
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
@@ -269,10 +303,19 @@ def register_system_commands(
             )
             rows = result.all()
 
-        if not rows:
-            return "No open positions."
+        reset_label = f" (since {reset_at.strftime('%m-%d %H:%M')})" if reset_at else " (all-time)"
+        drawdown_str = f"drawdown={drawdown_pct:.1f}%{reset_label}"
+        if drawdown_pct >= 30.0:
+            drawdown_str += " *** CIRCUIT BREAKER ACTIVE ***"
 
-        lines = ["Open positions:"]
+        state_line = f"state={current_state} | strategy={strategy_name} | mode={mode} | {drawdown_str}"
+        if current_state != "running":
+            state_line += f"\n*** signal loop is {current_state.upper()} — use /start to resume ***"
+
+        if not rows:
+            return f"{state_line}\nNo open positions."
+
+        lines = [state_line, "Open positions:"]
         total_unrealized = 0.0
         for pos, question, mid in rows:
             q = _truncate(question, 60)
@@ -403,6 +446,7 @@ def register_system_commands(
     cmd_handler.register("start", handle_start)
     cmd_handler.register("pause", handle_pause)
     cmd_handler.register("stop", handle_stop)
+    cmd_handler.register("reset_drawdown", handle_reset_drawdown)
     cmd_handler.register("show_config", handle_show_config)
     cmd_handler.register("logs", handle_logs)
     cmd_handler.register("version", handle_version)

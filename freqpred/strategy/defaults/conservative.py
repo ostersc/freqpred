@@ -26,7 +26,7 @@ class ConservativeDefault(IPredictionStrategy):
         name="ConservativeDefault",
         min_edge=0.12,
         min_confidence=0.80,
-        max_exposure_per_market=0.02,
+        max_exposure_per_market=0.133,  # kelly_fraction × 0.133 ≈ 2% of bankroll max
         kelly_fraction=0.15,
         categories=["technology"],
         min_volume_24h=500.0,
@@ -45,9 +45,3 @@ class ConservativeDefault(IPredictionStrategy):
             and signal.confidence >= self.config.min_confidence
         )
 
-    def position_size(self, signal: Signal, bankroll: float) -> float:
-        """Kelly-fractional sizing, capped at max_exposure_per_market."""
-        kelly = signal.edge / (1 - signal.estimated_probability)
-        raw = bankroll * kelly * self.config.kelly_fraction
-        cap = bankroll * self.config.max_exposure_per_market
-        return min(raw, cap)

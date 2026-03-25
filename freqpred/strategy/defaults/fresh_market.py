@@ -55,6 +55,3 @@ class FreshMarketStrategy(IPredictionStrategy):
             and signal.confidence >= self.config.min_confidence
         )
 
-    def position_size(self, signal: Signal, bankroll: float) -> float:
-        kelly = signal.edge / (1 - signal.estimated_probability)
-        return bankroll * kelly * self.config.kelly_fraction

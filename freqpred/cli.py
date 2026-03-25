@@ -286,7 +286,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
 
                 if run_state == "stopped":
                     log.debug("signal_loop.skipped", reason="stopped")
-                    await asyncio.sleep(config.signal.interval_seconds)
+                    await asyncio.sleep(10)  # poll frequently so /start is picked up quickly
                     continue
 
                 async with session_factory() as session:
@@ -357,8 +357,11 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 if order_manager is not None:
                     try:
                         async with session_factory() as cb_session:
+                            from freqpred.alerts.run_state import get_drawdown_reset_at  # noqa: PLC0415
+                            _reset_at = await get_drawdown_reset_at(cb_session)
                             await order_manager._risk.check_circuit_breakers(
-                                cb_session, order_manager._bankroll, mode=order_manager._mode
+                                cb_session, order_manager._bankroll, mode=order_manager._mode,
+                                drawdown_reset_at=_reset_at,
                             )
                     except TradingCircuitBreakerError as exc:
                         log.warning("signal_loop.circuit_breaker_fired", reason=str(exc))
@@ -531,6 +534,16 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 name="digest_scheduler",
             )
         )
+
+        async with session_factory() as _startup_session:
+            _startup_state = await get_run_state(_startup_session)
+        if _startup_state != "running":
+            click.echo(
+                f"\n*** WARNING: run_state='{_startup_state}' — "
+                "signal loop is INACTIVE. Use /start on Telegram to resume. ***\n",
+                err=True,
+            )
+        await alert_dispatcher.startup_alert(strategy_name, mode, _startup_state)
 
         click.echo(f"Running {len(tasks)} task(s). Press Ctrl+C to stop.")
         try:

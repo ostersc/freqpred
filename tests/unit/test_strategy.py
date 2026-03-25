@@ -20,7 +20,7 @@ from freqpred.strategy.loader import load_strategy
 # Helpers
 # ---------------------------------------------------------------------------
 
-NOW = datetime(2026, 3, 17, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime.now(tz=timezone.utc)
 
 
 def _market(
@@ -121,48 +121,50 @@ class TestConservativeDefaultShouldTrade:
 
 
 # ---------------------------------------------------------------------------
-# ConservativeDefault — position_size Kelly math + cap
+# ConservativeDefault — position_size Kelly math
 # ---------------------------------------------------------------------------
 
 class TestConservativeDefaultPositionSize:
     strategy = ConservativeDefault()
 
     def test_basic_kelly_sizing(self) -> None:
-        # edge=0.20, estimated_prob=0.60 → kelly = 0.20 / 0.40 = 0.50
-        # raw = 1000 * 0.50 * 0.15 = 75.0
-        # cap = 1000 * 0.02 = 20.0 → capped at 20.0
+        # edge=0.20, prob=0.60, conf=0.85 (default)
+        # p_market=0.40, b=1.5, p_adj=0.85*0.60+0.15*0.40=0.57
+        # f*=(1.5*0.57 - 0.43)/1.5 = 0.2833
+        # result = f* × kelly_fraction × market_budget
         sig = _signal(edge=0.20, estimated_probability=0.60)
         result = self.strategy.position_size(sig, bankroll=1000.0)
-        assert result == pytest.approx(20.0)
+        market_budget = 1000.0 * self.strategy.config.max_exposure_per_market
+        expected = pytest.approx(0.2833 * self.strategy.config.kelly_fraction * market_budget, rel=1e-3)
+        assert result == expected
 
-    def test_capped_at_max_exposure(self) -> None:
-        # Very high edge/prob → raw Kelly would exceed 2% cap
-        sig = _signal(edge=0.40, estimated_probability=0.80)
-        result = self.strategy.position_size(sig, bankroll=10_000.0)
-        cap = 10_000.0 * 0.02
-        assert result <= cap
-
-    def test_not_capped_when_small_edge(self) -> None:
-        # edge=0.13, estimated_prob=0.50 → kelly = 0.13 / 0.50 = 0.26
-        # raw = 1000 * 0.26 * 0.15 = 39.0; cap = 20.0 → capped
-        sig = _signal(edge=0.13, estimated_probability=0.50)
-        result = self.strategy.position_size(sig, bankroll=1000.0)
-        assert result == pytest.approx(
-            min(1000.0 * (0.13 / 0.50) * 0.15, 1000.0 * 0.02)
-        )
-
-    def test_never_exceeds_cap_for_any_signal(self) -> None:
+    def test_never_exceeds_max_position(self) -> None:
+        # Max possible = kelly_fraction × max_exposure × bankroll (f* is bounded by 1)
         bankroll = 5000.0
-        cap = bankroll * 0.02
+        max_pos = bankroll * self.strategy.config.kelly_fraction * self.strategy.config.max_exposure_per_market
         for edge, prob in [(0.12, 0.55), (0.30, 0.70), (0.50, 0.90)]:
             sig = _signal(edge=edge, estimated_probability=prob)
-            assert self.strategy.position_size(sig, bankroll) <= cap + 1e-9
+            assert self.strategy.position_size(sig, bankroll) <= max_pos + 1e-9
+
+    def test_confidence_scales_position(self) -> None:
+        # Higher confidence → larger p_adj → larger f* → larger position
+        sig_high = _signal(edge=0.05, estimated_probability=0.40, confidence=0.85)
+        sig_low  = _signal(edge=0.05, estimated_probability=0.40, confidence=0.50)
+        r_high = self.strategy.position_size(sig_high, bankroll=1000.0)
+        r_low  = self.strategy.position_size(sig_low,  bankroll=1000.0)
+        assert r_high > r_low
 
     def test_scales_with_bankroll(self) -> None:
         sig = _signal(edge=0.13, estimated_probability=0.55)
         r1 = self.strategy.position_size(sig, bankroll=1000.0)
         r2 = self.strategy.position_size(sig, bankroll=2000.0)
         assert r2 == pytest.approx(r1 * 2, rel=1e-6)
+
+    def test_returns_zero_when_no_edge_after_confidence_blend(self) -> None:
+        # At zero confidence p_adj == p_market → f* == 0
+        sig = _signal(edge=0.20, estimated_probability=0.60, confidence=0.0)
+        result = self.strategy.position_size(sig, bankroll=1000.0)
+        assert result == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

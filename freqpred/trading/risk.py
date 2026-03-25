@@ -215,6 +215,7 @@ class RiskEngine:
         session: AsyncSession,
         bankroll: float,
         mode: str,
+        drawdown_reset_at: "datetime | None" = None,
     ) -> None:
         """Query current state and raise TradingCircuitBreakerError if:
         - daily loss > config.max_daily_loss_pct * bankroll
@@ -244,12 +245,15 @@ class RiskEngine:
             raise TradingCircuitBreakerError(msg)
 
         # Drawdown circuit breaker
-        # ATH approximation: current bankroll + absolute value of total losses ever.
+        # ATH approximation: bankroll + losses since the last reset (or all-time if no reset).
+        drawdown_where = [
+            PositionRow.status == "closed",
+            PositionRow.mode == mode,
+        ]
+        if drawdown_reset_at is not None:
+            drawdown_where.append(PositionRow.exit_time >= drawdown_reset_at)
         all_pnl_result = await session.execute(
-            select(func.sum(PositionRow.pnl)).where(
-                PositionRow.status == "closed",
-                PositionRow.mode == mode,
-            )
+            select(func.sum(PositionRow.pnl)).where(*drawdown_where)
         )
         all_pnl: float = all_pnl_result.scalar_one() or 0.0
         ath_bankroll = bankroll + max(0.0, -all_pnl)

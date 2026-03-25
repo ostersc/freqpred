@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-03-24
+**Last updated:** 2026-03-25
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -574,9 +574,8 @@ class IPredictionStrategy(ABC):
             def should_trade(self, signal: Signal, market: Market) -> bool:
                 return signal.edge >= self.config.min_edge
 
-            def position_size(self, signal: Signal, bankroll: float) -> float:
-                kelly = signal.edge / (1 - signal.estimated_probability)
-                return bankroll * kelly * self.config.kelly_fraction
+            # position_size uses the default confidence-blended Kelly from IPredictionStrategy.
+            # Override only if custom sizing logic is needed.
 
             def should_exit(self, position: Position, signal: Signal, market: Market) -> bool:
                 # Signal-driven exit: LLM now disagrees with the position direction
@@ -896,14 +895,23 @@ If `data_quality` is `"low"` (insufficient news context), the signal is discarde
 
 ### Position Sizing
 
-Default: **fractional Kelly criterion**
+Default: **confidence-blended Kelly criterion** (`IPredictionStrategy.position_size`)
 
 ```
-kelly_fraction = edge / (1 - p_win)
-position_size = bankroll × kelly_fraction × config.kelly_multiplier
+p_market = mid-price at signal time (recovered from signal fields)
+B        = (1 - p_market) / p_market          # net payout odds
+p_adj    = confidence × p_est + (1 - confidence) × p_market
+f*       = (B × p_adj - (1 - p_adj)) / B      # Kelly fraction
+
+market_budget = max_exposure_per_market × bankroll
+position_size = f* × kelly_fraction × market_budget
 ```
 
-Where `config.kelly_multiplier` defaults to `0.25` (quarter-Kelly). Full Kelly is mathematically optimal but practically too aggressive; quarter-Kelly is standard for new strategies without long track records.
+Key design properties:
+- `max_exposure_per_market` is the **per-market budget** — Kelly scales within it, not against the full bankroll. Maximum possible position = `kelly_fraction × max_exposure_per_market × bankroll`.
+- `confidence` blends the LLM estimate toward the market price. At confidence = 0 the edge collapses to zero and no position is taken. At confidence = 1 the raw estimate is used directly.
+- `kelly_fraction` controls overall aggression (quarter-Kelly = 0.25 is default). Lowering it shrinks all positions proportionally.
+- If `f* ≤ 0` (no edge after confidence blending), `position_size` returns 0.
 
 ### Circuit Breakers
 

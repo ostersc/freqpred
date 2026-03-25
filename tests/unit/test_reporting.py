@@ -70,14 +70,18 @@ def _make_session(
     session = AsyncMock()
 
     # execute() calls in order:
-    # 1. open positions (count, exposure) → .one()
-    # 2. unrealized P&L rows → .all()
-    # 3. session pnl (scalar) → .scalar_one()
-    # 4. exit reason breakdown → .all()
-    # 5. yesterday llm spend (scalar) → .scalar_one()
-    # 6. LLM errors count (scalar) → .scalar_one()
-    # 7. fetcher backoff rows → .all()
+    # 1. get_run_state → .scalar_one_or_none()
+    # 2. open positions (count, exposure) → .one()
+    # 3. unrealized P&L rows → .all()
+    # 4. session pnl (scalar) → .scalar_one()
+    # 5. exit reason breakdown → .all()
+    # 6. yesterday llm spend (scalar) → .scalar_one()
+    # 7. LLM errors count (scalar) → .scalar_one()
+    # 8. fetcher backoff rows → .all()
     # (calibration and today_llm_spend are patched separately)
+
+    run_state_result = MagicMock()
+    run_state_result.scalar_one_or_none.return_value = None  # defaults to "running"
 
     open_result = MagicMock()
     open_result.one.return_value = (open_count, total_exposure)
@@ -101,7 +105,7 @@ def _make_session(
     backoff_result.all.return_value = backed_off_services
 
     session.execute = AsyncMock(
-        side_effect=[open_result, unrealized_result, pnl_result, exits_result, llm_spend_result, llm_errors_result, backoff_result]
+        side_effect=[run_state_result, open_result, unrealized_result, pnl_result, exits_result, llm_spend_result, llm_errors_result, backoff_result]
     )
     return session
 

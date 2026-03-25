@@ -90,6 +90,3 @@ class AlgoExampleStrategy(IAlgoStrategy):
             and signal.confidence >= self.config.min_confidence
         )
 
-    def position_size(self, signal: "Signal", bankroll: float) -> float:
-        kelly = signal.edge / (1.0 - signal.estimated_probability)
-        return bankroll * kelly * self.config.kelly_fraction

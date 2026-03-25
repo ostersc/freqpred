@@ -45,12 +45,12 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
 
     config = StrategyConfig(
         name="PoliticsEdgeStrategy",
-        min_edge=0.18,
+        min_edge=0.15,
         min_confidence=0.60,
-        max_exposure_per_market=0.05,
+        max_exposure_per_market=0.20,
         kelly_fraction=0.25,
         categories=["politics"],
-        min_volume_24h=1000.0,
+        min_volume_24h=100.0,
         max_days_to_close=90,
         min_days_to_close=0.25,
         stoploss=-0.30,
@@ -93,6 +93,3 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
             and signal.confidence >= self.config.min_confidence
         )
 
-    def position_size(self, signal: "Signal", bankroll: float) -> float:
-        kelly = signal.edge / (1 - signal.estimated_probability)
-        return bankroll * kelly * self.config.kelly_fraction

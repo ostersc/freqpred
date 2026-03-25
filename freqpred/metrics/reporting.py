@@ -44,6 +44,10 @@ async def generate_daily_digest(
     )
     yesterday_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
+    # --- Run state ---
+    from freqpred.alerts.run_state import get_run_state  # noqa: PLC0415
+    run_state = await get_run_state(session)
+
     # --- Open positions + unrealized P&L + excursion metrics ---
     open_result = await session.execute(
         select(
@@ -187,8 +191,12 @@ async def generate_daily_digest(
     )
 
     mode_label = trading_mode.upper()
+    run_state_note = (
+        f"{run_state} (INACTIVE — signal analysis halted)" if run_state != "running" else run_state
+    )
     prompt = (
         f"Daily digest as of {now.strftime('%Y-%m-%d %H:%M UTC')} [mode: {mode_label}]:\n"
+        f"- System run state: {run_state_note}\n"
         f"- Trading mode: {mode_label} ({'real money' if trading_mode == 'live' else 'simulated / no real money'})\n"
         f"- Open positions: {open_count} with ${total_exposure:.2f} gross exposure, "
         f"${net_exposure:+.2f} net exposure, ${unrealized_pnl:+.2f} unrealized P&L\n"
