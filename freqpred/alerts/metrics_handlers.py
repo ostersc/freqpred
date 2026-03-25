@@ -545,8 +545,15 @@ def register_metrics_commands(
     # ------------------------------------------------------------------ #
 
     async def handle_calibration(chat_id: int, args: list[str]) -> str:
+        lookback_days: int | None = None
+        if args:
+            try:
+                lookback_days = int(args[0])
+            except ValueError:
+                return f"Invalid days argument: {args[0]!r} — usage: /calibration [days]"
+
         async with session_factory() as session:
-            report = await compute_calibration(session, mode=mode)
+            report = await compute_calibration(session, mode=mode, lookback_days=lookback_days)
 
         if report.n_samples == 0:
             return "No resolved positions yet — calibration unavailable."
@@ -554,9 +561,10 @@ def register_metrics_commands(
         improvement = report.market_brier_score - report.brier_score
         direction = "better" if improvement > 0 else "worse"
 
+        period = f"last {lookback_days}d" if lookback_days is not None else "all-time"
         header_lines = [
             f"Brier score : {report.brier_score:.3f}  "
-            f"(market baseline: {report.market_brier_score:.3f})",
+            f"(market baseline: {report.market_brier_score:.3f})  [{period}]",
             f"Improvement : {improvement:+.3f} ({direction})",
             f"Samples     : {report.n_samples}",
         ]

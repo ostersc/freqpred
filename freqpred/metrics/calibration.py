@@ -51,6 +51,8 @@ async def compute_calibration(
     where_clauses: list = [
         MarketRow.status == "finalized",
         MarketRow.result.is_not(None),
+        SignalRow.model_used != "demo_harness",
+        SignalRow.prompt_version != "demo",
     ]
     if lookback_days is not None:
         cutoff = datetime.now(UTC) - timedelta(days=lookback_days)

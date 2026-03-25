@@ -201,3 +201,32 @@ async def test_no_lookback_stored_as_none() -> None:
     session = _make_session([(0.7, 0.5, 1)])
     report = await compute_calibration(session, mode="paper")
     assert report.lookback_days is None
+
+
+@pytest.mark.asyncio
+async def test_demo_harness_signals_excluded_from_query() -> None:
+    """SQL query excludes demo_harness signals (model_used or prompt_version)."""
+    captured_stmt = None
+
+    async def _capture(stmt: object, *args: object, **kwargs: object) -> MagicMock:
+        nonlocal captured_stmt
+        captured_stmt = stmt
+        result = MagicMock()
+        result.all.return_value = []
+        return result
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_capture)
+    await compute_calibration(session)
+
+    assert captured_stmt is not None
+    from sqlalchemy.dialects import postgresql
+
+    sql = str(
+        captured_stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "demo_harness" in sql
+    assert "'demo'" in sql

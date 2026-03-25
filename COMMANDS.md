@@ -209,7 +209,7 @@ State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a 
 | `/stats` | All-time aggregate stats: total trades, P&L, win rate, best/worst trade, avg hold duration, breakdown by exit reason |
 | `/balance` | Portfolio snapshot: bankroll, all-time P&L, net value, gross/net exposure, unrealized P&L, today's P&L, open position count, contract-weighted portfolio MAE/MFE |
 | `/budget` | LLM cost breakdown: today vs daily cap (%), per-query-type breakdown, this week, this month, all-time |
-| `/calibration` | Brier score vs naive baseline, improvement, sample count, per-probability-bucket breakdown |
+| `/calibration [days]` | Brier score vs market baseline, improvement, sample count, per-probability-bucket breakdown. Optional `days` arg limits to last N days (e.g. `/calibration 30`); omit for all-time. |
 | `/digest` | On-demand daily digest: Claude Haiku natural-language summary of open positions, P&L, LLM spend, and calibration |
 
 Tabular responses use monospace code blocks. Rows are truncated at 4096 chars with `... and N more` footer.
