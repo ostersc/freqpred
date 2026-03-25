@@ -351,21 +351,33 @@ class KalshiClient(IMarketClient):
         return self._to_market(data)
 
     async def get_market_from_settled(self, market_id: str) -> Market | None:
-        """Look up a market via the settled (status=settled) list endpoint.
+        """Look up a single market via the settled list endpoint.
 
         Kalshi's GET /markets/{ticker} returns 404 for markets that have been
         purged from the live API after finalization.  The settled list endpoint
         retains them and supports filtering by ``tickers=``.  Returns None if
         the market is not found in the settled list.
         """
+        results = await self.get_markets_from_settled([market_id])
+        return results[0] if results else None
+
+    async def get_markets_from_settled(self, market_ids: list[str]) -> list[Market]:
+        """Batch-fetch up to 200 markets from the settled list endpoint.
+
+        Pass multiple tickers as a comma-separated string.  Returns only the
+        markets that were found; silently skips any that are absent.
+        """
+        if not market_ids:
+            return []
         try:
-            data = await self._get("/markets", params={"status": "settled", "tickers": market_id, "limit": 1})
+            data = await self._get("/markets", params={
+                "status": "settled",
+                "tickers": ",".join(market_ids),
+                "limit": len(market_ids),
+            })
         except KalshiAPIError:
-            return None
-        markets = data.get("markets", [])
-        if not markets:
-            return None
-        return self._to_market(markets[0])
+            return []
+        return [self._to_market(m) for m in data.get("markets", [])]
 
     async def get_orderbook(self, market_id: str) -> dict[str, float]:
         """Return best bid/ask from the Kalshi orderbook.

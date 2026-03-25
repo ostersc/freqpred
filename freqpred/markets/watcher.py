@@ -219,43 +219,61 @@ class MarketWatcher:
             return 0
 
         async with self._session_factory() as session:
+            # Scope to markets we've generated at least one signal for —
+            # these are the only markets calibration cares about.  The DB
+            # can hold 90k+ finalized bracket markets we've never analyzed;
+            # fetching results for those wastes API quota with no benefit.
+            from freqpred.signal.models import SignalRow  # noqa: PLC0415
             rows = await session.execute(
-                select(MarketRow.id).where(
+                select(MarketRow.id)
+                .join(SignalRow, SignalRow.market_id == MarketRow.id)
+                .where(
                     MarketRow.status == "finalized",
                     MarketRow.result.is_(None),
                 )
+                .distinct()
             )
             market_ids = [r.id for r in rows.all()]
 
         if not market_ids:
             return 0
 
+        _BATCH = 100
         resolved = 0
-        for market_id in market_ids:
-            market = await self._client.get_market_from_settled(market_id)
-            if market is None or market.result is None:
-                continue
+        for i in range(0, len(market_ids), _BATCH):
+            batch = market_ids[i : i + _BATCH]
+            markets = await self._client.get_markets_from_settled(batch)
 
-            resolution = 1 if market.result == "yes" else 0
-            async with self._session_factory() as session:
-                await upsert_markets(session, [market])
-                await session.execute(
-                    update(PositionRow)
-                    .where(
-                        PositionRow.market_id == market_id,
-                        PositionRow.status == "closed",
-                        PositionRow.resolution.is_(None),
+            if markets:
+                markets_to_upsert = []
+                for market in markets:
+                    if market.result is None:
+                        continue
+                    resolution = 1 if market.result == "yes" else 0
+                    markets_to_upsert.append(market)
+                    async with self._session_factory() as session:
+                        await upsert_markets(session, [market])
+                        await session.execute(
+                            update(PositionRow)
+                            .where(
+                                PositionRow.market_id == market.id,
+                                PositionRow.status == "closed",
+                                PositionRow.resolution.is_(None),
+                            )
+                            .values(resolution=resolution)
+                        )
+                        await session.commit()
+                    log.info(
+                        "market_watcher.missing_result_resolved",
+                        market_id=market.id,
+                        result=market.result,
+                        resolution=resolution,
                     )
-                    .values(resolution=resolution)
-                )
-                await session.commit()
-            log.info(
-                "market_watcher.missing_result_resolved",
-                market_id=market_id,
-                result=market.result,
-                resolution=resolution,
-            )
-            resolved += 1
+                    resolved += 1
+
+            # Brief pause between batches to stay well within rate limits.
+            if i + _BATCH < len(market_ids):
+                await asyncio.sleep(0.5)
 
         if resolved:
             log.info("market_watcher.missing_results_sweep", resolved=resolved)
