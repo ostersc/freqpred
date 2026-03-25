@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-03-19
+**Last updated:** 2026-03-24
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -362,6 +362,25 @@ class StrategyConfig:
     trailing_stop_positive_offset: float = 0.02
     # Tight trail applied once trailing_stop_positive is crossed.
     # e.g. 0.02 = trail 2% below the peak price once in profit.
+
+    # --- Price range filter ---
+    min_mid_price: float | None = 0.05
+    max_mid_price: float | None = 0.95
+    # Skip markets whose current mid_price is outside this range.
+    # Markets priced below 0.05 or above 0.95 are effectively decided by the
+    # market — the LLM has no edge and generating signals on them produces noise.
+    # Applied in is_market_interesting() so it gates both ingestion and signal
+    # generation. Set either bound to None to disable that side of the filter.
+
+    # --- Stoploss re-entry guards ---
+    block_reentry_after_stoploss: bool = False
+    # If True, permanently block re-entry into any market that has ever had a
+    # stoploss or trailing_stop exit. Takes precedence over stoploss_cooldown_hours.
+
+    stoploss_cooldown_hours: float = 4.0
+    # Block re-entry into a market for this many hours after a stoploss or
+    # trailing_stop exit. Set to 0.0 to disable. Ignored if
+    # block_reentry_after_stoploss is True.
 ```
 
 ### Document (RAG Store)
@@ -431,7 +450,7 @@ class CatalystQuery:
 **Lifecycle rules:**
 - A `CatalystRun` is created when a market is first selected (generation=1) and then daily (generation increments).
 - On each new run, the previous run's `is_active` flag is left as-is; only the latest run is used for scheduling.
-- `CatalystRun.is_active` is set to `False` when: (a) the market's `close_time` has passed, or (b) all registered strategies return `False` from `is_market_interesting()` for that market.
+- `CatalystRun.is_active` is set to `False` when: (a) the market's `close_time` has passed, or (b) all registered strategies return `False` from `is_market_interesting()` for that market AND the market has no open positions. Markets with open positions are protected from deactivation so the ingestion pipeline continues supplying fresh context for exit decisions.
 - Ingestion scheduler query: `SELECT cq.query_text, cq.tv_query FROM catalyst_queries cq JOIN catalyst_runs cr ON cr.id = cq.run_id WHERE cr.is_active = TRUE AND cr.id IN (SELECT MAX(id)... per market)`.
 
 **Catalyst generation context (LLM prompt inputs):**
@@ -655,8 +674,18 @@ class IPredictionStrategy(ABC):
         marked inactive and ingestion stops.
 
         Default implementation applies StrategyConfig filters (category,
-        volume, days-to-close). Override for custom market selection logic.
+        volume, days-to-close, and mid_price range). Override for custom
+        market selection logic.
+
+        Note: markets with open positions are NEVER deactivated by the Market
+        Selector or excluded from signal analysis, regardless of whether
+        is_market_interesting() returns False. The price filter and other
+        filters only govern entry into new markets.
         """
+        if self.config.min_mid_price is not None and market.mid_price < self.config.min_mid_price:
+            return False
+        if self.config.max_mid_price is not None and market.mid_price > self.config.max_mid_price:
+            return False
         days_to_close = (market.close_time - datetime.utcnow()).days
         return (
             market.category in self.config.categories
@@ -1030,7 +1059,7 @@ Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
 1. **Signal Feed** — live stream of new signals with market question, our probability, market price, edge, direction
 2. **Open Positions** — current paper/live positions with unrealized P&L, filterable by strategy
 3. **Ledger** — resolved positions, actual P&L, running totals, filterable by strategy/confidence tier
-4. **Calibration** — scatter plot of estimated probability vs. resolution rate; Brier score trend
+4. **Calibration** — scatter plot of estimated probability vs. resolution rate; Brier score trend. Brier score is computed per-signal (each signal scores independently against the final market result) across all analyzed markets — not just traded ones. Supports lookback windows (daily, weekly, monthly, all-time) to track calibration drift. Baseline comparison is `market_brier_score` (market mid-price at signal time vs. outcome).
 5. **LLM Cost & Audit** — daily/weekly spend charts, cost by query type and strategy, query log with full prompt/response drilldown, budget burn rate vs. daily cap
 6. **Strategy Config** — view/edit active strategy parameters (no code changes needed for threshold tuning)
 7. **System Health** — API status, error rates, circuit breaker state, LLM budget circuit breaker status
@@ -1169,8 +1198,8 @@ telegram:
 **Done when:** 100+ markets resolved or exited with logged signals. Calibration score measured. Exit behavior observable from ledger. Decision made: is the signal real?
 
 **Go/no-go criteria for Phase 3:**
-- Brier score < 0.20 (better than naive baseline)
-- Positive calibration: 60-70% estimated → 60-70% resolution rate
+- Brier score < `market_brier_score` (beat the market's own calibration)
+- Positive calibration: 60-70% estimated → 60-70% resolution rate (measured per-signal across all analyzed markets, not just traded ones)
 - Positive simulated ROI over 100+ trades
 
 ---

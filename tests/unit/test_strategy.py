@@ -27,6 +27,7 @@ def _market(
     category: str = "politics",
     volume_24h: float = 1000.0,
     days_to_close: int = 14,
+    mid_price: float = 0.42,
 ) -> Market:
     return Market(
         id=str(uuid.uuid4()),
@@ -34,9 +35,9 @@ def _market(
         question="Will X happen?",
         category=category,
         close_time=NOW + timedelta(days=days_to_close),
-        yes_bid=0.40,
-        yes_ask=0.44,
-        mid_price=0.42,
+        yes_bid=mid_price - 0.02,
+        yes_ask=mid_price + 0.02,
+        mid_price=mid_price,
         volume_24h=volume_24h,
         open_interest=500.0,
         last_fetched_at=NOW,
@@ -202,6 +203,52 @@ class TestIsMarketInteresting:
     def test_passes_within_days_window(self) -> None:
         assert self.strategy.is_market_interesting(_market(category="technology", days_to_close=10))
         assert self.strategy.is_market_interesting(_market(category="technology", days_to_close=30))
+
+    def test_rejects_below_min_mid_price(self) -> None:
+        assert not self.strategy.is_market_interesting(
+            _market(category="technology", mid_price=0.03)
+        )
+
+    def test_rejects_above_max_mid_price(self) -> None:
+        assert not self.strategy.is_market_interesting(
+            _market(category="technology", mid_price=0.97)
+        )
+
+    def test_passes_at_min_mid_price_boundary(self) -> None:
+        assert self.strategy.is_market_interesting(
+            _market(category="technology", mid_price=0.05)
+        )
+
+    def test_passes_at_max_mid_price_boundary(self) -> None:
+        assert self.strategy.is_market_interesting(
+            _market(category="technology", mid_price=0.95)
+        )
+
+    def test_mid_price_filter_disabled_when_none(self) -> None:
+        from freqpred.strategy.config import StrategyConfig
+
+        class NoFilter(IPredictionStrategy):
+            config = StrategyConfig(
+                name="NoFilter",
+                min_edge=0.10,
+                min_confidence=0.70,
+                max_exposure_per_market=0.05,
+                kelly_fraction=0.25,
+                categories=["technology"],
+                min_volume_24h=0.0,
+                max_days_to_close=90,
+                min_days_to_close=0,
+                min_mid_price=None,
+                max_mid_price=None,
+            )
+            def should_trade(self, signal, market):  # type: ignore[override]
+                return True
+            def position_size(self, signal, bankroll):  # type: ignore[override]
+                return 0.0
+
+        strat = NoFilter()
+        assert strat.is_market_interesting(_market(category="technology", mid_price=0.01))
+        assert strat.is_market_interesting(_market(category="technology", mid_price=0.99))
 
     def test_category_filtered_strategy_rejects_wrong_category(self) -> None:
         from freqpred.strategy.config import StrategyConfig

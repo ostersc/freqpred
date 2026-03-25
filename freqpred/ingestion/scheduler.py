@@ -39,7 +39,7 @@ from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.ingestion.quota import current_window, get_window_count, increment_window_count
 from freqpred.ingestion.store import DocumentSkipped, link_document_to_market, upsert_document
-from freqpred.markets.models import Market, MarketRow
+from freqpred.markets.models import Market, MarketRow, PositionRow
 from freqpred.rag.embedder import LocalEmbedder
 
 if TYPE_CHECKING:
@@ -439,8 +439,15 @@ async def _ensure_catalysts(
 
     selected = select_markets(all_markets, [strategy])
 
+    # Protect markets with open positions from catalyst deactivation even if
+    # they no longer pass is_market_interesting (e.g. price drifted to extreme).
+    open_pos_result = await session.execute(
+        select(PositionRow.market_id).where(PositionRow.status == "open").distinct()
+    )
+    open_market_ids: set[str] = {r.market_id for r in open_pos_result.all()}
+
     # Deactivate catalysts for markets that are no longer interesting.
-    await deactivate_stale_catalysts(session, [strategy])
+    await deactivate_stale_catalysts(session, [strategy], open_market_ids)
 
     if not selected:
         return 0

@@ -62,6 +62,10 @@ class IPredictionStrategy(ABC):
         """
         now = datetime.now(tz=timezone.utc)
         days_to_close = (market.close_time - now).total_seconds() / 86400
+        if self.config.min_mid_price is not None and market.mid_price < self.config.min_mid_price:
+            return False
+        if self.config.max_mid_price is not None and market.mid_price > self.config.max_mid_price:
+            return False
         return (
             (not self.config.categories or market.category in self.config.categories)
             and market.volume_24h >= self.config.min_volume_24h

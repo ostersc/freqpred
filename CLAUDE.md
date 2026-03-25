@@ -181,6 +181,18 @@ When asked "what's next", "what should we work on", or told to start the next ta
 - If scope changes during implementation, update both the issue body and SPEC.md before proceeding
 - When adding a new Phase 3 task: add a checkbox entry to the Phase 3 list in SPEC.md (with issue link), create the issue, then implement
 
+### Keeping SPEC.md current
+**Update SPEC.md immediately whenever any of the following change:**
+- `StrategyConfig` fields (add, remove, rename, change default, change semantics)
+- `IPredictionStrategy` interface methods (signatures, defaults, contracts)
+- Core pipeline behaviour (market selection, ingestion, signal generation, exit priority)
+- Data model fields on `Market`, `Signal`, `Position`, `Document`, `CatalystRun`, or `LLMQuery`
+- Risk rules, circuit breakers, or hard caps
+- Calibration methodology (what is scored, how, against what baseline)
+- Any invariant documented in §7–§10 of SPEC.md
+
+This applies to **ad-hoc improvements** (outside of formal tasks) just as much as to tracked tasks. If code changes but SPEC.md doesn't, the spec becomes fiction. Update the `Last updated` date at the top of SPEC.md on every edit.
+
 ### Completing a task
 When all acceptance criteria are met and tests pass, in this order:
 1. **Summarize** what was implemented (files changed, key design decisions) and list the manual validation steps from the issue's acceptance criteria that require runtime verification (e.g. "run with --mode live and observe X"). Present this to the user and wait for them to confirm manual validation is done before proceeding.

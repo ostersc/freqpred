@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.ingestion.models import CatalystQuery, CatalystQueryRow, CatalystRun, CatalystRunRow
 from freqpred.llm.client import LLMClient, LLMError
-from freqpred.markets.models import Market, MarketRow
+from freqpred.markets.models import Market, MarketRow, PositionRow
 from freqpred.rag.models import Document
 
 log = structlog.get_logger(__name__)
@@ -180,6 +180,13 @@ async def run_catalyst_refresh(
 
     selected = select_markets(markets, strategies)
 
+    # Protect markets with open positions from catalyst deactivation even if
+    # they no longer pass is_market_interesting (e.g. price drifted to extreme).
+    open_pos_result = await session.execute(
+        select(PositionRow.market_id).where(PositionRow.status == "open").distinct()
+    )
+    open_market_ids: set[str] = {r.market_id for r in open_pos_result.all()}
+
     generated = 0
     skipped = 0
 
@@ -204,7 +211,7 @@ async def run_catalyst_refresh(
                 exc_info=True,
             )
 
-    deactivated = await deactivate_stale_catalysts(session, strategies)
+    deactivated = await deactivate_stale_catalysts(session, strategies, open_market_ids)
 
     log.info(
         "catalyst_generator.refresh_complete",

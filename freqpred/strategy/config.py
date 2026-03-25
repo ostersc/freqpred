@@ -27,6 +27,12 @@ class StrategyConfig:
     trailing_stop_positive: float | None = None      # switch to tight trail at this profit %
     trailing_stop_positive_offset: float = 0.02      # tight trail distance once profitable
 
+    # Price range filter: skip markets the market has already decided.
+    # Markets trading below min_mid_price or above max_mid_price are excluded
+    # from ingestion and signal generation. None = no filter on that bound.
+    min_mid_price: float | None = 0.05
+    max_mid_price: float | None = 0.95
+
     # Re-entry guards after a stoploss or trailing_stop exit.
     # block_reentry_after_stoploss takes precedence: if True, the market is
     # permanently blocked from re-entry once any stoploss/trailing_stop has fired,

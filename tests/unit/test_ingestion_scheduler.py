@@ -69,17 +69,20 @@ def _make_strategy(interested: bool = True) -> MagicMock:
 
 
 def _make_session(market_rows: list, catalyst_rows: list) -> AsyncMock:
-    """Build a mock session that returns market_rows on the first execute
-    and catalyst_rows (latest-run query) on the second execute."""
+    """Build a mock session that returns market_rows on the first execute,
+    an empty open-positions result on the second, and catalyst_rows on the third."""
     session = AsyncMock()
 
     markets_result = MagicMock()
     markets_result.scalars.return_value.all.return_value = market_rows
 
+    open_positions_result = MagicMock()
+    open_positions_result.all.return_value = []  # no open positions by default
+
     catalysts_result = MagicMock()
     catalysts_result.all.return_value = catalyst_rows
 
-    session.execute.side_effect = [markets_result, catalysts_result]
+    session.execute.side_effect = [markets_result, open_positions_result, catalysts_result]
     return session
 
 
@@ -119,6 +122,7 @@ class TestEnsureCatalysts:
         session = AsyncMock()
         session.execute.side_effect = [
             MagicMock(**{"scalars.return_value.all.return_value": [market_row]}),
+            MagicMock(**{"all.return_value": []}),  # open positions
             MagicMock(**{"all.return_value": [fresh_run]}),
         ]
 
@@ -148,6 +152,7 @@ class TestEnsureCatalysts:
         session = AsyncMock()
         session.execute.side_effect = [
             MagicMock(**{"scalars.return_value.all.return_value": [market_row]}),
+            MagicMock(**{"all.return_value": []}),  # open positions
             MagicMock(**{"all.return_value": [stale_run]}),
         ]
 
@@ -231,7 +236,8 @@ class TestEnsureCatalysts:
         session = AsyncMock()
         session.execute.side_effect = [
             MagicMock(**{"scalars.return_value.all.return_value": market_rows}),
-            MagicMock(**{"all.return_value": []}),
+            MagicMock(**{"all.return_value": []}),  # open positions
+            MagicMock(**{"all.return_value": []}),  # catalyst runs
         ]
 
         strategy = _make_strategy(interested=True)

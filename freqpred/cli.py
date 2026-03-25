@@ -324,7 +324,33 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 ]
 
                 interesting = strategy.filter_markets(markets)
-                log.info("signal_loop.cycle", total_markets=len(markets), selected=len(interesting))
+
+                # Always re-analyze markets with open positions even if they
+                # no longer pass filter_markets (e.g. price drifted outside
+                # the min/max mid_price window). Signal-driven exits must
+                # still fire for existing positions.
+                from freqpred.markets.models import PositionRow  # noqa: PLC0415
+                async with session_factory() as pos_session:
+                    open_pos_result = await pos_session.execute(
+                        select(PositionRow.market_id).where(
+                            PositionRow.status == "open",
+                            PositionRow.mode == mode,
+                        ).distinct()
+                    )
+                    open_market_ids = {row.market_id for row in open_pos_result.all()}
+
+                interesting_ids = {m.id for m in interesting}
+                market_by_id = {m.id: m for m in markets}
+                for mid in open_market_ids:
+                    if mid not in interesting_ids and mid in market_by_id:
+                        interesting.append(market_by_id[mid])
+
+                log.info(
+                    "signal_loop.cycle",
+                    total_markets=len(markets),
+                    selected=len(interesting),
+                    open_position_markets=len(open_market_ids - interesting_ids),
+                )
 
                 # Circuit breaker check at the top of each cycle
                 circuit_breaker_active = False
@@ -1103,14 +1129,29 @@ def metrics() -> None:
 
 
 @metrics.command(name="calibration")
+@click.option("--days", type=int, default=None, help="Lookback window in days (e.g. 7, 30). Default: all time.")
+@click.option(
+    "--period",
+    type=click.Choice(["day", "week", "month"]),
+    default=None,
+    help="Convenience alias: day=1, week=7, month=30. Mutually exclusive with --days.",
+)
 @click.pass_context
-def metrics_calibration(ctx: click.Context) -> None:
-    """Print Brier score, market baseline, and calibration buckets."""
+def metrics_calibration(ctx: click.Context, days: int | None, period: str | None) -> None:
+    """Print Brier score, market baseline, and calibration buckets.
+
+    Scores every signal against the final market result — not just traded markets.
+    Use --days or --period to filter by when the signal was generated.
+    """
+    if days is not None and period is not None:
+        raise click.UsageError("--days and --period are mutually exclusive.")
+    _period_map = {"day": 1, "week": 7, "month": 30}
+    lookback_days = days if days is not None else (_period_map[period] if period else None)
     config = ctx.obj["config"]
-    asyncio.run(_metrics_calibration(config))
+    asyncio.run(_metrics_calibration(config, lookback_days=lookback_days))
 
 
-async def _metrics_calibration(config: object) -> None:
+async def _metrics_calibration(config: object, lookback_days: int | None = None) -> None:
     import freqpred.signal.models  # noqa: F401
     import freqpred.rag.models     # noqa: F401
 
@@ -1126,19 +1167,20 @@ async def _metrics_calibration(config: object) -> None:
 
     try:
         async with session_factory() as session:
-            report = await compute_calibration(session)
+            report = await compute_calibration(session, lookback_days=lookback_days)
     finally:
         await engine.dispose()
 
+    period_label = f"last {report.lookback_days}d" if report.lookback_days else "all time"
     if report.n_samples == 0:
-        click.echo("No resolved positions yet.")
+        click.echo(f"No resolved signals yet ({period_label}).")
         return
 
     improvement = report.market_brier_score - report.brier_score
     direction = "better" if improvement > 0 else "worse"
+    click.echo(f"Period: {period_label}  |  Signals scored: {report.n_samples}")
     click.echo(f"Brier Score:     {report.brier_score:.3f}  (market baseline: {report.market_brier_score:.3f})")
     click.echo(f"Improvement vs market: {improvement:+.3f} ({direction})")
-    click.echo(f"Samples: {report.n_samples}")
     click.echo("")
     header = f"{'Probability Bucket':<22} {'Count':>6} {'Mean Est.':>10} {'Resolution Rate':>16}"
     click.echo(header)

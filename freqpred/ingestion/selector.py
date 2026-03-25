@@ -62,6 +62,7 @@ def select_markets(
 async def deactivate_stale_catalysts(
     session: AsyncSession,
     strategies: list[StrategyProtocol],
+    protected_market_ids: set[str] | frozenset[str] = frozenset(),
 ) -> int:
     """Deactivate catalyst runs for markets that are closed or no longer selected.
 
@@ -69,12 +70,17 @@ async def deactivate_stale_catalysts(
     - The market's close_time has passed (market resolved), OR
     - All registered strategies return False from is_market_interesting()
 
+    Markets in ``protected_market_ids`` are never deactivated — use this to
+    keep catalysts alive for markets with open positions even if they no longer
+    pass the strategy's price/day filters.
+
     Only the latest run per market is checked and potentially deactivated.
     Earlier runs are left as historical records.
 
     Args:
-        session:    Open async session (caller manages commit).
-        strategies: Registered strategy instances.
+        session:              Open async session (caller manages commit).
+        strategies:           Registered strategy instances.
+        protected_market_ids: Market IDs that must not be deactivated.
 
     Returns:
         Number of runs deactivated.
@@ -113,8 +119,9 @@ async def deactivate_stale_catalysts(
 
         closed = market.close_time <= now
         no_interest = not any(s.is_market_interesting(market) for s in strategies)
+        protected = market.id in protected_market_ids
 
-        if closed or no_interest:
+        if (closed or no_interest) and not protected:
             run_row.is_active = False
             session.add(run_row)
             deactivated += 1
