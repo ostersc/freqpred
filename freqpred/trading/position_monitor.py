@@ -164,8 +164,11 @@ class PositionMonitor:
                 fresh_signal=fresh_signal,
             )
             if result is None:
-                # No exit — update peak price tracker (trailing stop) + MAE/MFE
-                self._update_peak(position, current_price)
+                # No exit — update peak price tracker (trailing stop) + MAE/MFE.
+                # _update_peak needs the effective price from the position's perspective
+                # (1 - YES_mid for NO positions); _update_excursions handles this itself.
+                effective_price = 1.0 - current_price if position.direction == "NO" else current_price
+                self._update_peak(position, effective_price)
                 await self._update_excursions(position, current_price)
                 continue
 
@@ -239,11 +242,16 @@ class PositionMonitor:
         Pure function — no I/O. Separated for unit-testability.
         """
         config = strategy.config
+        # Convert YES mid-price to the effective price from the position's perspective.
+        # For NO positions the contract value is (1 - YES_mid), not YES_mid directly.
+        # All exit checks and returned exit_price must use this effective price so that
+        # P&L calculations and stoploss thresholds are direction-aware.
+        effective_price = 1.0 - current_price if position.direction == "NO" else current_price
         peak_price = self._peak_prices.get(position.id, position.entry_price)
         now = datetime.now(tz=timezone.utc)
 
         # 1. Hard stoploss (framework-enforced)
-        result = _check_stoploss(position, current_price, config.stoploss)
+        result = _check_stoploss(position, effective_price, config.stoploss)
         if result:
             return result
 
@@ -251,7 +259,7 @@ class PositionMonitor:
         if config.trailing_stop:
             result = _check_trailing_stop(
                 position,
-                current_price,
+                effective_price,
                 peak_price,
                 config.stoploss,
                 config.trailing_stop_positive,
@@ -261,29 +269,29 @@ class PositionMonitor:
                 return result
 
         # 3. Minimal ROI
-        result = _check_roi(position, current_price, now, config.minimal_roi)
+        result = _check_roi(position, effective_price, now, config.minimal_roi)
         if result:
             return result
 
         # 4. Force exit (signal-independent — strategy's own initiative)
         tag = strategy.force_exit(position, market)
         if tag is not None:
-            return (f"force_exit:{tag}", current_price)
+            return (f"force_exit:{tag}", effective_price)
 
         # 5. Custom exit hook (signal-informed)
         if fresh_signal is not None:
             tag = strategy.custom_exit(position, fresh_signal, market)
             if tag is not None:
-                return (f"custom_exit:{tag}", current_price)
+                return (f"custom_exit:{tag}", effective_price)
 
         # 6. Signal exit (only when a fresh signal is provided)
         if fresh_signal is not None:
             if strategy.should_exit(position, fresh_signal, market):
-                return ("signal", current_price)
+                return ("signal", effective_price)
 
-        # 6. Market resolution — Kalshi status is "finalized"/"resolved" OR close_time has passed
+        # 7. Market resolution — Kalshi status is "finalized"/"resolved" OR close_time has passed
         if market.status in ("finalized", "resolved") or market.close_time <= now:
-            return ("market_resolved", current_price)
+            return ("market_resolved", effective_price)
 
         return _NO_EXIT
 

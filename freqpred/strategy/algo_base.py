@@ -70,8 +70,10 @@ class IAlgoStrategy(IPredictionStrategy):
     def __init__(self) -> None:
         # raw tick buffer: one _Tick per WebSocket tick, per market
         self._ticks: dict[str, list[_Tick]] = {}
-        # candle cache: None = invalidated; pd.DataFrame = cached result
-        self._candle_cache: dict[str, pd.DataFrame | None] = {}
+        # candle cache keyed by (market_id, direction).
+        # YES and NO positions receive direction-corrected candles so they must be
+        # cached separately — a NO position's DataFrame has inverted OHLC.
+        self._candle_cache: dict[tuple[str, str], pd.DataFrame | None] = {}
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -103,8 +105,9 @@ class IAlgoStrategy(IPredictionStrategy):
         if market_id not in self._ticks:
             self._ticks[market_id] = []
         self._ticks[market_id].append(tick)
-        # Invalidate cached candles so force_exit recomputes on next call.
-        self._candle_cache[market_id] = None
+        # Invalidate cached candles for both directions so force_exit recomputes.
+        self._candle_cache[(market_id, "YES")] = None
+        self._candle_cache[(market_id, "NO")] = None
 
     # ------------------------------------------------------------------
     # force_exit override
@@ -120,13 +123,20 @@ class IAlgoStrategy(IPredictionStrategy):
         - ``populate_exit_trend`` raises (logs a warning, exception swallowed)
         """
         market_id = market.id
-        cached = self._candle_cache.get(market_id)
+        direction = position.direction
+        cache_key = (market_id, direction)
+        cached = self._candle_cache.get(cache_key)
 
         if cached is None:
             # Cache is invalidated — recompute from raw tick buffer.
             df = self._resample(market_id)
             if df is None or len(df) < self.min_candles:
                 return None
+            # Correct OHLC to the position's perspective so that indicators
+            # always see "contract value" — rising = profitable.  For NO
+            # positions the contract value is (1 - YES_price), so we invert.
+            if direction == "NO":
+                df = _invert_ohlc(df)
             try:
                 df = self.populate_indicators(df, {"market_id": market_id})
                 df = self.populate_exit_trend(df, {"market_id": market_id})
@@ -142,7 +152,7 @@ class IAlgoStrategy(IPredictionStrategy):
                     market_id=market_id,
                 )
                 return None
-            self._candle_cache[market_id] = df
+            self._candle_cache[cache_key] = df
             cached = df
 
         if bool(cached["exit_long"].iloc[-1]):
@@ -214,6 +224,32 @@ class IAlgoStrategy(IPredictionStrategy):
         self._ticks[market_id] = [t for t in ticks if _ts_gte(t.ts, cutoff)]
 
         return result
+
+
+# ---------------------------------------------------------------------------
+# OHLC direction helper
+# ---------------------------------------------------------------------------
+
+
+def _invert_ohlc(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Return a copy of *df* with OHLC columns flipped to the NO-contract perspective.
+
+    In a binary market ``no_price = 1 - yes_price``.  The high/low columns
+    swap because when YES is at its low, NO is at its high and vice versa::
+
+        no_open  = 1 - yes_open
+        no_close = 1 - yes_close
+        no_high  = 1 - yes_low
+        no_low   = 1 - yes_high
+
+    Non-OHLC columns (volume, spread, yes_bid, yes_ask) are left unchanged.
+    """
+    result = df.copy()
+    result["open"] = 1.0 - df["open"]
+    result["close"] = 1.0 - df["close"]
+    result["high"] = 1.0 - df["low"]
+    result["low"] = 1.0 - df["high"]
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -234,7 +234,10 @@ class Signal:
     # --- Estimate ---
     estimated_probability: float     # LLM's estimate (0.0-1.0)
     confidence: float                # LLM self-reported confidence (0.0-1.0)
-    edge: float                      # estimated_probability - market.mid_price at signal time
+    edge: float                      # direction-adjusted edge at signal time:
+                                     #   YES: estimated_probability - market.mid_price
+                                     #   NO:  market.mid_price - estimated_probability
+                                     # (positive = we believe the contract is underpriced)
     market_mid_at_signal: float      # snapshot of market price when signal was created
     direction: str                   # "YES" | "NO" | "SKIP"
 
@@ -322,6 +325,11 @@ class StrategyConfig:
     # Trigger exit when position loses this fraction from entry price.
     # e.g. -0.20 = exit if unrealized loss exceeds 20%.
     # Enforced by the position monitor on every price poll — strategy cannot override.
+    # All stoploss/trailing/ROI thresholds operate on the *effective contract price*:
+    #   YES positions: effective_price = market.mid_price
+    #   NO  positions: effective_price = 1.0 - market.mid_price
+    # The position monitor converts automatically — strategy configs use the same
+    # threshold values regardless of direction.
 
     minimal_roi: dict[str, float] = field(default_factory=lambda: {"0": 0.30, "1440": 0.15, "10080": 0.05})
     # Time-based profit targets. Key = minutes since entry, value = required profit fraction.
@@ -332,19 +340,21 @@ class StrategyConfig:
     #   - exit at 5% profit after 1 week (10080 min)
     # Prediction markets move slowly — use hour/day-scale values, not minute-scale.
     # Set to {} to disable.
+    # P&L % is computed against the effective contract price (see stoploss note above).
 
     trailing_stop: bool = False
-    # If True, stoploss trails from the best mid-price achieved since entry
+    # If True, stoploss trails from the best effective contract price achieved since entry
     # (i.e. the stop floor rises as the position profits, locking in gains).
+    # Peak tracking uses the same direction-corrected effective price as stoploss.
 
     trailing_stop_positive: float | None = None
     # Once unrealized P&L crosses this threshold (e.g. 0.10 = 10% profit),
     # switch to a tighter trailing stop equal to trailing_stop_positive_offset
-    # below the peak price. Encourages letting winners run while protecting profit.
+    # below the peak effective price. Encourages letting winners run while protecting profit.
 
     trailing_stop_positive_offset: float = 0.02
     # Tight trail applied once trailing_stop_positive is crossed.
-    # e.g. 0.02 = trail 2% below the peak price once in profit.
+    # e.g. 0.02 = trail 2% below the peak effective price once in profit.
 
     # --- Price range filter ---
     min_mid_price: float | None = 0.05
@@ -1124,7 +1134,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [ ] **T45** [#45](https://github.com/ostersc/freqpred/issues/45) — Circuit breaker hardening: drawdown breaker implementation; all four breakers verified; Telegram alert format; incident runbook. Depends on: T36.
 - [ ] **T47** [#47](https://github.com/ostersc/freqpred/issues/47) — `OrderTypes` config + limit order entry: `OrderTypes` dataclass on `StrategyConfig`; `custom_entry_price()` hook; entry at `estimated_prob - min_edge`; pending position fill-check + timeout cancellation; paper mode only.
 - [ ] **T48** [#48](https://github.com/ostersc/freqpred/issues/48) — Limit order exits + exchange-hosted stoploss: `exit=limit` posts resting ROI/trailing targets; `custom_exit_price()` hook; `stoploss_on_exchange` with interval refresh; emergency/circuit-breaker always market. Depends on: T47.
-- [x] **T49** [#49](https://github.com/ostersc/freqpred/issues/49) — `IAlgoStrategy`: DataFrame-driven exits via WebSocket tick data; freqtrade-style `populate_indicators()` + `populate_exit_trend()` hooks; OHLC candle buffer per market; `force_exit()` reads `exit_long` column; `PositionMonitor.on_tick()` feeds ticks to algo strategy buffers. Depends on: T39.
+- [x] **T49** [#49](https://github.com/ostersc/freqpred/issues/49) — `IAlgoStrategy`: DataFrame-driven exits via WebSocket tick data; freqtrade-style `populate_indicators()` + `populate_exit_trend()` hooks; OHLC candle buffer per market; `force_exit()` reads `exit_long` column; `PositionMonitor.on_tick()` feeds ticks to algo strategy buffers. OHLC is direction-corrected before being passed to `populate_indicators`/`populate_exit_trend`: NO positions receive inverted candles (`no_high = 1 - yes_low`, `no_low = 1 - yes_high`) so that indicator logic (RSI, EMA crossovers, etc.) operates on contract value from the holder's perspective. Candle cache is keyed by `(market_id, direction)` so YES and NO positions maintain independent OHLC series. Depends on: T39.
 - [ ] **T50** [#50](https://github.com/ostersc/freqpred/issues/50) — LLM-assisted exit analysis: `should_request_llm_exit()` predicate + `llm_exit_check()` async hook on `IAlgoStrategy`; PositionMonitor calls LLM when predicate fires; prompt includes candle metrics + P&L; response logged to `llm_queries`. Depends on: T49.
 - [x] **T51** [#51](https://github.com/ostersc/freqpred/issues/51) — TV chyron ingestion via Internet Archive Third Eye API + realtime scheduler: `tv_chyron.py` fetcher (`fetch_all`, `parse_and_groups`, `filter_chyrons`); new `realtime_scheduler.py` runs chyrons and Truth Social account feeds every 5 min (moved from main scheduler); `backoff.py` `tick_and_load` gains `services` filter so each scheduler manages its own counters independently; `ingestion.tv_chyron_enabled` and `ingestion.realtime_interval_seconds` config keys added.
 

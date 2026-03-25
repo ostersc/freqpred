@@ -96,10 +96,11 @@ def register_position_commands(
             if pos.status != "open":
                 return f"Position {position_id} is already {pos.status}."
 
+            exit_price = 1.0 - mid_price if pos.direction == "NO" else mid_price
             closed = await ledger.close_position(
                 session,
                 position_id,
-                exit_price=mid_price,
+                exit_price=exit_price,
                 exit_reason="manual_telegram",
             )
 
@@ -107,7 +108,7 @@ def register_position_commands(
         log.info("telegram.forceexit", position_id=position_id, pnl=closed.pnl)
         return (
             f"Position {position_id} closed.\n"
-            f"  exit_price={mid_price:.4f}  pnl={pnl_str}  reason=manual_telegram"
+            f"  exit_price={exit_price:.4f}  pnl={pnl_str}  reason=manual_telegram"
         )
 
     async def _close_position_live(position_id: str) -> str:
@@ -137,10 +138,11 @@ def register_position_commands(
             if pos.status != "open":
                 return f"Position {position_id} is already {pos.status}."
 
+            exit_price = 1.0 - mid_price if pos.direction == "NO" else mid_price
             closed = await ledger.close_position(
                 session,
                 position_id,
-                exit_price=mid_price,
+                exit_price=exit_price,
                 exit_reason="manual_telegram",
             )
 
@@ -148,7 +150,7 @@ def register_position_commands(
         log.info("telegram.forceexit_live", position_id=position_id, pnl=closed.pnl)
         return (
             f"Position {position_id} force-closed (LIVE).\n"
-            f"  exit_price={mid_price:.4f}  pnl={pnl_str}  reason=manual_telegram\n"
+            f"  exit_price={exit_price:.4f}  pnl={pnl_str}  reason=manual_telegram\n"
             "Note: submit a corresponding close order on Kalshi manually if not already done."
         )
 
@@ -170,10 +172,11 @@ def register_position_commands(
 
             closed_summaries: list[str] = []
             for pos, mid_price in rows:
+                exit_price = 1.0 - mid_price if pos.direction == "NO" else mid_price
                 closed = await ledger.close_position(
                     session,
                     str(pos.id),
-                    exit_price=mid_price,
+                    exit_price=exit_price,
                     exit_reason="manual_telegram",
                 )
                 pnl_str = f"{closed.pnl:+.4f}" if closed.pnl is not None else "N/A"

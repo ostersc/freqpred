@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from freqpred.markets.models import Market, Position
-from freqpred.strategy.algo_base import IAlgoStrategy, _Tick
+from freqpred.strategy.algo_base import IAlgoStrategy, _Tick, _invert_ohlc
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
 from freqpred.trading.position_monitor import PositionMonitor
@@ -61,14 +61,14 @@ def _make_market(market_id: str = "MKT-1") -> Market:
     )
 
 
-def _make_position(market_id: str = "MKT-1") -> Position:
+def _make_position(market_id: str = "MKT-1", direction: str = "YES") -> Position:
     return Position(
         id=str(uuid.uuid4()),
         market_id=market_id,
         signal_id=str(uuid.uuid4()),
         strategy_name="TestAlgo",
         strategy_version="1.0",
-        direction="YES",
+        direction=direction,
         contracts=10,
         entry_price=0.50,
         entry_time=_BASE_TS,
@@ -149,10 +149,12 @@ def test_tick_appended() -> None:
 
 def test_invalidates_cache() -> None:
     algo = _make_algo()
-    # Seed cache with a non-None sentinel
-    algo._candle_cache["MKT-1"] = MagicMock()
+    # Seed both direction cache entries with non-None sentinels
+    algo._candle_cache[("MKT-1", "YES")] = MagicMock()
+    algo._candle_cache[("MKT-1", "NO")] = MagicMock()
     _ingest(algo, "MKT-1", _ts(0))
-    assert algo._candle_cache["MKT-1"] is None
+    assert algo._candle_cache[("MKT-1", "YES")] is None
+    assert algo._candle_cache[("MKT-1", "NO")] is None
 
 
 def test_mid_computed_correctly() -> None:
@@ -354,7 +356,7 @@ def test_min_candles_no_premature_exit_and_fires_at_2x() -> None:
     # Phase 1: before min_candles — framework suppresses regardless of condition.
     for i in range(min_candles):
         _ingest(algo, mkt, _ts(i * 65))
-        algo._candle_cache[mkt] = None  # invalidate so each call recomputes
+        algo._candle_cache[(mkt, "YES")] = None  # invalidate so each call recomputes
         assert algo.force_exit(position, market) is None, (
             f"expected None at tick {i} ({i} complete candles, min_candles={min_candles})"
         )
@@ -362,14 +364,14 @@ def test_min_candles_no_premature_exit_and_fires_at_2x() -> None:
     # Phase 2: min_candles to 2×min_candles-1 complete candles — condition not yet met.
     for i in range(min_candles, min_candles * 2):
         _ingest(algo, mkt, _ts(i * 65))
-        algo._candle_cache[mkt] = None
+        algo._candle_cache[(mkt, "YES")] = None
         assert algo.force_exit(position, market) is None, (
             f"expected None at tick {i} ({i} complete candles, exit fires at {min_candles * 2})"
         )
 
     # Phase 3: exactly 2×min_candles complete candles → condition met → fires.
     _ingest(algo, mkt, _ts(min_candles * 2 * 65))
-    algo._candle_cache[mkt] = None
+    algo._candle_cache[(mkt, "YES")] = None
     assert algo.force_exit(position, market) == "algo_exit"
 
 
@@ -472,6 +474,112 @@ def test_none_hook_raises() -> None:
     assert result is None
     mock_log.warning.assert_called_once()
     assert "populate_exit_trend_error" in mock_log.warning.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# OHLC inversion tests
+# ---------------------------------------------------------------------------
+
+
+def test_invert_ohlc_correctness() -> None:
+    """_invert_ohlc flips open/close and swaps+inverts high/low."""
+    import pandas as pd
+
+    df = pd.DataFrame([{"open": 0.30, "high": 0.40, "low": 0.20, "close": 0.25, "volume": 3}])
+    result = _invert_ohlc(df)
+
+    assert result["open"].iloc[0] == pytest.approx(0.70)   # 1 - 0.30
+    assert result["close"].iloc[0] == pytest.approx(0.75)  # 1 - 0.25
+    assert result["high"].iloc[0] == pytest.approx(0.80)   # 1 - yes_low (0.20)
+    assert result["low"].iloc[0] == pytest.approx(0.60)    # 1 - yes_high (0.40)
+    assert result["volume"].iloc[0] == 3                    # unchanged
+
+
+def test_no_position_receives_inverted_ohlc() -> None:
+    """populate_exit_trend for a NO position sees contract-value candles, not YES candles."""
+    received_close: list[float] = []
+
+    class _CapturingAlgo(IAlgoStrategy):
+        config = StrategyConfig(
+            name="Capturing",
+            min_edge=0.0, min_confidence=0.0, max_exposure_per_market=100.0,
+            kelly_fraction=0.25, categories=[], min_volume_24h=0.0,
+            max_days_to_close=3650.0, min_days_to_close=0.0,
+        )
+
+        def populate_exit_trend(self, df, metadata):
+            received_close.append(float(df["close"].iloc[-1]))
+            df["exit_long"] = False
+            return df
+
+        def should_trade(self, s, m): return True
+        def position_size(self, s, b): return 1.0
+
+    algo = _CapturingAlgo()
+    # Bucket 0: YES prices 0.30 → 0.35 (close = 0.35)
+    _ingest(algo, "MKT-1", _ts(0),  bid=0.29, ask=0.31)  # mid=0.30
+    _ingest(algo, "MKT-1", _ts(30), bid=0.34, ask=0.36)  # mid=0.35 (close of bucket 0)
+    # Bucket 1: complete
+    _ingest(algo, "MKT-1", _ts(65), bid=0.34, ask=0.36)  # mid=0.35
+    # Bucket 2: partial — dropped
+    _ingest(algo, "MKT-1", _ts(130), bid=0.34, ask=0.36)
+
+    yes_pos = _make_position(direction="YES")
+    no_pos  = _make_position(direction="NO")
+    market  = _make_market()
+
+    algo.force_exit(yes_pos, market)
+    algo.force_exit(no_pos, market)
+
+    assert len(received_close) == 2
+    yes_close = received_close[0]
+    no_close  = received_close[1]
+    assert yes_close == pytest.approx(0.35)            # raw YES close
+    assert no_close  == pytest.approx(1.0 - 0.35)      # inverted: NO contract value
+
+
+def test_yes_and_no_positions_use_independent_caches() -> None:
+    """YES and NO positions for the same market have separate cache entries."""
+    call_count = {"YES": 0, "NO": 0}
+
+    class _TrackingAlgo(IAlgoStrategy):
+        config = StrategyConfig(
+            name="Tracking",
+            min_edge=0.0, min_confidence=0.0, max_exposure_per_market=100.0,
+            kelly_fraction=0.25, categories=[], min_volume_24h=0.0,
+            max_days_to_close=3650.0, min_days_to_close=0.0,
+        )
+        _last_close: float = 0.0
+
+        def populate_exit_trend(self, df, metadata):
+            self._last_close = float(df["close"].iloc[-1])
+            call_count["YES" if self._last_close < 0.5 else "NO"] += 1
+            df["exit_long"] = False
+            return df
+
+        def should_trade(self, s, m): return True
+        def position_size(self, s, b): return 1.0
+
+    algo = _TrackingAlgo()
+    _ingest(algo, "MKT-1", _ts(0),  bid=0.29, ask=0.31)  # mid=0.30
+    _ingest(algo, "MKT-1", _ts(65), bid=0.34, ask=0.36)  # partial
+
+    yes_pos = _make_position(direction="YES")
+    no_pos  = _make_position(direction="NO")
+    market  = _make_market()
+
+    # First call for YES → computes and caches YES-oriented df
+    algo.force_exit(yes_pos, market)
+    # Second call for YES → cache hit, no recompute
+    algo.force_exit(yes_pos, market)
+    # First call for NO → separate cache miss → recomputes with inverted OHLC
+    algo.force_exit(no_pos, market)
+    # Second call for NO → cache hit, no recompute
+    algo.force_exit(no_pos, market)
+
+    # populate_exit_trend was called exactly twice (once per direction)
+    assert ("MKT-1", "YES") in algo._candle_cache
+    assert ("MKT-1", "NO") in algo._candle_cache
 
 
 # ---------------------------------------------------------------------------

@@ -289,8 +289,9 @@ class PositionWatcher:
             for market_id, row in db_rows.items():
                 net = kalshi_net.get(market_id, 0)
                 if net == 0:
-                    # Kalshi has no position — auto-close.
-                    exit_price = market_mids.get(market_id, 0.0)
+                    # Kalshi has no position — auto-close at effective price.
+                    mid = market_mids.get(market_id, 0.0)
+                    exit_price = 1.0 - mid if row.direction == "NO" else mid
                     rows_to_auto_close.append((str(row.id), exit_price))
                     log.warning(
                         "position_watcher.reconcile_auto_close",

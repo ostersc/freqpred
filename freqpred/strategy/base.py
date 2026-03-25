@@ -129,6 +129,10 @@ class IPredictionStrategy(ABC):
         immediately after entry in demo/test strategies, or on a time-based rule
         that doesn't depend on LLM re-analysis.
 
+        Note: if you use ``market.mid_price`` for price-based logic, remember
+        that it is the YES mid. For NO positions the effective contract value is
+        ``1 - market.mid_price``.
+
         Default: None (no forced exit).
         """
         return None
@@ -138,6 +142,11 @@ class IPredictionStrategy(ABC):
 
         Return a non-None exit reason tag to force exit.
         Return None to proceed with normal logic.
+
+        Note: if you use ``market.mid_price`` for price-based logic, remember
+        that it is the YES mid. For NO positions the effective contract value is
+        ``1 - market.mid_price``.
+
         Default: None (no custom exit).
         """
         return None

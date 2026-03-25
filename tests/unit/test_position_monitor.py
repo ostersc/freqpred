@@ -449,6 +449,42 @@ class TestEvaluateExit:
         )
         assert result is None
 
+    def test_no_stoploss_false_fire_for_no_position(self) -> None:
+        """Regression: NO position entered at 0.67 should NOT stoploss when YES mid is 0.355.
+
+        Old bug: pnl_pct = (0.355 - 0.67) / 0.67 = -47% → fired immediately.
+        Fixed:   effective_price = 1 - 0.355 = 0.645; pnl_pct = -3.7% → no fire.
+        """
+        strategy = _make_strategy(stoploss=-0.20)
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.67, direction="NO")
+        # YES mid is 0.355 — price hasn't moved since entry
+        market = _make_market(mid_price=0.355)
+
+        result = monitor.evaluate_exit(
+            position=pos, market=market, current_price=0.355, strategy=strategy
+        )
+        assert result is None, (
+            "NO position should not stoploss when YES price hasn't moved "
+            "(stoploss was firing by comparing YES mid to NO entry price)"
+        )
+
+    def test_stoploss_fires_correctly_for_no_position(self) -> None:
+        """NO position stoploss fires when YES price rises enough to push NO value below threshold."""
+        strategy = _make_strategy(stoploss=-0.20)
+        monitor = self._monitor(strategy)
+        # Entered at NO ask 0.67; stoploss fires when NO value < 0.67 * 0.80 = 0.536
+        # → fires when YES mid > 1 - 0.536 = 0.464
+        pos = _make_position(entry_price=0.67, direction="NO")
+        # YES mid = 0.70 → effective_no_price = 0.30; pnl_pct = (0.30-0.67)/0.67 = -55%
+        result = monitor.evaluate_exit(
+            position=pos, market=_make_market(mid_price=0.70), current_price=0.70, strategy=strategy
+        )
+        assert result is not None
+        assert result[0] == "stoploss"
+        # exit_price must be the effective NO price, not the YES mid
+        assert result[1] == pytest.approx(0.30)
+
     def test_no_exit_when_conditions_not_met(self) -> None:
         strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.30})
         monitor = self._monitor(strategy)
