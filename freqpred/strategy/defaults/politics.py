@@ -46,7 +46,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
     config = StrategyConfig(
         name="PoliticsEdgeStrategy",
         min_edge=0.18,
-        min_confidence=0.70,
+        min_confidence=0.60,
         max_exposure_per_market=0.05,
         kelly_fraction=0.25,
         categories=["politics"],
@@ -54,6 +54,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         max_days_to_close=90,
         min_days_to_close=0.25,
         stoploss=-0.30,
+        stoploss_cooldown_hours=48.0,
         minimal_roi={"0": 0.40, "1440": 0.25, "10080": 0.10},
         trailing_stop=False,
         trailing_stop_positive=None,

@@ -269,7 +269,7 @@ async def get_calibration(
     report = await compute_calibration(session, mode=app_mode)
     return CalibrationResponse(
         brier_score=report.brier_score,
-        naive_brier_score=report.naive_brier_score,
+        market_brier_score=report.market_brier_score,
         n_samples=report.n_samples,
         buckets=[
             CalibrationBucketOut(

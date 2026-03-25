@@ -1105,7 +1105,7 @@ def metrics() -> None:
 @metrics.command(name="calibration")
 @click.pass_context
 def metrics_calibration(ctx: click.Context) -> None:
-    """Print Brier score, naive baseline, and calibration buckets."""
+    """Print Brier score, market baseline, and calibration buckets."""
     config = ctx.obj["config"]
     asyncio.run(_metrics_calibration(config))
 
@@ -1134,10 +1134,10 @@ async def _metrics_calibration(config: object) -> None:
         click.echo("No resolved positions yet.")
         return
 
-    improvement = report.naive_brier_score - report.brier_score
+    improvement = report.market_brier_score - report.brier_score
     direction = "better" if improvement > 0 else "worse"
-    click.echo(f"Brier Score:     {report.brier_score:.3f}  (naive baseline: {report.naive_brier_score:.3f})")
-    click.echo(f"Improvement vs baseline: {improvement:+.3f} ({direction})")
+    click.echo(f"Brier Score:     {report.brier_score:.3f}  (market baseline: {report.market_brier_score:.3f})")
+    click.echo(f"Improvement vs market: {improvement:+.3f} ({direction})")
     click.echo(f"Samples: {report.n_samples}")
     click.echo("")
     header = f"{'Probability Bucket':<22} {'Count':>6} {'Mean Est.':>10} {'Resolution Rate':>16}"

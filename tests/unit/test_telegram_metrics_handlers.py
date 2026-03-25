@@ -491,7 +491,7 @@ async def test_calibration_no_samples():
 
     empty_report = CalibrationReport(
         brier_score=0.0,
-        naive_brier_score=0.0,
+        market_brier_score=0.0,
         n_samples=0,
         buckets=[],
     )
@@ -516,7 +516,7 @@ async def test_calibration_with_data():
 
     report = CalibrationReport(
         brier_score=0.127,
-        naive_brier_score=0.224,
+        market_brier_score=0.224,
         n_samples=20,
         buckets=[
             CalibrationBucket(

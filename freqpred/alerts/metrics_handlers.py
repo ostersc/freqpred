@@ -551,12 +551,12 @@ def register_metrics_commands(
         if report.n_samples == 0:
             return "No resolved positions yet — calibration unavailable."
 
-        improvement = report.naive_brier_score - report.brier_score
+        improvement = report.market_brier_score - report.brier_score
         direction = "better" if improvement > 0 else "worse"
 
         header_lines = [
             f"Brier score : {report.brier_score:.3f}  "
-            f"(naive baseline: {report.naive_brier_score:.3f})",
+            f"(market baseline: {report.market_brier_score:.3f})",
             f"Improvement : {improvement:+.3f} ({direction})",
             f"Samples     : {report.n_samples}",
         ]

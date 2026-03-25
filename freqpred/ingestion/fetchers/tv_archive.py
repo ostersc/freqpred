@@ -212,7 +212,7 @@ async def fetch(
             )
         )
 
-    log.info(
+    log.debug(
         "tv_archive.fetch.complete",
         query=query,
         hits_returned=len(hits),

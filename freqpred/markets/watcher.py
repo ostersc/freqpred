@@ -9,8 +9,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.base import IMarketClient
-from freqpred.markets.kalshi import KalshiAPIError
-from freqpred.markets.models import MarketRow
+from freqpred.markets.kalshi import KalshiAPIError, KalshiClient
+from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.markets.repository import upsert_markets
 
 # Max markets to re-fetch per sweep cycle (rate-limit safety).
@@ -96,6 +96,7 @@ class MarketWatcher:
             stale_ids = await self._detect_stale_markets(session)
 
         resolved = await self._sweep_closed_markets()
+        missing_resolved = await self._sweep_missing_results()
 
         log.info(
             "market_watcher_cycle_complete",
@@ -103,6 +104,7 @@ class MarketWatcher:
             triggers_logged=triggered,
             stale_markets=len(stale_ids),
             resolved_swept=resolved,
+            missing_results_resolved=missing_resolved,
             elapsed_s=round((datetime.now(UTC) - cycle_start).total_seconds(), 2),
         )
         if stale_ids:
@@ -148,23 +150,44 @@ class MarketWatcher:
         for market_id in market_ids:
             try:
                 market = await self._client.get_market(market_id)
-                markets_to_upsert.append(market)
+                if market.status == "finalized" and market.result is None:
+                    # Kalshi sets status before populating result — skip the upsert
+                    # so the market stays at its current DB status and is retried
+                    # next cycle.  The 404 handler will eventually catch it if
+                    # Kalshi removes the market without ever setting a result.
+                    log.debug(
+                        "market_watcher.resolved_sweep_result_pending",
+                        market_id=market_id,
+                    )
+                else:
+                    markets_to_upsert.append(market)
             except KalshiAPIError as exc:
                 if exc.status_code == 404:
-                    # Market no longer exists on Kalshi — mark it finalized so
-                    # the resolved sweep never queries it again.
-                    log.warning(
-                        "market_watcher.resolved_sweep_not_found",
-                        market_id=market_id,
-                        hint="marking finalized so it is not retried",
-                    )
-                    async with self._session_factory() as session:
-                        await session.execute(
-                            update(MarketRow)
-                            .where(MarketRow.id == market_id)
-                            .values(status="finalized")
+                    # Market gone from live API — try the settled list as a fallback
+                    # before giving up, since settled retains results for purged markets.
+                    settled_market = None
+                    if isinstance(self._client, KalshiClient):
+                        settled_market = await self._client.get_market_from_settled(market_id)
+                    if settled_market is not None:
+                        log.info(
+                            "market_watcher.resolved_sweep_recovered_from_settled",
+                            market_id=market_id,
+                            result=settled_market.result,
                         )
-                        await session.commit()
+                        markets_to_upsert.append(settled_market)
+                    else:
+                        log.warning(
+                            "market_watcher.resolved_sweep_not_found",
+                            market_id=market_id,
+                            hint="marking finalized so it is not retried",
+                        )
+                        async with self._session_factory() as session:
+                            await session.execute(
+                                update(MarketRow)
+                                .where(MarketRow.id == market_id)
+                                .values(status="finalized")
+                            )
+                            await session.commit()
                 else:
                     log.error(
                         "market_watcher.resolved_sweep_error",
@@ -182,6 +205,61 @@ class MarketWatcher:
             log.info("market_watcher.resolved_sweep", updated=updated)
 
         return updated
+
+    async def _sweep_missing_results(self) -> int:
+        """Back-fill result for markets stuck at finalized with no result.
+
+        Queries the Kalshi settled list endpoint for any market in our DB that is
+        finalized but has result=NULL.  If a result is found, updates the market
+        and back-fills positions.resolution for all closed positions in that market.
+
+        Returns the number of markets resolved.
+        """
+        if not isinstance(self._client, KalshiClient):
+            return 0
+
+        async with self._session_factory() as session:
+            rows = await session.execute(
+                select(MarketRow.id).where(
+                    MarketRow.status == "finalized",
+                    MarketRow.result.is_(None),
+                )
+            )
+            market_ids = [r.id for r in rows.all()]
+
+        if not market_ids:
+            return 0
+
+        resolved = 0
+        for market_id in market_ids:
+            market = await self._client.get_market_from_settled(market_id)
+            if market is None or market.result is None:
+                continue
+
+            resolution = 1 if market.result == "yes" else 0
+            async with self._session_factory() as session:
+                await upsert_markets(session, [market])
+                await session.execute(
+                    update(PositionRow)
+                    .where(
+                        PositionRow.market_id == market_id,
+                        PositionRow.status == "closed",
+                        PositionRow.resolution.is_(None),
+                    )
+                    .values(resolution=resolution)
+                )
+                await session.commit()
+            log.info(
+                "market_watcher.missing_result_resolved",
+                market_id=market_id,
+                result=market.result,
+                resolution=resolution,
+            )
+            resolved += 1
+
+        if resolved:
+            log.info("market_watcher.missing_results_sweep", resolved=resolved)
+        return resolved
 
     async def _check_price_move_triggers(
         self,

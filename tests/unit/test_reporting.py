@@ -33,7 +33,7 @@ _FAKE_LLM_RESPONSE = LLMResponse(
 
 _EMPTY_CALIBRATION = CalibrationReport(
     brier_score=0.0,
-    naive_brier_score=0.0,
+    market_brier_score=0.0,
     n_samples=0,
     buckets=[
         CalibrationBucket(
@@ -49,7 +49,7 @@ _EMPTY_CALIBRATION = CalibrationReport(
 
 _POPULATED_CALIBRATION = CalibrationReport(
     brier_score=0.18,
-    naive_brier_score=0.25,
+    market_brier_score=0.25,
     n_samples=12,
     buckets=[],
 )
@@ -59,7 +59,8 @@ def _make_session(
     *,
     open_count: int = 2,
     total_exposure: float = 50.0,
-    yesterday_pnl: float = 3.20,
+    session_pnl: float = 3.20,
+    session_exit_rows: list = [],
     yesterday_llm_spend: float = 0.38,
     today_llm_spend: float = 0.05,
     llm_errors: int = 0,
@@ -71,10 +72,11 @@ def _make_session(
     # execute() calls in order:
     # 1. open positions (count, exposure) → .one()
     # 2. unrealized P&L rows → .all()
-    # 3. yesterday pnl (scalar) → .scalar_one()
-    # 4. yesterday llm spend (scalar) → .scalar_one()
-    # 5. LLM errors count (scalar) → .scalar_one()
-    # 6. fetcher backoff rows → .all()
+    # 3. session pnl (scalar) → .scalar_one()
+    # 4. exit reason breakdown → .all()
+    # 5. yesterday llm spend (scalar) → .scalar_one()
+    # 6. LLM errors count (scalar) → .scalar_one()
+    # 7. fetcher backoff rows → .all()
     # (calibration and today_llm_spend are patched separately)
 
     open_result = MagicMock()
@@ -84,7 +86,10 @@ def _make_session(
     unrealized_result.all.return_value = []  # no open positions in unit tests
 
     pnl_result = MagicMock()
-    pnl_result.scalar_one.return_value = yesterday_pnl
+    pnl_result.scalar_one.return_value = session_pnl
+
+    exits_result = MagicMock()
+    exits_result.all.return_value = session_exit_rows
 
     llm_spend_result = MagicMock()
     llm_spend_result.scalar_one.return_value = yesterday_llm_spend
@@ -96,7 +101,7 @@ def _make_session(
     backoff_result.all.return_value = backed_off_services
 
     session.execute = AsyncMock(
-        side_effect=[open_result, unrealized_result, pnl_result, llm_spend_result, llm_errors_result, backoff_result]
+        side_effect=[open_result, unrealized_result, pnl_result, exits_result, llm_spend_result, llm_errors_result, backoff_result]
     )
     return session
 
@@ -201,7 +206,7 @@ async def test_digest_handles_zero_positions_gracefully() -> None:
     session = _make_session(
         open_count=0,
         total_exposure=0.0,
-        yesterday_pnl=0.0,
+        session_pnl=0.0,
         yesterday_llm_spend=0.0,
         today_llm_spend=0.0,
     )
@@ -224,3 +229,34 @@ async def test_digest_handles_zero_positions_gracefully() -> None:
     assert "Open positions: 0" in prompt
     # Result is the mode banner + mock response
     assert result == f"[PAPER MODE]\n{_FAKE_DIGEST}"
+
+
+# ---------------------------------------------------------------------------
+# test_digest_includes_session_pnl_and_exit_breakdown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_digest_includes_session_pnl_and_exit_breakdown() -> None:
+    """Session P&L and exit-reason breakdown (including stop losses) appear in the prompt."""
+    stop_loss_rows = [
+        ("stoploss", 3, -12.50),
+        ("market_resolved", 1, 4.00),
+    ]
+    session = _make_session(session_pnl=-8.50, session_exit_rows=stop_loss_rows)
+    llm_client = _make_llm_client()
+
+    with patch(
+        "freqpred.metrics.reporting.compute_calibration",
+        new=AsyncMock(return_value=_EMPTY_CALIBRATION),
+    ), patch(
+        "freqpred.metrics.reporting.get_daily_spend_usd",
+        new=AsyncMock(return_value=0.0),
+    ):
+        await generate_daily_digest(session, llm_client)
+
+    prompt: str = llm_client.complete.call_args.kwargs.get("prompt", "")
+    assert "-8.50" in prompt          # session P&L total
+    assert "stoploss" in prompt       # stop loss exit reason visible
+    assert "3 trade(s)" in prompt     # stop loss count visible
+    assert "yesterday through now" in prompt  # label confirms extended window

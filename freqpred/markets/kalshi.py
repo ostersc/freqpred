@@ -350,6 +350,23 @@ class KalshiClient(IMarketClient):
             return self._schema_to_market(envelope.market)
         return self._to_market(data)
 
+    async def get_market_from_settled(self, market_id: str) -> Market | None:
+        """Look up a market via the settled (status=settled) list endpoint.
+
+        Kalshi's GET /markets/{ticker} returns 404 for markets that have been
+        purged from the live API after finalization.  The settled list endpoint
+        retains them and supports filtering by ``tickers=``.  Returns None if
+        the market is not found in the settled list.
+        """
+        try:
+            data = await self._get("/markets", params={"status": "settled", "tickers": market_id, "limit": 1})
+        except KalshiAPIError:
+            return None
+        markets = data.get("markets", [])
+        if not markets:
+            return None
+        return self._to_market(markets[0])
+
     async def get_orderbook(self, market_id: str) -> dict[str, float]:
         """Return best bid/ask from the Kalshi orderbook.
 

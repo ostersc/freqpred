@@ -109,7 +109,7 @@ class SignalPipeline:
                         edge=cloned.edge,
                     )
                     return cloned
-                log.info(
+                log.debug(
                     "signal.pipeline.skip_unchanged",
                     market_id=market.id,
                     retrieval_hash=new_hash,

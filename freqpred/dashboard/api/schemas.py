@@ -107,7 +107,7 @@ class CalibrationBucketOut(BaseModel):
 
 class CalibrationResponse(BaseModel):
     brier_score: float
-    naive_brier_score: float
+    market_brier_score: float
     n_samples: int
     buckets: list[CalibrationBucketOut]
 

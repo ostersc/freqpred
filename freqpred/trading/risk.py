@@ -6,7 +6,7 @@ Strategy position_size() output is ALWAYS passed through here before any order.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import func, select
@@ -43,6 +43,8 @@ class RiskEngine:
         market_id: str,
         max_market_exposure: float,
         mode: str = "paper",
+        stoploss_cooldown_hours: float = 0.0,
+        block_reentry_after_stoploss: bool = False,
     ) -> RiskDecision:
         """Enforce all hard caps. Returns RiskDecision(allowed=False) if any
         limit is breached. Never raises — callers check .allowed.
@@ -66,7 +68,35 @@ class RiskEngine:
                 capped_size=0.0,
             )
 
-        # 2. Cap position size at max_position_pct of bankroll
+        # 2. Stoploss re-entry guard
+        _stoploss_reasons = ("stoploss", "trailing_stop")
+        if block_reentry_after_stoploss or stoploss_cooldown_hours > 0:
+            stoploss_where = [
+                PositionRow.status == "closed",
+                PositionRow.exit_reason.in_(_stoploss_reasons),
+                PositionRow.market_id == market_id,
+                PositionRow.mode == mode,
+            ]
+            if not block_reentry_after_stoploss:
+                # Cooldown window only
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=stoploss_cooldown_hours)
+                stoploss_where.append(PositionRow.exit_time >= cutoff)
+            stoploss_count_result = await session.execute(
+                select(func.count(PositionRow.id)).where(*stoploss_where)
+            )
+            stoploss_count: int = stoploss_count_result.scalar_one()
+            if stoploss_count > 0:
+                if block_reentry_after_stoploss:
+                    reason = f"market {market_id} blocked: stoploss previously fired (block_reentry_after_stoploss=True)"
+                else:
+                    reason = (
+                        f"market {market_id} in stoploss cooldown: "
+                        f"{stoploss_count} stoploss exit(s) within the last {stoploss_cooldown_hours:.1f}h"
+                    )
+                logger.info("risk.stoploss_reentry_blocked", market_id=market_id, stoploss_count=stoploss_count)
+                return RiskDecision(allowed=False, reason=reason, capped_size=0.0)
+
+        # 3. Cap position size at max_position_pct of bankroll
         max_size = bankroll * self._config.max_position_pct
         capped_size = min(requested_size, max_size)
 

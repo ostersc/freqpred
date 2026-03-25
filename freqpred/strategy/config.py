@@ -26,3 +26,12 @@ class StrategyConfig:
     trailing_stop: bool = False
     trailing_stop_positive: float | None = None      # switch to tight trail at this profit %
     trailing_stop_positive_offset: float = 0.02      # tight trail distance once profitable
+
+    # Re-entry guards after a stoploss or trailing_stop exit.
+    # block_reentry_after_stoploss takes precedence: if True, the market is
+    # permanently blocked from re-entry once any stoploss/trailing_stop has fired,
+    # regardless of stoploss_cooldown_hours.
+    # If False and stoploss_cooldown_hours > 0, re-entry is blocked for that many
+    # hours after the most recent stoploss/trailing_stop exit on this market.
+    block_reentry_after_stoploss: bool = False
+    stoploss_cooldown_hours: float = 4.0  # set to 0.0 to disable cooldown

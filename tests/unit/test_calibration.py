@@ -86,7 +86,7 @@ async def test_naive_baseline_uses_market_mid() -> None:
     report = await compute_calibration(session, mode="paper")
     expected_naive = (0.36 + 0.36) / 2
     expected_model = (0.01 + 0.81) / 2
-    assert report.naive_brier_score == pytest.approx(expected_naive, rel=1e-6)
+    assert report.market_brier_score == pytest.approx(expected_naive, rel=1e-6)
     assert report.brier_score == pytest.approx(expected_model, rel=1e-6)
 
 
@@ -157,7 +157,7 @@ async def test_empty_positions_returns_zero_samples() -> None:
     report = await compute_calibration(session, mode="paper")
     assert report.n_samples == 0
     assert report.brier_score == pytest.approx(0.0)
-    assert report.naive_brier_score == pytest.approx(0.0)
+    assert report.market_brier_score == pytest.approx(0.0)
     # Still returns 10 empty buckets
     assert len(report.buckets) == 10
     for b in report.buckets:
@@ -170,3 +170,18 @@ async def test_prob_exactly_one_goes_to_last_bucket() -> None:
     session = _make_session([(1.0, 0.5, 1)])
     report = await compute_calibration(session, mode="paper")
     assert report.buckets[9].count == 1
+
+
+@pytest.mark.asyncio
+async def test_multiple_positions_same_market_averaged() -> None:
+    """SQL groups by market_id; the mock simulates that by returning one averaged
+    row. Verify that (0.8+0.6)/2=0.7 averaged against resolution=1 yields the
+    correct Brier score and n_samples=1, not 2."""
+    # The GROUP BY in production collapses these to one row: avg_prob=0.7, avg_mid=0.5
+    session = _make_session([(0.7, 0.5, 1)])
+    report = await compute_calibration(session, mode="paper")
+
+    # One market, one sample
+    assert report.n_samples == 1
+    # Brier = (0.7 - 1)^2 = 0.09
+    assert report.brier_score == pytest.approx(0.09, rel=1e-6)

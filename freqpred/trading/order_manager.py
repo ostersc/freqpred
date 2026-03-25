@@ -84,6 +84,8 @@ class OrderManager:
                 market_id=market.id,
                 max_market_exposure=strategy.config.max_exposure_per_market * self._bankroll,
                 mode=self._mode,
+                stoploss_cooldown_hours=strategy.config.stoploss_cooldown_hours,
+                block_reentry_after_stoploss=strategy.config.block_reentry_after_stoploss,
             )
             if not decision.allowed:
                 logger.info(

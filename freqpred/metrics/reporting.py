@@ -90,16 +90,40 @@ async def generate_daily_digest(
             mfe_dollar_sum += mfe * contracts
             mfe_contract_sum += contracts
 
-    # --- Yesterday's closed P&L ---
+    # --- Session P&L: yesterday midnight through now (captures full prior day + intraday) ---
     pnl_result = await session.execute(
         select(func.coalesce(func.sum(PositionRow.pnl), 0.0)).where(
             PositionRow.status == "closed",
             PositionRow.exit_time >= yesterday_start,
-            PositionRow.exit_time < yesterday_end,
             PositionRow.mode == trading_mode,
         )
     )
-    yesterday_pnl = float(pnl_result.scalar_one())
+    session_pnl = float(pnl_result.scalar_one())
+
+    # Exit reason breakdown for the same window (surfaces stop losses, circuit breaker exits, etc.)
+    exits_result = await session.execute(
+        select(
+            PositionRow.exit_reason,
+            func.count(PositionRow.id),
+            func.coalesce(func.sum(PositionRow.pnl), 0.0),
+        )
+        .where(
+            PositionRow.status == "closed",
+            PositionRow.exit_time >= yesterday_start,
+            PositionRow.mode == trading_mode,
+        )
+        .group_by(PositionRow.exit_reason)
+    )
+    exit_rows = exits_result.all()
+
+    if exit_rows:
+        exit_parts = [
+            f"{reason or 'resolved'}: {count} trade(s) ${pnl:+.2f}"
+            for reason, count, pnl in exit_rows
+        ]
+        session_exit_str = "; ".join(exit_parts)
+    else:
+        session_exit_str = "no closed trades in session"
 
     # --- LLM spend yesterday vs daily cap ---
     yesterday_spend_result = await session.execute(
@@ -170,7 +194,7 @@ async def generate_daily_digest(
         f"${net_exposure:+.2f} net exposure, ${unrealized_pnl:+.2f} unrealized P&L\n"
         f"- Portfolio MAE (worst excursion seen): {portfolio_mae_str}\n"
         f"- Portfolio MFE (best excursion seen): {portfolio_mfe_str}\n"
-        f"- Yesterday's closed P&L: ${yesterday_pnl:+.2f}\n"
+        f"- Session closed P&L (yesterday through now): ${session_pnl:+.2f} — breakdown: {session_exit_str}\n"
         f"- LLM spend yesterday: ${yesterday_llm_spend:.4f}; today so far: ${today_llm_spend:.4f}\n"
         f"- LLM errors (last 24h): {llm_errors}\n"
         f"- Signal calibration: {calibration_str}\n"
@@ -190,7 +214,7 @@ async def generate_daily_digest(
     log.info(
         "daily_digest.generated",
         open_positions=open_count,
-        yesterday_pnl=round(yesterday_pnl, 4),
+        session_pnl=round(session_pnl, 4),
         brier_score=round(calibration.brier_score, 4),
         n_samples=calibration.n_samples,
         llm_query_id=response.llm_query_id,

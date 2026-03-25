@@ -63,16 +63,24 @@ def _make_session(
     daily_pnl: float = 0.0,
     all_pnl: float = 0.0,
     market_exposure: float = 0.0,
+    recent_stoploss_count: int | None = None,
 ) -> MagicMock:
     """Return a mock AsyncSession whose execute() returns canned scalar results.
 
     Query order matches check_position:
+      (optional) stoploss count  — only when recent_stoploss_count is provided
       1. market_exposure (per-market cumulative)
       2. open_count
       3. total_exposure (portfolio-wide)
       4. daily_pnl
+
+    Pass recent_stoploss_count when the test enables stoploss_cooldown_hours or
+    block_reentry_after_stoploss, so the mock has the right value queued.
     """
-    call_returns = [market_exposure, open_count, total_exposure, daily_pnl]
+    call_returns: list[object] = []
+    if recent_stoploss_count is not None:
+        call_returns.append(recent_stoploss_count)
+    call_returns += [market_exposure, open_count, total_exposure, daily_pnl]
 
     session = MagicMock()
 
@@ -284,3 +292,80 @@ async def test_circuit_breaker_silent_when_within_limits() -> None:
 
     # Should not raise
     await engine.check_circuit_breakers(session, bankroll=BANKROLL, mode="live")
+
+
+# ---------------------------------------------------------------------------
+# stoploss re-entry guard tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_blocks_reentry_during_cooldown() -> None:
+    """Position is blocked when a stoploss exit exists within cooldown window."""
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    # recent_stoploss_count=1 → there was a stoploss within the cooldown window
+    session = _make_session(recent_stoploss_count=1)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=100.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+        stoploss_cooldown_hours=4.0,
+    )
+
+    assert decision.allowed is False
+    assert "cooldown" in decision.reason
+    assert MARKET_ID in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_allows_reentry_after_cooldown_window() -> None:
+    """Position is allowed when no stoploss exits exist within the cooldown window."""
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    # recent_stoploss_count=0 → no stoploss within cooldown window
+    session = _make_session(recent_stoploss_count=0)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+        stoploss_cooldown_hours=4.0,
+    )
+
+    assert decision.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_blocks_reentry_permanently_when_flag_set() -> None:
+    """Position is permanently blocked when block_reentry_after_stoploss=True."""
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    session = _make_session(recent_stoploss_count=1)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=100.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+        block_reentry_after_stoploss=True,
+    )
+
+    assert decision.allowed is False
+    assert "block_reentry_after_stoploss" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_cooldown_disabled_when_zero() -> None:
+    """No stoploss DB query fired when stoploss_cooldown_hours=0 and flag is False."""
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    # Do NOT pass recent_stoploss_count — if the check fires it will pop from an
+    # empty list and raise IndexError, proving the guard was incorrectly triggered.
+    session = _make_session(open_count=0, total_exposure=0.0, daily_pnl=0.0)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+        stoploss_cooldown_hours=0.0,
+        block_reentry_after_stoploss=False,
+    )
+
+    assert decision.allowed is True
