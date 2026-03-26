@@ -465,9 +465,13 @@ def _check_stoploss(
     current_price: float,
     stoploss: float,
 ) -> tuple[str, float] | None:
-    """Return ('stoploss', current_price) if the hard stoploss has been hit."""
-    pnl_pct = (current_price - position.entry_price) / position.entry_price
-    if pnl_pct <= stoploss:
+    """Return ('stoploss', current_price) if the hard stoploss has been hit.
+
+    ``stoploss`` is an absolute drop on the 0-1 price scale (e.g. -0.10 means
+    exit when the price has fallen 10 cents from entry).
+    """
+    dollar_loss = current_price - position.entry_price
+    if dollar_loss <= stoploss:
         return ("stoploss", current_price)
     return None
 
@@ -482,27 +486,28 @@ def _check_trailing_stop(
 ) -> tuple[str, float] | None:
     """Return ('trailing_stop', current_price) if the trailing stoploss has been hit.
 
+    All thresholds are absolute dollar distances on the 0-1 price scale.
+
     Logic:
-    - If ``trailing_stop_positive`` is set and unrealized P&L has crossed that
-      threshold, apply the tighter trail (``trailing_stop_positive_offset``
-      below peak).
+    - If ``trailing_stop_positive`` is set and the position has gained at least
+      that many cents from entry, apply the tighter trail
+      (``trailing_stop_positive_offset`` cents below peak).
     - Otherwise, apply the normal stoploss distance below peak.
     """
     entry = position.entry_price
-    unrealized_pct = (current_price - entry) / entry
-    peak_pct = (peak_price - entry) / entry
+    peak_gain = peak_price - entry  # absolute cents gained from entry to peak
 
     if (
         trailing_stop_positive is not None
-        and peak_pct >= trailing_stop_positive
+        and peak_gain >= trailing_stop_positive
     ):
-        # Tight trail: stop = peak - offset
+        # Tight trail: stop = peak - offset (cents)
         trail_distance = trailing_stop_positive_offset
     else:
-        # Normal trail: stop = peak + stoploss (stoploss is negative)
-        trail_distance = -stoploss  # positive distance below peak
+        # Normal trail: stop = peak - |stoploss| (cents)
+        trail_distance = -stoploss  # convert negative to positive distance
 
-    stop_price = peak_price * (1.0 - trail_distance)
+    stop_price = peak_price - trail_distance
     if current_price <= stop_price:
         return ("trailing_stop", current_price)
     return None

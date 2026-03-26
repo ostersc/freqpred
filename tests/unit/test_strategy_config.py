@@ -46,7 +46,7 @@ class TestConservativeDefaultExitConfig:
     config = ConservativeDefault().config
 
     def test_stoploss(self) -> None:
-        assert self.config.stoploss == pytest.approx(-0.25)
+        assert self.config.stoploss == pytest.approx(-0.15)
 
     def test_trailing_stop_enabled(self) -> None:
         assert self.config.trailing_stop is True
@@ -57,8 +57,8 @@ class TestConservativeDefaultExitConfig:
 class TestPoliticsExitConfig:
     config = PoliticsEdgeStrategy().config
 
-    def test_stoploss_wider_than_conservative(self) -> None:
-        assert self.config.stoploss <= -0.25
+    def test_stoploss(self) -> None:
+        assert self.config.stoploss == pytest.approx(-0.15)
 
     def test_trailing_stop_disabled(self) -> None:
         assert self.config.trailing_stop is False
@@ -66,9 +66,8 @@ class TestPoliticsExitConfig:
 class TestTechExitConfig:
     config = TechNewsStrategy().config
 
-    def test_stoploss_tighter_than_conservative(self) -> None:
-        conservative_stoploss = ConservativeDefault().config.stoploss
-        assert self.config.stoploss > conservative_stoploss
+    def test_stoploss(self) -> None:
+        assert self.config.stoploss == pytest.approx(-0.15)
 
     def test_trailing_stop_enabled(self) -> None:
         assert self.config.trailing_stop is True

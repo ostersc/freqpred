@@ -149,6 +149,8 @@ class PositionWatcher:
 
                 if self._subscribed:
                     await self._send_subscribe(ws, list(self._subscribed))
+                else:
+                    log.info("position_watcher.no_open_positions", hint="no ticker subscriptions sent")
 
                 async for raw in ws:
                     await self._handle_message(json.loads(raw))
@@ -177,16 +179,20 @@ class PositionWatcher:
         elif msg_type == "ticker":
             inner = msg.get("msg", {})
             market_id = inner.get("market_ticker")
-            # Kalshi WebSocket v2 sends yes_bid/yes_ask as integer cents (0–100),
-            # not the yes_bid_dollars dollar-string used by the REST API.
-            yes_bid_raw = inner.get("yes_bid")
-            yes_ask_raw = inner.get("yes_ask")
+            # Kalshi WebSocket v2 sends prices as dollar strings (yes_bid_dollars,
+            # yes_ask_dollars), not integer cents.
+            yes_bid_raw = inner.get("yes_bid_dollars")
+            yes_ask_raw = inner.get("yes_ask_dollars")
             if market_id and yes_bid_raw is not None and yes_ask_raw is not None:
-                yes_bid = float(yes_bid_raw) / 100  # cents → dollars
-                yes_ask = float(yes_ask_raw) / 100  # cents → dollars
+                yes_bid = float(yes_bid_raw)
+                yes_ask = float(yes_ask_raw)
                 # Only process ticks for markets where we hold positions.
                 if market_id in self._subscribed:
                     await self._on_ticker_update(market_id, yes_bid, yes_ask)
+                else:
+                    log.warning("position_watcher.tick_not_subscribed", market_id=market_id)
+            else:
+                log.warning("position_watcher.ticker_missing_fields", raw=str(inner)[:200])
 
         elif msg_type == "error":
             code = msg.get("msg", {}).get("code")
@@ -357,6 +363,7 @@ class PositionWatcher:
         self, ws: websockets.WebSocketClientProtocol, market_ids: list[str]
     ) -> None:
         """Send a fresh subscribe command for the given market_ids."""
+        log.info("position_watcher.subscribing", market_ids=sorted(market_ids), count=len(market_ids))
         await ws.send(
             json.dumps(
                 {
@@ -374,6 +381,7 @@ class PositionWatcher:
         self, ws: websockets.WebSocketClientProtocol, market_ids: list[str]
     ) -> None:
         """Extend existing subscription with additional market_ids."""
+        log.info("position_watcher.adding_markets", market_ids=sorted(market_ids))
         await ws.send(
             json.dumps(
                 {

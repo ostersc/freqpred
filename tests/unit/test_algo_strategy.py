@@ -147,7 +147,8 @@ def test_tick_appended() -> None:
     assert len(algo._ticks["MKT-1"]) == 2
 
 
-def test_invalidates_cache() -> None:
+def test_invalidates_cache_on_new_bucket() -> None:
+    """First tick for a market (new bucket) invalidates the cache."""
     algo = _make_algo()
     # Seed both direction cache entries with non-None sentinels
     algo._candle_cache[("MKT-1", "YES")] = MagicMock()
@@ -155,6 +156,21 @@ def test_invalidates_cache() -> None:
     _ingest(algo, "MKT-1", _ts(0))
     assert algo._candle_cache[("MKT-1", "YES")] is None
     assert algo._candle_cache[("MKT-1", "NO")] is None
+
+
+def test_same_bucket_tick_does_not_invalidate_cache() -> None:
+    """A tick within the same candle window must NOT invalidate the cache."""
+    algo = _make_algo(timeframe="1min")
+    # First tick establishes bucket 10:00
+    _ingest(algo, "MKT-1", _ts(0))
+    # Seed cache with sentinels
+    sentinel = MagicMock()
+    algo._candle_cache[("MKT-1", "YES")] = sentinel
+    algo._candle_cache[("MKT-1", "NO")] = sentinel
+    # Second tick at t=30s is still in the 10:00 bucket — should NOT invalidate
+    _ingest(algo, "MKT-1", _ts(30))
+    assert algo._candle_cache[("MKT-1", "YES")] is sentinel
+    assert algo._candle_cache[("MKT-1", "NO")] is sentinel
 
 
 def test_mid_computed_correctly() -> None:
@@ -666,8 +682,8 @@ def test_cache_invalidated_after_tick() -> None:
     _ingest(algo, market.id, _ts(130))
 
     algo.force_exit(position, market)
-    # New tick — invalidates cache
-    _ingest(algo, market.id, _ts(135))
+    # New tick in the NEXT 1-min bucket (t=195s → 10:03) — invalidates cache
+    _ingest(algo, market.id, _ts(195))
     algo.force_exit(position, market)
 
     assert call_count == 2

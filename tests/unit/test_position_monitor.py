@@ -151,19 +151,19 @@ def _make_strategy(
 class TestCheckStoploss:
     def test_fires_when_loss_exceeds_threshold(self) -> None:
         pos = _make_position(entry_price=0.50)
-        # current_price=0.38 → pnl_pct = (0.38-0.50)/0.50 = -0.24 ≤ -0.20
-        result = _check_stoploss(pos, current_price=0.38, stoploss=-0.20)
-        assert result == ("stoploss", 0.38)
+        # dollar_loss = 0.28 - 0.50 = -0.22 ≤ -0.20 → fires
+        result = _check_stoploss(pos, current_price=0.28, stoploss=-0.20)
+        assert result == ("stoploss", 0.28)
 
     def test_fires_just_at_threshold(self) -> None:
         pos = _make_position(entry_price=0.50)
-        # entry * (1 + stoploss) = 0.50 * 0.80 = 0.40; use 0.399 to be just inside
-        result = _check_stoploss(pos, current_price=0.399, stoploss=-0.20)
-        assert result == ("stoploss", 0.399)
+        # entry + stoploss = 0.50 - 0.20 = 0.30; dollar_loss = 0.30 - 0.50 = -0.20 ≤ -0.20
+        result = _check_stoploss(pos, current_price=0.30, stoploss=-0.20)
+        assert result == ("stoploss", 0.30)
 
     def test_no_fire_when_loss_below_threshold(self) -> None:
         pos = _make_position(entry_price=0.50)
-        # pnl_pct = (0.42-0.50)/0.50 = -0.16 > -0.20
+        # dollar_loss = 0.42 - 0.50 = -0.08 > -0.20
         result = _check_stoploss(pos, current_price=0.42, stoploss=-0.20)
         assert result is None
 
@@ -181,20 +181,20 @@ class TestCheckTrailingStop:
     def test_fires_when_price_drops_from_peak(self) -> None:
         pos = _make_position(entry_price=0.50)
         # peak=0.70, stoploss=-0.20 → trail_distance=0.20
-        # stop = 0.70 * (1 - 0.20) = 0.56; current=0.55 ≤ 0.56
+        # stop = 0.70 - 0.20 = 0.50; current=0.49 ≤ 0.50
         result = _check_trailing_stop(
             pos,
-            current_price=0.55,
+            current_price=0.49,
             peak_price=0.70,
             stoploss=-0.20,
             trailing_stop_positive=None,
             trailing_stop_positive_offset=0.02,
         )
-        assert result == ("trailing_stop", 0.55)
+        assert result == ("trailing_stop", 0.49)
 
     def test_no_fire_when_above_trail(self) -> None:
         pos = _make_position(entry_price=0.50)
-        # peak=0.70, stop=0.56; current=0.60 > 0.56
+        # peak=0.70, stop=0.50; current=0.60 > 0.50
         result = _check_trailing_stop(
             pos,
             current_price=0.60,
@@ -207,8 +207,8 @@ class TestCheckTrailingStop:
 
     def test_tight_trail_applied_once_positive_threshold_crossed(self) -> None:
         pos = _make_position(entry_price=0.50)
-        # peak_pct = (0.65-0.50)/0.50 = 0.30 >= trailing_stop_positive=0.10
-        # tight stop = 0.65 * (1 - 0.02) = 0.637; current=0.63 ≤ 0.637
+        # peak_gain = 0.65 - 0.50 = 0.15 >= trailing_stop_positive=0.10 → tight trail
+        # tight stop = 0.65 - 0.02 = 0.63; current=0.63 ≤ 0.63
         result = _check_trailing_stop(
             pos,
             current_price=0.63,
@@ -221,8 +221,8 @@ class TestCheckTrailingStop:
 
     def test_normal_trail_used_before_positive_threshold(self) -> None:
         pos = _make_position(entry_price=0.50)
-        # peak_pct = (0.54-0.50)/0.50 = 0.08 < trailing_stop_positive=0.10
-        # normal stop = 0.54 * (1 - 0.20) = 0.432; current=0.44 > 0.432
+        # peak_gain = 0.54 - 0.50 = 0.04 < trailing_stop_positive=0.10 → normal trail
+        # normal stop = 0.54 - 0.20 = 0.34; current=0.44 > 0.34
         result = _check_trailing_stop(
             pos,
             current_price=0.44,
@@ -252,10 +252,10 @@ class TestEvaluateExit:
         strategy = _make_strategy(stoploss=-0.20)
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50)
-        market = _make_market(mid_price=0.38)  # -24% → stoploss
+        market = _make_market(mid_price=0.28)  # dollar_loss = -0.22 ≤ -0.20 → stoploss
 
         result = monitor.evaluate_exit(
-            position=pos, market=market, current_price=0.38, strategy=strategy
+            position=pos, market=market, current_price=0.28, strategy=strategy
         )
         assert result is not None
         assert result[0] == "stoploss"
@@ -266,11 +266,11 @@ class TestEvaluateExit:
         pos = _make_position(entry_price=0.50)
         monitor._peak_prices[pos.id] = 0.70  # seen a peak of 0.70
 
-        # current=0.55 → below trail (0.70 * 0.80 = 0.56)
+        # current=0.49 → below trail (0.70 - 0.20 = 0.50)
         result = monitor.evaluate_exit(
             position=pos,
-            market=_make_market(mid_price=0.55),
-            current_price=0.55,
+            market=_make_market(mid_price=0.49),
+            current_price=0.49,
             strategy=strategy,
         )
         assert result is not None
@@ -404,10 +404,10 @@ class TestEvaluateExit:
         """NO position stoploss fires when YES price rises enough to push NO value below threshold."""
         strategy = _make_strategy(stoploss=-0.20)
         monitor = self._monitor(strategy)
-        # Entered at NO ask 0.67; stoploss fires when NO value < 0.67 * 0.80 = 0.536
-        # → fires when YES mid > 1 - 0.536 = 0.464
+        # Entered at NO ask 0.67; stoploss fires when NO value < 0.67 - 0.20 = 0.47
+        # → fires when YES mid > 1 - 0.47 = 0.53
         pos = _make_position(entry_price=0.67, direction="NO")
-        # YES mid = 0.70 → effective_no_price = 0.30; pnl_pct = (0.30-0.67)/0.67 = -55%
+        # YES mid = 0.70 → effective_no_price = 0.30; dollar_loss = 0.30 - 0.67 = -0.37 ≤ -0.20
         result = monitor.evaluate_exit(
             position=pos, market=_make_market(mid_price=0.70), current_price=0.70, strategy=strategy
         )
@@ -488,7 +488,7 @@ class TestCheckAllPositions:
             }
         )
 
-        market = _make_market(mid_price=0.38)  # -24% → stoploss
+        market = _make_market(mid_price=0.38)  # injected via evaluate_exit mock; price value unused
 
         with (
             patch(

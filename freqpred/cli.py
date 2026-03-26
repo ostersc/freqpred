@@ -203,7 +203,6 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     discord = DiscordSender(webhook_url=config.alerts.discord_webhook_url)
     senders.append(discord)
     alert_dispatcher = AlertDispatcher(senders)
-    await alert_dispatcher.send(f"freqpred started | strategy={strategy_name} | mode={mode}")
 
     telegram_cmd_handler = TelegramCommandHandler(
         bot_token=config.alerts.telegram_bot_token,

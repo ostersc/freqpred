@@ -28,6 +28,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+
+def _timeframe_seconds(timeframe: str) -> int:
+    """Parse a timeframe string (e.g. '5min', '1h') to seconds."""
+    if timeframe.endswith("min"):
+        return int(timeframe[:-3]) * 60
+    if timeframe.endswith("h"):
+        return int(timeframe[:-1]) * 3600
+    if timeframe.endswith("s"):
+        return int(timeframe[:-1])
+    raise ValueError(f"Unsupported timeframe: {timeframe!r}")
+
 import structlog
 
 from freqpred.strategy.base import IPredictionStrategy
@@ -74,6 +85,9 @@ class IAlgoStrategy(IPredictionStrategy):
         # YES and NO positions receive direction-corrected candles so they must be
         # cached separately — a NO position's DataFrame has inverted OHLC.
         self._candle_cache: dict[tuple[str, str], pd.DataFrame | None] = {}
+        # tracks the UTC epoch (integer seconds) of the current open candle bucket
+        # per market; cache is only invalidated when this changes.
+        self._current_bucket: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -105,9 +119,15 @@ class IAlgoStrategy(IPredictionStrategy):
         if market_id not in self._ticks:
             self._ticks[market_id] = []
         self._ticks[market_id].append(tick)
-        # Invalidate cached candles for both directions so force_exit recomputes.
-        self._candle_cache[(market_id, "YES")] = None
-        self._candle_cache[(market_id, "NO")] = None
+        # Only invalidate the candle cache when the tick crosses into a new candle
+        # bucket.  Ticks within the same window don't change the complete-candle set
+        # (_resample always drops the partial current bucket), so recomputing on
+        # every tick would be wasted work.
+        bucket = int(ts.timestamp()) // _timeframe_seconds(self.timeframe) * _timeframe_seconds(self.timeframe)
+        if self._current_bucket.get(market_id) != bucket:
+            self._current_bucket[market_id] = bucket
+            self._candle_cache[(market_id, "YES")] = None
+            self._candle_cache[(market_id, "NO")] = None
 
     # ------------------------------------------------------------------
     # force_exit override

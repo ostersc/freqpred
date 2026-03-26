@@ -16,11 +16,12 @@ class StrategyConfig:
     max_days_to_close: float
     min_days_to_close: float
 
-    # Exit management
-    stoploss: float = -0.20
+    # Exit management — all thresholds are absolute 0-1 price-scale dollars.
+    # e.g. stoploss=-0.10 means "exit if price drops 10 cents from entry".
+    stoploss: float = -0.15
     trailing_stop: bool = False
-    trailing_stop_positive: float | None = None      # switch to tight trail at this profit %
-    trailing_stop_positive_offset: float = 0.02      # tight trail distance once profitable
+    trailing_stop_positive: float | None = None      # switch to tight trail once up this many cents
+    trailing_stop_positive_offset: float = 0.02      # tight trail distance (cents) below peak
 
     # Price range filter: skip markets the market has already decided.
     # Markets trading below min_mid_price or above max_mid_price are excluded

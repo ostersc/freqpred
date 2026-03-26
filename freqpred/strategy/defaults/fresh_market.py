@@ -30,7 +30,7 @@ class FreshMarketStrategy(IPredictionStrategy):
         min_volume_24h=0.0,
         max_days_to_close=7.0,
         min_days_to_close=0.25,
-        stoploss=-0.20,
+        stoploss=-0.10,
         trailing_stop=True,
         trailing_stop_positive=0.10,
         trailing_stop_positive_offset=0.02,

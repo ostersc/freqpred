@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -183,7 +183,9 @@ class TestDeactivateStaleMarkets:
         run_row = self._make_run_row(market_row)
         session = self._make_session([(run_row, market_row)])
 
-        count = await deactivate_stale_catalysts(session, [_strategy(True)])
+        with patch("freqpred.ingestion.selector.datetime") as mock_dt:
+            mock_dt.now.return_value = NOW
+            count = await deactivate_stale_catalysts(session, [_strategy(True)])
 
         assert count == 0
         assert run_row.is_active is True
@@ -202,7 +204,9 @@ class TestDeactivateStaleMarkets:
             (closed_rrow, closed_mrow),
         ])
 
-        count = await deactivate_stale_catalysts(session, [_strategy(True)])
+        with patch("freqpred.ingestion.selector.datetime") as mock_dt:
+            mock_dt.now.return_value = NOW
+            count = await deactivate_stale_catalysts(session, [_strategy(True)])
 
         assert count == 1
         assert active_rrow.is_active is True

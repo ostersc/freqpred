@@ -187,8 +187,8 @@ async def test_position_monitor_called_on_tick() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_message_ticker_parses_cents_to_dollars() -> None:
-    """Kalshi WS sends yes_bid/yes_ask as integer cents; _handle_message converts to dollars."""
+async def test_handle_message_ticker_parses_dollar_strings() -> None:
+    """Kalshi WS v2 sends yes_bid_dollars/yes_ask_dollars as dollar strings; _handle_message parses them."""
     watcher, _, _, _, _ = _make_watcher(open_market_ids={"MKT-1"})
 
     calls: list[tuple[str, float, float]] = []
@@ -202,8 +202,8 @@ async def test_handle_message_ticker_parses_cents_to_dollars() -> None:
         "type": "ticker",
         "msg": {
             "market_ticker": "MKT-1",
-            "yes_bid": 62,   # 62 cents
-            "yes_ask": 66,   # 66 cents
+            "yes_bid_dollars": "0.6200",
+            "yes_ask_dollars": "0.6600",
         },
     })
 
@@ -215,8 +215,8 @@ async def test_handle_message_ticker_parses_cents_to_dollars() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_message_ticker_ignores_old_dollars_field() -> None:
-    """Messages using the old yes_bid_dollars field name are silently ignored."""
+async def test_handle_message_ticker_ignores_old_cents_field() -> None:
+    """Messages using the old yes_bid/yes_ask integer-cents field names are silently ignored."""
     watcher, _, _, _, _ = _make_watcher(open_market_ids={"MKT-1"})
 
     calls: list[tuple] = []
@@ -226,17 +226,16 @@ async def test_handle_message_ticker_ignores_old_dollars_field() -> None:
 
     watcher._on_ticker_update = fake_on_ticker  # type: ignore[method-assign]
 
-    # Message uses old field name that no longer exists in WS API
+    # Message uses old integer-cents format — should not trigger an update.
     await watcher._handle_message({
         "type": "ticker",
         "msg": {
             "market_ticker": "MKT-1",
-            "yes_bid_dollars": "0.6200",
-            "yes_ask_dollars": "0.6600",
+            "yes_bid": 62,
+            "yes_ask": 66,
         },
     })
 
-    # Should not trigger an update — wrong field names, real WS sends yes_bid/yes_ask
     assert calls == []
 
 
@@ -254,7 +253,7 @@ async def test_handle_message_ticker_skips_unsubscribed_market() -> None:
 
     await watcher._handle_message({
         "type": "ticker",
-        "msg": {"market_ticker": "MKT-1", "yes_bid": 62, "yes_ask": 66},
+        "msg": {"market_ticker": "MKT-1", "yes_bid_dollars": "0.6200", "yes_ask_dollars": "0.6600"},
     })
 
     assert calls == []
