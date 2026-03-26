@@ -283,8 +283,16 @@ class PositionMonitor:
             if strategy.should_exit(position, fresh_signal, market):
                 return ("signal", effective_price)
 
-        # 6. Market resolution — Kalshi status is "finalized"/"resolved" OR close_time has passed
-        if market.status in ("finalized", "resolved") or market.close_time <= now:
+        # 6. Market resolution — Kalshi status is "finalized"/"resolved"/"settled" OR close_time has passed
+        if market.status in ("finalized", "resolved", "settled") or market.close_time <= now:
+            # If Kalshi has published a result, settle at the correct payout.
+            # The contract settles at $1 for the winning side and $0 for the losing side —
+            # not at the current mid_price (which would misstate P&L for paper positions).
+            # If result is not yet published (market expired but still determining),
+            # fall back to effective_price as the best available estimate.
+            if market.result is not None:
+                wins = position.direction.upper() == market.result.upper()
+                return ("market_resolved", 1.0 if wins else 0.0)
             return ("market_resolved", effective_price)
 
         return _NO_EXIT

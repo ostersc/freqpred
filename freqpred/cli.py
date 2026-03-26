@@ -475,6 +475,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             client=kalshi_client,
             session_factory=session_factory,
             polling_interval=config.kalshi.polling_interval_seconds,
+            alert_dispatcher=alert_dispatcher,
         )
         tasks.append(asyncio.create_task(watcher.run(), name="market_watcher"))
         tasks.append(

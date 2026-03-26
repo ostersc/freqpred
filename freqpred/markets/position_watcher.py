@@ -1,14 +1,16 @@
 """PositionWatcher: persistent Kalshi WebSocket ticker subscription for open live positions.
 
-Maintains a single ``ticker`` channel subscription for every market where freqpred
-holds an open or pending live position.  Provides sub-second price updates and
-triggers PositionMonitor on each tick.  REST polling (MarketWatcher) continues
-unchanged for markets without live positions.
+Maintains a ``ticker`` + ``market_lifecycle`` channel subscription for every market
+where freqpred holds an open or pending live position.  Provides sub-second price
+updates and triggers PositionMonitor on each tick.  On ``market_lifecycle`` settled
+events, closes all open live positions at the correct payout price.  REST polling
+(MarketWatcher) continues unchanged for markets without live positions.
 
 Connection lifecycle:
   On connect  → reconcile DB vs Kalshi positions → reconcile pending orders
-               → re-query open markets → subscribe to ticker channel
+               → re-query open markets → subscribe to ticker + market_lifecycle channels
   While alive → handle ticker messages → upsert DB price → call PositionMonitor
+              → handle market_lifecycle settled → close positions + unsubscribe
   On disconnect → exponential backoff (1s → 2s → 4s … 60s max) → reconnect
 """
 from __future__ import annotations
@@ -27,6 +29,7 @@ from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.trading import ledger
 
 if TYPE_CHECKING:
+    from freqpred.alerts.dispatcher import AlertDispatcher
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.trading.order_manager import OrderManager
     from freqpred.trading.position_monitor import PositionMonitor
@@ -53,6 +56,7 @@ class PositionWatcher:
         position_monitor: "PositionMonitor",
         order_manager: "OrderManager",
         price_move_threshold: float = 0.05,
+        alert_dispatcher: "AlertDispatcher | None" = None,
     ) -> None:
         self._kalshi_client = kalshi_client
         self._ws_url = ws_url
@@ -60,13 +64,15 @@ class PositionWatcher:
         self._position_monitor = position_monitor
         self._order_manager = order_manager
         self._price_move_threshold = price_move_threshold
+        self._alert_dispatcher = alert_dispatcher
 
         # Set of market_ids currently in the ticker subscription.
         self._subscribed: set[str] = set()
         # Live websockets connection (set while connected, None otherwise).
         self._ws: websockets.WebSocketClientProtocol | None = None
-        # Subscription ID assigned by Kalshi for the active ticker subscription.
-        self._subscription_sid: int | None = None
+        # Subscription IDs assigned by Kalshi (one per channel subscribed).
+        # Kalshi may return multiple sids when subscribing to multiple channels.
+        self._subscription_sids: list[int] = []
         # Sequential command ID (Kalshi requires monotonically increasing ids).
         self._msg_id: int = 0
         # In-memory tracking of last known mid_price per market for Δ logging.
@@ -93,7 +99,7 @@ class PositionWatcher:
             backoff = min(backoff * 2, 60.0)
 
     async def subscribe(self, market_id: str) -> None:
-        """Add a market to the ticker subscription.
+        """Add a market to the ticker + market_lifecycle subscription.
 
         Called by cli.py after a new live position is opened.
         Safe to call when disconnected — market_id is added to the in-memory
@@ -103,18 +109,19 @@ class PositionWatcher:
             return
         self._subscribed.add(market_id)
         if self._ws is not None:
-            if self._subscription_sid is not None:
+            if self._subscription_sids:
                 await self._send_add_markets(self._ws, [market_id])
             else:
                 await self._send_subscribe(self._ws, [market_id])
 
     async def unsubscribe(self, market_id: str) -> None:
-        """Remove a market from the ticker subscription.
+        """Remove a market from the subscription.
 
-        Called after a live position closes.  Safe to call when disconnected.
+        Called after a live position closes or a market settles.
+        Safe to call when disconnected.
         """
         self._subscribed.discard(market_id)
-        if self._ws is not None and self._subscription_sid is not None:
+        if self._ws is not None and self._subscription_sids:
             await self._send_remove_markets(self._ws, [market_id])
 
     # ------------------------------------------------------------------
@@ -156,7 +163,7 @@ class PositionWatcher:
                     await self._handle_message(json.loads(raw))
             finally:
                 self._ws = None
-                self._subscription_sid = None
+                self._subscription_sids = []
 
     # ------------------------------------------------------------------
     # Message handling
@@ -167,12 +174,13 @@ class PositionWatcher:
         msg_type = msg.get("type")
 
         if msg_type == "subscribed":
-            sid = msg.get("msg", {}).get("sid")
-            if sid is not None:
-                self._subscription_sid = sid
+            inner = msg.get("msg", {})
+            sid = inner.get("sid")
+            if sid is not None and sid not in self._subscription_sids:
+                self._subscription_sids.append(sid)
             log.info(
                 "position_watcher.subscribed",
-                channel=msg.get("msg", {}).get("channel"),
+                channel=inner.get("channel"),
                 sid=sid,
             )
 
@@ -193,6 +201,19 @@ class PositionWatcher:
                     log.warning("position_watcher.tick_not_subscribed", market_id=market_id)
             else:
                 log.warning("position_watcher.ticker_missing_fields", raw=str(inner)[:200])
+
+        elif msg_type == "market_lifecycle":
+            inner = msg.get("msg", {})
+            market_id = inner.get("market_ticker")
+            status = inner.get("status", "")
+            result = inner.get("result")
+            if market_id:
+                await self._on_market_lifecycle(market_id, status, result)
+            else:
+                log.warning(
+                    "position_watcher.lifecycle_missing_market_ticker",
+                    raw=str(inner)[:200],
+                )
 
         elif msg_type == "error":
             code = msg.get("msg", {}).get("code")
@@ -250,6 +271,108 @@ class PositionWatcher:
 
         # Trigger exit evaluation for all open positions.
         await self._position_monitor.check_all_positions()
+
+    async def _on_market_lifecycle(
+        self, market_id: str, status: str, result: str | None
+    ) -> None:
+        """Handle a market_lifecycle WebSocket event.
+
+        Status progression: "active" → "determined" → "settled"
+
+        On "settled": close all open live positions at correct payout price,
+        send WIN/LOSS alert, and unsubscribe from this market.
+        On "determined": log for observability but do NOT close positions yet.
+        Other statuses: log at debug level and continue.
+        """
+        if status == "determined":
+            log.info(
+                "position_watcher.market_determined",
+                market_id=market_id,
+                result=result,
+            )
+            return
+
+        if status != "settled":
+            log.debug(
+                "position_watcher.market_lifecycle",
+                market_id=market_id,
+                status=status,
+            )
+            return
+
+        log.info("position_watcher.market_settled", market_id=market_id, result=result)
+
+        if result is None:
+            log.warning(
+                "position_watcher.lifecycle_settled_no_result",
+                market_id=market_id,
+            )
+            return
+
+        await self._close_positions_for_resolved_market(market_id, result)
+        await self.unsubscribe(market_id)
+
+    async def _close_positions_for_resolved_market(
+        self, market_id: str, result: str
+    ) -> None:
+        """Close all open live positions for a market that has resolved.
+
+        Payout logic:
+          - direction matches result (e.g. YES holds YES-wins market) → exit_price = 1.00
+          - direction opposes result → exit_price = 0.00
+        """
+        resolution = 1 if result.lower() == "yes" else 0
+
+        async with self._session_factory() as session:
+            market_res = await session.execute(
+                select(MarketRow).where(MarketRow.id == market_id)
+            )
+            market_row = market_res.scalar_one_or_none()
+
+            pos_res = await session.execute(
+                select(PositionRow).where(
+                    PositionRow.market_id == market_id,
+                    PositionRow.mode == "live",
+                    PositionRow.status.in_(["open", "pending"]),
+                )
+            )
+            rows = pos_res.scalars().all()
+
+        if not rows:
+            log.info("position_watcher.no_positions_to_resolve", market_id=market_id)
+            return
+
+        for row in rows:
+            wins = row.direction.upper() == result.upper()
+            exit_price = 1.0 if wins else 0.0
+            async with self._session_factory() as close_session:
+                closed = await ledger.close_position(
+                    close_session,
+                    str(row.id),
+                    exit_price=exit_price,
+                    exit_reason="market_resolved",
+                    resolution=resolution,
+                )
+            log.info(
+                "position_watcher.position_resolved",
+                market_id=market_id,
+                position_id=str(row.id),
+                direction=row.direction,
+                result=result,
+                exit_price=exit_price,
+                pnl=closed.pnl,
+            )
+            if self._alert_dispatcher is not None:
+                pnl_val = closed.pnl or 0.0
+                prefix = "WIN" if pnl_val >= 0 else "LOSS"
+                pnl_str = f"{pnl_val:+.4f}"
+                question = market_row.question if market_row is not None else market_id
+                msg = (
+                    f"{prefix}: {question} resolved {result.upper()}\n"
+                    f"P&L: {pnl_str}  |  Direction: {closed.direction}  |  "
+                    f"Entry: {closed.entry_price:.4f}  Exit: {closed.exit_price:.4f}"
+                )
+                await self._alert_dispatcher.send(msg)
 
     # ------------------------------------------------------------------
     # Position reconciliation
@@ -362,7 +485,13 @@ class PositionWatcher:
     async def _send_subscribe(
         self, ws: websockets.WebSocketClientProtocol, market_ids: list[str]
     ) -> None:
-        """Send a fresh subscribe command for the given market_ids."""
+        """Send a fresh subscribe command for the given market_ids.
+
+        Subscribes to both ``ticker`` (sub-second price updates) and
+        ``market_lifecycle`` (resolution events) in a single command.
+        Kalshi may return one or two ``subscribed`` events (one per channel);
+        each sid is appended to ``_subscription_sids``.
+        """
         log.info("position_watcher.subscribing", market_ids=sorted(market_ids), count=len(market_ids))
         await ws.send(
             json.dumps(
@@ -370,7 +499,7 @@ class PositionWatcher:
                     "id": self._next_id(),
                     "cmd": "subscribe",
                     "params": {
-                        "channels": ["ticker"],
+                        "channels": ["ticker", "market_lifecycle"],
                         "market_tickers": market_ids,
                     },
                 }
@@ -388,7 +517,7 @@ class PositionWatcher:
                     "id": self._next_id(),
                     "cmd": "update_subscription",
                     "params": {
-                        "sids": [self._subscription_sid],
+                        "sids": self._subscription_sids,
                         "market_tickers": market_ids,
                         "action": "add_markets",
                     },
@@ -406,7 +535,7 @@ class PositionWatcher:
                     "id": self._next_id(),
                     "cmd": "update_subscription",
                     "params": {
-                        "sids": [self._subscription_sid],
+                        "sids": self._subscription_sids,
                         "market_tickers": market_ids,
                         "action": "delete_markets",
                     },

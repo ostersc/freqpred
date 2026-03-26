@@ -436,6 +436,219 @@ async def test_reconcile_closes_position_when_kalshi_has_zero() -> None:
     assert call_kwargs.get("exit_reason") == "reconcile_auto_close"
 
 
+# ---------------------------------------------------------------------------
+# _on_market_lifecycle tests (T40)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_settled_yes_closes_winning_position() -> None:
+    """YES position, market resolves YES → close_position(exit_price=1.0, exit_reason='market_resolved')."""
+    watcher, _, session_factory, _, _ = _make_watcher(open_market_ids={"MKT-1"})
+
+    market_row = MagicMock()
+    market_row.question = "Will YES win?"
+
+    pos_row = _make_position_row(market_id="MKT-1", status="open", mode="live")
+    pos_row.direction = "YES"
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+
+    scalar_result = MagicMock()
+    scalar_result.scalar_one_or_none.return_value = market_row
+    pos_result = _make_db_result([pos_row])
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        return scalar_result if call_count == 1 else pos_result
+
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        closed_pos = MagicMock()
+        closed_pos.pnl = 0.4
+        closed_pos.direction = "YES"
+        closed_pos.entry_price = 0.6
+        closed_pos.exit_price = 1.0
+        mock_ledger.close_position = AsyncMock(return_value=closed_pos)
+
+        await watcher._on_market_lifecycle("MKT-1", "settled", "yes")
+
+    mock_ledger.close_position.assert_awaited_once()
+    call_kwargs = mock_ledger.close_position.call_args.kwargs
+    assert call_kwargs["exit_price"] == pytest.approx(1.0)
+    assert call_kwargs["exit_reason"] == "market_resolved"
+    assert call_kwargs["resolution"] == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_settled_yes_closes_losing_position() -> None:
+    """NO position, market resolves YES → close_position(exit_price=0.0)."""
+    watcher, _, session_factory, _, _ = _make_watcher(open_market_ids={"MKT-1"})
+
+    market_row = MagicMock()
+    market_row.question = "Will YES win?"
+
+    pos_row = _make_position_row(market_id="MKT-1", status="open", mode="live")
+    pos_row.direction = "NO"
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+
+    scalar_result = MagicMock()
+    scalar_result.scalar_one_or_none.return_value = market_row
+    pos_result = _make_db_result([pos_row])
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        return scalar_result if call_count == 1 else pos_result
+
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        closed_pos = MagicMock()
+        closed_pos.pnl = -0.3
+        closed_pos.direction = "NO"
+        closed_pos.entry_price = 0.3
+        closed_pos.exit_price = 0.0
+        mock_ledger.close_position = AsyncMock(return_value=closed_pos)
+
+        await watcher._on_market_lifecycle("MKT-1", "settled", "yes")
+
+    mock_ledger.close_position.assert_awaited_once()
+    call_kwargs = mock_ledger.close_position.call_args.kwargs
+    assert call_kwargs["exit_price"] == pytest.approx(0.0)
+    assert call_kwargs["exit_reason"] == "market_resolved"
+    assert call_kwargs["resolution"] == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_determined_does_not_close_positions() -> None:
+    """status='determined' → no close_position() call (positions stay open until 'settled')."""
+    watcher, _, session_factory, _, _ = _make_watcher(open_market_ids={"MKT-1"})
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(return_value=_make_db_result([]))
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        mock_ledger.close_position = AsyncMock()
+        await watcher._on_market_lifecycle("MKT-1", "determined", "yes")
+
+    mock_ledger.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_unsubscribes_after_settlement() -> None:
+    """After settlement, market_id is removed from _subscribed."""
+    watcher, _, session_factory, _, _ = _make_watcher(open_market_ids={"MKT-1"})
+
+    scalar_result = MagicMock()
+    scalar_result.scalar_one_or_none.return_value = None  # no market row needed
+    empty_result = _make_db_result([])  # no positions
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        return scalar_result if call_count == 1 else empty_result
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    with patch("freqpred.markets.position_watcher.ledger"):
+        await watcher._on_market_lifecycle("MKT-1", "settled", "yes")
+
+    assert "MKT-1" not in watcher._subscribed
+
+
+@pytest.mark.asyncio
+async def test_telegram_alert_sent_on_resolution() -> None:
+    """AlertDispatcher.send() is called with WIN/LOSS message on position resolution."""
+    alert_dispatcher = MagicMock()
+    alert_dispatcher.send = AsyncMock()
+
+    watcher, _, session_factory, _, _ = _make_watcher(open_market_ids={"MKT-1"})
+    watcher._alert_dispatcher = alert_dispatcher
+
+    market_row = MagicMock()
+    market_row.question = "Will it rain?"
+
+    pos_row = _make_position_row(market_id="MKT-1", status="open", mode="live")
+    pos_row.direction = "YES"
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+
+    scalar_result = MagicMock()
+    scalar_result.scalar_one_or_none.return_value = market_row
+    pos_result = _make_db_result([pos_row])
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        return scalar_result if call_count == 1 else pos_result
+
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        closed_pos = MagicMock()
+        closed_pos.pnl = 0.5
+        closed_pos.direction = "YES"
+        closed_pos.entry_price = 0.5
+        closed_pos.exit_price = 1.0
+        mock_ledger.close_position = AsyncMock(return_value=closed_pos)
+
+        await watcher._on_market_lifecycle("MKT-1", "settled", "yes")
+
+    alert_dispatcher.send.assert_awaited_once()
+    sent_msg: str = alert_dispatcher.send.call_args.args[0]
+    assert "WIN" in sent_msg or "LOSS" in sent_msg
+    assert "Will it rain?" in sent_msg
+
+
+@pytest.mark.asyncio
+async def test_rest_fallback_resolves_if_websocket_missed() -> None:
+    """MarketWatcher._resolve_settled_live_positions() closes open live positions for settled markets."""
+    from freqpred.markets.watcher import MarketWatcher
+
+    mock_client = MagicMock()
+    mock_client.list_markets = AsyncMock(return_value=[])
+
+    session_factory = MagicMock()
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.commit = AsyncMock()
+    session_factory.return_value = mock_session
+
+    # Row simulating a join result (PositionRow.id, PositionRow.direction, MarketRow.result)
+    row = MagicMock()
+    row.id = uuid.uuid4()
+    row.direction = "YES"
+    row.result = "yes"
+
+    mock_session.execute = AsyncMock(return_value=_make_db_result([row]))
+
+    watcher = MarketWatcher(client=mock_client, session_factory=session_factory)
+
+    with patch("freqpred.markets.watcher.ledger") as mock_ledger:
+        mock_ledger.close_position = AsyncMock()
+        count = await watcher._resolve_settled_live_positions()
+
+    assert count == 1
+    mock_ledger.close_position.assert_awaited_once()
+    call_kwargs = mock_ledger.close_position.call_args.kwargs
+    assert call_kwargs["exit_price"] == pytest.approx(1.0)
+    assert call_kwargs["exit_reason"] == "market_resolved"
+    assert call_kwargs["resolution"] == 1
+
+
 @pytest.mark.asyncio
 async def test_reconcile_ignores_kalshi_only_positions() -> None:
     """Kalshi has a position not in DB (manual trade) → logged, no new DB row created."""

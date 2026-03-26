@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import select, update
@@ -12,6 +13,10 @@ from freqpred.markets.base import IMarketClient
 from freqpred.markets.kalshi import KalshiAPIError, KalshiClient
 from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.markets.repository import upsert_markets
+from freqpred.trading import ledger
+
+if TYPE_CHECKING:
+    from freqpred.alerts.dispatcher import AlertDispatcher
 
 # Max markets to re-fetch per sweep cycle (rate-limit safety).
 _RESOLVED_SWEEP_BATCH = 200
@@ -66,11 +71,13 @@ class MarketWatcher:
         session_factory: async_sessionmaker[AsyncSession],
         polling_interval: int = 300,
         price_move_threshold: float = PRICE_MOVE_THRESHOLD,
+        alert_dispatcher: "AlertDispatcher | None" = None,
     ) -> None:
         self._client = client
         self._session_factory = session_factory
         self._polling_interval = polling_interval
         self._price_move_threshold = price_move_threshold
+        self._alert_dispatcher = alert_dispatcher
 
     async def run(self) -> None:
         """Run the polling loop indefinitely until the task is cancelled."""
@@ -97,6 +104,7 @@ class MarketWatcher:
 
         resolved = await self._sweep_closed_markets()
         missing_resolved = await self._sweep_missing_results()
+        rest_fallback_resolved = await self._resolve_settled_live_positions()
 
         log.info(
             "market_watcher_cycle_complete",
@@ -105,6 +113,7 @@ class MarketWatcher:
             stale_markets=len(stale_ids),
             resolved_swept=resolved,
             missing_results_resolved=missing_resolved,
+            rest_fallback_resolved=rest_fallback_resolved,
             elapsed_s=round((datetime.now(UTC) - cycle_start).total_seconds(), 2),
         )
         if stale_ids:
@@ -278,6 +287,53 @@ class MarketWatcher:
         if resolved:
             log.info("market_watcher.missing_results_sweep", resolved=resolved)
         return resolved
+
+    async def _resolve_settled_live_positions(self) -> int:
+        """REST-poll fallback: close open live positions on already-settled markets.
+
+        Handles resolutions missed by the WebSocket during reconnect windows.
+        Idempotent — positions already closed are excluded by the status filter.
+
+        Returns the number of positions closed.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(PositionRow.id, PositionRow.direction, MarketRow.result)
+                .join(MarketRow, PositionRow.market_id == MarketRow.id)
+                .where(
+                    PositionRow.status.in_(["open", "pending"]),
+                    PositionRow.mode == "live",
+                    MarketRow.status.in_(["settled", "finalized"]),
+                    MarketRow.result.is_not(None),
+                )
+            )
+            rows = result.all()
+
+        if not rows:
+            return 0
+
+        for row in rows:
+            market_result: str = row.result
+            resolution = 1 if market_result.lower() == "yes" else 0
+            wins = row.direction.upper() == market_result.upper()
+            exit_price = 1.0 if wins else 0.0
+            async with self._session_factory() as close_session:
+                await ledger.close_position(
+                    close_session,
+                    str(row.id),
+                    exit_price=exit_price,
+                    exit_reason="market_resolved",
+                    resolution=resolution,
+                )
+            log.info(
+                "market_watcher.rest_fallback_resolved",
+                position_id=str(row.id),
+                direction=row.direction,
+                result=market_result,
+                exit_price=exit_price,
+            )
+
+        return len(rows)
 
     async def _check_price_move_triggers(
         self,

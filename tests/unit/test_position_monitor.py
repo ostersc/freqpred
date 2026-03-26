@@ -361,6 +361,64 @@ class TestEvaluateExit:
         assert result is not None
         assert result[0] == "market_resolved"
 
+    def test_market_resolved_winning_position_exits_at_one(self) -> None:
+        """YES position + market.result='yes' → exit_price=1.0, not mid_price."""
+        strategy = _make_strategy()
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50, direction="YES")
+        market = _make_market(mid_price=0.60, close_time=NOW - timedelta(hours=1))
+        market.result = "yes"
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=market,
+            current_price=0.60,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "market_resolved"
+        assert result[1] == pytest.approx(1.0)
+
+    def test_market_resolved_losing_position_exits_at_zero(self) -> None:
+        """NO position + market.result='yes' → exit_price=0.0 (NO side loses).
+
+        mid_price=0.60 chosen so NO effective_price=0.40 > stoploss threshold,
+        meaning stoploss does not fire before market_resolved.
+        """
+        strategy = _make_strategy()
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.35, direction="NO")
+        market = _make_market(mid_price=0.60, close_time=NOW - timedelta(hours=1))
+        market.result = "yes"
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=market,
+            current_price=0.60,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "market_resolved"
+        assert result[1] == pytest.approx(0.0)
+
+    def test_market_resolved_uses_mid_when_result_unknown(self) -> None:
+        """close_time passed but result not yet published → falls back to effective_price."""
+        strategy = _make_strategy()
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50, direction="YES")
+        market = _make_market(mid_price=0.52, close_time=NOW - timedelta(hours=1))
+        # market.result is None (not yet set by Kalshi)
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=market,
+            current_price=0.52,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "market_resolved"
+        assert result[1] == pytest.approx(0.52)
+
     def test_no_market_resolved_when_status_open_and_close_time_future(self) -> None:
         strategy = _make_strategy()
         monitor = self._monitor(strategy)
@@ -571,10 +629,10 @@ class TestCheckAllPositions:
         )
 
         closed_pos = Position(
-            **{**pos.__dict__, "status": "closed", "exit_price": 0.99, "exit_reason": "market_resolved", "resolution": 1, "pnl": 49.0, "pnl_pct": 0.98}
+            **{**pos.__dict__, "status": "closed", "exit_price": 1.0, "exit_reason": "market_resolved", "resolution": 1, "pnl": 50.0, "pnl_pct": 1.0}
         )
 
-        # Market is Kalshi-resolved at YES price = 0.99
+        # Market is Kalshi-resolved YES — exit_price must be 1.0 (payout), not mid_price
         market = _make_market(mid_price=0.99, close_time=NOW + timedelta(days=5))
         market.status = "resolved"
         market.result = "yes"
@@ -623,7 +681,7 @@ class TestCheckAllPositions:
         mock_close.assert_awaited_once_with(
             session,
             pos_id,
-            exit_price=0.99,
+            exit_price=1.0,
             exit_reason="market_resolved",
             resolution=1,
         )
