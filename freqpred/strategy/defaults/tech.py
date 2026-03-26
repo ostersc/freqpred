@@ -21,7 +21,6 @@ class TechNewsStrategy(IPredictionStrategy):
         max_days_to_close=30,
         min_days_to_close=1,
         stoploss=-0.15,
-        minimal_roi={"0": 0.25, "1440": 0.12, "10080": 0.05},
         trailing_stop=True,
         trailing_stop_positive=0.10,
         trailing_stop_positive_offset=0.02,

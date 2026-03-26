@@ -30,11 +30,6 @@ class TestStrategyConfigDefaults:
         config = _minimal_config()
         assert config.stoploss < 0
 
-    def test_minimal_roi_keys_are_non_negative_integers(self) -> None:
-        config = _minimal_config()
-        for key in config.minimal_roi:
-            assert int(key) >= 0, f"key {key!r} is not a non-negative integer string"
-
     def test_trailing_stop_default_is_false(self) -> None:
         config = _minimal_config()
         assert config.trailing_stop is False
@@ -46,12 +41,6 @@ class TestStrategyConfigDefaults:
     def test_trailing_stop_positive_offset_default(self) -> None:
         config = _minimal_config()
         assert config.trailing_stop_positive_offset == pytest.approx(0.02)
-
-    def test_minimal_roi_default_values_are_descending(self) -> None:
-        config = _minimal_config()
-        values = [config.minimal_roi[k] for k in sorted(config.minimal_roi, key=int)]
-        assert values == sorted(values, reverse=True), "ROI thresholds should decrease over time"
-
 
 class TestConservativeDefaultExitConfig:
     config = ConservativeDefault().config
@@ -65,11 +54,6 @@ class TestConservativeDefaultExitConfig:
     def test_trailing_stop_positive(self) -> None:
         assert self.config.trailing_stop_positive == pytest.approx(0.15)
 
-    def test_minimal_roi_keys_non_negative(self) -> None:
-        for key in self.config.minimal_roi:
-            assert int(key) >= 0
-
-
 class TestPoliticsExitConfig:
     config = PoliticsEdgeStrategy().config
 
@@ -78,11 +62,6 @@ class TestPoliticsExitConfig:
 
     def test_trailing_stop_disabled(self) -> None:
         assert self.config.trailing_stop is False
-
-    def test_minimal_roi_keys_non_negative(self) -> None:
-        for key in self.config.minimal_roi:
-            assert int(key) >= 0
-
 
 class TestTechExitConfig:
     config = TechNewsStrategy().config
@@ -94,6 +73,3 @@ class TestTechExitConfig:
     def test_trailing_stop_enabled(self) -> None:
         assert self.config.trailing_stop is True
 
-    def test_minimal_roi_keys_non_negative(self) -> None:
-        for key in self.config.minimal_roi:
-            assert int(key) >= 0

@@ -1,10 +1,24 @@
-"""PoliticsEdgeStrategy: US politics markets with conservative Kelly + TA exits."""
+"""PoliticsEdgeStrategy: US politics markets with PM-native exits.
+
+Uses 5-min candles (politics markets move slowly) with the same
+thesis-aware exit logic as AlgoExampleStrategy:
+
+  1. **Safe-zone displacement + choppiness** — outside thesis range + choppy
+     + near range top → exit at best available price.  Safe-zone margin is
+     ``config.min_edge`` (0.15 for this strategy).
+  2. **Trailing stop** — framework-level (disabled by default for politics;
+     these markets are sticky and reversals are often noise).
+"""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
+
 from freqpred.strategy.algo_base import IAlgoStrategy
 from freqpred.strategy.config import StrategyConfig
+
+logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -16,27 +30,29 @@ if TYPE_CHECKING:
 # without excessive noise from thin order books.
 _TIMEFRAME = "5min"
 
-# EMA21 is the slowest indicator; require enough candles for it to warm up.
-# 22 × 5min = 110 minutes of data before any TA exit fires.
-_EMA_SHORT = 9
-_EMA_LONG = 21
-_RSI_PERIOD = 14
-_MIN_CANDLES = _EMA_LONG + 1  # 22
+# Rolling window (in candles) for choppiness and range-top detection.
+# 10 × 5min = 50 minutes of lookback.
+_LOOKBACK = 10
 
-# Higher RSI threshold than equity markets — politics prices are stickier
-# and an RSI of 70 is common even without a real reversal.
-_RSI_OVERBOUGHT = 78.0
+# Average (high - low) / close over the lookback window above this = choppy.
+# Slightly higher than the 1-min default (0.05) because 5-min candles
+# naturally have wider ranges.
+_CHOPPINESS_THRESHOLD = 0.06
+
+# Require at least this many complete 5-min candles for indicators to settle.
+# 25 × 5min = ~2 hours of data before any TA exit fires.
+_MIN_CANDLES = 25
 
 
 class PoliticsEdgeStrategy(IAlgoStrategy):
-    """US politics markets with conservative Kelly sizing and TA-driven exits.
+    """US politics markets with conservative Kelly sizing and PM-native exits.
 
-    LLM signal controls entry (min_edge=0.18, min_confidence=0.70).
+    LLM signal controls entry (min_edge=0.15, min_confidence=0.60).
 
     Exit priority (per framework rules):
-      1–3. Hard stoploss / trailing stop / minimal ROI  (config below)
-      4.   force_exit — TA: RSI overbought OR EMA bearish cross (this class)
-      5–6. custom_exit / should_exit  (inherited no-ops)
+      1–2. Hard stoploss / trailing stop  (config below)
+      3.   force_exit — PM-native: thesis-aware displacement/choppiness (this class)
+      4–5. custom_exit / should_exit  (inherited no-ops)
     """
 
     timeframe: str = _TIMEFRAME
@@ -55,7 +71,6 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         min_days_to_close=0.25,
         stoploss=-0.30,
         stoploss_cooldown_hours=48.0,
-        minimal_roi={"0": 0.40, "1440": 0.25, "10080": 0.10},
         trailing_stop=False,
         trailing_stop_positive=None,
         trailing_stop_positive_offset=0.02,
@@ -65,26 +80,52 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         super().__init__()
 
     def populate_indicators(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
-        """RSI(14), EMA(9), EMA(21) on 5-min close prices."""
-        import pandas_ta as ta  # noqa: PLC0415
-
-        df["rsi"] = ta.rsi(df["close"], length=_RSI_PERIOD)
-        df["ema_short"] = ta.ema(df["close"], length=_EMA_SHORT)
-        df["ema_long"] = ta.ema(df["close"], length=_EMA_LONG)
+        """Choppiness (normalized candle range) and rolling high for range-top timing."""
+        df["range_pct"] = (df["high"] - df["low"]) / df["close"].clip(lower=0.01)
+        df["choppiness"] = df["range_pct"].rolling(_LOOKBACK, min_periods=1).mean()
+        df["rolling_high"] = df["close"].rolling(_LOOKBACK, min_periods=1).max()
         return df
 
     def populate_exit_trend(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
-        """Exit on RSI overbought OR bearish EMA crossover.
+        """Exit on thesis-displacement + choppiness.
 
-        By the time this is called, min_candles (22) is guaranteed by
-        IAlgoStrategy.force_exit(), so both indicators are fully warmed up.
+        Signal — Safe-zone displacement + choppiness:
+          Safe zone = [min(entry, p_est) - min_edge, max(entry, p_est) + min_edge].
+          Outside + choppy + near range top → exit at best available price.
         """
-        import pandas_ta as ta  # noqa: PLC0415
+        entry = metadata["entry_price"]
+        p_est = metadata["p_est"]
 
-        rsi_exit = df["rsi"] > _RSI_OVERBOUGHT
-        ema_cross_exit = ta.cross(df["ema_short"], df["ema_long"], above=False)
+        # Signal: thesis-aware displacement
+        safe_low = min(entry, p_est) - self.config.min_edge
+        safe_high = max(entry, p_est) + self.config.min_edge
+        outside_safe = (df["close"] < safe_low) | (df["close"] > safe_high)
 
-        df["exit_long"] = (rsi_exit | ema_cross_exit).fillna(False)
+        choppy = df["choppiness"] > _CHOPPINESS_THRESHOLD
+        near_range_top = df["close"] >= df["rolling_high"] * 0.98
+
+        displacement_exit = outside_safe & choppy & near_range_top
+
+        df["exit_long"] = (displacement_exit).fillna(False)
+
+        # Debug: log last candle's key values for exit decision.
+        last = df.iloc[-1]
+        logger.debug(
+            "politics_exit_eval",
+            market_id=metadata["market_id"],
+            close=round(last["close"], 4),
+            entry=round(entry, 4),
+            p_est=round(p_est, 4),
+            safe_low=round(safe_low, 4),
+            safe_high=round(safe_high, 4),
+            choppiness=round(last["choppiness"], 4),
+            chop_thresh=_CHOPPINESS_THRESHOLD,
+            rolling_high=round(last["rolling_high"], 4),
+            outside_safe=bool(outside_safe.iloc[-1]),
+            choppy=bool(choppy.iloc[-1]),
+            near_top=bool(near_range_top.iloc[-1]),
+            exit=bool(df["exit_long"].iloc[-1]),
+        )
         return df
 
     def should_trade(self, signal: "Signal", market: "Market") -> bool:
@@ -92,4 +133,3 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
             signal.edge >= self.config.min_edge
             and signal.confidence >= self.config.min_confidence
         )
-

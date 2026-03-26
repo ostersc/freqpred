@@ -384,7 +384,7 @@ def register_system_commands(
 
         lines = [f"Last {len(rows)} resolved position(s):"]
         for pos, question in rows:
-            q = _truncate(question, 50)
+            q = _truncate(question, 80)
             pnl_str = f"{pos.pnl:+.4f}" if pos.pnl is not None else "N/A"
             duration = "N/A"
             if pos.entry_time and pos.exit_time:
@@ -431,7 +431,7 @@ def register_system_commands(
 
         lines = [f"Last {len(rows)} signal(s):"]
         for sig, question in rows:
-            q = _truncate(question, 50)
+            q = _truncate(question, 80)
             lines.append(
                 f"  {q}\n"
                 f"    prob={sig.estimated_probability:.3f}  mid={sig.market_mid_at_signal:.3f}"

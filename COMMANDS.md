@@ -74,14 +74,18 @@ Generates 3–5 Claude Haiku catalyst queries per market, then runs Tavily + New
 uv run freqpred positions list
 uv run freqpred positions list --status open
 uv run freqpred positions list --status closed --limit 100
+uv run freqpred positions list --days 1
+uv run freqpred positions list --strategy PoliticsEdgeStrategy --days 7
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `--status` | `all` | `open`, `closed`, or `all` |
 | `--limit` | `50` | Maximum rows to display |
+| `--strategy` | _(none)_ | Filter by strategy name (exact match) |
+| `--days` | _(none)_ | Only show positions entered within the last N days (e.g. `1` = last 24 hours, `0.5` = last 12 hours) |
 
-Columns include MAE and MFE (signed price deltas; multiply by contracts for dollar impact). These are populated for positions that have been monitored by the position monitor since entry.
+Columns include HELD (time held: `exit_time - entry_time` for closed, elapsed since entry for open), PNL% (return over capital spent: `pnl / (entry_price × contracts + fee)`, only populated on close), MAE and MFE (signed price deltas; multiply by contracts for dollar impact).
 
 ---
 

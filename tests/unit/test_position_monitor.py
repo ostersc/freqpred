@@ -4,7 +4,6 @@ All DB interactions mocked — no external dependencies.
 Tests cover:
 - _check_stoploss
 - _check_trailing_stop
-- _check_roi
 - PositionMonitor.evaluate_exit (full priority order)
 - PositionMonitor.check_all_positions (integration of the loop)
 """
@@ -23,7 +22,6 @@ from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
 from freqpred.trading.position_monitor import (
     PositionMonitor,
-    _check_roi,
     _check_stoploss,
     _check_trailing_stop,
 )
@@ -115,15 +113,11 @@ def _make_signal(direction: str = "YES", confidence: float = 0.82) -> Signal:
 def _make_strategy(
     *,
     stoploss: float = -0.20,
-    minimal_roi: dict[str, float] | None = None,
     trailing_stop: bool = False,
     trailing_stop_positive: float | None = None,
     trailing_stop_positive_offset: float = 0.02,
     min_confidence: float = 0.80,
 ) -> IPredictionStrategy:
-    if minimal_roi is None:
-        minimal_roi = {"0": 0.30, "1440": 0.15, "10080": 0.05}
-
     class _TestStrategy(IPredictionStrategy):
         config = StrategyConfig(
             name="TestStrategy",
@@ -136,7 +130,6 @@ def _make_strategy(
             max_days_to_close=365,
             min_days_to_close=0,
             stoploss=stoploss,
-            minimal_roi=minimal_roi,
             trailing_stop=trailing_stop,
             trailing_stop_positive=trailing_stop_positive,
             trailing_stop_positive_offset=trailing_stop_positive_offset,
@@ -242,49 +235,6 @@ class TestCheckTrailingStop:
 
 
 # ---------------------------------------------------------------------------
-# _check_roi
-# ---------------------------------------------------------------------------
-
-class TestCheckRoi:
-    MINIMAL_ROI = {"0": 0.30, "1440": 0.15, "10080": 0.05}
-
-    def test_fires_immediately_at_30pct(self) -> None:
-        pos = _make_position(entry_price=0.50, entry_time=NOW)
-        # current_price=0.65 → pnl_pct=0.30 >= 0.30 (threshold "0" applies)
-        result = _check_roi(pos, 0.65, NOW + timedelta(minutes=1), self.MINIMAL_ROI)
-        assert result == ("roi", 0.65)
-
-    def test_applies_day_tier_after_1440_min(self) -> None:
-        pos = _make_position(entry_price=0.50, entry_time=NOW)
-        # elapsed=1441 min → tier "1440" applies, need 15% profit
-        # price=0.5775 → pnl_pct=0.155 >= 0.15
-        result = _check_roi(
-            pos, 0.5775, NOW + timedelta(minutes=1441), self.MINIMAL_ROI
-        )
-        assert result == ("roi", 0.5775)
-
-    def test_no_fire_before_threshold_met(self) -> None:
-        pos = _make_position(entry_price=0.50, entry_time=NOW)
-        # elapsed=1 min → tier "0" applies, need 30%; price=0.60 → 20%
-        result = _check_roi(pos, 0.60, NOW + timedelta(minutes=1), self.MINIMAL_ROI)
-        assert result is None
-
-    def test_no_fire_on_empty_roi(self) -> None:
-        pos = _make_position(entry_price=0.50, entry_time=NOW)
-        result = _check_roi(pos, 0.99, NOW + timedelta(minutes=1), {})
-        assert result is None
-
-    def test_week_tier_applies(self) -> None:
-        pos = _make_position(entry_price=0.50, entry_time=NOW)
-        # elapsed > 10080 min → tier "10080" applies, need 5%
-        # price=0.526 → pnl_pct=0.052 >= 0.05
-        result = _check_roi(
-            pos, 0.526, NOW + timedelta(minutes=10_081), self.MINIMAL_ROI
-        )
-        assert result == ("roi", 0.526)
-
-
-# ---------------------------------------------------------------------------
 # PositionMonitor.evaluate_exit — priority order
 # ---------------------------------------------------------------------------
 
@@ -298,8 +248,8 @@ class TestEvaluateExit:
         )
         return monitor
 
-    def test_stoploss_fires_before_roi(self) -> None:
-        strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.01})
+    def test_stoploss_fires(self) -> None:
+        strategy = _make_strategy(stoploss=-0.20)
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50)
         market = _make_market(mid_price=0.38)  # -24% → stoploss
@@ -325,24 +275,6 @@ class TestEvaluateExit:
         )
         assert result is not None
         assert result[0] == "trailing_stop"
-
-    def test_roi_fires_when_profitable(self) -> None:
-        strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.30})
-        monitor = self._monitor(strategy)
-        pos = _make_position(entry_price=0.50, entry_time=NOW)
-
-        with patch(
-            "freqpred.trading.position_monitor.datetime"
-        ) as mock_dt:
-            mock_dt.now.return_value = NOW + timedelta(minutes=1)
-            result = monitor.evaluate_exit(
-                position=pos,
-                market=_make_market(mid_price=0.66),
-                current_price=0.66,  # 32% profit
-                strategy=strategy,
-            )
-        assert result is not None
-        assert result[0] == "roi"
 
     def test_custom_exit_fires_when_signal_provided(self) -> None:
         strategy = _make_strategy()
@@ -397,8 +329,7 @@ class TestEvaluateExit:
         assert result[0] == "signal"
 
     def test_market_resolved_when_close_time_passed(self) -> None:
-        # Disable ROI so it doesn't fire first, then verify market_resolved fires
-        strategy = _make_strategy(minimal_roi={})
+        strategy = _make_strategy()
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50)
         market = _make_market(mid_price=0.52, close_time=NOW - timedelta(hours=1))
@@ -414,7 +345,7 @@ class TestEvaluateExit:
 
     def test_market_resolved_when_kalshi_status_resolved(self) -> None:
         """Fires market_resolved when Kalshi marks status='resolved', even if close_time is future."""
-        strategy = _make_strategy(minimal_roi={})
+        strategy = _make_strategy()
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50)
         # close_time is in the future — wouldn't trigger via time check alone
@@ -431,7 +362,7 @@ class TestEvaluateExit:
         assert result[0] == "market_resolved"
 
     def test_no_market_resolved_when_status_open_and_close_time_future(self) -> None:
-        strategy = _make_strategy(minimal_roi={})
+        strategy = _make_strategy()
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50)
         # Use real now so this test doesn't break as calendar time advances.
@@ -486,7 +417,7 @@ class TestEvaluateExit:
         assert result[1] == pytest.approx(0.30)
 
     def test_no_exit_when_conditions_not_met(self) -> None:
-        strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.30})
+        strategy = _make_strategy(stoploss=-0.20)
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50, entry_time=NOW)
 
@@ -624,7 +555,7 @@ class TestCheckAllPositions:
     @pytest.mark.asyncio
     async def test_resolution_inferred_from_settled_price(self) -> None:
         """When position exits at YES contract price ~1.0, resolution=1 is passed to close_position."""
-        strategy = _make_strategy(minimal_roi={})
+        strategy = _make_strategy()
         pos = _make_position(entry_price=0.50, strategy_name="TestStrategy", direction="YES")
         pos_id = pos.id
 
@@ -931,7 +862,7 @@ class TestLiveExit:
     @pytest.mark.asyncio
     async def test_no_exit_submits_no_order(self) -> None:
         """When evaluate_exit returns None, place_order is never called."""
-        strategy = _make_strategy(stoploss=-0.20, minimal_roi={"0": 0.30})
+        strategy = _make_strategy(stoploss=-0.20)
         pos = _make_position(entry_price=0.50, entry_time=NOW, mode="live")
 
         kalshi_client = MagicMock()

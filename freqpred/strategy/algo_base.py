@@ -137,9 +137,19 @@ class IAlgoStrategy(IPredictionStrategy):
             # positions the contract value is (1 - YES_price), so we invert.
             if direction == "NO":
                 df = _invert_ohlc(df)
+            # Direction-correct p_est: for NO positions the effective estimate
+            # is (1 - p_est), same frame as the inverted OHLC.
+            p_est = position.signal_estimated_prob
+            if direction == "NO":
+                p_est = 1.0 - p_est
+            metadata = {
+                "market_id": market_id,
+                "entry_price": position.entry_price,
+                "p_est": p_est,
+            }
             try:
-                df = self.populate_indicators(df, {"market_id": market_id})
-                df = self.populate_exit_trend(df, {"market_id": market_id})
+                df = self.populate_indicators(df, metadata)
+                df = self.populate_exit_trend(df, metadata)
             except Exception:
                 logger.warning(
                     "algo_strategy.populate_exit_trend_error",

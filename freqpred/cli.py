@@ -1000,14 +1000,32 @@ def positions() -> None:
     show_default=True,
     help="Maximum number of positions to display.",
 )
+@click.option(
+    "--strategy",
+    default=None,
+    help="Filter by strategy name (exact match).",
+)
+@click.option(
+    "--days",
+    default=None,
+    type=float,
+    help="Only show positions entered within the last N days (e.g. 1 = last 24 hours).",
+)
 @click.pass_context
-def positions_list(ctx: click.Context, status: str, limit: int) -> None:
+def positions_list(ctx: click.Context, status: str, limit: int, strategy: str | None, days: float | None) -> None:
     """Print positions from the database."""
     config = ctx.obj["config"]
-    asyncio.run(_positions_list(config, status, limit))
+    asyncio.run(_positions_list(config, status, limit, strategy, days))
 
 
-async def _positions_list(config: object, status: str, limit: int) -> None:
+async def _positions_list(
+    config: object,
+    status: str,
+    limit: int,
+    strategy: str | None,
+    days: float | None,
+) -> None:
+    from datetime import UTC, datetime as _datetime, timedelta  # noqa: PLC0415
     import freqpred.signal.models  # noqa: F401
     import freqpred.rag.models     # noqa: F401
 
@@ -1028,6 +1046,11 @@ async def _positions_list(config: object, status: str, limit: int) -> None:
             stmt = select(PositionRow).order_by(PositionRow.entry_time.desc()).limit(limit)
             if status != "all":
                 stmt = stmt.where(PositionRow.status == status)
+            if strategy is not None:
+                stmt = stmt.where(PositionRow.strategy_name == strategy)
+            if days is not None:
+                cutoff = _datetime.now(tz=UTC) - timedelta(days=days)
+                stmt = stmt.where(PositionRow.entry_time >= cutoff)
             result = await session.execute(stmt)
             rows = result.scalars().all()
     finally:
@@ -1037,14 +1060,34 @@ async def _positions_list(config: object, status: str, limit: int) -> None:
         click.echo("No positions found.")
         return
 
+    now = _datetime.now(tz=UTC)
+
+    def _fmt_held(r: "PositionRow") -> str:
+        end = r.exit_time if r.exit_time is not None else now
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=UTC)
+        start = r.entry_time
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        secs = max(0, int((end - start).total_seconds()))
+        days, rem = divmod(secs, 86400)
+        hours, rem = divmod(rem, 3600)
+        mins = rem // 60
+        if days > 0:
+            return f"{days}d{hours:02d}h"
+        if hours > 0:
+            return f"{hours}h{mins:02d}m"
+        return f"{mins}m"
+
     header = (
         f"{'ID':<38} {'MARKET':<28} {'STRATEGY':<20} {'DIR':<4} {'CTRCTS':>6} "
-        f"{'ENTRY':>6} {'EDGE':>6} {'STATUS':<7} {'MODE':<6} {'PNL':>8} {'MAE':>7} {'MFE':>7}"
+        f"{'ENTRY':>6} {'EDGE':>6} {'STATUS':<7} {'HELD':>7} {'MODE':<6} {'PNL':>8} {'PNL%':>7} {'MAE':>7} {'MFE':>7}"
     )
     click.echo(header)
     click.echo("-" * len(header))
     for r in rows:
         pnl_str = f"{r.pnl:+.4f}" if r.pnl is not None else "      -"
+        pnl_pct_str = f"{r.pnl_pct:+.1%}" if r.pnl_pct is not None else "     -"
         edge_str = f"{r.signal_edge:+.3f}" if r.signal_edge is not None else "     -"
         mae_str = f"{r.mae:+.4f}" if r.mae is not None else "      -"
         mfe_str = f"{r.mfe:+.4f}" if r.mfe is not None else "      -"
@@ -1052,7 +1095,7 @@ async def _positions_list(config: object, status: str, limit: int) -> None:
         click.echo(
             f"{str(r.id):<38} {r.market_id:<28} {strategy_str:<20} {r.direction:<4} "
             f"{r.contracts:>6} {r.entry_price:>6.3f} {edge_str:>6} {r.status:<7} "
-            f"{r.mode:<6} {pnl_str:>8} {mae_str:>7} {mfe_str:>7}"
+            f"{_fmt_held(r):>7} {r.mode:<6} {pnl_str:>8} {pnl_pct_str:>7} {mae_str:>7} {mfe_str:>7}"
         )
     click.echo(f"\nTotal: {len(rows)} position(s)")
 

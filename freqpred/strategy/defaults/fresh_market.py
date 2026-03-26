@@ -31,7 +31,6 @@ class FreshMarketStrategy(IPredictionStrategy):
         max_days_to_close=7.0,
         min_days_to_close=0.25,
         stoploss=-0.20,
-        minimal_roi={"0": 0.30, "1440": 0.15},
         trailing_stop=True,
         trailing_stop_positive=0.10,
         trailing_stop_positive_offset=0.02,

@@ -3,11 +3,10 @@
 Exit priority order (per SPEC §8):
   1. Hard stoploss        — framework-enforced, cannot be overridden by strategy
   2. Trailing stoploss    — trails from best mid-price since entry
-  3. Minimal ROI          — time-based profit targets
-  4. Force exit           — strategy.force_exit(), signal-independent, every tick
-  5. Custom exit          — strategy.custom_exit(), requires fresh signal
-  6. Signal exit          — strategy.should_exit(), only when a fresh signal is passed in
-  7. Market resolution    — market close_time passed (paper: simulated at current price)
+  3. Force exit           — strategy.force_exit(), signal-independent, every tick
+  4. Custom exit          — strategy.custom_exit(), requires fresh signal
+  5. Signal exit          — strategy.should_exit(), only when a fresh signal is passed in
+  6. Market resolution    — market close_time passed (paper: simulated at current price)
 """
 from __future__ import annotations
 
@@ -268,28 +267,23 @@ class PositionMonitor:
             if result:
                 return result
 
-        # 3. Minimal ROI
-        result = _check_roi(position, effective_price, now, config.minimal_roi)
-        if result:
-            return result
-
-        # 4. Force exit (signal-independent — strategy's own initiative)
+        # 3. Force exit (signal-independent — strategy's own initiative)
         tag = strategy.force_exit(position, market)
         if tag is not None:
             return (f"force_exit:{tag}", effective_price)
 
-        # 5. Custom exit hook (signal-informed)
+        # 4. Custom exit hook (signal-informed)
         if fresh_signal is not None:
             tag = strategy.custom_exit(position, fresh_signal, market)
             if tag is not None:
                 return (f"custom_exit:{tag}", effective_price)
 
-        # 6. Signal exit (only when a fresh signal is provided)
+        # 5. Signal exit (only when a fresh signal is provided)
         if fresh_signal is not None:
             if strategy.should_exit(position, fresh_signal, market):
                 return ("signal", effective_price)
 
-        # 7. Market resolution — Kalshi status is "finalized"/"resolved" OR close_time has passed
+        # 6. Market resolution — Kalshi status is "finalized"/"resolved" OR close_time has passed
         if market.status in ("finalized", "resolved") or market.close_time <= now:
             return ("market_resolved", effective_price)
 
@@ -511,39 +505,6 @@ def _check_trailing_stop(
     stop_price = peak_price * (1.0 - trail_distance)
     if current_price <= stop_price:
         return ("trailing_stop", current_price)
-    return None
-
-
-def _check_roi(
-    position: Position,
-    current_price: float,
-    now: datetime,
-    minimal_roi: dict[str, float],
-) -> tuple[str, float] | None:
-    """Return ('roi', current_price) if a minimal ROI target has been met.
-
-    minimal_roi keys are minutes-since-entry thresholds (as strings).
-    The applicable target is the one with the highest threshold that is
-    still <= elapsed minutes.
-    """
-    if not minimal_roi:
-        return None
-
-    elapsed_minutes = (now - position.entry_time).total_seconds() / 60.0
-    pnl_pct = (current_price - position.entry_price) / position.entry_price
-
-    # Find the ROI target for the current elapsed time:
-    # use the largest threshold key that is <= elapsed_minutes
-    applicable_target: float | None = None
-    best_threshold = -1.0
-    for threshold_str, target in minimal_roi.items():
-        threshold = float(threshold_str)
-        if threshold <= elapsed_minutes and threshold > best_threshold:
-            best_threshold = threshold
-            applicable_target = target
-
-    if applicable_target is not None and pnl_pct >= applicable_target:
-        return ("roi", current_price)
     return None
 
 

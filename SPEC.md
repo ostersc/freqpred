@@ -331,17 +331,6 @@ class StrategyConfig:
     # The position monitor converts automatically — strategy configs use the same
     # threshold values regardless of direction.
 
-    minimal_roi: dict[str, float] = field(default_factory=lambda: {"0": 0.30, "1440": 0.15, "10080": 0.05})
-    # Time-based profit targets. Key = minutes since entry, value = required profit fraction.
-    # Exit as soon as unrealized P&L % >= target for the elapsed time tier.
-    # e.g. {"0": 0.30, "1440": 0.15, "10080": 0.05}:
-    #   - exit immediately at 30% profit
-    #   - exit at 15% profit after 1 day (1440 min)
-    #   - exit at 5% profit after 1 week (10080 min)
-    # Prediction markets move slowly — use hour/day-scale values, not minute-scale.
-    # Set to {} to disable.
-    # P&L % is computed against the effective contract price (see stoploss note above).
-
     trailing_stop: bool = False
     # If True, stoploss trails from the best effective contract price achieved since entry
     # (i.e. the stop floor rises as the position profits, locking in gains).
@@ -545,14 +534,13 @@ A **cost budget circuit breaker** enforces a configurable daily LLM spend cap (d
 
 ## 8. Strategy Plugin Interface
 
-Strategies are Python classes that implement `IPredictionStrategy`. The design mirrors freqtrade's `IStrategy` — entry signals, exit signals, stoploss, and ROI targets are all strategy-owned. The framework enforces hard caps on top; strategy logic defines the alpha.
+Strategies are Python classes that implement `IPredictionStrategy`. The design mirrors freqtrade's `IStrategy` — entry signals, exit signals, stoploss, and trailing stops are all strategy-owned. The framework enforces hard caps on top; strategy logic defines the alpha.
 
 | freqtrade concept | freqpred equivalent |
 |---|---|
 | `populate_entry_trend()` | `should_trade(signal, market) -> bool` |
 | `populate_exit_trend()` | `should_exit(position, signal, market) -> bool` |
 | `stoploss = -0.10` | `config.stoploss = -0.20` |
-| `minimal_roi = {"0": 0.04}` | `config.minimal_roi = {"0": 0.30, "1440": 0.15}` |
 | `trailing_stop = True` | `config.trailing_stop = True` |
 | `custom_exit()` | `custom_exit(position, signal, market) -> str \| None` |
 | post-trade hook | `on_resolution(position)` |
@@ -576,7 +564,6 @@ class IPredictionStrategy(ABC):
                 kelly_fraction=0.25,
                 categories=["politics"],
                 stoploss=-0.20,
-                minimal_roi={"0": 0.30, "1440": 0.15},
                 trailing_stop=True,
                 ...
             )
@@ -709,8 +696,8 @@ The position monitor evaluates exit conditions in this order on every price poll
 
 1. **Hard stoploss** (`config.stoploss`) — framework-enforced, cannot be overridden
 2. **Trailing stoploss** (`config.trailing_stop`) — trails from the best price since entry
-3. **Minimal ROI** (`config.minimal_roi`) — time-based profit targets
-4. **Custom exit** (`strategy.custom_exit()`) — strategy-defined special conditions
+3. **Force exit** (`strategy.force_exit()`) — strategy's own initiative, signal-independent, every tick
+4. **Custom exit** (`strategy.custom_exit()`) — strategy-defined, requires fresh signal
 5. **Signal exit** (`strategy.should_exit()`) — called only after LLM re-analysis (on price-triggered signal refreshes, not every poll)
 6. **Market resolution** — market closes, position settled at $1.00 or $0.00
 
@@ -724,7 +711,6 @@ Every closed position records an `exit_reason` string for analysis:
 |---|---|
 | `"stoploss"` | Hard stoploss hit |
 | `"trailing_stop"` | Trailing stoploss hit |
-| `"roi"` | Minimal ROI target met |
 | `"custom_exit:<tag>"` | `custom_exit()` returned a tag |
 | `"signal"` | `should_exit()` returned True |
 | `"market_resolved"` | Market paid out at resolution |
@@ -1101,7 +1087,7 @@ telegram:
 
 - [x] Order Manager (paper mode) (T19)
 - [x] Ledger (positions, resolutions, P&L) (T18)
-- [x] Strategy exit interface — `should_exit()`, `custom_exit()`, `stoploss`, `minimal_roi`, `trailing_stop` on `IPredictionStrategy` and `StrategyConfig` (T25)
+- [x] Strategy exit interface — `should_exit()`, `custom_exit()`, `force_exit()`, `stoploss`, `trailing_stop` on `IPredictionStrategy` and `StrategyConfig` (T25)
 - [x] Position monitor — background loop checking all open positions on each price poll; simulates paper exits when stoploss/ROI/signal conditions are met; logs `exit_reason` (T26)
 - [x] Calibration metrics (Brier score, calibration curve) (T21)
 - [x] Web dashboard (signal feed + ledger views) (T24)
