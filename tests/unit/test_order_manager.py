@@ -36,7 +36,7 @@ BANKROLL = 10_000.0
 # ---------------------------------------------------------------------------
 
 
-def _make_market(yes_bid: float = 0.50, yes_ask: float = 0.56) -> Market:
+def _make_market(yes_bid: float = 0.50, yes_ask: float = 0.54) -> Market:
     return Market(
         id=MARKET_ID,
         platform="kalshi",
@@ -202,6 +202,63 @@ async def test_submit_returns_none_when_risk_blocks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_returns_none_when_spread_too_wide() -> None:
+    """Spread > min_edge / 2 → None before strategy or risk checks."""
+    om, _ = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True)
+    # spread = 0.60 - 0.50 = 0.10 > min_edge/2 = 0.05
+    wide_market = _make_market(yes_bid=0.50, yes_ask=0.60)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(), wide_market, strategy)
+
+    assert result is None
+    mock_ledger.assert_not_called()
+    om._risk.check_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_submit_respects_custom_max_spread() -> None:
+    """Explicit max_spread on config overrides the min_edge/2 default."""
+
+    class _WideAllowed(IPredictionStrategy):
+        config = StrategyConfig(
+            name="WideSpread",
+            min_edge=0.10,
+            min_confidence=0.70,
+            max_exposure_per_market=0.10,
+            kelly_fraction=0.25,
+            categories=["politics"],
+            min_volume_24h=0.0,
+            max_days_to_close=90,
+            min_days_to_close=1,
+            max_spread=0.15,  # explicit override — wider than min_edge/2
+        )
+
+        def should_trade(self, signal: Signal, market: Market) -> bool:
+            return True
+
+        def position_size(self, signal: Signal, bankroll: float) -> float:
+            return 100.0
+
+    om, _ = _make_order_manager()
+    strategy = _WideAllowed()
+    # spread = 0.60 - 0.50 = 0.10 — would fail default (0.05) but passes custom (0.15)
+    market = _make_market(yes_bid=0.50, yes_ask=0.60)
+    expected_position = _make_position(entry_price=0.60)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        result = await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    assert result is expected_position
+    mock_ledger.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_submit_opens_position_when_all_clear() -> None:
     """Happy path: all checks pass → Position returned, ledger.open_position called."""
     expected_position = _make_position(contracts=178, entry_price=0.56)
@@ -214,7 +271,7 @@ async def test_submit_opens_position_when_all_clear() -> None:
         new_callable=AsyncMock,
         return_value=expected_position,
     ) as mock_ledger:
-        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.56), strategy)
+        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
 
     assert result is expected_position
     mock_ledger.assert_called_once()
@@ -259,7 +316,7 @@ async def test_returns_none_when_contracts_below_one() -> None:
     strategy = _make_strategy(position_size_result=0.40)
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
-        result = await om.submit(_make_signal(), _make_market(yes_ask=0.56), strategy)
+        result = await om.submit(_make_signal(), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
 
     assert result is None
     mock_ledger.assert_not_called()
@@ -275,7 +332,7 @@ async def test_uses_yes_ask_as_entry_price_for_yes_direction() -> None:
     )
     om, _ = _make_order_manager(risk=risk)
     strategy = _make_strategy(position_size_result=100.0)
-    market = _make_market(yes_bid=0.50, yes_ask=0.60)
+    market = _make_market(yes_bid=0.56, yes_ask=0.60)
 
     with patch(
         "freqpred.trading.order_manager.ledger.open_position",
@@ -297,18 +354,18 @@ async def test_uses_no_price_for_no_direction() -> None:
     )
     om, _ = _make_order_manager(risk=risk)
     strategy = _make_strategy(position_size_result=100.0)
-    market = _make_market(yes_bid=0.50, yes_ask=0.56)
-    # NO price = 1 - 0.50 = 0.50
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+    # NO price = 1 - 0.52 = 0.48
 
     with patch(
         "freqpred.trading.order_manager.ledger.open_position",
         new_callable=AsyncMock,
-        return_value=_make_position(direction="NO", entry_price=0.50),
+        return_value=_make_position(direction="NO", entry_price=0.48),
     ) as mock_ledger:
         await om.submit(_make_signal(direction="NO"), market, strategy)
 
     call_kwargs = mock_ledger.call_args.kwargs
-    assert call_kwargs["entry_price"] == pytest.approx(0.50)
+    assert call_kwargs["entry_price"] == pytest.approx(0.48)
     assert call_kwargs["direction"] == "NO"
 
 
@@ -378,7 +435,7 @@ async def test_live_mode_calls_place_order(monkeypatch: pytest.MonkeyPatch) -> N
         new_callable=AsyncMock,
         return_value=expected_position,
     ):
-        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.56), strategy)
+        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
 
     assert result is expected_position
     mock_kalshi.place_order.assert_called_once()
@@ -418,7 +475,7 @@ async def test_live_mode_records_pending_position(monkeypatch: pytest.MonkeyPatc
         new_callable=AsyncMock,
         return_value=pending_position,
     ) as mock_ledger:
-        await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.56), strategy)
+        await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
 
     mock_ledger.assert_called_once()
     kwargs = mock_ledger.call_args.kwargs
@@ -440,7 +497,7 @@ async def test_paper_mode_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
         new_callable=AsyncMock,
         return_value=expected_position,
     ) as mock_ledger:
-        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.56), strategy)
+        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
 
     assert result is expected_position
     kwargs = mock_ledger.call_args.kwargs

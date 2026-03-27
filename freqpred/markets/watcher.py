@@ -367,7 +367,7 @@ class MarketWatcher:
             signal_mid: float = row.market_mid_at_signal
 
             if price_moved(new_mid, signal_mid, self._price_move_threshold):
-                log.info(
+                log.debug(
                     "market_watcher.price_moved",
                     market_id=market_id,
                     current_mid=new_mid,

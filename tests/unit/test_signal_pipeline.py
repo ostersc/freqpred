@@ -36,6 +36,8 @@ FAKE_MARKET_ID = "MARKET-001"
 
 def _make_market(
     mid_price: float = 0.50,
+    yes_bid: float = 0.48,
+    yes_ask: float = 0.52,
     current_signal_id: str | None = None,
 ) -> MagicMock:
     """Return a minimal Market-like object."""
@@ -47,8 +49,8 @@ def _make_market(
         question="Will the Fed raise rates in June 2026?",
         category="economics",
         close_time=datetime(2026, 6, 30, tzinfo=timezone.utc),
-        yes_bid=0.48,
-        yes_ask=0.52,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
         mid_price=mid_price,
         volume_24h=1000.0,
         open_interest=500.0,
@@ -259,7 +261,8 @@ class TestCloneAtPrice:
         session.flush = AsyncMock()
         session.add = MagicMock()
         # current_mid=0.50, signal_mid=0.75 → delta=0.25 → clone
-        market = _make_market(mid_price=0.50, current_signal_id=FAKE_SIGNAL_ID)
+        # yes_ask=0.50 → edge = 0.80 - 0.50 = 0.30
+        market = _make_market(mid_price=0.50, yes_ask=0.50, yes_bid=0.48, current_signal_id=FAKE_SIGNAL_ID)
         result = await pipeline._clone_at_price(session, market)
         assert result is not None
         assert result.trigger == "price_moved"
@@ -279,8 +282,8 @@ class TestCloneAtPrice:
         session.execute = AsyncMock(return_value=execute_result)
         session.flush = AsyncMock()
         session.add = MagicMock()
-        # mid drops to 0.40, prob=0.30, NO edge = mid - prob = 0.40 - 0.30 = 0.10
-        market = _make_market(mid_price=0.40, current_signal_id=FAKE_SIGNAL_ID)
+        # yes_bid=0.40 → no_ask=0.60, edge = (1-0.30) - 0.60 = yes_bid - prob = 0.40 - 0.30 = 0.10
+        market = _make_market(mid_price=0.40, yes_bid=0.40, yes_ask=0.42, current_signal_id=FAKE_SIGNAL_ID)
         result = await pipeline._clone_at_price(session, market)
         assert result is not None
         assert abs(result.edge - (0.40 - 0.30)) < 1e-9
@@ -416,6 +419,18 @@ class TestBuildPrompt:
         assert "[1]" in prompt
         assert "[2]" in prompt
         assert "[3]" in prompt
+
+    def test_includes_current_date(self) -> None:
+        """Prompt must include the current UTC date so LLM can reason about time-to-close."""
+        market = _make_market()
+        prompt = build_prompt(market, [])
+        assert "Current Date (UTC):" in prompt
+
+    def test_includes_days_to_close(self) -> None:
+        """Prompt must include relative days-to-close so LLM knows urgency."""
+        market = _make_market()
+        prompt = build_prompt(market, [])
+        assert "days from now" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -598,7 +613,7 @@ class TestSignalPipelineAnalyze:
 
     @pytest.mark.asyncio
     async def test_edge_computed_correctly_yes(self) -> None:
-        """YES signal: edge = estimated_prob - mid (positive when underpriced)."""
+        """YES signal: edge = estimated_prob - yes_ask (positive when underpriced)."""
         doc = _make_document()
         pipeline, _, _ = self._make_pipeline(
             docs=[doc],
@@ -607,14 +622,15 @@ class TestSignalPipelineAnalyze:
         )
 
         with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
-            result = await pipeline.analyze(_make_market(mid_price=0.50))
+            result = await pipeline.analyze(_make_market(yes_ask=0.50, yes_bid=0.48, mid_price=0.49))
 
         assert result is not None
+        # edge = 0.70 - 0.50 = 0.20
         assert abs(result.edge - 0.20) < 1e-6
 
     @pytest.mark.asyncio
     async def test_edge_computed_correctly_no(self) -> None:
-        """NO signal: edge = mid - estimated_prob (positive when NO is underpriced)."""
+        """NO signal: edge = (1-prob) - no_ask = yes_bid - prob (positive when NO underpriced)."""
         doc = _make_document()
         pipeline, _, _ = self._make_pipeline(
             docs=[doc],
@@ -623,10 +639,11 @@ class TestSignalPipelineAnalyze:
         )
 
         with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
-            result = await pipeline.analyze(_make_market(mid_price=0.045))
+            # no_ask = 1 - yes_bid = 1 - 0.045 = 0.955; edge = (1-0.01) - 0.955 = 0.035
+            result = await pipeline.analyze(_make_market(yes_bid=0.045, yes_ask=0.06, mid_price=0.0525))
 
         assert result is not None
-        # edge = 0.045 - 0.01 = 0.035 (positive — there IS edge on the NO side)
+        # edge = yes_bid - prob = 0.045 - 0.01 = 0.035
         assert abs(result.edge - 0.035) < 1e-6
 
     @pytest.mark.asyncio

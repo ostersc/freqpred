@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-03-26
+**Last updated:** 2026-03-27
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -128,20 +128,22 @@ The **Position Watcher** maintains a persistent Kalshi WebSocket connection and 
 | Channel | Payload | Action |
 |---|---|---|
 | `ticker` | Real-time best bid/ask update | Update `MarketRow` price fields + `price_updated_at`; emit `price_moved` signal trigger if Δmid ≥ threshold |
-| `market_lifecycle` | Status change (active → determined → settled) | Mark position for resolution; trigger P&L calculation |
+| `market_lifecycle_v2` | Global broadcast (market_ticker filter not supported). `determined` carries `settlement_value`; `settled` does not. | On `determined`: close positions at $1/$0; on `settled` with no cached result: REST fallback |
 
 ### Connection lifecycle
 
 ```
 On startup / position opened:
   - Build subscription set: {market_id for position in open_positions}
-  - Connect to wss://trading-api.kalshi.com/trade-api/v2/ws/v2
+  - Connect to wss://api.elections.kalshi.com/trade-api/ws/v2
   - Authenticate (same RSA-PSS headers as REST, passed in connect message)
-  - Subscribe to ticker + market_lifecycle for each market in the set
+  - Subscribe to ticker + market_lifecycle_v2 for each market in the set
 
 While connected:
   - On ticker update: upsert price in DB; emit price_moved event if threshold crossed
-  - On market_lifecycle → settled: resolve position, record P&L, unsubscribe ticker
+  - On market_lifecycle_v2 → determined: settlement_value present ("1.0000"=YES, "0.0000"=NO) → resolve position, record P&L, unsubscribe
+  - On market_lifecycle_v2 → settled: no settlement_value → REST fallback if determined was missed
+  (channel is global broadcast; market_ticker filters not supported — filter in code)
 
 On position closed / market resolved:
   - Remove market from subscription set
@@ -1112,7 +1114,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T37** [#37](https://github.com/ostersc/freqpred/issues/37) — OrderManager live branch: startup balance guard (abort if Kalshi balance < `bankroll_usd`); route to `KalshiClient.place_order()` when `mode=live`; record positions as `pending` with `exchange_order_id`; `reconcile_pending_orders()` stub. Depends on: T36.
 - [x] **T38** [#38](https://github.com/ostersc/freqpred/issues/38) — PositionMonitor live exits: submit IOC sell order on exit; close ledger only after exchange confirms; alert on `KalshiAPIError`. Depends on: T36, T37.
 - [x] **T39** [#39](https://github.com/ostersc/freqpred/issues/39) — PositionWatcher WebSocket `ticker`: persistent connection per open live position; sub-second price updates; triggers position monitor on each tick; exponential backoff reconnect; Kalshi↔DB position reconciliation on startup and reconnect (sync contracts, auto-close zero-net, skip manual-only). Depends on: T37, T38.
-- [x] **T40** [#40](https://github.com/ostersc/freqpred/issues/40) — PositionWatcher `market_lifecycle`: resolution events; settle at $1/$0 on `settled`; REST poll fallback for missed events. Depends on: T39.
+- [x] **T40** [#40](https://github.com/ostersc/freqpred/issues/40) — PositionWatcher `market_lifecycle_v2`: resolution events; settle at $1/$0 on `settled` (`settlement_value` "1.0000"=YES/"0.0000"=NO, `event_type` not `status`); REST poll fallback for missed events. Depends on: T39.
 - [ ] **T41** [#41](https://github.com/ostersc/freqpred/issues/41) — Dashboard: Strategy Config + System Health API endpoints; GET/PUT strategy params at runtime; circuit breaker state, WebSocket status, pending order count. Depends on: T36.
 - [ ] **T42** [#42](https://github.com/ostersc/freqpred/issues/42) — Production AWS deployment: ECS Fargate, RDS Postgres 16 + pgvector, Secrets Manager, CloudWatch alarms, deployment runbook. Depends on: T36.
 - [ ] **T43** [#43](https://github.com/ostersc/freqpred/issues/43) — GitHub Actions CI/CD: lint → test → build Docker → push to ECR → migrate → deploy to ECS. Depends on: T42.

@@ -83,6 +83,23 @@ def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int 
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+    # Route truthbrush's loguru messages through structlog at DEBUG level so they
+    # only appear with --log-level DEBUG and use the same format as everything else.
+    try:
+        from loguru import logger as _loguru
+        try:
+            _loguru.remove(0)  # remove default stderr sink (always id=0 on first import)
+        except ValueError:
+            pass
+        _loguru.add(
+            lambda msg: logging.getLogger("truthbrush").debug(msg.record["message"]),
+            filter=lambda r: r["name"].startswith("truthbrush"),
+            level=0,
+            format="{message}",
+        )
+    except ImportError:
+        pass
+
     # Per-module level overrides from config
     for module, module_level in (log_module_levels or {}).items():
         logging.getLogger(module).setLevel(getattr(logging, module_level))

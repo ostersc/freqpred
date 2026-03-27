@@ -29,6 +29,10 @@ class StrategyConfig:
     min_mid_price: float | None = 0.05
     max_mid_price: float | None = 0.95
 
+    # Liquidity filter: reject entry if yes_ask - yes_bid exceeds this threshold.
+    # None = auto-compute as min_edge / 2 (spread must consume < half your edge).
+    max_spread: float | None = None
+
     # Re-entry guards after a stoploss or trailing_stop exit.
     # block_reentry_after_stoploss takes precedence: if True, the market is
     # permanently blocked from re-entry once any stoploss/trailing_stop has fired,

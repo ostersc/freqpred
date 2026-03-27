@@ -152,7 +152,15 @@ class PositionMonitor:
                 )
                 continue
 
-            current_price = market.mid_price
+            # Use the bid price for the held side — what you'd actually receive on exit.
+            # This prevents phantom stoploss triggers on illiquid markets where the ask
+            # side is stale and inflates mid_price far above the last traded price.
+            # YES position: receive yes_bid when selling.
+            # NO position:  receive no_bid = (1 - yes_ask) when selling.
+            if position.direction == "NO":
+                current_price = round(1.0 - market.yes_ask, 4)
+            else:
+                current_price = market.yes_bid
             fresh_signal = fresh_signals.get(position.market_id)
 
             result = self.evaluate_exit(
@@ -164,10 +172,8 @@ class PositionMonitor:
             )
             if result is None:
                 # No exit — update peak price tracker (trailing stop) + MAE/MFE.
-                # _update_peak needs the effective price from the position's perspective
-                # (1 - YES_mid for NO positions); _update_excursions handles this itself.
-                effective_price = 1.0 - current_price if position.direction == "NO" else current_price
-                self._update_peak(position, effective_price)
+                # current_price is already the side bid — pass directly.
+                self._update_peak(position, current_price)
                 await self._update_excursions(position, current_price)
                 continue
 
@@ -241,11 +247,10 @@ class PositionMonitor:
         Pure function — no I/O. Separated for unit-testability.
         """
         config = strategy.config
-        # Convert YES mid-price to the effective price from the position's perspective.
-        # For NO positions the contract value is (1 - YES_mid), not YES_mid directly.
-        # All exit checks and returned exit_price must use this effective price so that
-        # P&L calculations and stoploss thresholds are direction-aware.
-        effective_price = 1.0 - current_price if position.direction == "NO" else current_price
+        # current_price is already the side-specific bid (yes_bid for YES, no_bid for NO).
+        # For exit evaluation it is passed through as-is — it already represents
+        # what the holder would receive when selling.
+        effective_price = current_price
         peak_price = self._peak_prices.get(position.id, position.entry_price)
         now = datetime.now(tz=timezone.utc)
 
@@ -436,10 +441,8 @@ class PositionMonitor:
 
     async def _update_excursions(self, position: Position, current_price: float) -> None:
         """Update MAE/MFE for a position and persist to DB when a new extreme is hit."""
-        if position.direction == "YES":
-            delta = current_price - position.entry_price
-        else:
-            delta = (1.0 - current_price) - position.entry_price
+        # current_price is the side bid (yes_bid for YES, no_bid for NO) — already converted.
+        delta = current_price - position.entry_price
 
         is_first_observation = position.id not in self._peak_deltas
         prev_best = self._peak_deltas.get(position.id, position.mfe if position.mfe is not None else delta)

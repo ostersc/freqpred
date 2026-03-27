@@ -157,12 +157,19 @@ class SignalPipeline:
             )
             await session.commit()
 
+        if signal.direction == "YES":
+            side_price = market.yes_ask
+        elif signal.direction == "NO":
+            side_price = round(1.0 - market.yes_bid, 4)
+        else:
+            side_price = None
         log.info(
             "signal.pipeline.new_signal",
             market_id=market.id,
             signal_id=signal.id,
             probability=signal.estimated_probability,
             direction=signal.direction,
+            side_price=side_price,
         )
         return signal
 
@@ -184,15 +191,20 @@ class SignalPipeline:
         signal_id = uuid.uuid4()
         estimated_probability = parsed["probability"]
         direction = parsed["direction"]
-        # Edge is always positive when there is an exploitable advantage in the
-        # signal's direction.  For YES signals: edge = prob - mid (we think YES
-        # is underpriced).  For NO signals: edge = (1 - prob) - (1 - mid) =
-        # mid - prob (we think NO is underpriced).  SKIP signals keep the raw
-        # YES-side value for audit purposes.
+        # Edge uses the actual ask price for the signal's side — not mid_price —
+        # because mid on illiquid markets is meaningless.
+        # YES: edge = prob - yes_ask  (we think YES is underpriced vs what it costs)
+        # NO:  edge = (1-prob) - no_ask = (1-prob) - (1-yes_bid) = yes_bid - prob
+        # SKIP: edge = prob - yes_ask for audit; no_ask not applicable.
         if direction == "NO":
-            edge = market.mid_price - estimated_probability
-        else:
-            edge = estimated_probability - market.mid_price
+            market_ask_at_signal: float | None = round(1.0 - market.yes_bid, 4)
+            edge = (1.0 - estimated_probability) - market_ask_at_signal
+        elif direction == "YES":
+            market_ask_at_signal = market.yes_ask
+            edge = estimated_probability - market_ask_at_signal
+        else:  # SKIP
+            market_ask_at_signal = None
+            edge = estimated_probability - market.yes_ask
         docs = [doc for doc, _ in doc_pairs]
 
         signal_row = SignalRow(
@@ -202,6 +214,7 @@ class SignalPipeline:
             confidence=parsed["confidence"],
             edge=edge,
             market_mid_at_signal=market.mid_price,
+            market_ask_at_signal=market_ask_at_signal,
             direction=direction,
             reasoning=parsed["reasoning"],
             sources=[d.id for d in docs],
@@ -241,6 +254,7 @@ class SignalPipeline:
             confidence=parsed["confidence"],
             edge=edge,
             market_mid_at_signal=market.mid_price,
+            market_ask_at_signal=market_ask_at_signal,
             direction=parsed["direction"],
             reasoning=parsed["reasoning"],
             sources=[d.id for d in docs],
@@ -287,9 +301,14 @@ class SignalPipeline:
         new_id = uuid.uuid4()
 
         if current.direction == "NO":
-            new_edge = market.mid_price - current.estimated_probability
-        else:
-            new_edge = current.estimated_probability - market.mid_price
+            new_ask = round(1.0 - market.yes_bid, 4)
+            new_edge = (1.0 - current.estimated_probability) - new_ask
+        elif current.direction == "YES":
+            new_ask = market.yes_ask
+            new_edge = current.estimated_probability - new_ask
+        else:  # SKIP
+            new_ask = None
+            new_edge = current.estimated_probability - market.yes_ask
 
         signal_row = SignalRow(
             id=new_id,
@@ -298,6 +317,7 @@ class SignalPipeline:
             confidence=current.confidence,
             edge=new_edge,
             market_mid_at_signal=market.mid_price,
+            market_ask_at_signal=new_ask,
             direction=current.direction,
             reasoning=current.reasoning,
             sources=current.sources,
@@ -323,6 +343,7 @@ class SignalPipeline:
             confidence=current.confidence,
             edge=new_edge,
             market_mid_at_signal=market.mid_price,
+            market_ask_at_signal=new_ask,
             direction=current.direction,
             reasoning=current.reasoning,
             sources=list(current.sources),

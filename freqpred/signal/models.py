@@ -33,6 +33,7 @@ class SignalRow(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     edge: Mapped[float] = mapped_column(Float, nullable=False)
     market_mid_at_signal: Mapped[float] = mapped_column(Float, nullable=False)
+    market_ask_at_signal: Mapped[float | None] = mapped_column(Float, nullable=True)
     direction: Mapped[str] = mapped_column(VARCHAR(10), nullable=False)
 
     # Context
@@ -93,4 +94,5 @@ class Signal:
     created_at: datetime
     raw_context: str
 
+    market_ask_at_signal: float | None = None  # ask for the signal's side; None for SKIP
     social_sentiment_summary: str | None = None

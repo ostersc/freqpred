@@ -443,7 +443,7 @@ async def test_reconcile_closes_position_when_kalshi_has_zero() -> None:
 
 @pytest.mark.asyncio
 async def test_lifecycle_settled_yes_closes_winning_position() -> None:
-    """YES position, market resolves YES → close_position(exit_price=1.0, exit_reason='market_resolved')."""
+    """YES position, market determined YES → close_position(exit_price=1.0, exit_reason='market_resolved')."""
     watcher, _, session_factory, _, _ = _make_watcher(open_market_ids={"MKT-1"})
 
     market_row = MagicMock()
@@ -475,7 +475,7 @@ async def test_lifecycle_settled_yes_closes_winning_position() -> None:
         closed_pos.exit_price = 1.0
         mock_ledger.close_position = AsyncMock(return_value=closed_pos)
 
-        await watcher._on_market_lifecycle("MKT-1", "settled", "yes")
+        await watcher._on_market_lifecycle("MKT-1", "determined", "yes")
 
     mock_ledger.close_position.assert_awaited_once()
     call_kwargs = mock_ledger.close_position.call_args.kwargs
@@ -486,7 +486,7 @@ async def test_lifecycle_settled_yes_closes_winning_position() -> None:
 
 @pytest.mark.asyncio
 async def test_lifecycle_settled_yes_closes_losing_position() -> None:
-    """NO position, market resolves YES → close_position(exit_price=0.0)."""
+    """NO position, market determined YES → close_position(exit_price=0.0)."""
     watcher, _, session_factory, _, _ = _make_watcher(open_market_ids={"MKT-1"})
 
     market_row = MagicMock()
@@ -518,7 +518,7 @@ async def test_lifecycle_settled_yes_closes_losing_position() -> None:
         closed_pos.exit_price = 0.0
         mock_ledger.close_position = AsyncMock(return_value=closed_pos)
 
-        await watcher._on_market_lifecycle("MKT-1", "settled", "yes")
+        await watcher._on_market_lifecycle("MKT-1", "determined", "yes")
 
     mock_ledger.close_position.assert_awaited_once()
     call_kwargs = mock_ledger.close_position.call_args.kwargs
@@ -528,15 +528,15 @@ async def test_lifecycle_settled_yes_closes_losing_position() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_determined_does_not_close_positions() -> None:
-    """status='determined' → no close_position() call (positions stay open until 'settled')."""
+async def test_lifecycle_settled_does_not_close_positions() -> None:
+    """status='settled' → no close_position() call (positions already closed on 'determined')."""
     watcher, _, session_factory, _, _ = _make_watcher(open_market_ids={"MKT-1"})
     mock_session = session_factory.return_value.__aenter__.return_value
     mock_session.execute = AsyncMock(return_value=_make_db_result([]))
 
     with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
         mock_ledger.close_position = AsyncMock()
-        await watcher._on_market_lifecycle("MKT-1", "determined", "yes")
+        await watcher._on_market_lifecycle("MKT-1", "settled", None)
 
     mock_ledger.close_position.assert_not_awaited()
 
@@ -604,7 +604,7 @@ async def test_telegram_alert_sent_on_resolution() -> None:
         closed_pos.exit_price = 1.0
         mock_ledger.close_position = AsyncMock(return_value=closed_pos)
 
-        await watcher._on_market_lifecycle("MKT-1", "settled", "yes")
+        await watcher._on_market_lifecycle("MKT-1", "determined", "yes")
 
     alert_dispatcher.send.assert_awaited_once()
     sent_msg: str = alert_dispatcher.send.call_args.args[0]

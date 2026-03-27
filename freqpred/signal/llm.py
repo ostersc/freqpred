@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import structlog
 
@@ -10,7 +11,7 @@ from freqpred.rag.models import Document
 
 log = structlog.get_logger(__name__)
 
-PROMPT_VERSION = "signal-v1"
+PROMPT_VERSION = "signal-v2"
 
 SYSTEM_PROMPT = """\
 You are a prediction market probability analyst. Your task is to estimate the \
@@ -26,10 +27,14 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
     Includes the market question, current price context, and document excerpts
     as evidence.
     """
+    now = datetime.now(tz=timezone.utc)
+    days_to_close = (market.close_time - now).total_seconds() / 86400
+
     lines: list[str] = [
         f"Market Question: {market.question}",
         f"Category: {market.category}",
-        f"Market Closes: {market.close_time.isoformat()}",
+        f"Current Date (UTC): {now.strftime('%Y-%m-%d %H:%M')}",
+        f"Market Closes: {market.close_time.isoformat()} ({days_to_close:.1f} days from now)",
         "",
         "=== EVIDENCE ===",
     ]

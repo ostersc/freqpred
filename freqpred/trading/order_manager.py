@@ -47,6 +47,7 @@ class OrderManager:
     ) -> Position | None:
         """Full trade execution flow (paper or live).
 
+        0. Liquidity gate: spread > max_spread → return None
         1. strategy.should_trade(signal, market) → if False, return None
         2. strategy.position_size(signal, bankroll) → raw_size
         3. risk.check_position(session, signal, raw_size, bankroll)
@@ -58,6 +59,25 @@ class OrderManager:
         6. Log structured event
         7. Return Position
         """
+        # Step 0: liquidity gate — reject if spread > max_spread (default: min_edge / 2).
+        # Prevents phantom stoploss triggers caused by stale ask-side quotes on illiquid markets.
+        spread = round(market.yes_ask - market.yes_bid, 4)
+        effective_max_spread = (
+            strategy.config.max_spread
+            if strategy.config.max_spread is not None
+            else strategy.config.min_edge / 2
+        )
+        if spread > effective_max_spread:
+            logger.info(
+                "order_manager.spread_too_wide",
+                market_id=market.id,
+                spread=spread,
+                max_spread=effective_max_spread,
+                yes_bid=market.yes_bid,
+                yes_ask=market.yes_ask,
+            )
+            return None
+
         # Step 1: strategy gate
         if not strategy.should_trade(signal, market):
             logger.debug(

@@ -55,6 +55,16 @@ freqpred/
 - **pytest + pytest-asyncio** — testing
 - **Pydantic v2** — config validation and data models
 - **uv** — dependency management (not pip)
+- **Kalshi Trade API v2** — REST base `https://api.elections.kalshi.com/trade-api/v2`; WebSocket `wss://api.elections.kalshi.com/trade-api/ws/v2`
+
+### Kalshi WS v2 channel names (gotcha)
+The WebSocket uses **`market_lifecycle_v2`** (not `market_lifecycle`). Valid channels: `ticker`, `market_lifecycle_v2`, `orderbook_delta`, `trade`, `fill`, `market_positions`, `user_orders`.
+
+**`market_lifecycle_v2` is a global broadcast — `market_ticker` filters are explicitly NOT supported.** All market lifecycle events are received regardless of subscription. Filter in code.
+
+**Settlement result lives in `determined`, not `settled`:**
+- `event_type: "determined"` → carries `settlement_value` (`"1.0000"` = YES wins, `"0.0000"` = NO wins). Act here.
+- `event_type: "settled"` → only carries `settled_ts`. No result. Just unsubscribe — `MarketWatcher._resolve_settled_live_positions` handles any missed determinations on the next poll cycle.
 
 ---
 
