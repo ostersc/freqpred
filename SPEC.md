@@ -796,20 +796,12 @@ flowchart TD
 | Source | Use Case | Notes |
 |---|---|---|
 | **Reddit** | Subreddit sentiment for relevant communities | No credentials required — uses public JSON API (`reddit.com/r/{sub}/search.json`); target subs per category (see below) |
-| **Truth Social** | Real-time posts from key political/market-moving accounts + keyword search | Requires a Truth Social account (`TRUTHSOCIAL_USERNAME` / `TRUTHSOCIAL_PASSWORD`); uses `truthbrush` library |
+| **Truth Social** | Real-time posts from key political/market-moving accounts | Requires a Truth Social account (`TRUTHSOCIAL_USERNAME` / `TRUTHSOCIAL_PASSWORD`); uses `truthbrush` library; account feed mode only (runs in realtime_scheduler) |
 | **Twitter/X API** | Real-time public sentiment on market topics | Expensive ($100–$5000/mo tier); treat as optional enrichment |
 | **Kalshi market comments** | Crowd reasoning directly on the market in question | Already fetched with market metadata |
 | **Manifold Markets** | Community probability estimates on overlapping questions | Free API; useful as an independent signal cross-check |
 
-**Truth Social implementation — two modes:**
-
-*Search mode* (catalyst-driven, runs per query in scheduler loop):
-- Calls `api.search(query=query_text, searchtype="statuses")`
-- Filters client-side to posts with `created_at >= now - 48h`
-- Results stored as-is — no pre-summarization (posts are short)
-- `source_type="social"`, `source_name="TruthSocial"`
-
-*Account feed mode* (standing feeds, runs in **realtime_scheduler** every 5 min):
+**Truth Social implementation (account feed mode, runs in realtime_scheduler every 5 min):**
 - Calls `api.pull_statuses(username, created_after=last_run)` for each configured account
 - `last_run` tracked in Postgres (`fetcher_cursors` table, keyed by `(fetcher, key)`)
 - Not tied to a specific market — broad ingestion, all categories benefit
@@ -1059,7 +1051,7 @@ telegram:
 - [x] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (sentence-transformers) → store
 - [x] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
 - [x] GDELT fetcher: Doc API query → parallel article body fetch → store (T32)
-- [x] Truth Social fetcher: search mode (per catalyst query) + account feed mode (per cycle) via `truthbrush` (T33)
+- [x] Truth Social fetcher: account feed mode (per cycle) via `truthbrush` (T33)
 - [x] Internet Archive TV fetcher: catalyst `tv_query` → transcript clip search → store
 - [ ] Twitter/X fetcher (optional — gated on API cost decision)
 - [x] Strategy interface (`IPredictionStrategy`) + `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy` strategies

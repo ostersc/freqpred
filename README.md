@@ -109,7 +109,7 @@ graph TD
     end
 
     subgraph Sources[Third-party Sources]
-        IS_SRC[Tavily · NewsAPI · Reddit · GDELT · TV Transcripts · Truth Social search]
+        IS_SRC[Tavily · NewsAPI · Reddit · GDELT · TV Transcripts]
         RS_SRC[TV Chyrons · Truth Social account feeds]
     end
 
