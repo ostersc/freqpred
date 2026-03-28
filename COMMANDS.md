@@ -186,6 +186,7 @@ alerts:
 | `/start` | Set run loop to `running`; new positions resume |
 | `/pause` | Set run loop to `paused`; no new positions, existing positions still managed |
 | `/stop` | Halt signal analysis entirely; use `/start` to resume |
+| `/shutdown` | Gracefully shut down the freqpred process. Requires inline keyboard confirmation (30 s timeout). Sends a shutdown alert to all configured channels before exiting. |
 | `/reset_drawdown` | Reset the drawdown circuit breaker. Stores the current timestamp; drawdown is measured only from this point forward. |
 | `/show_config` | Show strategy name, mode, min edge, max position size, LLM budget |
 | `/logs [n]` | Last *n* log lines (default 20); truncated at 4096 chars |

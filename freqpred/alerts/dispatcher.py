@@ -84,3 +84,9 @@ class AlertDispatcher:
                 "signal loop is INACTIVE. Use /start to resume. ***"
             )
         await self.send(msg)
+
+    async def shutdown_alert(self, strategy_name: str, mode: str, open_positions: int = 0) -> None:
+        msg = f"freqpred shutting down | strategy={strategy_name} | mode={mode}"
+        if open_positions > 0:
+            msg += f"\nWARNING: {open_positions} open live position(s) will be unmonitored until restart."
+        await self.send(msg)

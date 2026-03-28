@@ -17,9 +17,12 @@ Usage::
 """
 from __future__ import annotations
 
+import asyncio
 import collections
 import importlib.metadata
 import logging
+import os
+import signal
 import subprocess
 import uuid as _uuid
 from datetime import UTC, datetime, timezone
@@ -143,6 +146,56 @@ def register_system_commands(
             await set_run_state(session, "stopped")
         log.info("telegram.stop", chat_id=chat_id)
         return "Run loop stopped. Signal analysis halted. Use /start to resume."
+
+    # ------------------------------------------------------------------ #
+    # /shutdown — send SIGTERM to the process (graceful shutdown)          #
+    # ------------------------------------------------------------------ #
+
+    _SHUTDOWN_TIMEOUT_SECS = 30
+
+    async def handle_shutdown(chat_id: int, args: list[str]) -> str | None:
+        nonce = _uuid.uuid4().hex[:12]
+        confirm_data = f"confirm_shutdown:{nonce}"
+        cancel_data = f"cancel_shutdown:{nonce}"
+
+        async def on_confirm(cb_chat_id: int, data: str, cb_query_id: str) -> str | None:
+            cmd_handler.unregister_callback(confirm_data)
+            cmd_handler.unregister_callback(cancel_data)
+            log.info("telegram.shutdown", chat_id=cb_chat_id)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return "Shutting down. Goodbye."
+
+        async def on_cancel(cb_chat_id: int, data: str, cb_query_id: str) -> str | None:
+            cmd_handler.unregister_callback(confirm_data)
+            cmd_handler.unregister_callback(cancel_data)
+            return "Shutdown cancelled."
+
+        cmd_handler.register_callback(confirm_data, on_confirm)
+        cmd_handler.register_callback(cancel_data, on_cancel)
+
+        await cmd_handler.send_inline_keyboard(
+            chat_id,
+            "Are you sure you want to shut down freqpred?",
+            [
+                [
+                    {"text": "Confirm Shutdown", "callback_data": confirm_data},
+                    {"text": "Cancel", "callback_data": cancel_data},
+                ]
+            ],
+        )
+
+        async def _timeout_notify() -> None:
+            await asyncio.sleep(_SHUTDOWN_TIMEOUT_SECS)
+            if confirm_data in cmd_handler._callback_handlers:
+                cmd_handler.unregister_callback(confirm_data)
+                cmd_handler.unregister_callback(cancel_data)
+                await cmd_handler._send_reply(
+                    chat_id,
+                    "Confirmation timed out after 30 s. Shutdown cancelled.",
+                )
+
+        asyncio.create_task(_timeout_notify())
+        return None
 
     # ------------------------------------------------------------------ #
     # /reset_drawdown — reset drawdown circuit breaker start date          #
@@ -446,6 +499,7 @@ def register_system_commands(
     cmd_handler.register("start", handle_start)
     cmd_handler.register("pause", handle_pause)
     cmd_handler.register("stop", handle_stop)
+    cmd_handler.register("shutdown", handle_shutdown)
     cmd_handler.register("reset_drawdown", handle_reset_drawdown)
     cmd_handler.register("show_config", handle_show_config)
     cmd_handler.register("logs", handle_logs)

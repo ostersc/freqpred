@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal as _signal
 
 import click
 import structlog
@@ -563,6 +564,10 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         await alert_dispatcher.startup_alert(strategy_name, mode, _startup_state)
 
         click.echo(f"Running {len(tasks)} task(s). Press Ctrl+C to stop.")
+
+        loop = asyncio.get_event_loop()
+        loop.add_signal_handler(_signal.SIGTERM, lambda: [t.cancel() for t in tasks])
+
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -571,6 +576,22 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            open_live_positions = 0
+            if mode == "live":
+                try:
+                    from freqpred.markets.models import PositionRow
+                    from sqlalchemy import func as _func
+                    async with session_factory() as _shutdown_session:
+                        _result = await _shutdown_session.execute(
+                            select(_func.count()).select_from(PositionRow).where(
+                                PositionRow.status == "open", PositionRow.mode == "live"
+                            )
+                        )
+                        raw = _result.scalar_one()
+                        open_live_positions = int(raw) if raw is not None else 0
+                except Exception:
+                    pass
+            await alert_dispatcher.shutdown_alert(strategy_name, mode, open_live_positions)
             await engine.dispose()
             click.echo("Shutdown complete.")
 
