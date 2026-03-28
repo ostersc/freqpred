@@ -94,24 +94,95 @@ Bundled strategies: `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStra
 
 ```mermaid
 graph TD
-    MW[Market Watcher] --> MS[Market Selector]
-    MS --> CG[Catalyst Generator - Haiku]
-    CG --> IS[Ingestion Scheduler - 30 min]
-    CG --> RS[Realtime Scheduler - 5 min]
-    IS --> DS[(Document Store - pgvector)]
+    subgraph Exchange[Kalshi Exchange]
+        KREST[REST - orders and poll]
+        KWS[WebSocket - ticker and lifecycle]
+    end
+
+    subgraph Ingestion[Ingestion Pipeline]
+        MW[Market Watcher - 5min poll]
+        MS[Market Selector]
+        CG[Catalyst Generator - Haiku]
+        IS[Ingestion Scheduler - 30min]
+        RS[Realtime Scheduler - 5min]
+        DS[(Document Store - pgvector)]
+    end
+
+    subgraph Sources[Third-party Sources]
+        IS_SRC[Tavily · NewsAPI · Reddit · GDELT · TV Transcripts · Truth Social search]
+        RS_SRC[TV Chyrons · Truth Social account feeds]
+    end
+
+    subgraph Signal[Signal Pipeline]
+        SP[Signal Pipeline - RAG + Sonnet]
+        SE[Strategy Engine]
+        OM[Order Manager - paper / live]
+    end
+
+    subgraph Positions[Position Tracking]
+        PW[Position Watcher - WebSocket]
+        PM[Position Monitor]
+        L[(Ledger - Postgres)]
+        DA[Dashboard + Alerts]
+    end
+
+    subgraph Plugin[Strategy Plugin]
+        STRAT[IPredictionStrategy]
+    end
+
+    KREST --> MW
+    MW --> MS
+    MS --> CG
+    CG --> IS
+    CG --> RS
+    IS --> DS
     RS --> DS
-    DS --> SP[Signal Pipeline - RAG + Claude Sonnet]
-    MW --> SP
-    SP --> SE[Strategy Engine - plugins]
-    SE --> OM[Order Manager - paper / live]
-    OM --> KC[IMarketClient - Kalshi]
-    OM --> L[(Ledger - Postgres)]
-    L --> DA[Dashboard + Alerts]
+    DS --> SP
+    MW -->|prices| SP
+    SP --> SE
+    SE --> OM
+    OM --> KREST
+    KWS --> PW
+    PW -->|price ticks| PM
+    PW -->|determined / settled| PM
+    OM --> PM
+    PM --> KREST
+    PM --> L
+    L --> DA
+    IS --> IS_SRC
+    RS --> RS_SRC
+    MS -. is_market_interesting .-> STRAT
+    SE -. "should_trade / position_size" .-> STRAT
+    PM -. "force_exit every tick" .-> STRAT
+    PM -. "custom_exit / should_exit on signal" .-> STRAT
+    PM -. on_resolution .-> STRAT
+
+    classDef exchange fill:#e8e8e8,stroke:#888,color:#333
+    classDef ingestion fill:#d4edda,stroke:#28a745,color:#155724
+    classDef signal fill:#cce5ff,stroke:#0069d9,color:#004085
+    classDef position fill:#fff3cd,stroke:#d39e00,color:#533f03
+    classDef strategy fill:#f8d7da,stroke:#721c24,stroke-width:3px,color:#721c24
+    classDef sources fill:#e2d9f3,stroke:#7048a8,color:#3d1e6d
+
+    class KREST,KWS exchange
+    class MW,MS,CG,IS,RS,DS ingestion
+    class SP,SE,OM signal
+    class PW,PM,L,DA position
+    class STRAT strategy
+    class IS_SRC,RS_SRC sources
+
+    linkStyle 21 stroke:#721c24,stroke-width:2px
+    linkStyle 22 stroke:#721c24,stroke-width:2px
+    linkStyle 23 stroke:#721c24,stroke-width:2px
+    linkStyle 24 stroke:#721c24,stroke-width:2px
+    linkStyle 25 stroke:#721c24,stroke-width:2px
 ```
 
-Two async pipelines: **ingestion** (continuous, catalyst-driven, cheap) and **signal** (triggered, RAG + LLM, expensive). They communicate through the DB only — no shared state.
+Three concurrent components: **ingestion** (catalyst-driven, continuous), **signal** (triggered, RAG + LLM), and **position watcher** (WebSocket, sub-second price + resolution events). All communicate through Postgres — no shared state.
 
-See [SPEC.md §6](SPEC.md) for component responsibilities, [SPEC.md §9](SPEC.md) for the full signal pipeline, and [SPEC.md §8](SPEC.md) for the strategy interface.
+Red dashed edges show `IPredictionStrategy` callback invocations — the single plugin point for market selection, entry, exit, and resolution logic.
+
+See [SPEC.md §6](SPEC.md) for component responsibilities, [SPEC.md §8](SPEC.md) for the full strategy interface, and [SPEC.md §9](SPEC.md) for the signal pipeline.
 
 ---
 
