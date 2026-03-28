@@ -4,26 +4,28 @@
 
 freqpred uses retrieval-augmented LLM analysis to estimate the "true" probability of prediction market outcomes, identifies edges against market-implied prices, and executes trades with systematic risk controls.
 
+**Status:** Phase 2 complete (paper trading + calibration running). Phase 3 (live trading) in progress.
+
 ---
 
 ## What it does
 
 1. **Monitors** active markets on Kalshi (Politics, Technology, Economics, ...)
-2. **Retrieves** relevant news context via Tavily, NewsAPI, and Reddit (RAG)
-3. **Estimates** event probability using Claude with structured output
-4. **Identifies** markets where LLM probability diverges from market price
+2. **Ingests** targeted news via Tavily, NewsAPI, Reddit, GDELT, TV archives (catalyst-driven RAG)
+3. **Estimates** event probability using Claude Sonnet with structured output
+4. **Identifies** markets where LLM probability diverges meaningfully from market price
 5. **Trades** via a pluggable strategy interface with hard risk controls
 6. **Tracks** calibration — are our probability estimates actually accurate?
 
-## Philosophy
+> **Why no backtesting?** LLMs have seen market resolutions in training data, creating unavoidable look-ahead bias. freqpred validates via paper trading + Brier score calibration instead.
 
-Backtesting prediction markets is unreliable: LLMs have seen market resolutions in training data, creating unavoidable look-ahead bias. Instead, freqpred validates strategies through **paper trading + calibration tracking** — simulating trades against real market prices and measuring Brier score over resolved markets.
+For full architecture, data models, strategy interface, and roadmap, see **[SPEC.md](SPEC.md)**.
 
 ---
 
 ## Setup
 
-**Prerequisites:** Python 3.12+, Docker (for Postgres + Redis), `uv`
+**Prerequisites:** Python 3.12+, Docker (for Postgres), `uv`
 
 ```bash
 # 1. Install dependencies
@@ -34,21 +36,20 @@ cp config/config.example.yaml config/config.yaml
 # Edit config/config.yaml — or set env vars (see below)
 
 # 3. Start local services
-docker-compose up -d db redis
+docker-compose up -d db
 
 # 4. Apply database migrations
 uv run freqpred db migrate
 
-# 5. (Optional) Start Adminer — database web UI at http://localhost:8080
+# 5. (Optional) Database web UI at http://localhost:8080
 docker-compose up -d adminer
 ```
 
-**Required environment variables** (set in `.env` or directly):
+**Required env vars** (set in `.env` or directly):
 
 ```
 ANTHROPIC_API_KEY=...     # Claude — signal analysis + catalyst generation
 DATABASE_URL=postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred
-REDIS_URL=redis://localhost:6379
 
 # Optional — enables news fetching
 TAVILY_API_KEY=...
@@ -58,7 +59,7 @@ NEWSAPI_KEY=...
 KALSHI_API_KEY=...
 KALSHI_PRIVATE_KEY_PATH=...
 
-# Optional — enables Telegram + Discord alerts (see Alerts section below)
+# Optional — Telegram + Discord alerts
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 DISCORD_WEBHOOK_URL=...
@@ -68,93 +69,55 @@ DISCORD_WEBHOOK_URL=...
 
 ## Running
 
-### Signal-only mode
-
-Runs the market watcher, ingestion scheduler, and signal pipeline concurrently. Prints each new signal to stdout. No trades are placed.
-
 ```bash
+# Signal analysis only — no trades placed
 uv run freqpred run --strategy ConservativeDefault --mode signal-only
+
+# Paper trading (default)
+uv run freqpred run --strategy ConservativeDefault --mode paper
+
+# Live trading (requires LIVE_TRADING_ENABLED=true)
+uv run freqpred run --strategy ConservativeDefault --mode live
 ```
 
-Press **Ctrl+C** to stop cleanly.
-
-### Custom strategies
-
-Point `--strategy` at a `.py` file containing a class that subclasses `IPredictionStrategy`:
+Point `--strategy` at a `.py` file to load a custom strategy:
 
 ```bash
-uv run freqpred run --strategy strategies/my_strategy.py --mode signal-only
+uv run freqpred run --strategy strategies/my_strategy.py --mode paper
 ```
+
+Bundled strategies: `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy`
 
 ---
 
-## Alerts (Telegram + Discord)
+## Architecture
 
-freqpred can push real-time notifications to Telegram and/or Discord. Both channels are independently optional — missing credentials silently disable that channel without affecting the other.
-
-**Events that trigger an alert:**
-- New signal where edge meets the strategy's minimum threshold
-- Paper trade opened
-- Circuit breaker fired (daily loss / drawdown limits hit)
-- Daily digest (via `report digest` command)
-
-### Telegram setup
-
-1. Message [@BotFather](https://t.me/BotFather) on Telegram and run `/newbot` to create a bot — copy the **bot token**.
-2. Get your **chat ID** by messaging [@userinfobot](https://t.me/userinfobot) — it replies immediately with your user ID. That number is your personal chat ID.
-   > **Alternative:** open a chat with your new bot, send it any message (e.g. `/start`), then immediately fetch `https://api.telegram.org/bot<TOKEN>/getUpdates` — look for `"chat": {"id": ...}` in the result. `getUpdates` returns empty if no messages have been sent since the last poll.
-3. Add to `.env`:
-   ```
-   TELEGRAM_BOT_TOKEN=123456789:AAF...
-   TELEGRAM_CHAT_ID=123456789
-   ```
-4. (Optional) Enable inbound bot commands by listing your Telegram username or user ID in `config.yaml`:
-   ```yaml
-   alerts:
-     telegram_authorized_users:
-       - your_username
-   ```
-5. Verify:
-   ```bash
-   uv run freqpred alerts test --channel telegram
-   # Expected: message appears in your Telegram chat
-   ```
-
-See [COMMANDS.md — Telegram bot commands](COMMANDS.md#telegram-bot-commands) for available bot commands and how to authorize users.
-
-### Discord setup
-
-1. Open your Discord server → **Server Settings → Integrations → Webhooks → New Webhook**.
-2. Choose the target channel, copy the **Webhook URL**.
-3. Add to `.env`:
-   ```
-   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
-   ```
-4. Verify:
-   ```bash
-   uv run freqpred alerts test --channel discord
-   # Expected: message appears in your Discord channel
-   ```
-
-### Test both channels at once
-
-```bash
-uv run freqpred alerts test --channel all
+```mermaid
+graph TD
+    MW[Market Watcher] --> MS[Market Selector]
+    MS --> CG[Catalyst Generator - Haiku]
+    CG --> IS[Ingestion Scheduler - 30 min]
+    CG --> RS[Realtime Scheduler - 5 min]
+    IS --> DS[(Document Store - pgvector)]
+    RS --> DS
+    DS --> SP[Signal Pipeline - RAG + Claude Sonnet]
+    MW --> SP
+    SP --> SE[Strategy Engine - plugins]
+    SE --> OM[Order Manager - paper / live]
+    OM --> KC[IMarketClient - Kalshi]
+    OM --> L[(Ledger - Postgres)]
+    L --> DA[Dashboard + Alerts]
 ```
 
-### Daily digest
+Two async pipelines: **ingestion** (continuous, catalyst-driven, cheap) and **signal** (triggered, RAG + LLM, expensive). They communicate through the DB only — no shared state.
 
-Generate and print a natural-language summary of system health (positions, P&L, LLM spend, calibration):
-
-```bash
-uv run freqpred report digest
-```
+See [SPEC.md §6](SPEC.md) for component responsibilities, [SPEC.md §9](SPEC.md) for the full signal pipeline, and [SPEC.md §8](SPEC.md) for the strategy interface.
 
 ---
 
-## CLI reference
+## CLI and alerts
 
-See **[COMMANDS.md](COMMANDS.md)** for the full reference — CLI commands and Telegram bot commands with all options documented.
+See **[COMMANDS.md](COMMANDS.md)** for the full CLI reference and all Telegram bot commands.
 
 Quick reference:
 
@@ -168,76 +131,43 @@ uv run freqpred metrics calibration
 uv run freqpred report digest
 uv run freqpred alerts test --channel all
 uv run freqpred db migrate
+uv run freqpred dashboard
 ```
 
----
-
-## Architecture
-
-```
-Market Watcher ──────────────────────────────────────────────────────────────┐
-  (polls Kalshi, upserts prices, enqueues price-move signal triggers)        │
-                                                                             ▼
-Ingestion Scheduler                                          Signal Pipeline (RAG + LLM)
-  Catalyst Generator → search queries per market              embed question → vector search
-  Fetchers: Tavily + NewsAPI + Reddit                         → Claude probability estimate
-  Local embeddings (sentence-transformers) → Postgres pgvector → Signal written to DB
-                                                                             │
-                                                                             ▼
-                                                               Strategy Engine
-                                                                 should_trade? position_size?
-                                                                             │
-                                                                             ▼
-                                                               Order Manager → Paper/Live Orders
-                                                                             │
-                                                                             ▼
-                                                               Dashboard + Alerts + Calibration
-```
-
-See [SPEC.md](SPEC.md) for the full architecture, data models, strategy interface, and development roadmap.
+**Alerts** — Telegram and Discord are independently optional. Missing credentials silently disable that channel. Set `telegram_authorized_users` in `config.yaml` to enable inbound bot commands (status queries, position management, circuit breaker control). See [COMMANDS.md — Telegram bot commands](COMMANDS.md#telegram-bot-commands).
 
 ---
 
 ## Development
 
-**Database UI:** Adminer runs at `http://localhost:8080` — use server `db`, username/password/database all `freqpred`.
-
-```bash
-docker-compose up -d adminer
-```
-
 ```bash
 # Run all unit tests
 uv run pytest tests/unit/
 
-# Run integration tests (requires running Postgres + Redis)
+# Run integration tests (requires running Postgres)
 uv run pytest tests/
 
-# Create a new database migration
+# Create a new migration
 uv run alembic revision --autogenerate -m "description"
 
 # Apply migrations
-uv run alembic upgrade head
+uv run freqpred db migrate
 ```
 
-Built-in strategies: `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy`
+Adminer (database UI): `docker-compose up -d adminer` → `http://localhost:8080` (server: `db`, user/pass/db: `freqpred`)
 
-## Platforms
+---
 
-| Platform | Status |
-|---|---|
-| Kalshi | v1 — primary |
-| Interactive Brokers (event contracts) | v2 — planned |
-
-## Tech Stack
+## Tech stack
 
 - **Python 3.12+**, FastAPI, SQLAlchemy 2.0 async, Alembic
 - **PostgreSQL 16 + pgvector** — market/signal/position storage + vector search
-- **Redis** — signal trigger queue, ingestion dedup
-- **Claude (Anthropic)** — signal analysis + catalyst generation
-- **sentence-transformers** — local document embeddings (`all-MiniLM-L6-v2`, 384 dims, no API key required; Voyage AI `voyage-3` is a possible future enhancement for higher-quality retrieval)
-- **Tavily + NewsAPI + Reddit** — news ingestion
+- **Claude (Anthropic)** — signal analysis (`claude-sonnet-4-6`) + catalyst generation (`claude-haiku-4-5`)
+- **sentence-transformers** — local document embeddings (`all-MiniLM-L6-v2`, 384 dims, no API key)
+- **Tavily + NewsAPI + Reddit + GDELT + Internet Archive TV** — news ingestion
 - **uv** — dependency management
+
+---
 
 ## License
 
