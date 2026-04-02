@@ -159,7 +159,7 @@ class RiskEngine:
         )
         total_exposure: float = exposure_result.scalar_one() or 0.0
         max_exposure = bankroll * self._config.max_total_exposure_pct
-        if total_exposure > max_exposure:
+        if total_exposure >= max_exposure:
             logger.info(
                 "risk.total_exposure_exceeded",
                 exposure=total_exposure,
@@ -168,11 +168,14 @@ class RiskEngine:
             return RiskDecision(
                 allowed=False,
                 reason=(
-                    f"total exposure {total_exposure:.2f} > max {max_exposure:.2f} "
+                    f"total exposure {total_exposure:.2f} >= max {max_exposure:.2f} "
                     f"({self._config.max_total_exposure_pct:.0%} of bankroll)"
                 ),
                 capped_size=0.0,
             )
+        # Cap so the new position cannot push total exposure over the limit.
+        remaining_total_capacity = max_exposure - total_exposure
+        capped_size = min(capped_size, remaining_total_capacity)
 
         # 6. Daily loss check
         today_start = datetime.now(timezone.utc).replace(

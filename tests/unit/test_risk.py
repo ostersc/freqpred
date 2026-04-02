@@ -214,6 +214,40 @@ async def test_blocks_when_total_exposure_exceeded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_blocks_when_total_exposure_exactly_at_limit() -> None:
+    # 40% of 2000 = 800; existing exposure = 800 → >= check should block
+    engine = RiskEngine(_make_config(max_total_exposure_pct=0.40))
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=5, total_exposure=800.0, daily_pnl=0.0)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+    )
+
+    assert decision.allowed is False
+    assert "exposure" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_caps_size_to_remaining_total_exposure_capacity() -> None:
+    # 40% of 2000 = 800; existing exposure = 750 → only $50 headroom.
+    # Requesting $100 should be capped to $50 (not blocked outright).
+    engine = RiskEngine(_make_config(max_total_exposure_pct=0.40, max_position_pct=0.10))
+    signal = _make_signal(edge=0.20)
+    # market_exposure=0 so per-market cap doesn't interfere; MAX_MARKET_EXPOSURE large enough
+    session = _make_session(open_count=5, total_exposure=750.0, daily_pnl=0.0, market_exposure=0.0)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=100.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=500.0,
+    )
+
+    assert decision.allowed is True
+    assert decision.capped_size == pytest.approx(50.0)
+
+
+@pytest.mark.asyncio
 async def test_allows_valid_position() -> None:
     engine = RiskEngine(_make_config())
     signal = _make_signal(edge=0.20)
