@@ -96,7 +96,7 @@ class SignalConfig(BaseModel):
 class RiskConfig(BaseModel):
     max_position_pct: float = Field(default=0.05)
     max_daily_loss_pct: float = Field(default=0.15)
-    max_total_exposure_pct: float = Field(default=0.40)
+    max_total_exposure_pct: float = Field(default=0.30)
     min_edge_floor: float = Field(default=0.10)
     max_open_positions: int = Field(default=20)
     max_daily_llm_spend_usd: float = Field(default=10.0)

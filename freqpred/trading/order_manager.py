@@ -88,21 +88,26 @@ class OrderManager:
             )
             return None
 
-        # Step 2: raw position size
-        raw_size = strategy.position_size(signal, self._bankroll)
-
         async with self._session_factory() as session:
+            # Compute current net bankroll (initial deposit ± all closed P&L) so
+            # all risk caps are denominated against the active balance, not the
+            # original deposit.
+            net_bankroll = await ledger.get_net_bankroll(session, self._bankroll, mode=self._mode)
+
+            # Step 2: raw position size (uses net bankroll so Kelly sizing shrinks with losses)
+            raw_size = strategy.position_size(signal, net_bankroll)
+
             # Circuit breakers fire before any position check
-            await self._risk.check_circuit_breakers(session, self._bankroll, mode=self._mode)
+            await self._risk.check_circuit_breakers(session, net_bankroll, mode=self._mode)
 
             # Step 3: risk enforcement
             decision = await self._risk.check_position(
                 session,
                 signal,
                 raw_size,
-                self._bankroll,
+                net_bankroll,
                 market_id=market.id,
-                max_market_exposure=strategy.config.max_exposure_per_market * self._bankroll,
+                max_market_exposure=strategy.config.max_exposure_per_market * net_bankroll,
                 mode=self._mode,
                 stoploss_cooldown_hours=strategy.config.stoploss_cooldown_hours,
                 block_reentry_after_stoploss=strategy.config.block_reentry_after_stoploss,

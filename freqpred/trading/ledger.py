@@ -103,6 +103,22 @@ async def update_position_excursions(
     await session.commit()
 
 
+async def get_net_bankroll(session: AsyncSession, initial_bankroll: float, mode: str = "paper") -> float:
+    """Current effective bankroll = initial_bankroll + all closed P&L for *mode*.
+
+    Uses realized P&L only (closed positions). Floored at 0.0 so risk
+    checks never operate on a negative bankroll.
+    """
+    result = await session.execute(
+        select(func.coalesce(func.sum(PositionRow.pnl), 0.0)).where(
+            PositionRow.status == "closed",
+            PositionRow.mode == mode,
+        )
+    )
+    all_time_pnl: float = float(result.scalar_one())
+    return max(0.0, initial_bankroll + all_time_pnl)
+
+
 async def get_open_positions(session: AsyncSession, mode: str = "paper") -> list[Position]:
     """Return all positions with status='open' for *mode*, ordered by entry_time desc."""
     result = await session.execute(
