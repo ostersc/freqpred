@@ -86,7 +86,7 @@ def _build_filter_map(close_time: datetime | None) -> dict[str, Any]:
     Date format must be YYYY-MM (month-level) for range operators to work.
     """
     now = datetime.now(timezone.utc)
-    end = min(close_time, now) if close_time and close_time > now else now
+    end = min(close_time, now) if close_time else now
     start = end - timedelta(days=60)
 
     start_str = start.strftime("%Y-%m")
