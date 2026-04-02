@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-03-27
+**Last updated:** 2026-04-02
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -872,7 +872,7 @@ If `data_quality` is `"low"` (insufficient news context), the signal is discarde
 |---|---|---|
 | Max position size | 5% of bankroll | Per market |
 | Max daily loss | 15% of bankroll | Triggers circuit breaker |
-| Max total exposure | 40% of bankroll | Sum of all open positions |
+| Max total exposure | 30% of bankroll | Sum of all open positions |
 | Min edge to trade | 10% | Absolute floor; strategy can raise, not lower |
 | Max open positions | 20 | Prevents overextension |
 

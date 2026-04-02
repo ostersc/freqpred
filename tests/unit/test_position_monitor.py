@@ -78,7 +78,7 @@ def _make_market(
         platform="kalshi",
         question="Will X happen?",
         category="politics",
-        close_time=close_time or (NOW + timedelta(days=10)),
+        close_time=close_time or (datetime.now(timezone.utc) + timedelta(days=10)),
         yes_bid=mid_price - 0.02,
         yes_ask=mid_price + 0.02,
         mid_price=mid_price,

@@ -163,6 +163,26 @@ def _make_order_manager(
 
 
 # ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _patch_get_net_bankroll():
+    """Patch ledger.get_net_bankroll to return BANKROLL in all tests.
+
+    Individual tests that want a different net bankroll should override
+    with their own patch inside the test body.
+    """
+    with patch(
+        "freqpred.trading.order_manager.ledger.get_net_bankroll",
+        new_callable=AsyncMock,
+        return_value=BANKROLL,
+    ):
+        yield
+
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -367,6 +387,43 @@ async def test_uses_no_price_for_no_direction() -> None:
     call_kwargs = mock_ledger.call_args.kwargs
     assert call_kwargs["entry_price"] == pytest.approx(0.48)
     assert call_kwargs["direction"] == "NO"
+
+
+@pytest.mark.asyncio
+async def test_risk_uses_net_bankroll_not_initial() -> None:
+    """OrderManager uses net bankroll (initial + closed P&L) for all risk calls.
+
+    With initial bankroll $10k but $4k of realized losses, net bankroll = $6k.
+    risk.check_circuit_breakers and risk.check_position should receive $6k.
+    """
+    net_bankroll = 6_000.0
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_position = AsyncMock(
+        return_value=RiskDecision(allowed=True, reason="", capped_size=100.0)
+    )
+    om, _ = _make_order_manager(risk=risk, bankroll=BANKROLL)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    expected_position = _make_position()
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.get_net_bankroll",
+        new_callable=AsyncMock,
+        return_value=net_bankroll,
+    ), patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ):
+        await om.submit(_make_signal(), _make_market(), strategy)
+
+    risk.check_circuit_breakers.assert_called_once()
+    # check_circuit_breakers(session, net_bankroll, mode=...) — bankroll is 2nd positional
+    assert risk.check_circuit_breakers.call_args.args[1] == net_bankroll
+
+    risk.check_position.assert_called_once()
+    # check_position(session, signal, raw_size, net_bankroll, ...) — bankroll is 4th positional
+    assert risk.check_position.call_args.args[3] == net_bankroll
 
 
 @pytest.mark.asyncio
