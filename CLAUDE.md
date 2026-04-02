@@ -156,6 +156,7 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 
 - Use SQLAlchemy 2.0 async style throughout (`async with session` pattern)
 - All migrations via Alembic — never alter schema manually
+- Migration files must be named `NNNN_short_description.py` with a zero-padded 4-digit sequence number matching the `revision` string inside (e.g. `0020_documents_published_at_nullable.py`, `revision = '0020'`). Never use autogenerate's default hex IDs as filenames or revision IDs.
 - Table names are snake_case plural: `markets`, `signals`, `positions`, `documents`, `llm_queries`
 - All tables have `created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()`
 - UUIDs for all primary keys except `llm_queries` (auto-increment int)

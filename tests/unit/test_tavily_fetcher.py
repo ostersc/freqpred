@@ -104,14 +104,12 @@ async def test_fetch_naive_published_date_gets_utc(mock_tavily_client):
 
 
 @pytest.mark.asyncio
-async def test_fetch_missing_published_date_falls_back_to_now(mock_tavily_client):
+async def test_fetch_missing_published_date_stores_none(mock_tavily_client):
     mock_tavily_client.search.return_value = {
         "results": [_make_item(published_date=None)]
     }
     docs = await fetch(_API_KEY, _QUERY)
-    # published_at should be close to now (within a few seconds)
-    assert docs[0].published_at.tzinfo is not None
-    assert docs[0].published_at.year == 2026
+    assert docs[0].published_at is None
 
 
 @pytest.mark.asyncio

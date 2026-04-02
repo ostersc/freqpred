@@ -101,12 +101,12 @@ def _statuses_to_docs(
 
         created_str = status.get("created_at") or ""
         try:
-            published_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            published_at: datetime | None = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
-            published_at = now
+            published_at = None
 
         # Client-side recency filter.
-        if published_at <= created_after:
+        if published_at is None or published_at <= created_after:
             log.debug("truthsocial.skip.too_old", url=url, created_at=created_str)
             continue
 

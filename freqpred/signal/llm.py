@@ -11,7 +11,7 @@ from freqpred.rag.models import Document
 
 log = structlog.get_logger(__name__)
 
-PROMPT_VERSION = "signal-v2"
+PROMPT_VERSION = "signal-v3"
 
 SYSTEM_PROMPT = """\
 You are a prediction market probability analyst. Your task is to estimate the \
@@ -30,11 +30,28 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
     now = datetime.now(tz=timezone.utc)
     days_to_close = (market.close_time - now).total_seconds() / 86400
 
+    open_time_str = (
+        market.open_time.isoformat() if market.open_time else "unknown"
+    )
+
     lines: list[str] = [
         f"Market Question: {market.question}",
         f"Category: {market.category}",
         f"Current Date (UTC): {now.strftime('%Y-%m-%d %H:%M')}",
+        f"Market Opened (Issuance Date): {open_time_str}",
         f"Market Closes: {market.close_time.isoformat()} ({days_to_close:.1f} days from now)",
+        "",
+        "IMPORTANT — TEMPORAL EVIDENCE RULES:",
+        "1. The resolution criterion requires the event to occur AFTER the market issuance date.",
+        "2. Check the date of the SPECIFIC EVENT described in each document, NOT the article",
+        "   publication date. An article published on April 1 that quotes a statement from",
+        "   November 2025 is PRE-ISSUANCE evidence and cannot resolve this market. If an",
+        "   article does not make the event date explicit, treat it as pre-issuance unless",
+        "   context clearly places the event within the market window.",
+        "3. Historical instances (before issuance) inform base-rate probability only —",
+        "   do not assume the event occurred within the window simply because it has in the past.",
+        "4. If you can identify a specific confirmed instance of the event occurring WITHIN",
+        "   the market window, weight that evidence heavily.",
         "",
         "=== EVIDENCE ===",
     ]
@@ -47,7 +64,7 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
             lines += [
                 f"[{i}] {doc.title}",
                 f"    Source: {doc.source_name} ({doc.source_type})",
-                f"    Published: {doc.published_at.isoformat()}",
+                f"    Published: {doc.published_at.isoformat() if doc.published_at else 'unknown'}",
                 f"    ID: {doc.id}",
                 f"    {excerpt}",
                 "",

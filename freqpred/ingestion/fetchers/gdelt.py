@@ -202,7 +202,7 @@ async def fetch(
                 tzinfo=timezone.utc
             )
         except (ValueError, TypeError):
-            published_at = now
+            published_at = None
 
         docs.append(
             RawDocument(

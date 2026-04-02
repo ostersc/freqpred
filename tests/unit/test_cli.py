@@ -304,7 +304,7 @@ class TestSignalAnalyzeCommand:
         with patch("freqpred.cli.load_config", return_value=config), \
              patch("freqpred.cli._signal_analyze", new_callable=AsyncMock) as mock_analyze:
             result = runner.invoke(main, ["signal", "analyze", "--market-id", "MKT-1"])
-        mock_analyze.assert_called_once_with(config, "MKT-1")
+        mock_analyze.assert_called_once_with(config, "MKT-1", force=False)
         assert result.exit_code == 0
 
 

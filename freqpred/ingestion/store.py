@@ -53,7 +53,7 @@ class RawDocument:
     source_name: str   # e.g. "Reuters", "r/politics"
     category: str
     tags: list[str]
-    published_at: datetime
+    published_at: datetime | None
     fetched_at: datetime
     summary: str | None = None
 

@@ -192,7 +192,7 @@ async def fetch(
                 tzinfo=timezone.utc
             )
         except (ValueError, TypeError):
-            published_at = now
+            published_at = None
 
         # Named entities from auto-NER — stored as tags.
         subjects: list[str] = fields.get("subject") or []

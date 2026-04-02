@@ -75,14 +75,14 @@ async def fetch(
             log.debug("tavily.fetch.skip", reason="excluded_domain", url=url)
             continue
 
-        try:
-            published_at = (
-                datetime.fromisoformat(published_str) if published_str else now
-            )
-            if published_at.tzinfo is None:
-                published_at = published_at.replace(tzinfo=timezone.utc)
-        except ValueError:
-            published_at = now
+        published_at = None
+        if published_str:
+            try:
+                published_at = datetime.fromisoformat(published_str)
+                if published_at.tzinfo is None:
+                    published_at = published_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
 
         docs.append(
             RawDocument(

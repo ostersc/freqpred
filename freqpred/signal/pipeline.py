@@ -51,6 +51,7 @@ class SignalPipeline:
         self,
         market: Market,
         trigger: str = "scheduled",
+        force: bool = False,
     ) -> Signal | None:
         """Analyze a market and return a new Signal if evidence has changed.
 
@@ -59,16 +60,21 @@ class SignalPipeline:
         2. If no documents retrieved → return None (no evidence to analyze).
         3. Compute retrieval hash from doc IDs.
         4. If hash == current signal hash → return None (no new evidence).
+           Skipped when *force* is True.
         5. Call Claude with market question + docs as context.
         6. Parse JSON response.
         7. Write Signal + DocumentMarketLinks + update Market.current_signal_id
            in a single transaction.
         8. Return Signal.
 
+        Args:
+            force: If True, bypass the retrieval-hash deduplication check and
+                   always call the LLM regardless of whether evidence has changed.
+
         Returns:
             A new ``Signal`` if evidence has changed and LLM analysis succeeded.
-            ``None`` if evidence is unchanged, the LLM call fails, or the
-            response is malformed.
+            ``None`` if evidence is unchanged (and not forced), the LLM call
+            fails, or the response is malformed.
         """
         async with self._session_factory() as session:
             # Step 1: retrieve relevant documents with cosine similarity scores
@@ -94,8 +100,8 @@ class SignalPipeline:
             doc_ids = [d.id for d in docs]
             new_hash = compute_retrieval_hash(doc_ids)
 
-            # Step 5: skip if evidence unchanged since last signal
-            if await should_skip(session, market.current_signal_id, new_hash):
+            # Step 5: skip if evidence unchanged since last signal (unless forced)
+            if not force and await should_skip(session, market.current_signal_id, new_hash):
                 # Evidence unchanged — but if price moved we can still create a
                 # new signal by cloning the current one at the new price (no LLM call).
                 cloned = await self._clone_at_price(session, market)

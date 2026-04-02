@@ -125,7 +125,7 @@ async def test_fetch_parses_seendate():
 
 
 @pytest.mark.asyncio
-async def test_fetch_invalid_seendate_falls_back_to_now():
+async def test_fetch_invalid_seendate_stores_none():
     articles = [_make_article(seendate="not-a-date")]
     client_mock = _make_client_mock(
         _make_gdelt_response(articles),
@@ -135,8 +135,7 @@ async def test_fetch_invalid_seendate_falls_back_to_now():
     with patch("freqpred.ingestion.fetchers.gdelt.httpx.AsyncClient", return_value=client_mock):
         docs = await fetch(_QUERY)
 
-    assert docs[0].published_at.tzinfo is not None
-    assert docs[0].published_at.year == 2026
+    assert docs[0].published_at is None
 
 
 @pytest.mark.asyncio

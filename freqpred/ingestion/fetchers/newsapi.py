@@ -96,14 +96,12 @@ async def fetch(
             log.debug("newsapi.fetch.skip", reason="excluded_domain", url=url)
             continue
 
-        try:
-            published_at = (
-                datetime.fromisoformat(published_str.replace("Z", "+00:00"))
-                if published_str
-                else now
-            )
-        except ValueError:
-            published_at = now
+        published_at = None
+        if published_str:
+            try:
+                published_at = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+            except ValueError:
+                pass
 
         docs.append(
             RawDocument(

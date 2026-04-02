@@ -106,12 +106,12 @@ async def test_fetch_parses_published_at_z_suffix(mock_newsapi_client):
 
 
 @pytest.mark.asyncio
-async def test_fetch_missing_published_at_falls_back(mock_newsapi_client):
+async def test_fetch_missing_published_at_stores_none(mock_newsapi_client):
     article = _make_article()
     article["publishedAt"] = None
     mock_newsapi_client.get_everything.return_value = {"articles": [article]}
     docs = await fetch(_API_KEY, _QUERY, _FROM)
-    assert docs[0].published_at.tzinfo is not None
+    assert docs[0].published_at is None
 
 
 @pytest.mark.asyncio

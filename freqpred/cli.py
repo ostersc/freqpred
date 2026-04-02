@@ -934,14 +934,15 @@ def signal() -> None:
 
 @signal.command(name="analyze")
 @click.option("--market-id", required=True, help="Kalshi market ID to analyze.")
+@click.option("--force", is_flag=True, default=False, help="Bypass hash deduplication and force a new LLM call.")
 @click.pass_context
-def signal_analyze(ctx: click.Context, market_id: str) -> None:
+def signal_analyze(ctx: click.Context, market_id: str, force: bool) -> None:
     """One-shot signal analysis for a specific market."""
     config = ctx.obj["config"]
-    asyncio.run(_signal_analyze(config, market_id))
+    asyncio.run(_signal_analyze(config, market_id, force=force))
 
 
-async def _signal_analyze(config: object, market_id: str) -> None:
+async def _signal_analyze(config: object, market_id: str, *, force: bool = False) -> None:
     import anthropic
 
     import freqpred.signal.models  # noqa: F401
@@ -1015,7 +1016,7 @@ async def _signal_analyze(config: object, market_id: str) -> None:
             top_k=config.signal.top_k_documents,
         )
 
-        signal = await pipeline.analyze(market, trigger="manual")
+        signal = await pipeline.analyze(market, trigger="manual", force=force)
 
         if signal is None:
             click.echo("No new signal generated (evidence unchanged or LLM error).")

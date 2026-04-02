@@ -44,8 +44,8 @@ class DocumentRow(Base):
     tags: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list)
 
     # Temporal
-    published_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False
+    published_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
     )
     fetched_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
@@ -122,7 +122,7 @@ class Document:
     tags: list[str]
 
     # Temporal
-    published_at: datetime
+    published_at: datetime | None
     fetched_at: datetime
 
     # Vector search

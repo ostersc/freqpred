@@ -432,6 +432,28 @@ class TestBuildPrompt:
         prompt = build_prompt(market, [])
         assert "days from now" in prompt
 
+    def test_includes_issuance_date_when_open_time_set(self) -> None:
+        """Prompt must include the market open/issuance date when available."""
+        market = _make_market()
+        market.open_time = datetime(2026, 3, 30, tzinfo=timezone.utc)
+        prompt = build_prompt(market, [])
+        assert "Market Opened (Issuance Date):" in prompt
+        assert "2026-03-30" in prompt
+
+    def test_includes_issuance_date_unknown_when_open_time_none(self) -> None:
+        """Prompt should gracefully handle missing open_time."""
+        market = _make_market()
+        market.open_time = None
+        prompt = build_prompt(market, [])
+        assert "Market Opened (Issuance Date): unknown" in prompt
+
+    def test_includes_pre_issuance_warning(self) -> None:
+        """Prompt must warn LLM that pre-issuance evidence cannot directly resolve the market."""
+        market = _make_market()
+        prompt = build_prompt(market, [])
+        assert "TEMPORAL EVIDENCE RULES" in prompt
+        assert "date of the SPECIFIC EVENT" in prompt
+
 
 # ---------------------------------------------------------------------------
 # SignalPipeline.analyze — full pipeline tests
