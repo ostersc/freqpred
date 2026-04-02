@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.alerts.command_handlers import _clip, _truncate
+from freqpred.alerts.run_state import get_drawdown_window
 from freqpred.metrics.calibration import compute_calibration
 from freqpred.trading.ledger import get_portfolio_summary
 
@@ -433,6 +434,7 @@ def register_metrics_commands(
 
         async with session_factory() as session:
             summary = await get_portfolio_summary(session, mode=mode)
+            drawdown_reset_at, drawdown_reset_bankroll = await get_drawdown_window(session)
 
         all_time_pnl = summary["all_time_pnl_usd"]
         net_value = bankroll + all_time_pnl
@@ -453,6 +455,19 @@ def register_metrics_commands(
             return f"  {label}: ${usd:+.2f}  ({pct:+.4f} wtd avg)"
 
         mode_label = f"({mode} mode)"
+        if drawdown_reset_bankroll is not None and drawdown_reset_bankroll > 0:
+            drawdown = max(0.0, (drawdown_reset_bankroll - net_value) / drawdown_reset_bankroll)
+            reset_ts = (
+                drawdown_reset_at.strftime("%Y-%m-%d %H:%MZ")
+                if drawdown_reset_at is not None
+                else "unknown"
+            )
+            drawdown_line = (
+                f"  Drawdown      : {drawdown:.1%} from ${drawdown_reset_bankroll:,.2f}"
+                f"  (reset {reset_ts})"
+            )
+        else:
+            drawdown_line = "  Drawdown      : no baseline set (use /reset_drawdown)"
         lines = [
             f"Balance snapshot {mode_label}:",
             f"  Bankroll      : ${bankroll:,.2f}",
@@ -465,6 +480,7 @@ def register_metrics_commands(
             f"  Open positions: {open_count}",
             _excursion_line("Portfolio MAE ", portfolio_mae_usd, portfolio_mae_pct),
             _excursion_line("Portfolio MFE ", portfolio_mfe_usd, portfolio_mfe_pct),
+            drawdown_line,
         ]
         return "\n".join(lines)
 
@@ -595,7 +611,7 @@ def register_metrics_commands(
             return "Digest unavailable: LLM client not configured."
 
         async with session_factory() as session:
-            return await generate_daily_digest(session, llm_client, trading_mode=mode)
+            return await generate_daily_digest(session, llm_client, trading_mode=mode, bankroll=config.trading.bankroll_usd)
 
     # ------------------------------------------------------------------ #
     # Register all handlers

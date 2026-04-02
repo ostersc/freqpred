@@ -97,8 +97,13 @@ class OrderManager:
             # Step 2: raw position size (uses net bankroll so Kelly sizing shrinks with losses)
             raw_size = strategy.position_size(signal, net_bankroll)
 
-            # Circuit breakers fire before any position check
-            await self._risk.check_circuit_breakers(session, net_bankroll, mode=self._mode)
+            # Circuit breakers fire before any position check.
+            from freqpred.alerts.run_state import get_drawdown_window  # noqa: PLC0415
+            _, drawdown_reset_bankroll = await get_drawdown_window(session)
+            await self._risk.check_circuit_breakers(
+                session, net_bankroll, mode=self._mode,
+                drawdown_reset_bankroll=drawdown_reset_bankroll,
+            )
 
             # Step 3: risk enforcement
             decision = await self._risk.check_position(

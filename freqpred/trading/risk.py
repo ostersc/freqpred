@@ -218,13 +218,18 @@ class RiskEngine:
         session: AsyncSession,
         bankroll: float,
         mode: str,
-        drawdown_reset_at: "datetime | None" = None,
+        drawdown_reset_bankroll: "float | None" = None,
     ) -> None:
         """Query current state and raise TradingCircuitBreakerError if:
         - daily loss > config.max_daily_loss_pct * bankroll
-        - total drawdown > 30% (all-time high vs current)
+        - drawdown from reset baseline > 30%
         Only positions matching ``mode`` are considered.
         Called at the start of each signal loop cycle.
+
+        ``bankroll`` must be the current net bankroll (initial deposit ± all
+        closed P&L).  ``drawdown_reset_bankroll`` is the net bankroll stored
+        when /reset_drawdown was last called; if None the drawdown check is
+        skipped (no baseline established yet).
         """
         # Daily loss circuit breaker
         today_start = datetime.now(timezone.utc).replace(
@@ -247,26 +252,16 @@ class RiskEngine:
             logger.error("risk.circuit_breaker.daily_loss", daily_pnl=daily_pnl)
             raise TradingCircuitBreakerError(msg)
 
-        # Drawdown circuit breaker
-        # ATH approximation: bankroll + losses since the last reset (or all-time if no reset).
-        drawdown_where = [
-            PositionRow.status == "closed",
-            PositionRow.mode == mode,
-        ]
-        if drawdown_reset_at is not None:
-            drawdown_where.append(PositionRow.exit_time >= drawdown_reset_at)
-        all_pnl_result = await session.execute(
-            select(func.sum(PositionRow.pnl)).where(*drawdown_where)
-        )
-        all_pnl: float = all_pnl_result.scalar_one() or 0.0
-        ath_bankroll = bankroll + max(0.0, -all_pnl)
-        drawdown = (ath_bankroll - bankroll) / ath_bankroll if ath_bankroll > 0 else 0.0
-        _DRAWDOWN_LIMIT = 0.30
-        if drawdown > _DRAWDOWN_LIMIT:
-            msg = (
-                f"Circuit breaker: total drawdown {drawdown:.1%} exceeds "
-                f"{_DRAWDOWN_LIMIT:.0%} "
-                f"(ATH bankroll: {ath_bankroll:.2f}, current: {bankroll:.2f})"
-            )
-            logger.error("risk.circuit_breaker.drawdown", drawdown=drawdown)
-            raise TradingCircuitBreakerError(msg)
+        # Drawdown circuit breaker — compare current net bankroll against the
+        # value stored when the drawdown window was last reset.
+        if drawdown_reset_bankroll is not None and drawdown_reset_bankroll > 0:
+            drawdown = max(0.0, (drawdown_reset_bankroll - bankroll) / drawdown_reset_bankroll)
+            _DRAWDOWN_LIMIT = 0.30
+            if drawdown > _DRAWDOWN_LIMIT:
+                msg = (
+                    f"Circuit breaker: drawdown {drawdown:.1%} exceeds "
+                    f"{_DRAWDOWN_LIMIT:.0%} "
+                    f"(baseline: {drawdown_reset_bankroll:.2f}, current: {bankroll:.2f})"
+                )
+                logger.error("risk.circuit_breaker.drawdown", drawdown=drawdown)
+                raise TradingCircuitBreakerError(msg)

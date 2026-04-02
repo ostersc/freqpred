@@ -292,18 +292,18 @@ async def test_status_no_open_positions():
 
     # execute() calls in order:
     # 1. get_run_state → scalar_one_or_none() → None (defaults to "running")
-    # 2. get_drawdown_reset_at → scalar_one_or_none() → None (no reset)
-    # 3. drawdown P&L query → scalar_one() → 0.0
+    # 2. get_drawdown_window → scalar_one_or_none() → None (no reset)
+    # 3. get_net_bankroll → scalar_one() → 0.0
     # 4. open positions query → all() → []
     run_state_mock = MagicMock()
     run_state_mock.scalar_one_or_none.return_value = None
-    reset_at_mock = MagicMock()
-    reset_at_mock.scalar_one_or_none.return_value = None
-    pnl_mock = MagicMock()
-    pnl_mock.scalar_one.return_value = 0.0
+    reset_window_mock = MagicMock()
+    reset_window_mock.scalar_one_or_none.return_value = None
+    net_bankroll_mock = MagicMock()
+    net_bankroll_mock.scalar_one.return_value = 0.0
     positions_mock = MagicMock()
     positions_mock.all.return_value = []
-    session.execute = AsyncMock(side_effect=[run_state_mock, reset_at_mock, pnl_mock, positions_mock])
+    session.execute = AsyncMock(side_effect=[run_state_mock, reset_window_mock, net_bankroll_mock, positions_mock])
 
     cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
     register_system_commands(cmd_handler, session_factory, MagicMock(

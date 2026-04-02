@@ -202,12 +202,19 @@ def register_system_commands(
     # ------------------------------------------------------------------ #
 
     async def handle_reset_drawdown(chat_id: int, args: list[str]) -> str:
+        from freqpred.trading import ledger as _ledger  # noqa: PLC0415
         async with session_factory() as session:
-            reset_at = await reset_drawdown(session)
-        log.info("telegram.reset_drawdown", chat_id=chat_id, reset_at=reset_at.isoformat())
+            net_bankroll = await _ledger.get_net_bankroll(
+                session, config.trading.bankroll_usd, mode=mode
+            )
+            reset_at = await reset_drawdown(session, net_bankroll)
+        log.info(
+            "telegram.reset_drawdown",
+            chat_id=chat_id, reset_at=reset_at.isoformat(), net_bankroll=net_bankroll,
+        )
         return (
-            f"Drawdown circuit breaker reset. "
-            f"Drawdown will now be calculated from {reset_at.strftime('%Y-%m-%d %H:%M UTC')} forward."
+            f"Drawdown reset. Baseline set to ${net_bankroll:,.2f} "
+            f"at {reset_at.strftime('%Y-%m-%d %H:%M UTC')}."
         )
 
     # ------------------------------------------------------------------ #
@@ -326,27 +333,19 @@ def register_system_commands(
             return "\n".join(lines)
 
         # List all open positions
-        from sqlalchemy import func as _func  # noqa: PLC0415
-        from freqpred.alerts.run_state import get_drawdown_reset_at  # noqa: PLC0415
+        from freqpred.alerts.run_state import get_drawdown_window  # noqa: PLC0415
+        from freqpred.trading import ledger as _ledger  # noqa: PLC0415
 
         async with session_factory() as session:
             current_state = await get_run_state(session)
-            reset_at = await get_drawdown_reset_at(session)
-
-            # Drawdown calculation (mirrors check_circuit_breakers)
-            drawdown_where = [
-                PositionRow.status == "closed",
-                PositionRow.mode == mode,
-            ]
-            if reset_at is not None:
-                drawdown_where.append(PositionRow.exit_time >= reset_at)
-            pnl_result = await session.execute(
-                select(_func.sum(PositionRow.pnl)).where(*drawdown_where)
+            reset_at, reset_bankroll = await get_drawdown_window(session)
+            net_bankroll = await _ledger.get_net_bankroll(
+                session, config.trading.bankroll_usd, mode=mode
             )
-            pnl_since_reset: float = pnl_result.scalar_one() or 0.0
-            bankroll = config.trading.bankroll_usd
-            ath = bankroll + max(0.0, -pnl_since_reset)
-            drawdown_pct = (ath - bankroll) / ath * 100 if ath > 0 else 0.0
+            if reset_bankroll is not None and reset_bankroll > 0:
+                drawdown_pct = max(0.0, (reset_bankroll - net_bankroll) / reset_bankroll) * 100
+            else:
+                drawdown_pct = 0.0
 
             result = await session.execute(
                 select(PositionRow, MarketRow.question, MarketRow.mid_price)
@@ -356,7 +355,10 @@ def register_system_commands(
             )
             rows = result.all()
 
-        reset_label = f" (since {reset_at.strftime('%m-%d %H:%M')})" if reset_at else " (all-time)"
+        if reset_bankroll is not None and reset_at is not None:
+            reset_label = f" from ${reset_bankroll:,.0f} (reset {reset_at.strftime('%m-%d %H:%M')})"
+        else:
+            reset_label = " (no baseline)"
         drawdown_str = f"drawdown={drawdown_pct:.1f}%{reset_label}"
         if drawdown_pct >= 30.0:
             drawdown_str += " *** CIRCUIT BREAKER ACTIVE ***"

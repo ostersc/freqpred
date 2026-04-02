@@ -352,6 +352,8 @@ async def test_stats_with_data():
 # ---------------------------------------------------------------------------
 
 
+
+
 @pytest.mark.asyncio
 async def test_balance_zero_state():
     session_factory, session = _async_session_ctx()
@@ -371,6 +373,9 @@ async def test_balance_zero_state():
             "portfolio_mae_pct": None,
             "portfolio_mfe_pct": None,
         },
+    ), patch(
+        "freqpred.alerts.metrics_handlers.get_drawdown_window",
+        new=AsyncMock(return_value=(None, None)),
     ):
         cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
         register_metrics_commands(
@@ -381,6 +386,7 @@ async def test_balance_zero_state():
     assert "1,000.00" in reply
     assert "Net value" in reply
     assert "paper" in reply
+    assert "Drawdown" in reply
 
 
 @pytest.mark.asyncio
@@ -402,6 +408,9 @@ async def test_balance_with_pnl():
             "portfolio_mae_pct": -0.072,
             "portfolio_mfe_pct": 0.107,
         },
+    ), patch(
+        "freqpred.alerts.metrics_handlers.get_drawdown_window",
+        new=AsyncMock(return_value=(None, None)),
     ):
         cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
         register_metrics_commands(
@@ -413,6 +422,7 @@ async def test_balance_with_pnl():
     assert "3.21" in reply       # all-time P&L
     assert "48.60" in reply      # exposure
     assert "3" in reply          # open positions
+    assert "Drawdown" in reply
 
 
 # ---------------------------------------------------------------------------

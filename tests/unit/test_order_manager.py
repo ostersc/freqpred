@@ -182,6 +182,17 @@ def _patch_get_net_bankroll():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _patch_get_drawdown_window():
+    """Patch get_drawdown_window so order_manager.submit() doesn't need a real DB."""
+    with patch(
+        "freqpred.alerts.run_state.get_drawdown_window",
+        new_callable=AsyncMock,
+        return_value=(None, None),
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

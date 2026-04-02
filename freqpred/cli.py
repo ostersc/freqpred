@@ -50,12 +50,15 @@ def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int 
     root.setLevel(level)
     root.handlers.clear()
 
-    # Console handler — colours on
+    # Console handler — colours on, no locals in tracebacks (avoids leaking secrets/large objects)
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             foreign_pre_chain=shared_processors,
-            processor=structlog.dev.ConsoleRenderer(colors=True),
+            processor=structlog.dev.ConsoleRenderer(
+                colors=True,
+                exception_formatter=structlog.dev.plain_traceback,
+            ),
         )
     )
     root.addHandler(console_handler)
@@ -74,7 +77,10 @@ def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int 
         file_handler.setFormatter(
             structlog.stdlib.ProcessorFormatter(
                 foreign_pre_chain=shared_processors,
-                processor=structlog.dev.ConsoleRenderer(colors=False),
+                processor=structlog.dev.ConsoleRenderer(
+                    colors=False,
+                    exception_formatter=structlog.dev.plain_traceback,
+                ),
             )
         )
         root.addHandler(file_handler)
@@ -374,11 +380,15 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 if order_manager is not None:
                     try:
                         async with session_factory() as cb_session:
-                            from freqpred.alerts.run_state import get_drawdown_reset_at  # noqa: PLC0415
-                            _reset_at = await get_drawdown_reset_at(cb_session)
+                            from freqpred.alerts.run_state import get_drawdown_window  # noqa: PLC0415
+                            from freqpred.trading import ledger as _ledger  # noqa: PLC0415
+                            _net_bankroll = await _ledger.get_net_bankroll(
+                                cb_session, order_manager._bankroll, mode=order_manager._mode
+                            )
+                            _, _reset_bankroll = await get_drawdown_window(cb_session)
                             await order_manager._risk.check_circuit_breakers(
-                                cb_session, order_manager._bankroll, mode=order_manager._mode,
-                                drawdown_reset_at=_reset_at,
+                                cb_session, _net_bankroll, mode=order_manager._mode,
+                                drawdown_reset_bankroll=_reset_bankroll,
                             )
                     except TradingCircuitBreakerError as exc:
                         log.warning("signal_loop.circuit_breaker_fired", reason=str(exc))
@@ -548,6 +558,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     digest_time=config.alerts.digest_time,
                     digest_timezone=config.alerts.digest_timezone,
                     trading_mode=mode,
+                    bankroll=config.trading.bankroll_usd,
                 ),
                 name="digest_scheduler",
             )

@@ -31,6 +31,7 @@ async def generate_daily_digest(
     session: AsyncSession,
     llm_client: LLMClient,
     trading_mode: str = "paper",
+    bankroll: float = 0.0,
 ) -> str:
     """
     Assembles a structured data snapshot (open positions, yesterday P&L,
@@ -44,9 +45,10 @@ async def generate_daily_digest(
     )
     yesterday_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # --- Run state ---
-    from freqpred.alerts.run_state import get_run_state  # noqa: PLC0415
+    # --- Run state + drawdown ---
+    from freqpred.alerts.run_state import get_run_state, get_drawdown_window  # noqa: PLC0415
     run_state = await get_run_state(session)
+    drawdown_reset_at, drawdown_reset_bankroll = await get_drawdown_window(session)
 
     # --- Open positions + unrealized P&L + excursion metrics ---
     open_result = await session.execute(
@@ -129,6 +131,15 @@ async def generate_daily_digest(
     else:
         session_exit_str = "no closed trades in session"
 
+    # --- Drawdown: current net vs stored baseline at reset time ---
+    # net_value derived from bankroll + all-time closed P&L (unrealized excluded to match ledger)
+    all_time_pnl_result = await session.execute(
+        select(func.coalesce(func.sum(PositionRow.pnl), 0.0)).where(
+            PositionRow.status == "closed", PositionRow.mode == trading_mode
+        )
+    )
+    net_value: float = bankroll + float(all_time_pnl_result.scalar_one())
+
     # --- LLM spend yesterday vs daily cap ---
     yesterday_spend_result = await session.execute(
         select(func.coalesce(func.sum(LLMQueryRow.cost_usd), 0.0)).where(
@@ -175,6 +186,23 @@ async def generate_daily_digest(
     else:
         fetcher_status = "all fetchers healthy"
 
+    # --- Drawdown string for prompt ---
+    if drawdown_reset_bankroll is not None and drawdown_reset_bankroll > 0:
+        drawdown = max(0.0, (drawdown_reset_bankroll - net_value) / drawdown_reset_bankroll)
+        reset_label = (
+            drawdown_reset_at.strftime("%Y-%m-%d %H:%MZ")
+            if drawdown_reset_at is not None
+            else "unknown"
+        )
+        drawdown_str = f"{drawdown:.1%} from ${drawdown_reset_bankroll:,.2f} at reset ({reset_label})"
+        drawdown_footer = f"Drawdown: {drawdown_str}"
+    elif bankroll > 0:
+        drawdown_str = "no baseline set (use /reset_drawdown)"
+        drawdown_footer = f"Drawdown: {drawdown_str}"
+    else:
+        drawdown_str = "unknown (bankroll not provided)"
+        drawdown_footer = None
+
     # --- Build prompt ---
     calibration_str = (
         f"Brier score {calibration.brier_score:.3f} over {calibration.n_samples} resolved markets"
@@ -206,7 +234,8 @@ async def generate_daily_digest(
         f"- LLM spend yesterday: ${yesterday_llm_spend:.4f}; today so far: ${today_llm_spend:.4f}\n"
         f"- LLM errors (last 24h): {llm_errors}\n"
         f"- Signal calibration: {calibration_str}\n"
-        f"- Fetcher status: {fetcher_status}\n\n"
+        f"- Fetcher status: {fetcher_status}\n"
+        f"- Drawdown: {drawdown_str}\n\n"
         "Write a single natural-language paragraph (≤150 words) summarizing "
         "system health and anything worth attention."
     )
@@ -230,7 +259,8 @@ async def generate_daily_digest(
     )
 
     mode_banner = f"[{mode_label} MODE]\n"
-    return mode_banner + response.content
+    footer = f"\n{drawdown_footer}" if drawdown_footer else ""
+    return mode_banner + response.content + footer
 
 
 def _seconds_until_next(time_str: str, tz: ZoneInfo) -> float:
@@ -250,6 +280,7 @@ async def run_digest_scheduler(
     digest_time: str = "07:00",
     digest_timezone: str = "America/New_York",
     trading_mode: str = "paper",
+    bankroll: float = 0.0,
 ) -> None:
     """Background task: generate and send the daily digest at the configured time.
 
@@ -270,7 +301,7 @@ async def run_digest_scheduler(
 
         try:
             async with session_factory() as session:
-                digest = await generate_daily_digest(session, llm_client, trading_mode=trading_mode)
+                digest = await generate_daily_digest(session, llm_client, trading_mode=trading_mode, bankroll=bankroll)
             await alert_dispatcher.digest_alert(digest)
             log.info("digest_scheduler.sent")
         except asyncio.CancelledError:

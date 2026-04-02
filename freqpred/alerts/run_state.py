@@ -37,15 +37,37 @@ async def get_drawdown_reset_at(session: AsyncSession) -> datetime | None:
     return row.drawdown_reset_at if row is not None else None
 
 
-async def reset_drawdown(session: AsyncSession) -> datetime:
-    """Set drawdown_reset_at to now and commit. Returns the new reset timestamp."""
+async def get_drawdown_window(session: AsyncSession) -> tuple[datetime | None, float | None]:
+    """Return (reset_at, reset_bankroll) for the current drawdown window.
+
+    ``reset_bankroll`` is the net bankroll stored at the time of the last
+    /reset_drawdown call.  Both values are None if no reset has ever been done.
+    """
+    result = await session.execute(select(RunStateRow).limit(1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None, None
+    return row.drawdown_reset_at, row.drawdown_reset_bankroll
+
+
+async def reset_drawdown(session: AsyncSession, net_bankroll: float) -> datetime:
+    """Set drawdown_reset_at and drawdown_reset_bankroll to now/current value.
+
+    ``net_bankroll`` is the current net account value and becomes the baseline
+    against which all future drawdown measurements are made.
+    Returns the new reset timestamp.
+    """
     result = await session.execute(select(RunStateRow).limit(1))
     row = result.scalar_one_or_none()
     now = datetime.now(UTC)
     if row is None:
-        session.add(RunStateRow(id=1, state=_DEFAULT_STATE, updated_at=now, drawdown_reset_at=now))
+        session.add(RunStateRow(
+            id=1, state=_DEFAULT_STATE, updated_at=now,
+            drawdown_reset_at=now, drawdown_reset_bankroll=net_bankroll,
+        ))
     else:
         row.drawdown_reset_at = now
+        row.drawdown_reset_bankroll = net_bankroll
         row.updated_at = now
     await session.commit()
     return now

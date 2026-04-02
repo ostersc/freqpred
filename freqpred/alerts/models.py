@@ -29,3 +29,6 @@ class RunStateRow(Base):
     drawdown_reset_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True, default=None
     )
+    drawdown_reset_bankroll: Mapped[float | None] = mapped_column(
+        nullable=True, default=None
+    )

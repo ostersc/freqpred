@@ -71,17 +71,22 @@ def _make_session(
 
     # execute() calls in order:
     # 1. get_run_state → .scalar_one_or_none()
-    # 2. open positions (count, exposure) → .one()
-    # 3. unrealized P&L rows → .all()
-    # 4. session pnl (scalar) → .scalar_one()
-    # 5. exit reason breakdown → .all()
-    # 6. yesterday llm spend (scalar) → .scalar_one()
-    # 7. LLM errors count (scalar) → .scalar_one()
-    # 8. fetcher backoff rows → .all()
+    # 2. get_drawdown_window → .scalar_one_or_none()
+    # 3. open positions (count, exposure) → .one()
+    # 4. unrealized P&L rows → .all()
+    # 5. session pnl (scalar) → .scalar_one()
+    # 6. exit reason breakdown → .all()
+    # 7. all-time pnl for net_value (scalar) → .scalar_one()
+    # 8. yesterday llm spend (scalar) → .scalar_one()
+    # 9. LLM errors count (scalar) → .scalar_one()
+    # 10. fetcher backoff rows → .all()
     # (calibration and today_llm_spend are patched separately)
 
     run_state_result = MagicMock()
     run_state_result.scalar_one_or_none.return_value = None  # defaults to "running"
+
+    drawdown_reset_result = MagicMock()
+    drawdown_reset_result.scalar_one_or_none.return_value = None  # no reset
 
     open_result = MagicMock()
     open_result.one.return_value = (open_count, total_exposure)
@@ -95,6 +100,9 @@ def _make_session(
     exits_result = MagicMock()
     exits_result.all.return_value = session_exit_rows
 
+    dd_pnl_result = MagicMock()
+    dd_pnl_result.scalar_one.return_value = 0.0  # no drawdown losses
+
     llm_spend_result = MagicMock()
     llm_spend_result.scalar_one.return_value = yesterday_llm_spend
 
@@ -105,7 +113,12 @@ def _make_session(
     backoff_result.all.return_value = backed_off_services
 
     session.execute = AsyncMock(
-        side_effect=[run_state_result, open_result, unrealized_result, pnl_result, exits_result, llm_spend_result, llm_errors_result, backoff_result]
+        side_effect=[
+            run_state_result, drawdown_reset_result,
+            open_result, unrealized_result, pnl_result, exits_result,
+            dd_pnl_result,
+            llm_spend_result, llm_errors_result, backoff_result,
+        ]
     )
     return session
 
