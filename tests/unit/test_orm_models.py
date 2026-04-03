@@ -53,6 +53,7 @@ def test_all_tables_registered():
         "catalyst_runs",
         "catalyst_queries",
         "api_daily_counters",
+        "fetcher_cursors",
         "fetcher_rate_limits",
         "run_state",
     }

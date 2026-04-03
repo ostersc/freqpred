@@ -63,7 +63,7 @@ async def deactivate_stale_catalysts(
     session: AsyncSession,
     strategies: list[StrategyProtocol],
     protected_market_ids: set[str] | frozenset[str] = frozenset(),
-) -> int:
+) -> list[str]:
     """Deactivate catalyst runs for markets that are closed or no longer selected.
 
     A run is deactivated when:
@@ -83,7 +83,7 @@ async def deactivate_stale_catalysts(
         protected_market_ids: Market IDs that must not be deactivated.
 
     Returns:
-        Number of runs deactivated.
+        List of market IDs whose catalyst runs were deactivated.
     """
     now = datetime.now(UTC)
 
@@ -113,7 +113,7 @@ async def deactivate_stale_catalysts(
     )
     rows = result.all()
 
-    deactivated = 0
+    deactivated_ids: list[str] = []
     for run_row, market_row in rows:
         market = _market_row_to_domain(market_row)
 
@@ -124,7 +124,7 @@ async def deactivate_stale_catalysts(
         if (closed or no_interest) and not protected:
             run_row.is_active = False
             session.add(run_row)
-            deactivated += 1
+            deactivated_ids.append(market.id)
             log.info(
                 "selector.deactivated_catalyst_run",
                 market_id=market.id,
@@ -133,15 +133,15 @@ async def deactivate_stale_catalysts(
                 reason="closed" if closed else "no_strategy_interest",
             )
 
-    if deactivated:
+    if deactivated_ids:
         await session.flush()
 
     log.info(
         "selector.deactivation_complete",
         checked=len(rows),
-        deactivated=deactivated,
+        deactivated=len(deactivated_ids),
     )
-    return deactivated
+    return deactivated_ids
 
 
 # ---------------------------------------------------------------------------

@@ -41,3 +41,22 @@ async def set_cursor(
         ),
         {"fetcher": fetcher, "key": key, "last_run_at": last_run_at},
     )
+
+
+async def delete_cursors(
+    session: AsyncSession, fetcher: str, keys: list[str] | set[str]
+) -> None:
+    """Delete all cursor rows for the given fetcher+keys.
+
+    Used to clean up per-market cursors when markets close or become
+    uninteresting so stale rows do not accumulate in fetcher_cursors.
+    No-op if *keys* is empty.
+    """
+    if not keys:
+        return
+    await session.execute(
+        text(
+            "DELETE FROM fetcher_cursors WHERE fetcher = :fetcher AND key = ANY(:keys)"
+        ),
+        {"fetcher": fetcher, "keys": list(keys)},
+    )

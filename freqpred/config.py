@@ -41,12 +41,22 @@ class AnthropicConfig(BaseModel):
 
 class TavilyConfig(BaseModel):
     api_key: str = Field(default="")
+    daily_cap: int = Field(default=33, description="Max requests per day (1,000 credits/month ÷ 30).")
+    min_fetch_interval_hours: float = Field(default=1.0, description="Floor on per-market adaptive fetch interval.")
 
 
 class NewsAPIConfig(BaseModel):
     api_key: str = Field(default="")
     enabled: bool = Field(default=True)
     max_window_requests: int = Field(default=45, description="Max requests per 12-hour window (NewsAPI allows 50).")
+    min_fetch_interval_hours: float = Field(default=1.0, description="Floor on per-market adaptive fetch interval.")
+
+
+class GuardianConfig(BaseModel):
+    api_key: str = Field(default="")
+    enabled: bool = Field(default=True)
+    daily_cap: int = Field(default=490, description="Max requests per day (Guardian free tier: 500; leave headroom).")
+    min_fetch_interval_hours: float = Field(default=1.0, description="Floor on per-market fetch interval regardless of market count.")
 
 
 class RedditConfig(BaseModel):
@@ -133,6 +143,7 @@ class Settings(BaseModel):
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     tavily: TavilyConfig = Field(default_factory=TavilyConfig)
     newsapi: NewsAPIConfig = Field(default_factory=NewsAPIConfig)
+    guardian: GuardianConfig = Field(default_factory=GuardianConfig)
     reddit: RedditConfig = Field(default_factory=RedditConfig)
     truthsocial: TruthSocialConfig = Field(default_factory=TruthSocialConfig)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
@@ -173,6 +184,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
     "NEWSAPI_KEY": ("newsapi", "api_key"),
+    "GUARDIAN_API_KEY": ("guardian", "api_key"),
     "TRUTHSOCIAL_USERNAME": ("truthsocial", "username"),
     "TRUTHSOCIAL_PASSWORD": ("truthsocial", "password"),
     "TELEGRAM_BOT_TOKEN": ("alerts", "telegram_bot_token"),

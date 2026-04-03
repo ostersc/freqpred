@@ -102,7 +102,7 @@ class TestEnsureCatalysts:
 
         with (
             patch("freqpred.ingestion.selector.select_markets", return_value=[MagicMock(id="MKT-1")]),
-            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock),
+            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock, return_value=[]),
             patch("freqpred.ingestion.catalyst_generator.generate_catalysts", new_callable=AsyncMock) as mock_gen,
         ):
             count = await _ensure_catalysts(session, strategy, llm_client, embedder)
@@ -132,7 +132,7 @@ class TestEnsureCatalysts:
 
         with (
             patch("freqpred.ingestion.selector.select_markets", return_value=[MagicMock(id="MKT-1")]),
-            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock),
+            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock, return_value=[]),
             patch("freqpred.ingestion.catalyst_generator.generate_catalysts", new_callable=AsyncMock) as mock_gen,
         ):
             count = await _ensure_catalysts(session, strategy, llm_client, embedder)
@@ -162,7 +162,7 @@ class TestEnsureCatalysts:
 
         with (
             patch("freqpred.ingestion.selector.select_markets", return_value=[MagicMock(id="MKT-1")]),
-            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock),
+            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock, return_value=[]),
             patch("freqpred.ingestion.catalyst_generator.generate_catalysts", new_callable=AsyncMock) as mock_gen,
         ):
             count = await _ensure_catalysts(session, strategy, llm_client, embedder)
@@ -182,7 +182,7 @@ class TestEnsureCatalysts:
 
         with (
             patch("freqpred.ingestion.selector.select_markets", return_value=[]),
-            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock),
+            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock, return_value=[]),
             patch("freqpred.ingestion.catalyst_generator.generate_catalysts", new_callable=AsyncMock) as mock_gen,
         ):
             count = await _ensure_catalysts(session, strategy, llm_client, embedder)
@@ -248,7 +248,7 @@ class TestEnsureCatalysts:
 
         with (
             patch("freqpred.ingestion.selector.select_markets", return_value=markets),
-            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock),
+            patch("freqpred.ingestion.selector.deactivate_stale_catalysts", new_callable=AsyncMock, return_value=[]),
             patch(
                 "freqpred.ingestion.catalyst_generator.generate_catalysts",
                 new_callable=AsyncMock,

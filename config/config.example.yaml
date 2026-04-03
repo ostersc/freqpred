@@ -36,10 +36,21 @@ anthropic:
 tavily:
   # Overridden by TAVILY_API_KEY env var
   api_key: ""
+  daily_cap: 33                   # 1,000 credits/month ÷ 30 days
+  min_fetch_interval_hours: 1.0   # floor on per-market interval regardless of market count
 
 newsapi:
   # Overridden by NEWSAPI_KEY env var
   api_key: ""
+  min_fetch_interval_hours: 1.0   # floor on per-market interval; hard limit is max_window_requests
+
+guardian:
+  # Free developer key: https://open-platform.theguardian.com/access/
+  # Overridden by GUARDIAN_API_KEY env var
+  api_key: ""
+  enabled: true
+  daily_cap: 490                  # Guardian free tier allows 500/day; leave 10 headroom
+  min_fetch_interval_hours: 1.0   # floor on per-market interval regardless of market count
 
 reddit:
   # Uses the public Reddit JSON API — no credentials required

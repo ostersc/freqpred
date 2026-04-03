@@ -52,3 +52,21 @@ async def increment_window_count(
         ),
         {"service": service, "date": for_date, "slot": hour_slot},
     )
+
+
+async def get_daily_count(
+    session: AsyncSession, service: str, for_date: date
+) -> int:
+    """Return total request count for *service* across both 12-hour slots for a day.
+
+    Used for services with a per-day cap (e.g. Guardian: 500/day) rather than
+    a per-window cap.  Returns 0 if no rows exist yet.
+    """
+    result = await session.execute(
+        text(
+            "SELECT COALESCE(SUM(request_count), 0) FROM api_daily_counters "
+            "WHERE service = :service AND date = :date"
+        ),
+        {"service": service, "date": for_date},
+    )
+    return int(result.scalar() or 0)
