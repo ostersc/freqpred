@@ -520,6 +520,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     newsapi_max_window_requests=config.newsapi.max_window_requests,
                     guardian_api_key=config.guardian.api_key,
                     guardian_enabled=config.guardian.enabled,
+                    guardian_daily_cap=config.guardian.daily_cap,
+                    guardian_min_fetch_interval_hours=config.guardian.min_fetch_interval_hours,
                 ),
                 name="ingestion_scheduler",
             )

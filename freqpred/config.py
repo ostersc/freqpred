@@ -52,6 +52,8 @@ class NewsAPIConfig(BaseModel):
 class GuardianConfig(BaseModel):
     api_key: str = Field(default="")
     enabled: bool = Field(default=True)
+    daily_cap: int = Field(default=490, description="Max requests per day (Guardian free tier: 500; leave headroom).")
+    min_fetch_interval_hours: float = Field(default=1.0, description="Floor on per-market fetch interval regardless of market count.")
 
 
 class RedditConfig(BaseModel):

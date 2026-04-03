@@ -783,6 +783,9 @@ flowchart TD
 - Response body field is HTML — stripped of tags and entity-unescaped before storage
 - Rate limit: 1 req/sec (free developer tier: 500 req/day); uses fixed `asyncio.sleep(1.0)` before each call
 - HTTP 429 → `GuardianRateLimitError` → triggers backoff in the scheduler (same pattern as NewsAPI/Tavily)
+- **Adaptive per-market fetch interval** — Guardian is fetched once per market per computed interval rather than every scheduler cycle. Interval formula: `max(min_interval, min(24h, total_active_queries × 24h / daily_cap))`. This automatically scales with the number of monitored markets so the daily cap is never exceeded under normal operation. At 10 markets × 4 queries the interval is ~2h; at 50 markets it is ~10h.
+- Per-market last-fetch time tracked in `fetcher_cursors` table keyed `('guardian', market_id)`. Cursors are deleted when markets close or lose strategy interest (via `delete_cursors` called after `deactivate_stale_catalysts`).
+- Hard daily cap (`guardian.daily_cap`, default: 490) enforced via `api_daily_counters` table as a backstop circuit-breaker. Configured via `guardian.min_fetch_interval_hours` (default: 1.0h, floor on the adaptive interval).
 - Configured via `guardian.api_key` / `GUARDIAN_API_KEY` env var; `guardian.enabled` flag (default: `true`)
 - `source_type="news"`, `source_name="The Guardian"`
 

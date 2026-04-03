@@ -28,6 +28,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.ingestion.backoff import record_rate_limit, record_success, tick_and_load
+from freqpred.ingestion.cursors import delete_cursors, get_cursor, set_cursor
 from freqpred.ingestion.fetchers import gdelt as gdelt_fetcher
 from freqpred.ingestion.fetchers import guardian as guardian_fetcher
 from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
@@ -39,7 +40,7 @@ from freqpred.ingestion.fetchers.guardian import GuardianRateLimitError
 from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
 from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
-from freqpred.ingestion.quota import current_window, get_window_count, increment_window_count
+from freqpred.ingestion.quota import current_window, get_daily_count, get_window_count, increment_window_count
 from freqpred.ingestion.store import DocumentSkipped, link_document_to_market, upsert_document
 from freqpred.markets.models import Market, MarketRow, PositionRow
 from freqpred.rag.embedder import LocalEmbedder
@@ -90,6 +91,8 @@ async def run_cycle(
     newsapi_max_window_requests: int = 45,
     guardian_api_key: str = "",
     guardian_enabled: bool = True,
+    guardian_daily_cap: int = 490,
+    guardian_min_fetch_interval_hours: float = 1.0,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
 ) -> dict[str, int]:
@@ -121,6 +124,10 @@ async def run_cycle(
         guardian_api_key:           Guardian Content API key. Guardian is skipped if empty.
         guardian_enabled:           When False, the Guardian fetcher is skipped entirely
                                     even if guardian_api_key is set (default: True).
+        guardian_daily_cap:         Hard daily request cap for Guardian (default: 490).
+        guardian_min_fetch_interval_hours: Floor on the per-market adaptive fetch interval
+                                    (default: 1.0h). The actual interval scales up automatically
+                                    with market count to stay within the daily cap.
         reddit_user_agent:          User-Agent for Reddit requests.
         domain_blacklist:           Domains to exclude from fetcher results.
                                     Matched as a substring of each URL (default: kalshi.com).
@@ -172,6 +179,35 @@ async def run_cycle(
     gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
     tv_archive_limit_hit: bool = backoff_state.get("tv_archive", False)
 
+    # Guardian daily quota check — if already at cap for today, skip the whole cycle.
+    guardian_daily_count: int = 0
+    if guardian_api_key and guardian_enabled and not guardian_limit_hit:
+        guardian_daily_count = await get_daily_count(session, "guardian", now.date())
+        if guardian_daily_count >= guardian_daily_cap:
+            guardian_limit_hit = True
+            log.warning(
+                "scheduler.guardian_daily_cap_reached_at_cycle_start",
+                count=guardian_daily_count,
+                cap=guardian_daily_cap,
+            )
+
+    # Adaptive per-market fetch interval: scale with total active query count so
+    # the daily cap is spread evenly across markets regardless of how many are active.
+    # interval = max(min_interval, min(24h, total_queries * 24h / daily_cap))
+    total_active_queries = sum(len(qp) for _, _, _, qp in market_queries)
+    if guardian_daily_cap > 0 and total_active_queries > 0:
+        _auto_interval_hours = total_active_queries * 24.0 / guardian_daily_cap
+        _clamped = max(guardian_min_fetch_interval_hours, min(24.0, _auto_interval_hours))
+    else:
+        _clamped = 24.0
+    guardian_fetch_interval = timedelta(hours=_clamped)
+    log.debug(
+        "scheduler.guardian_fetch_interval",
+        total_queries=total_active_queries,
+        interval_hours=round(_clamped, 2),
+        daily_cap=guardian_daily_cap,
+    )
+
     # Track which services had a successful call this cycle so we only write
     # record_success once per service (it's idempotent but avoids extra DB hits).
     success_recorded: set[str] = set()
@@ -181,6 +217,20 @@ async def run_cycle(
         market_fetched = 0
         market_stored = 0
         market_error = 0
+
+        # --- Guardian cursor check (once per market, not per query) ---
+        # Guardian is fetched at most once per market per adaptive interval to
+        # stay within the daily cap.  The interval scales automatically with
+        # the number of active markets; guardian_limit_hit may be set here if
+        # the daily cap was hit mid-cycle by a previous market.
+        guardian_due_this_market = False
+        if guardian_api_key and guardian_enabled and not guardian_limit_hit:
+            last_guardian = await get_cursor(session, "guardian", market_id)
+            guardian_due_this_market = (
+                last_guardian is None
+                or (now - last_guardian) >= guardian_fetch_interval
+            )
+        guardian_fetched_this_market = False
 
         for query_text, tv_query in query_pairs:
             # --- Build non-GDELT fetch coroutines to run in parallel ---
@@ -224,7 +274,8 @@ async def run_cycle(
                     ))
 
             # Guardian: use tv_query (Solr syntax) when available, else query_text.
-            if guardian_api_key and guardian_enabled and not guardian_limit_hit:
+            # Only included when the per-market cursor says this market is due.
+            if guardian_due_this_market and not guardian_limit_hit:
                 fetch_names.append("guardian")
                 fetch_coros.append(guardian_fetcher.fetch(
                     api_key=guardian_api_key,
@@ -264,6 +315,7 @@ async def run_cycle(
                         log.warning("scheduler.newsapi_rate_limited", reason=str(result), skip_cycles=skip_cycles)
                     elif name == "guardian" and isinstance(result, GuardianRateLimitError):
                         guardian_limit_hit = True
+                        guardian_due_this_market = False
                         skip_cycles = await record_rate_limit(session, "guardian")
                         log.warning("scheduler.guardian_rate_limited", reason=str(result), skip_cycles=skip_cycles)
                     else:
@@ -278,6 +330,18 @@ async def run_cycle(
                     raw_docs.extend(result)
                     if name == "newsapi" and newsapi_fetched:
                         await increment_window_count(session, "newsapi", newsapi_window_date, newsapi_hour_slot)
+                    if name == "guardian":
+                        guardian_fetched_this_market = True
+                        guardian_daily_count += 1
+                        await increment_window_count(session, "guardian", now.date(), now.hour // 12)
+                        if guardian_daily_count >= guardian_daily_cap:
+                            guardian_limit_hit = True
+                            guardian_due_this_market = False
+                            log.warning(
+                                "scheduler.guardian_daily_cap_reached",
+                                count=guardian_daily_count,
+                                cap=guardian_daily_cap,
+                            )
                     # Clear backoff on first success this cycle for this service.
                     if name not in success_recorded:
                         await record_success(session, name)
@@ -332,6 +396,10 @@ async def run_cycle(
                     )
                     market_error += 1
 
+        # Update Guardian cursor for this market after all its queries complete.
+        if guardian_fetched_this_market:
+            await set_cursor(session, "guardian", market_id, now)
+
         log.info(
             "scheduler.market_cycle_complete",
             market_id=market_id,
@@ -370,6 +438,8 @@ async def run_scheduler(
     newsapi_max_window_requests: int = 45,
     guardian_api_key: str = "",
     guardian_enabled: bool = True,
+    guardian_daily_cap: int = 490,
+    guardian_min_fetch_interval_hours: float = 1.0,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
 ) -> None:
@@ -390,6 +460,8 @@ async def run_scheduler(
         newsapi_max_window_requests: Per-12-hour-window request cap for the NewsAPI fetcher.
         guardian_api_key:           Guardian Content API key.
         guardian_enabled:           When False, Guardian fetcher is skipped entirely.
+        guardian_daily_cap:         Hard daily request cap for Guardian (default: 490).
+        guardian_min_fetch_interval_hours: Floor on per-market adaptive fetch interval.
         reddit_user_agent:          User-Agent for Reddit requests.
         domain_blacklist:           Domains to exclude from fetcher results.
     """
@@ -422,6 +494,8 @@ async def run_scheduler(
                     newsapi_max_window_requests=newsapi_max_window_requests,
                     guardian_api_key=guardian_api_key,
                     guardian_enabled=guardian_enabled,
+                    guardian_daily_cap=guardian_daily_cap,
+                    guardian_min_fetch_interval_hours=guardian_min_fetch_interval_hours,
                     reddit_user_agent=reddit_user_agent,
                     domain_blacklist=domain_blacklist,
                 )
@@ -478,8 +552,11 @@ async def _ensure_catalysts(
     )
     open_market_ids: set[str] = {r.market_id for r in open_pos_result.all()}
 
-    # Deactivate catalysts for markets that are no longer interesting.
-    await deactivate_stale_catalysts(session, [strategy], open_market_ids)
+    # Deactivate catalysts for markets that are no longer interesting, then
+    # clean up their Guardian cursors so stale rows don't accumulate.
+    deactivated_ids = await deactivate_stale_catalysts(session, [strategy], open_market_ids)
+    if deactivated_ids:
+        await delete_cursors(session, "guardian", deactivated_ids)
 
     if not selected:
         return 0

@@ -160,9 +160,10 @@ class TestDeactivateStaleMarkets:
         run_row = self._make_run_row(market_row)
         session = self._make_session([(run_row, market_row)])
 
-        count = await deactivate_stale_catalysts(session, [_strategy(True)])
+        result = await deactivate_stale_catalysts(session, [_strategy(True)])
 
-        assert count == 1
+        assert len(result) == 1
+        assert result[0] == "MKT-1"
         assert run_row.is_active is False
         session.add.assert_called_once_with(run_row)
 
@@ -172,9 +173,9 @@ class TestDeactivateStaleMarkets:
         run_row = self._make_run_row(market_row)
         session = self._make_session([(run_row, market_row)])
 
-        count = await deactivate_stale_catalysts(session, [_strategy(False)])
+        result = await deactivate_stale_catalysts(session, [_strategy(False)])
 
-        assert count == 1
+        assert len(result) == 1
         assert run_row.is_active is False
 
     @pytest.mark.asyncio
@@ -185,9 +186,9 @@ class TestDeactivateStaleMarkets:
 
         with patch("freqpred.ingestion.selector.datetime") as mock_dt:
             mock_dt.now.return_value = NOW
-            count = await deactivate_stale_catalysts(session, [_strategy(True)])
+            result = await deactivate_stale_catalysts(session, [_strategy(True)])
 
-        assert count == 0
+        assert result == []
         assert run_row.is_active is True
         session.add.assert_not_called()
 
@@ -206,14 +207,28 @@ class TestDeactivateStaleMarkets:
 
         with patch("freqpred.ingestion.selector.datetime") as mock_dt:
             mock_dt.now.return_value = NOW
-            count = await deactivate_stale_catalysts(session, [_strategy(True)])
+            result = await deactivate_stale_catalysts(session, [_strategy(True)])
 
-        assert count == 1
+        assert result == ["B"]
         assert active_rrow.is_active is True
         assert closed_rrow.is_active is False
 
     @pytest.mark.asyncio
-    async def test_no_active_runs_returns_zero(self) -> None:
+    async def test_no_active_runs_returns_empty_list(self) -> None:
         session = self._make_session([])
-        count = await deactivate_stale_catalysts(session, [_strategy(True)])
-        assert count == 0
+        result = await deactivate_stale_catalysts(session, [_strategy(True)])
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_deactivated_ids_contain_all_stale_markets(self) -> None:
+        """All deactivated market IDs are returned, not just a count."""
+        rows = []
+        for mid in ["X", "Y", "Z"]:
+            mrow = self._make_market_row(mid, close_time=PAST)
+            rrow = self._make_run_row(mrow)
+            rows.append((rrow, mrow))
+        session = self._make_session(rows)
+
+        result = await deactivate_stale_catalysts(session, [_strategy(True)])
+
+        assert sorted(result) == ["X", "Y", "Z"]
