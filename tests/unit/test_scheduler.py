@@ -54,6 +54,22 @@ def mock_quota(monkeypatch):
         "freqpred.ingestion.scheduler.increment_window_count",
         AsyncMock(return_value=None),
     )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.get_daily_count",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.get_cursor",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.set_cursor",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.delete_cursors",
+        AsyncMock(return_value=None),
+    )
 
 
 @pytest.fixture(autouse=True)

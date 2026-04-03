@@ -776,17 +776,29 @@ flowchart TD
 | **Internet Archive TV News Archive** | Closed-caption transcripts from 163+ U.S. TV stations; current to present day; free, no key required | Supplementary — especially valuable for word-mention markets and markets about public statements |
 | **Internet Archive Third Eye (TV chyrons)** | OCR-extracted lower-third ticker text from live US TV (CNN, Fox News, MSNBC, BBC); near-real-time; free, no key required | High-signal for breaking news markets — a chyron like `FED CUTS RATES` often appears minutes before full transcripts. Runs in realtime_scheduler every 5 min. |
 
+**Adaptive per-market fetch intervals (Tavily, NewsAPI, Guardian):**
+
+All three rate-limited news fetchers use the same adaptive interval pattern to stay within their daily budgets regardless of how many markets are being monitored:
+
+- **Interval formula:** `max(min_interval, min(24h, total_active_queries × 24h / daily_cap))`
+- Each fetcher is checked once per market (cursor lookup before the query loop) and set once per market (after all queries complete). Every catalyst query for a due market fires — no single-query sampling.
+- Per-market last-fetch time tracked in `fetcher_cursors` keyed `(fetcher, market_id)`. Cursors are deleted when markets close or lose strategy interest (via `delete_cursors` called after `deactivate_stale_catalysts`).
+- Daily usage tracked in `api_daily_counters` (same table as NewsAPI window tracking); incremented per successful fetch.
+
+| Fetcher | Budget | Daily cap default | Notes |
+|---|---|---|---|
+| **Tavily** | 1,000 credits/month | 33/day (÷30) | Hard cap via `api_daily_counters`; plan `UsageLimitExceededError` also triggers backoff |
+| **NewsAPI** | 100 req/day | derived from `max_window_requests × 2` | Window cap (45/12h) remains the hard backstop; adaptive interval spreads load across markets |
+| **Guardian** | 500 req/day | 490 | Hard cap via `api_daily_counters`; HTTP 429 triggers backoff |
+
+Config keys: `tavily.daily_cap`, `tavily.min_fetch_interval_hours`; `newsapi.min_fetch_interval_hours`; `guardian.daily_cap`, `guardian.min_fetch_interval_hours`. All default to `min_fetch_interval_hours=1.0h`.
+
 **Guardian API implementation:**
 - Query endpoint: `https://content.guardianapis.com/search` with `show-fields=body,headline`
-- Uses `tv_query` (Solr/Lucene boolean syntax) when available; falls back to `query_text` — the Guardian `q` parameter supports full boolean syntax including AND/OR/phrase queries
+- Uses `tv_query` (Solr/Lucene boolean syntax) when available; falls back to `query_text`
 - `from-date=YYYY-MM-DD` set to 7-day lookback (`_GUARDIAN_LOOKBACK_DAYS`)
 - Response body field is HTML — stripped of tags and entity-unescaped before storage
-- Rate limit: 1 req/sec (free developer tier: 500 req/day); uses fixed `asyncio.sleep(1.0)` before each call
-- HTTP 429 → `GuardianRateLimitError` → triggers backoff in the scheduler (same pattern as NewsAPI/Tavily)
-- **Adaptive per-market fetch interval** — Guardian is fetched once per market per computed interval rather than every scheduler cycle. Interval formula: `max(min_interval, min(24h, total_active_queries × 24h / daily_cap))`. This automatically scales with the number of monitored markets so the daily cap is never exceeded under normal operation. At 10 markets × 4 queries the interval is ~2h; at 50 markets it is ~10h.
-- Per-market last-fetch time tracked in `fetcher_cursors` table keyed `('guardian', market_id)`. Cursors are deleted when markets close or lose strategy interest (via `delete_cursors` called after `deactivate_stale_catalysts`).
-- Hard daily cap (`guardian.daily_cap`, default: 490) enforced via `api_daily_counters` table as a backstop circuit-breaker. Configured via `guardian.min_fetch_interval_hours` (default: 1.0h, floor on the adaptive interval).
-- Configured via `guardian.api_key` / `GUARDIAN_API_KEY` env var; `guardian.enabled` flag (default: `true`)
+- Rate limit: 1 req/sec; uses fixed `asyncio.sleep(1.0)` before each call
 - `source_type="news"`, `source_name="The Guardian"`
 
 **GDELT implementation:**

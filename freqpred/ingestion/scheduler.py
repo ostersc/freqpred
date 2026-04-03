@@ -86,9 +86,12 @@ async def run_cycle(
     strategy: "StrategyProtocol | None" = None,
     llm_client: "LLMClient | None" = None,
     tavily_api_key: str = "",
+    tavily_daily_cap: int = 33,
+    tavily_min_fetch_interval_hours: float = 1.0,
     newsapi_api_key: str = "",
     newsapi_enabled: bool = True,
     newsapi_max_window_requests: int = 45,
+    newsapi_min_fetch_interval_hours: float = 1.0,
     guardian_api_key: str = "",
     guardian_enabled: bool = True,
     guardian_daily_cap: int = 490,
@@ -116,11 +119,14 @@ async def run_cycle(
         llm_client:                 LLM client for catalyst generation. If None, catalyst
                                     generation is skipped.
         tavily_api_key:             Tavily API key. Tavily is skipped if empty.
+        tavily_daily_cap:           Hard daily request cap for Tavily (default: 33; 1,000/month ÷ 30).
+        tavily_min_fetch_interval_hours: Floor on per-market adaptive interval for Tavily (default: 1.0h).
         newsapi_api_key:            NewsAPI key. NewsAPI is skipped if empty.
         newsapi_enabled:             When False, the NewsAPI fetcher is skipped entirely
                                      even if newsapi_api_key is set (default: True).
         newsapi_max_window_requests: Per-12-hour-window request cap tracked in Postgres
                                      ``api_daily_counters`` (default: 45; NewsAPI allows 50).
+        newsapi_min_fetch_interval_hours: Floor on per-market adaptive interval for NewsAPI (default: 1.0h).
         guardian_api_key:           Guardian Content API key. Guardian is skipped if empty.
         guardian_enabled:           When False, the Guardian fetcher is skipped entirely
                                     even if guardian_api_key is set (default: True).
@@ -179,33 +185,48 @@ async def run_cycle(
     gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
     tv_archive_limit_hit: bool = backoff_state.get("tv_archive", False)
 
-    # Guardian daily quota check — if already at cap for today, skip the whole cycle.
+    # Per-fetcher daily quota checks — if already at cap, skip for the whole cycle.
+    tavily_daily_count: int = 0
+    if tavily_api_key and not tavily_limit_hit:
+        tavily_daily_count = await get_daily_count(session, "tavily", now.date())
+        if tavily_daily_count >= tavily_daily_cap:
+            tavily_limit_hit = True
+            log.warning("scheduler.tavily_daily_cap_reached_at_cycle_start",
+                        count=tavily_daily_count, cap=tavily_daily_cap)
+
     guardian_daily_count: int = 0
     if guardian_api_key and guardian_enabled and not guardian_limit_hit:
         guardian_daily_count = await get_daily_count(session, "guardian", now.date())
         if guardian_daily_count >= guardian_daily_cap:
             guardian_limit_hit = True
-            log.warning(
-                "scheduler.guardian_daily_cap_reached_at_cycle_start",
-                count=guardian_daily_count,
-                cap=guardian_daily_cap,
-            )
+            log.warning("scheduler.guardian_daily_cap_reached_at_cycle_start",
+                        count=guardian_daily_count, cap=guardian_daily_cap)
 
-    # Adaptive per-market fetch interval: scale with total active query count so
-    # the daily cap is spread evenly across markets regardless of how many are active.
-    # interval = max(min_interval, min(24h, total_queries * 24h / daily_cap))
+    # Adaptive per-market fetch intervals.
+    # Formula: max(min_interval, min(24h, total_queries × 24h / daily_cap))
+    # Scales automatically with market count so the daily cap is never exceeded.
+    # NewsAPI uses max_window_requests × 2 (2 windows/day) as its daily budget.
     total_active_queries = sum(len(qp) for _, _, _, qp in market_queries)
-    if guardian_daily_cap > 0 and total_active_queries > 0:
-        _auto_interval_hours = total_active_queries * 24.0 / guardian_daily_cap
-        _clamped = max(guardian_min_fetch_interval_hours, min(24.0, _auto_interval_hours))
-    else:
-        _clamped = 24.0
-    guardian_fetch_interval = timedelta(hours=_clamped)
+
+    def _compute_interval(daily_cap: float, min_hours: float) -> timedelta:
+        if daily_cap > 0 and total_active_queries > 0:
+            hours = max(min_hours, min(24.0, total_active_queries * 24.0 / daily_cap))
+        else:
+            hours = 24.0
+        return timedelta(hours=hours)
+
+    tavily_fetch_interval = _compute_interval(tavily_daily_cap, tavily_min_fetch_interval_hours)
+    newsapi_fetch_interval = _compute_interval(
+        newsapi_max_window_requests * 2, newsapi_min_fetch_interval_hours
+    )
+    guardian_fetch_interval = _compute_interval(guardian_daily_cap, guardian_min_fetch_interval_hours)
+
     log.debug(
-        "scheduler.guardian_fetch_interval",
+        "scheduler.fetch_intervals",
         total_queries=total_active_queries,
-        interval_hours=round(_clamped, 2),
-        daily_cap=guardian_daily_cap,
+        tavily_hours=round(tavily_fetch_interval.total_seconds() / 3600, 2),
+        newsapi_hours=round(newsapi_fetch_interval.total_seconds() / 3600, 2),
+        guardian_hours=round(guardian_fetch_interval.total_seconds() / 3600, 2),
     )
 
     # Track which services had a successful call this cycle so we only write
@@ -218,17 +239,33 @@ async def run_cycle(
         market_stored = 0
         market_error = 0
 
-        # --- Guardian cursor check (once per market, not per query) ---
-        # Guardian is fetched at most once per market per adaptive interval to
-        # stay within the daily cap.  The interval scales automatically with
-        # the number of active markets; guardian_limit_hit may be set here if
-        # the daily cap was hit mid-cycle by a previous market.
+        # --- Per-market cursor checks (once per market, not per query) ---
+        # Each rate-limited fetcher is fetched at most once per market per its
+        # adaptive interval. The interval scales with total active query count
+        # so the daily cap is spread evenly. *_limit_hit flags may be updated
+        # mid-cycle if the cap was hit while processing a previous market.
+
+        tavily_due_this_market = False
+        if tavily_api_key and not tavily_limit_hit:
+            last_tavily = await get_cursor(session, "tavily", market_id)
+            tavily_due_this_market = (
+                last_tavily is None or (now - last_tavily) >= tavily_fetch_interval
+            )
+        tavily_fetched_this_market = False
+
+        newsapi_due_this_market = False
+        if newsapi_api_key and newsapi_enabled and not newsapi_limit_hit:
+            last_newsapi = await get_cursor(session, "newsapi", market_id)
+            newsapi_due_this_market = (
+                last_newsapi is None or (now - last_newsapi) >= newsapi_fetch_interval
+            )
+        newsapi_fetched_this_market = False
+
         guardian_due_this_market = False
         if guardian_api_key and guardian_enabled and not guardian_limit_hit:
             last_guardian = await get_cursor(session, "guardian", market_id)
             guardian_due_this_market = (
-                last_guardian is None
-                or (now - last_guardian) >= guardian_fetch_interval
+                last_guardian is None or (now - last_guardian) >= guardian_fetch_interval
             )
         guardian_fetched_this_market = False
 
@@ -241,7 +278,7 @@ async def run_cycle(
             fetch_names: list[str] = []
             fetch_coros = []
 
-            if tavily_api_key and not tavily_limit_hit:
+            if tavily_due_this_market and not tavily_limit_hit:
                 fetch_names.append("tavily")
                 fetch_coros.append(tavily_fetcher.fetch(
                     api_key=tavily_api_key,
@@ -249,9 +286,9 @@ async def run_cycle(
                     excluded_domains=domain_blacklist,
                 ))
 
-            # NewsAPI quota check requires a DB round-trip; do it before the gather.
-            newsapi_fetched = False
-            if newsapi_api_key and newsapi_enabled and not newsapi_limit_hit:
+            # NewsAPI: adaptive cursor gate first, then per-query window cap check.
+            newsapi_queued = False
+            if newsapi_due_this_market and not newsapi_limit_hit:
                 window_count = await get_window_count(session, "newsapi", newsapi_window_date, newsapi_hour_slot)
                 if window_count >= newsapi_max_window_requests:
                     if not newsapi_limit_logged:
@@ -264,7 +301,7 @@ async def run_cycle(
                         )
                         newsapi_limit_logged = True
                 else:
-                    newsapi_fetched = True
+                    newsapi_queued = True
                     fetch_names.append("newsapi")
                     fetch_coros.append(newsapi_fetcher.fetch(
                         api_key=newsapi_api_key,
@@ -274,7 +311,6 @@ async def run_cycle(
                     ))
 
             # Guardian: use tv_query (Solr syntax) when available, else query_text.
-            # Only included when the per-market cursor says this market is due.
             if guardian_due_this_market and not guardian_limit_hit:
                 fetch_names.append("guardian")
                 fetch_coros.append(guardian_fetcher.fetch(
@@ -306,10 +342,12 @@ async def run_cycle(
                 if isinstance(result, BaseException):
                     if name == "tavily" and isinstance(result, (ForbiddenError, UsageLimitExceededError)):
                         tavily_limit_hit = True
+                        tavily_due_this_market = False
                         skip_cycles = await record_rate_limit(session, "tavily")
                         log.warning("scheduler.tavily_limit_reached", reason=str(result), skip_cycles=skip_cycles)
                     elif name == "newsapi" and isinstance(result, NewsAPIRateLimitError):
                         newsapi_limit_hit = True
+                        newsapi_due_this_market = False
                         newsapi_limit_logged = True
                         skip_cycles = await record_rate_limit(session, "newsapi")
                         log.warning("scheduler.newsapi_rate_limited", reason=str(result), skip_cycles=skip_cycles)
@@ -328,7 +366,17 @@ async def run_cycle(
                         )
                 else:
                     raw_docs.extend(result)
-                    if name == "newsapi" and newsapi_fetched:
+                    if name == "tavily":
+                        tavily_fetched_this_market = True
+                        tavily_daily_count += 1
+                        await increment_window_count(session, "tavily", now.date(), now.hour // 12)
+                        if tavily_daily_count >= tavily_daily_cap:
+                            tavily_limit_hit = True
+                            tavily_due_this_market = False
+                            log.warning("scheduler.tavily_daily_cap_reached",
+                                        count=tavily_daily_count, cap=tavily_daily_cap)
+                    if name == "newsapi" and newsapi_queued:
+                        newsapi_fetched_this_market = True
                         await increment_window_count(session, "newsapi", newsapi_window_date, newsapi_hour_slot)
                     if name == "guardian":
                         guardian_fetched_this_market = True
@@ -337,11 +385,8 @@ async def run_cycle(
                         if guardian_daily_count >= guardian_daily_cap:
                             guardian_limit_hit = True
                             guardian_due_this_market = False
-                            log.warning(
-                                "scheduler.guardian_daily_cap_reached",
-                                count=guardian_daily_count,
-                                cap=guardian_daily_cap,
-                            )
+                            log.warning("scheduler.guardian_daily_cap_reached",
+                                        count=guardian_daily_count, cap=guardian_daily_cap)
                     # Clear backoff on first success this cycle for this service.
                     if name not in success_recorded:
                         await record_success(session, name)
@@ -396,7 +441,11 @@ async def run_cycle(
                     )
                     market_error += 1
 
-        # Update Guardian cursor for this market after all its queries complete.
+        # Update per-market cursors after all queries complete.
+        if tavily_fetched_this_market:
+            await set_cursor(session, "tavily", market_id, now)
+        if newsapi_fetched_this_market:
+            await set_cursor(session, "newsapi", market_id, now)
         if guardian_fetched_this_market:
             await set_cursor(session, "guardian", market_id, now)
 
@@ -433,9 +482,12 @@ async def run_scheduler(
     strategy: "StrategyProtocol | None" = None,
     llm_client: "LLMClient | None" = None,
     tavily_api_key: str = "",
+    tavily_daily_cap: int = 33,
+    tavily_min_fetch_interval_hours: float = 1.0,
     newsapi_api_key: str = "",
     newsapi_enabled: bool = True,
     newsapi_max_window_requests: int = 45,
+    newsapi_min_fetch_interval_hours: float = 1.0,
     guardian_api_key: str = "",
     guardian_enabled: bool = True,
     guardian_daily_cap: int = 490,
@@ -489,9 +541,12 @@ async def run_scheduler(
                     strategy=strategy,
                     llm_client=llm_client,
                     tavily_api_key=tavily_api_key,
+                    tavily_daily_cap=tavily_daily_cap,
+                    tavily_min_fetch_interval_hours=tavily_min_fetch_interval_hours,
                     newsapi_api_key=newsapi_api_key,
                     newsapi_enabled=newsapi_enabled,
                     newsapi_max_window_requests=newsapi_max_window_requests,
+                    newsapi_min_fetch_interval_hours=newsapi_min_fetch_interval_hours,
                     guardian_api_key=guardian_api_key,
                     guardian_enabled=guardian_enabled,
                     guardian_daily_cap=guardian_daily_cap,
@@ -556,7 +611,8 @@ async def _ensure_catalysts(
     # clean up their Guardian cursors so stale rows don't accumulate.
     deactivated_ids = await deactivate_stale_catalysts(session, [strategy], open_market_ids)
     if deactivated_ids:
-        await delete_cursors(session, "guardian", deactivated_ids)
+        for fetcher in ("tavily", "newsapi", "guardian"):
+            await delete_cursors(session, fetcher, deactivated_ids)
 
     if not selected:
         return 0

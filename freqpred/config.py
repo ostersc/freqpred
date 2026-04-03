@@ -41,12 +41,15 @@ class AnthropicConfig(BaseModel):
 
 class TavilyConfig(BaseModel):
     api_key: str = Field(default="")
+    daily_cap: int = Field(default=33, description="Max requests per day (1,000 credits/month ÷ 30).")
+    min_fetch_interval_hours: float = Field(default=1.0, description="Floor on per-market adaptive fetch interval.")
 
 
 class NewsAPIConfig(BaseModel):
     api_key: str = Field(default="")
     enabled: bool = Field(default=True)
     max_window_requests: int = Field(default=45, description="Max requests per 12-hour window (NewsAPI allows 50).")
+    min_fetch_interval_hours: float = Field(default=1.0, description="Floor on per-market adaptive fetch interval.")
 
 
 class GuardianConfig(BaseModel):
