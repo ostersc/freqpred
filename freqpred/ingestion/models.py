@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, Text, VARCHAR
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, SmallInteger, Text, VARCHAR
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.schema import PrimaryKeyConstraint
@@ -83,14 +83,17 @@ class CatalystQueryRow(Base):
 class ApiDailyCounterRow(Base):
     """ORM model for the ``api_daily_counters`` table.
 
-    One row per (service, date) pair. Incremented atomically via
+    One row per (service, date, hour_slot) triple. hour_slot is 0 for
+    00:00–11:59 UTC and 1 for 12:00–23:59 UTC. Incremented atomically via
     INSERT ... ON CONFLICT DO UPDATE in quota.py.
     """
 
     __tablename__ = "api_daily_counters"
+    __table_args__ = (PrimaryKeyConstraint("service", "date", "hour_slot"),)
 
-    service: Mapped[str] = mapped_column(Text, primary_key=True)
-    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    service: Mapped[str] = mapped_column(Text, nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    hour_slot: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0")
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
