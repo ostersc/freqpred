@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-04-02
+**Last updated:** 2026-04-03
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -104,7 +104,7 @@ graph TD
 | **Market Selector** | Reads active markets from DB; calls `strategy.is_market_interesting()` on each registered strategy; passes selected markets to Catalyst Generator |
 | **Catalyst Generator** | LLM call (Haiku) per selected market: derives 3–5 specific search queries (catalysts) representing events that could materially shift probability. Stored as first-class DB entities. Re-runs daily, RAG-informed on subsequent passes. |
 | **Position Watcher** | Streams live price updates via Kalshi WebSocket for markets with open positions |
-| **Ingestion Scheduler** | Reads the latest active catalyst queries per market from DB; runs Tavily + NewsAPI + Reddit + GDELT + TV Archive fetchers against those queries (every 30 min); upserts results into Document store |
+| **Ingestion Scheduler** | Reads the latest active catalyst queries per market from DB; runs Tavily + NewsAPI + Guardian + Reddit + GDELT + TV Archive fetchers against those queries (every 30 min); upserts results into Document store |
 | **Realtime Scheduler** | Polls cursor-based near-real-time sources on a faster cadence (default 5 min): TV chyrons via Internet Archive Third Eye API; Truth Social account feeds. Uses `fetcher_cursors` for dedup so frequent polling does not double-process. |
 | **Signal Pipeline** | Retrieves news context via RAG, runs LLM analysis, returns probability estimate |
 | **Strategy Engine** | Applies `IPredictionStrategy` plugins to signal output, decides trade/size/skip |
@@ -770,10 +770,21 @@ flowchart TD
 |---|---|---|
 | **Tavily Search API** | Fresh web search per market question | Primary |
 | **NewsAPI** | Structured article archive for less-breaking topics | Secondary |
+| **The Guardian API** | Full article body text; real-time; free developer key (500 req/day); strong on politics, economics, international news | Secondary |
 | **Kalshi market metadata** | Market description + linked sources from the exchange | Always included |
 | **GDELT** | High-volume global news index; free, no key required | Supplementary |
 | **Internet Archive TV News Archive** | Closed-caption transcripts from 163+ U.S. TV stations; current to present day; free, no key required | Supplementary — especially valuable for word-mention markets and markets about public statements |
 | **Internet Archive Third Eye (TV chyrons)** | OCR-extracted lower-third ticker text from live US TV (CNN, Fox News, MSNBC, BBC); near-real-time; free, no key required | High-signal for breaking news markets — a chyron like `FED CUTS RATES` often appears minutes before full transcripts. Runs in realtime_scheduler every 5 min. |
+
+**Guardian API implementation:**
+- Query endpoint: `https://content.guardianapis.com/search` with `show-fields=body,headline`
+- Uses `tv_query` (Solr/Lucene boolean syntax) when available; falls back to `query_text` — the Guardian `q` parameter supports full boolean syntax including AND/OR/phrase queries
+- `from-date=YYYY-MM-DD` set to 7-day lookback (`_GUARDIAN_LOOKBACK_DAYS`)
+- Response body field is HTML — stripped of tags and entity-unescaped before storage
+- Rate limit: 1 req/sec (free developer tier: 500 req/day); uses fixed `asyncio.sleep(1.0)` before each call
+- HTTP 429 → `GuardianRateLimitError` → triggers backoff in the scheduler (same pattern as NewsAPI/Tavily)
+- Configured via `guardian.api_key` / `GUARDIAN_API_KEY` env var; `guardian.enabled` flag (default: `true`)
+- `source_type="news"`, `source_name="The Guardian"`
 
 **GDELT implementation:**
 - Query the GDELT Doc API (`api.gdeltproject.org/api/v2/doc/doc`) with the catalyst query text and a `timespan=1d` parameter per cycle
@@ -1050,6 +1061,7 @@ telegram:
 - [x] Document store schema (Postgres + pgvector extension)
 - [x] Ingestion pipeline: Tavily + NewsAPI fetchers → dedup → embed (sentence-transformers) → store
 - [x] Ingestion pipeline: Reddit fetcher + social pre-summarizer → store
+- [x] Guardian API fetcher: full article body via Content API; Solr query support; HTML strip; 429 backoff
 - [x] GDELT fetcher: Doc API query → parallel article body fetch → store (T32)
 - [x] Truth Social fetcher: account feed mode (per cycle) via `truthbrush` (T33)
 - [x] Internet Archive TV fetcher: catalyst `tv_query` → transcript clip search → store
@@ -1175,11 +1187,12 @@ freqpred/
 │   ├── ingestion/
 │   │   ├── selector.py          # market selector: calls strategy.is_market_interesting()
 │   │   ├── catalyst_generator.py# LLM (Haiku) derives catalyst queries per market; manages CatalystRun/CatalystQuery
-│   │   ├── scheduler.py         # main ingestion scheduler (30 min): catalyst queries → Tavily/NewsAPI/Reddit/GDELT/TV Archive
+│   │   ├── scheduler.py         # main ingestion scheduler (30 min): catalyst queries → Tavily/NewsAPI/Guardian/Reddit/GDELT/TV Archive
 │   │   ├── realtime_scheduler.py# fast scheduler (5 min): TV chyrons (Third Eye) + Truth Social account feeds
 │   │   ├── fetchers/
 │   │   │   ├── tavily.py        # Tavily Search API fetcher
 │   │   │   ├── newsapi.py       # NewsAPI fetcher
+│   │   │   ├── guardian.py      # The Guardian Content API fetcher (full body, free tier, Solr query support)
 │   │   │   ├── gdelt.py         # GDELT Doc API fetcher + article body fetch
 │   │   │   ├── reddit.py        # Reddit API fetcher
 │   │   │   ├── tv_archive.py    # Internet Archive TV transcript search fetcher

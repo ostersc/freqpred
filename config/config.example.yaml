@@ -41,6 +41,12 @@ newsapi:
   # Overridden by NEWSAPI_KEY env var
   api_key: ""
 
+guardian:
+  # Free developer key: https://open-platform.theguardian.com/access/
+  # Overridden by GUARDIAN_API_KEY env var
+  api_key: ""
+  enabled: true
+
 reddit:
   # Uses the public Reddit JSON API — no credentials required
   user_agent: "freqpred/0.1"

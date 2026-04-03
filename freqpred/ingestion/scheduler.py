@@ -6,8 +6,8 @@ Each cycle:
   3. Generates catalyst queries for markets that have none yet
      (or whose last run is stale) via generate_catalysts.
   4. Deactivates catalysts for markets no longer selected.
-  5. Runs Tavily + NewsAPI + Reddit + GDELT + TV Archive fetchers against every
-     active CatalystQuery and upserts results into the document store.
+  5. Runs Tavily + NewsAPI + Guardian + Reddit + GDELT + TV Archive fetchers
+     against every active CatalystQuery and upserts results into the document store.
 
 Near-real-time sources (TV chyrons, Truth Social account feeds) run on their
 own faster cadence in ``realtime_scheduler.py``.
@@ -29,11 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.ingestion.backoff import record_rate_limit, record_success, tick_and_load
 from freqpred.ingestion.fetchers import gdelt as gdelt_fetcher
+from freqpred.ingestion.fetchers import guardian as guardian_fetcher
 from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
 from freqpred.ingestion.fetchers import reddit as reddit_fetcher
 from freqpred.ingestion.fetchers import tavily as tavily_fetcher
 from freqpred.ingestion.fetchers import tv_archive as tv_archive_fetcher
 from freqpred.ingestion.fetchers.gdelt import GDELTRateLimitError
+from freqpred.ingestion.fetchers.guardian import GuardianRateLimitError
 from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
 from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
@@ -48,11 +50,12 @@ if TYPE_CHECKING:
 
 # Backoff services owned by this scheduler — passed to tick_and_load so the
 # realtime scheduler's counters (truthsocial) are not affected.
-_MAIN_SCHEDULER_SERVICES: frozenset[str] = frozenset({"tavily", "newsapi", "gdelt", "tv_archive"})
+_MAIN_SCHEDULER_SERVICES: frozenset[str] = frozenset({"tavily", "newsapi", "guardian", "gdelt", "tv_archive"})
 
 log = structlog.get_logger(__name__)
 
 _NEWSAPI_LOOKBACK_DAYS = 7
+_GUARDIAN_LOOKBACK_DAYS = 7
 
 # Category → subreddit mapping used for Reddit queries.
 _SUBREDDIT_MAP: dict[str, list[str]] = {
@@ -85,6 +88,8 @@ async def run_cycle(
     newsapi_api_key: str = "",
     newsapi_enabled: bool = True,
     newsapi_max_window_requests: int = 45,
+    guardian_api_key: str = "",
+    guardian_enabled: bool = True,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
 ) -> dict[str, int]:
@@ -113,8 +118,11 @@ async def run_cycle(
                                      even if newsapi_api_key is set (default: True).
         newsapi_max_window_requests: Per-12-hour-window request cap tracked in Postgres
                                      ``api_daily_counters`` (default: 45; NewsAPI allows 50).
+        guardian_api_key:           Guardian Content API key. Guardian is skipped if empty.
+        guardian_enabled:           When False, the Guardian fetcher is skipped entirely
+                                    even if guardian_api_key is set (default: True).
         reddit_user_agent:          User-Agent for Reddit requests.
-        domain_blacklist:           Domains to exclude from Tavily and NewsAPI results.
+        domain_blacklist:           Domains to exclude from fetcher results.
                                     Matched as a substring of each URL (default: kalshi.com).
     Returns:
         Stats dict with keys: markets_processed, catalysts_generated,
@@ -148,6 +156,7 @@ async def run_cycle(
     total_error = 0
     now = datetime.now(UTC)
     newsapi_from = now - timedelta(days=_NEWSAPI_LOOKBACK_DAYS)
+    guardian_from = now - timedelta(days=_GUARDIAN_LOOKBACK_DAYS)
     newsapi_window_date, newsapi_hour_slot = current_window(now)
 
     # Load persistent backoff state from DB (ticks down this scheduler's counters).
@@ -159,6 +168,7 @@ async def run_cycle(
     tavily_limit_hit: bool = backoff_state.get("tavily", False)
     newsapi_limit_hit: bool = backoff_state.get("newsapi", False)
     newsapi_limit_logged: bool = newsapi_limit_hit
+    guardian_limit_hit: bool = backoff_state.get("guardian", False)
     gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
     tv_archive_limit_hit: bool = backoff_state.get("tv_archive", False)
 
@@ -213,6 +223,16 @@ async def run_cycle(
                         excluded_domains=domain_blacklist,
                     ))
 
+            # Guardian: use tv_query (Solr syntax) when available, else query_text.
+            if guardian_api_key and guardian_enabled and not guardian_limit_hit:
+                fetch_names.append("guardian")
+                fetch_coros.append(guardian_fetcher.fetch(
+                    api_key=guardian_api_key,
+                    query=tv_query or query_text,
+                    from_date=guardian_from,
+                    excluded_domains=domain_blacklist,
+                ))
+
             fetch_names.append("reddit")
             fetch_coros.append(reddit_fetcher.fetch(
                 subreddits=_subreddits_for_category(category),
@@ -242,6 +262,10 @@ async def run_cycle(
                         newsapi_limit_logged = True
                         skip_cycles = await record_rate_limit(session, "newsapi")
                         log.warning("scheduler.newsapi_rate_limited", reason=str(result), skip_cycles=skip_cycles)
+                    elif name == "guardian" and isinstance(result, GuardianRateLimitError):
+                        guardian_limit_hit = True
+                        skip_cycles = await record_rate_limit(session, "guardian")
+                        log.warning("scheduler.guardian_rate_limited", reason=str(result), skip_cycles=skip_cycles)
                     else:
                         log.warning(
                             "scheduler.fetcher_error",
@@ -344,6 +368,8 @@ async def run_scheduler(
     newsapi_api_key: str = "",
     newsapi_enabled: bool = True,
     newsapi_max_window_requests: int = 45,
+    guardian_api_key: str = "",
+    guardian_enabled: bool = True,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
 ) -> None:
@@ -362,14 +388,18 @@ async def run_scheduler(
         newsapi_api_key:            NewsAPI key.
         newsapi_enabled:            When False, NewsAPI fetcher is skipped entirely.
         newsapi_max_window_requests: Per-12-hour-window request cap for the NewsAPI fetcher.
+        guardian_api_key:           Guardian Content API key.
+        guardian_enabled:           When False, Guardian fetcher is skipped entirely.
         reddit_user_agent:          User-Agent for Reddit requests.
-        domain_blacklist:           Domains to exclude from Tavily and NewsAPI results.
+        domain_blacklist:           Domains to exclude from fetcher results.
     """
     active_fetchers = ["reddit", "gdelt"]
     if tavily_api_key:
         active_fetchers.insert(0, "tavily")
     if newsapi_api_key and newsapi_enabled:
         active_fetchers.insert(0 if not tavily_api_key else 1, "newsapi")
+    if guardian_api_key and guardian_enabled:
+        active_fetchers.append("guardian")
 
     log.info(
         "scheduler.started",
@@ -390,6 +420,8 @@ async def run_scheduler(
                     newsapi_api_key=newsapi_api_key,
                     newsapi_enabled=newsapi_enabled,
                     newsapi_max_window_requests=newsapi_max_window_requests,
+                    guardian_api_key=guardian_api_key,
+                    guardian_enabled=guardian_enabled,
                     reddit_user_agent=reddit_user_agent,
                     domain_blacklist=domain_blacklist,
                 )
