@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from freqpred.ingestion.realtime_scheduler import run_realtime_cycle
-from freqpred.ingestion.store import DocumentSkipped, RawDocument
+from freqpred.ingestion.store import DocumentSkipped, UpsertStatus, RawDocument
 from freqpred.rag.models import Document
 
 NOW = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
@@ -213,7 +213,7 @@ class TestChyronPhase:
             patch(
                 "freqpred.ingestion.realtime_scheduler.upsert_document",
                 new_callable=AsyncMock,
-                return_value=doc,
+                return_value=(doc, UpsertStatus.INSERTED),
             ) as mock_upsert,
             patch(
                 "freqpred.ingestion.realtime_scheduler.link_document_to_market",

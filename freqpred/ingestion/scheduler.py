@@ -41,7 +41,7 @@ from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
 from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.ingestion.quota import current_window, get_daily_count, get_window_count, increment_window_count
-from freqpred.ingestion.store import DocumentSkipped, link_document_to_market, upsert_document
+from freqpred.ingestion.store import DocumentSkipped, UpsertStatus, link_document_to_market, upsert_document
 from freqpred.markets.models import Market, MarketRow, PositionRow
 from freqpred.rag.embedder import LocalEmbedder
 
@@ -81,7 +81,7 @@ def _subreddits_for_category(category: str) -> list[str]:
 
 
 async def run_cycle(
-    session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
     embedder: LocalEmbedder,
     strategy: "StrategyProtocol | None" = None,
     llm_client: "LLMClient | None" = None,
@@ -111,8 +111,13 @@ async def run_cycle(
     Fetcher errors are caught per-fetcher; one failure does not abort others.
     Near-real-time sources (chyrons, Truth Social) run in realtime_scheduler.py.
 
+    Session ownership: this function manages its own sessions via session_factory.
+    A single setup session handles catalyst generation and per-cycle state loading;
+    then one session per market is opened and committed after each market completes
+    so documents are immediately visible to the signal pipeline.
+
     Args:
-        session:                    Open async SQLAlchemy session (caller manages commit).
+        session_factory:            Async SQLAlchemy session factory.
         embedder:                   Local embedder for document storage.
         strategy:                   Strategy used to filter markets. If None, all markets
                                     with active catalyst runs are processed.
@@ -141,93 +146,95 @@ async def run_cycle(
         Stats dict with keys: markets_processed, catalysts_generated,
         docs_fetched, docs_stored, docs_error.
     """
+    now = datetime.now(UTC)
     catalysts_generated = 0
 
-    # --- Phase 1: catalyst generation for newly-selected markets ---------------
-    # Each market's catalysts are committed inside _ensure_catalysts so rows
-    # are durable even if the process dies during the generation loop.
-    if strategy is not None and llm_client is not None:
-        catalysts_generated = await _ensure_catalysts(
-            session, strategy, llm_client, embedder
+    # --- Phase 1: setup session — catalyst generation + per-cycle state --------
+    # Committed once at the end of this block. _ensure_catalysts also commits
+    # per-market internally so catalysts are durable before fetching begins.
+    async with session_factory() as session:
+        if strategy is not None and llm_client is not None:
+            catalysts_generated = await _ensure_catalysts(
+                session, strategy, llm_client, embedder
+            )
+
+        market_queries = await _load_active_market_queries(session)
+
+        if not market_queries:
+            log.debug("scheduler.run_cycle.no_active_markets")
+            await session.commit()
+            return {
+                "markets_processed": 0,
+                "catalysts_generated": catalysts_generated,
+                "docs_fetched": 0,
+                "docs_stored": 0,
+                "docs_error": 0,
+            }
+
+        newsapi_from = now - timedelta(days=_NEWSAPI_LOOKBACK_DAYS)
+        guardian_from = now - timedelta(days=_GUARDIAN_LOOKBACK_DAYS)
+        newsapi_window_date, newsapi_hour_slot = current_window(now)
+
+        # Load persistent backoff state from DB (ticks down this scheduler's counters).
+        backoff_state = await tick_and_load(session, services=_MAIN_SCHEDULER_SERVICES)
+
+        # In-memory flags for within-cycle short-circuit. Initialized from DB
+        # state so a restart respects backoff that was set in a previous cycle.
+        tavily_limit_hit: bool = backoff_state.get("tavily", False)
+        newsapi_limit_hit: bool = backoff_state.get("newsapi", False)
+        newsapi_limit_logged: bool = newsapi_limit_hit
+        guardian_limit_hit: bool = backoff_state.get("guardian", False)
+        gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
+        tv_archive_limit_hit: bool = backoff_state.get("tv_archive", False)
+
+        # Per-fetcher daily quota checks — if already at cap, skip for the whole cycle.
+        tavily_daily_count: int = 0
+        if tavily_api_key and not tavily_limit_hit:
+            tavily_daily_count = await get_daily_count(session, "tavily", now.date())
+            if tavily_daily_count >= tavily_daily_cap:
+                tavily_limit_hit = True
+                log.warning("scheduler.tavily_daily_cap_reached_at_cycle_start",
+                            count=tavily_daily_count, cap=tavily_daily_cap)
+
+        guardian_daily_count: int = 0
+        if guardian_api_key and guardian_enabled and not guardian_limit_hit:
+            guardian_daily_count = await get_daily_count(session, "guardian", now.date())
+            if guardian_daily_count >= guardian_daily_cap:
+                guardian_limit_hit = True
+                log.warning("scheduler.guardian_daily_cap_reached_at_cycle_start",
+                            count=guardian_daily_count, cap=guardian_daily_cap)
+
+        # Adaptive per-market fetch intervals.
+        # Formula: max(min_interval, min(24h, total_queries × 24h / daily_cap))
+        total_active_queries = sum(len(qp) for _, _, _, qp in market_queries)
+
+        def _compute_interval(daily_cap: float, min_hours: float) -> timedelta:
+            if daily_cap > 0 and total_active_queries > 0:
+                hours = max(min_hours, min(24.0, total_active_queries * 24.0 / daily_cap))
+            else:
+                hours = 24.0
+            return timedelta(hours=hours)
+
+        tavily_fetch_interval = _compute_interval(tavily_daily_cap, tavily_min_fetch_interval_hours)
+        newsapi_fetch_interval = _compute_interval(
+            newsapi_max_window_requests * 2, newsapi_min_fetch_interval_hours
+        )
+        guardian_fetch_interval = _compute_interval(guardian_daily_cap, guardian_min_fetch_interval_hours)
+
+        log.debug(
+            "scheduler.fetch_intervals",
+            total_queries=total_active_queries,
+            tavily_hours=round(tavily_fetch_interval.total_seconds() / 3600, 2),
+            newsapi_hours=round(newsapi_fetch_interval.total_seconds() / 3600, 2),
+            guardian_hours=round(guardian_fetch_interval.total_seconds() / 3600, 2),
         )
 
-    # --- Phase 2: load markets that have active catalyst queries ---------------
-    market_queries = await _load_active_market_queries(session)
+        await session.commit()
 
-    if not market_queries:
-        log.debug("scheduler.run_cycle.no_active_markets")
-        return {
-            "markets_processed": 0,
-            "catalysts_generated": catalysts_generated,
-            "docs_fetched": 0,
-            "docs_stored": 0,
-            "docs_error": 0,
-        }
-
+    # --- Phase 2: market loop — one session per market, committed after each ---
     total_fetched = 0
     total_stored = 0
     total_error = 0
-    now = datetime.now(UTC)
-    newsapi_from = now - timedelta(days=_NEWSAPI_LOOKBACK_DAYS)
-    guardian_from = now - timedelta(days=_GUARDIAN_LOOKBACK_DAYS)
-    newsapi_window_date, newsapi_hour_slot = current_window(now)
-
-    # Load persistent backoff state from DB (ticks down this scheduler's counters).
-    # Returns {service: is_backed_off} for services with existing rows.
-    backoff_state = await tick_and_load(session, services=_MAIN_SCHEDULER_SERVICES)
-
-    # In-memory flags for within-cycle short-circuit. Initialized from DB
-    # state so a restart respects backoff that was set in a previous cycle.
-    tavily_limit_hit: bool = backoff_state.get("tavily", False)
-    newsapi_limit_hit: bool = backoff_state.get("newsapi", False)
-    newsapi_limit_logged: bool = newsapi_limit_hit
-    guardian_limit_hit: bool = backoff_state.get("guardian", False)
-    gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
-    tv_archive_limit_hit: bool = backoff_state.get("tv_archive", False)
-
-    # Per-fetcher daily quota checks — if already at cap, skip for the whole cycle.
-    tavily_daily_count: int = 0
-    if tavily_api_key and not tavily_limit_hit:
-        tavily_daily_count = await get_daily_count(session, "tavily", now.date())
-        if tavily_daily_count >= tavily_daily_cap:
-            tavily_limit_hit = True
-            log.warning("scheduler.tavily_daily_cap_reached_at_cycle_start",
-                        count=tavily_daily_count, cap=tavily_daily_cap)
-
-    guardian_daily_count: int = 0
-    if guardian_api_key and guardian_enabled and not guardian_limit_hit:
-        guardian_daily_count = await get_daily_count(session, "guardian", now.date())
-        if guardian_daily_count >= guardian_daily_cap:
-            guardian_limit_hit = True
-            log.warning("scheduler.guardian_daily_cap_reached_at_cycle_start",
-                        count=guardian_daily_count, cap=guardian_daily_cap)
-
-    # Adaptive per-market fetch intervals.
-    # Formula: max(min_interval, min(24h, total_queries × 24h / daily_cap))
-    # Scales automatically with market count so the daily cap is never exceeded.
-    # NewsAPI uses max_window_requests × 2 (2 windows/day) as its daily budget.
-    total_active_queries = sum(len(qp) for _, _, _, qp in market_queries)
-
-    def _compute_interval(daily_cap: float, min_hours: float) -> timedelta:
-        if daily_cap > 0 and total_active_queries > 0:
-            hours = max(min_hours, min(24.0, total_active_queries * 24.0 / daily_cap))
-        else:
-            hours = 24.0
-        return timedelta(hours=hours)
-
-    tavily_fetch_interval = _compute_interval(tavily_daily_cap, tavily_min_fetch_interval_hours)
-    newsapi_fetch_interval = _compute_interval(
-        newsapi_max_window_requests * 2, newsapi_min_fetch_interval_hours
-    )
-    guardian_fetch_interval = _compute_interval(guardian_daily_cap, guardian_min_fetch_interval_hours)
-
-    log.debug(
-        "scheduler.fetch_intervals",
-        total_queries=total_active_queries,
-        tavily_hours=round(tavily_fetch_interval.total_seconds() / 3600, 2),
-        newsapi_hours=round(newsapi_fetch_interval.total_seconds() / 3600, 2),
-        guardian_hours=round(guardian_fetch_interval.total_seconds() / 3600, 2),
-    )
 
     # Track which services had a successful call this cycle so we only write
     # record_success once per service (it's idempotent but avoids extra DB hits).
@@ -237,217 +244,217 @@ async def run_cycle(
         market_start = time.monotonic()
         market_fetched = 0
         market_stored = 0
+        market_deduped = 0
         market_error = 0
 
-        # --- Per-market cursor checks (once per market, not per query) ---
-        # Each rate-limited fetcher is fetched at most once per market per its
-        # adaptive interval. The interval scales with total active query count
-        # so the daily cap is spread evenly. *_limit_hit flags may be updated
-        # mid-cycle if the cap was hit while processing a previous market.
+        async with session_factory() as market_session:
+            # --- Per-market cursor checks (once per market, not per query) ---
+            tavily_due_this_market = False
+            if tavily_api_key and not tavily_limit_hit:
+                last_tavily = await get_cursor(market_session, "tavily", market_id)
+                tavily_due_this_market = (
+                    last_tavily is None or (now - last_tavily) >= tavily_fetch_interval
+                )
+            tavily_fetched_this_market = False
 
-        tavily_due_this_market = False
-        if tavily_api_key and not tavily_limit_hit:
-            last_tavily = await get_cursor(session, "tavily", market_id)
-            tavily_due_this_market = (
-                last_tavily is None or (now - last_tavily) >= tavily_fetch_interval
-            )
-        tavily_fetched_this_market = False
+            newsapi_due_this_market = False
+            if newsapi_api_key and newsapi_enabled and not newsapi_limit_hit:
+                last_newsapi = await get_cursor(market_session, "newsapi", market_id)
+                newsapi_due_this_market = (
+                    last_newsapi is None or (now - last_newsapi) >= newsapi_fetch_interval
+                )
+            newsapi_fetched_this_market = False
 
-        newsapi_due_this_market = False
-        if newsapi_api_key and newsapi_enabled and not newsapi_limit_hit:
-            last_newsapi = await get_cursor(session, "newsapi", market_id)
-            newsapi_due_this_market = (
-                last_newsapi is None or (now - last_newsapi) >= newsapi_fetch_interval
-            )
-        newsapi_fetched_this_market = False
+            guardian_due_this_market = False
+            if guardian_api_key and guardian_enabled and not guardian_limit_hit:
+                last_guardian = await get_cursor(market_session, "guardian", market_id)
+                guardian_due_this_market = (
+                    last_guardian is None or (now - last_guardian) >= guardian_fetch_interval
+                )
+            guardian_fetched_this_market = False
 
-        guardian_due_this_market = False
-        if guardian_api_key and guardian_enabled and not guardian_limit_hit:
-            last_guardian = await get_cursor(session, "guardian", market_id)
-            guardian_due_this_market = (
-                last_guardian is None or (now - last_guardian) >= guardian_fetch_interval
-            )
-        guardian_fetched_this_market = False
+            for query_text, tv_query in query_pairs:
+                # --- Build non-GDELT fetch coroutines to run in parallel ---
+                # GDELT (doc + TV) are run sequentially afterwards because they share
+                # a 1 req/5 s rate limit across all their API endpoints.
+                fetch_names: list[str] = []
+                fetch_coros = []
 
-        for query_text, tv_query in query_pairs:
-            # --- Build non-GDELT fetch coroutines to run in parallel ---
-            # GDELT (doc + TV) are run sequentially afterwards because they share
-            # a 1 req/5 s rate limit across all their API endpoints. Running them
-            # concurrently in the same gather would fire simultaneous requests and
-            # trigger rate limiting despite each function's own sleep guard.
-            fetch_names: list[str] = []
-            fetch_coros = []
-
-            if tavily_due_this_market and not tavily_limit_hit:
-                fetch_names.append("tavily")
-                fetch_coros.append(tavily_fetcher.fetch(
-                    api_key=tavily_api_key,
-                    query=query_text,
-                    excluded_domains=domain_blacklist,
-                ))
-
-            # NewsAPI: adaptive cursor gate first, then per-query window cap check.
-            newsapi_queued = False
-            if newsapi_due_this_market and not newsapi_limit_hit:
-                window_count = await get_window_count(session, "newsapi", newsapi_window_date, newsapi_hour_slot)
-                if window_count >= newsapi_max_window_requests:
-                    if not newsapi_limit_logged:
-                        log.warning(
-                            "newsapi_window_limit_reached",
-                            window_date=newsapi_window_date.isoformat(),
-                            hour_slot=newsapi_hour_slot,
-                            count=window_count,
-                            max_window_requests=newsapi_max_window_requests,
-                        )
-                        newsapi_limit_logged = True
-                else:
-                    newsapi_queued = True
-                    fetch_names.append("newsapi")
-                    fetch_coros.append(newsapi_fetcher.fetch(
-                        api_key=newsapi_api_key,
+                if tavily_due_this_market and not tavily_limit_hit:
+                    fetch_names.append("tavily")
+                    fetch_coros.append(tavily_fetcher.fetch(
+                        api_key=tavily_api_key,
                         query=query_text,
-                        from_date=newsapi_from,
                         excluded_domains=domain_blacklist,
                     ))
 
-            # Guardian: use tv_query (Solr syntax) when available, else query_text.
-            if guardian_due_this_market and not guardian_limit_hit:
-                fetch_names.append("guardian")
-                fetch_coros.append(guardian_fetcher.fetch(
-                    api_key=guardian_api_key,
-                    query=tv_query or query_text,
-                    from_date=guardian_from,
-                    excluded_domains=domain_blacklist,
-                ))
-
-            fetch_names.append("reddit")
-            fetch_coros.append(reddit_fetcher.fetch(
-                subreddits=_subreddits_for_category(category),
-                query=query_text,
-                user_agent=reddit_user_agent,
-            ))
-
-            if tv_query and not tv_archive_limit_hit:
-                fetch_names.append("tv_archive")
-                fetch_coros.append(tv_archive_fetcher.fetch(
-                    query=tv_query,
-                    close_time=close_time,
-                ))
-
-            # --- Run non-GDELT fetchers in parallel ---
-            results = await asyncio.gather(*fetch_coros, return_exceptions=True)
-
-            raw_docs = []
-            for name, result in zip(fetch_names, results):
-                if isinstance(result, BaseException):
-                    if name == "tavily" and isinstance(result, (ForbiddenError, UsageLimitExceededError)):
-                        tavily_limit_hit = True
-                        tavily_due_this_market = False
-                        skip_cycles = await record_rate_limit(session, "tavily")
-                        log.warning("scheduler.tavily_limit_reached", reason=str(result), skip_cycles=skip_cycles)
-                    elif name == "newsapi" and isinstance(result, NewsAPIRateLimitError):
-                        newsapi_limit_hit = True
-                        newsapi_due_this_market = False
-                        newsapi_limit_logged = True
-                        skip_cycles = await record_rate_limit(session, "newsapi")
-                        log.warning("scheduler.newsapi_rate_limited", reason=str(result), skip_cycles=skip_cycles)
-                    elif name == "guardian" and isinstance(result, GuardianRateLimitError):
-                        guardian_limit_hit = True
-                        guardian_due_this_market = False
-                        skip_cycles = await record_rate_limit(session, "guardian")
-                        log.warning("scheduler.guardian_rate_limited", reason=str(result), skip_cycles=skip_cycles)
+                # NewsAPI: adaptive cursor gate first, then per-query window cap check.
+                newsapi_queued = False
+                if newsapi_due_this_market and not newsapi_limit_hit:
+                    window_count = await get_window_count(market_session, "newsapi", newsapi_window_date, newsapi_hour_slot)
+                    if window_count >= newsapi_max_window_requests:
+                        if not newsapi_limit_logged:
+                            log.warning(
+                                "newsapi_window_limit_reached",
+                                window_date=newsapi_window_date.isoformat(),
+                                hour_slot=newsapi_hour_slot,
+                                count=window_count,
+                                max_window_requests=newsapi_max_window_requests,
+                            )
+                            newsapi_limit_logged = True
                     else:
+                        newsapi_queued = True
+                        fetch_names.append("newsapi")
+                        fetch_coros.append(newsapi_fetcher.fetch(
+                            api_key=newsapi_api_key,
+                            query=query_text,
+                            from_date=newsapi_from,
+                            excluded_domains=domain_blacklist,
+                        ))
+
+                # Guardian: use tv_query (Solr syntax) when available, else query_text.
+                if guardian_due_this_market and not guardian_limit_hit:
+                    fetch_names.append("guardian")
+                    fetch_coros.append(guardian_fetcher.fetch(
+                        api_key=guardian_api_key,
+                        query=tv_query or query_text,
+                        from_date=guardian_from,
+                        excluded_domains=domain_blacklist,
+                    ))
+
+                fetch_names.append("reddit")
+                fetch_coros.append(reddit_fetcher.fetch(
+                    subreddits=_subreddits_for_category(category),
+                    query=query_text,
+                    user_agent=reddit_user_agent,
+                ))
+
+                if tv_query and not tv_archive_limit_hit:
+                    fetch_names.append("tv_archive")
+                    fetch_coros.append(tv_archive_fetcher.fetch(
+                        query=tv_query,
+                        close_time=close_time,
+                    ))
+
+                # --- Run non-GDELT fetchers in parallel ---
+                results = await asyncio.gather(*fetch_coros, return_exceptions=True)
+
+                raw_docs = []
+                for name, result in zip(fetch_names, results):
+                    if isinstance(result, BaseException):
+                        if name == "tavily" and isinstance(result, (ForbiddenError, UsageLimitExceededError)):
+                            tavily_limit_hit = True
+                            tavily_due_this_market = False
+                            skip_cycles = await record_rate_limit(market_session, "tavily")
+                            log.warning("scheduler.tavily_limit_reached", reason=str(result), skip_cycles=skip_cycles)
+                        elif name == "newsapi" and isinstance(result, NewsAPIRateLimitError):
+                            newsapi_limit_hit = True
+                            newsapi_due_this_market = False
+                            newsapi_limit_logged = True
+                            skip_cycles = await record_rate_limit(market_session, "newsapi")
+                            log.warning("scheduler.newsapi_rate_limited", reason=str(result), skip_cycles=skip_cycles)
+                        elif name == "guardian" and isinstance(result, GuardianRateLimitError):
+                            guardian_limit_hit = True
+                            guardian_due_this_market = False
+                            skip_cycles = await record_rate_limit(market_session, "guardian")
+                            log.warning("scheduler.guardian_rate_limited", reason=str(result), skip_cycles=skip_cycles)
+                        else:
+                            log.warning(
+                                "scheduler.fetcher_error",
+                                market_id=market_id,
+                                fetcher=name,
+                                query=query_text,
+                                error=str(result),
+                            )
+                    else:
+                        raw_docs.extend(result)
+                        if name == "tavily":
+                            tavily_fetched_this_market = True
+                            tavily_daily_count += 1
+                            await increment_window_count(market_session, "tavily", now.date(), now.hour // 12)
+                            if tavily_daily_count >= tavily_daily_cap:
+                                tavily_limit_hit = True
+                                tavily_due_this_market = False
+                                log.warning("scheduler.tavily_daily_cap_reached",
+                                            count=tavily_daily_count, cap=tavily_daily_cap)
+                        if name == "newsapi" and newsapi_queued:
+                            newsapi_fetched_this_market = True
+                            await increment_window_count(market_session, "newsapi", newsapi_window_date, newsapi_hour_slot)
+                        if name == "guardian":
+                            guardian_fetched_this_market = True
+                            guardian_daily_count += 1
+                            await increment_window_count(market_session, "guardian", now.date(), now.hour // 12)
+                            if guardian_daily_count >= guardian_daily_cap:
+                                guardian_limit_hit = True
+                                guardian_due_this_market = False
+                                log.warning("scheduler.guardian_daily_cap_reached",
+                                            count=guardian_daily_count, cap=guardian_daily_cap)
+                        # Clear backoff on first success this cycle for this service.
+                        if name not in success_recorded:
+                            await record_success(market_session, name)
+                            success_recorded.add(name)
+
+                # --- Run GDELT fetcher ---
+                # Runs sequentially after the parallel gather (has its own rate-limit sleep).
+                if not gdelt_limit_hit:
+                    try:
+                        gdelt_docs = await gdelt_fetcher.fetch(
+                            query=query_text,
+                            excluded_domains=domain_blacklist,
+                        )
+                        raw_docs.extend(gdelt_docs)
+                        if "gdelt" not in success_recorded:
+                            await record_success(market_session, "gdelt")
+                            success_recorded.add("gdelt")
+                    except GDELTRateLimitError as exc:
+                        gdelt_limit_hit = True
+                        skip_cycles = await record_rate_limit(market_session, "gdelt")
+                        log.warning("scheduler.gdelt_rate_limited", reason=str(exc), skip_cycles=skip_cycles)
+                    except Exception:
                         log.warning(
                             "scheduler.fetcher_error",
                             market_id=market_id,
-                            fetcher=name,
+                            fetcher="gdelt",
                             query=query_text,
-                            error=str(result),
+                            exc_info=True,
                         )
-                else:
-                    raw_docs.extend(result)
-                    if name == "tavily":
-                        tavily_fetched_this_market = True
-                        tavily_daily_count += 1
-                        await increment_window_count(session, "tavily", now.date(), now.hour // 12)
-                        if tavily_daily_count >= tavily_daily_cap:
-                            tavily_limit_hit = True
-                            tavily_due_this_market = False
-                            log.warning("scheduler.tavily_daily_cap_reached",
-                                        count=tavily_daily_count, cap=tavily_daily_cap)
-                    if name == "newsapi" and newsapi_queued:
-                        newsapi_fetched_this_market = True
-                        await increment_window_count(session, "newsapi", newsapi_window_date, newsapi_hour_slot)
-                    if name == "guardian":
-                        guardian_fetched_this_market = True
-                        guardian_daily_count += 1
-                        await increment_window_count(session, "guardian", now.date(), now.hour // 12)
-                        if guardian_daily_count >= guardian_daily_cap:
-                            guardian_limit_hit = True
-                            guardian_due_this_market = False
-                            log.warning("scheduler.guardian_daily_cap_reached",
-                                        count=guardian_daily_count, cap=guardian_daily_cap)
-                    # Clear backoff on first success this cycle for this service.
-                    if name not in success_recorded:
-                        await record_success(session, name)
-                        success_recorded.add(name)
 
-            # --- Run GDELT fetcher ---
-            # Runs sequentially after the parallel gather (has its own rate-limit sleep).
-            if not gdelt_limit_hit:
-                try:
-                    gdelt_docs = await gdelt_fetcher.fetch(
-                        query=query_text,
-                        excluded_domains=domain_blacklist,
-                    )
-                    raw_docs.extend(gdelt_docs)
-                    if "gdelt" not in success_recorded:
-                        await record_success(session, "gdelt")
-                        success_recorded.add("gdelt")
-                except GDELTRateLimitError as exc:
-                    gdelt_limit_hit = True
-                    skip_cycles = await record_rate_limit(session, "gdelt")
-                    log.warning("scheduler.gdelt_rate_limited", reason=str(exc), skip_cycles=skip_cycles)
-                except Exception:
-                    log.warning(
-                        "scheduler.fetcher_error",
-                        market_id=market_id,
-                        fetcher="gdelt",
-                        query=query_text,
-                        exc_info=True,
-                    )
+                market_fetched += len(raw_docs)
 
-            market_fetched += len(raw_docs)
+                # Upsert each document.
+                # Each upsert is wrapped in a savepoint so that a single document
+                # failure (e.g. constraint violation) does not abort the entire
+                # PostgreSQL transaction and roll back all other documents.
+                for raw_doc in raw_docs:
+                    raw_doc.category = category
+                    try:
+                        async with market_session.begin_nested():
+                            doc, status = await upsert_document(market_session, embedder, raw_doc)
+                            await link_document_to_market(market_session, doc.id, market_id)
+                        if status == UpsertStatus.DEDUPED:
+                            market_deduped += 1
+                        else:
+                            market_stored += 1
+                    except DocumentSkipped:
+                        pass  # empty body after cleaning — already logged at debug
+                    except Exception:
+                        log.warning(
+                            "scheduler.upsert_error",
+                            market_id=market_id,
+                            source_url=raw_doc.source_url,
+                            exc_info=True,
+                        )
+                        market_error += 1
 
-            # Upsert each document.
-            # Each upsert is wrapped in a savepoint so that a single document
-            # failure (e.g. constraint violation) does not abort the entire
-            # PostgreSQL transaction and roll back all other documents.
-            for raw_doc in raw_docs:
-                raw_doc.category = category
-                try:
-                    async with session.begin_nested():
-                        doc = await upsert_document(session, embedder, raw_doc)
-                        await link_document_to_market(session, doc.id, market_id)
-                    market_stored += 1
-                except DocumentSkipped:
-                    pass  # empty body after cleaning — already logged at debug
-                except Exception:
-                    log.warning(
-                        "scheduler.upsert_error",
-                        market_id=market_id,
-                        source_url=raw_doc.source_url,
-                        exc_info=True,
-                    )
-                    market_error += 1
+            # Update per-market cursors after all queries complete.
+            if tavily_fetched_this_market:
+                await set_cursor(market_session, "tavily", market_id, now)
+            if newsapi_fetched_this_market:
+                await set_cursor(market_session, "newsapi", market_id, now)
+            if guardian_fetched_this_market:
+                await set_cursor(market_session, "guardian", market_id, now)
 
-        # Update per-market cursors after all queries complete.
-        if tavily_fetched_this_market:
-            await set_cursor(session, "tavily", market_id, now)
-        if newsapi_fetched_this_market:
-            await set_cursor(session, "newsapi", market_id, now)
-        if guardian_fetched_this_market:
-            await set_cursor(session, "guardian", market_id, now)
+            await market_session.commit()
 
         log.info(
             "scheduler.market_cycle_complete",
@@ -456,6 +463,7 @@ async def run_cycle(
             queries=len(query_pairs),
             docs_fetched=market_fetched,
             docs_stored=market_stored,
+            docs_deduped=market_deduped,
             docs_error=market_error,
         )
 
@@ -534,27 +542,25 @@ async def run_scheduler(
 
     while True:
         try:
-            async with session_factory() as session:
-                await run_cycle(
-                    session=session,
-                    embedder=embedder,
-                    strategy=strategy,
-                    llm_client=llm_client,
-                    tavily_api_key=tavily_api_key,
-                    tavily_daily_cap=tavily_daily_cap,
-                    tavily_min_fetch_interval_hours=tavily_min_fetch_interval_hours,
-                    newsapi_api_key=newsapi_api_key,
-                    newsapi_enabled=newsapi_enabled,
-                    newsapi_max_window_requests=newsapi_max_window_requests,
-                    newsapi_min_fetch_interval_hours=newsapi_min_fetch_interval_hours,
-                    guardian_api_key=guardian_api_key,
-                    guardian_enabled=guardian_enabled,
-                    guardian_daily_cap=guardian_daily_cap,
-                    guardian_min_fetch_interval_hours=guardian_min_fetch_interval_hours,
-                    reddit_user_agent=reddit_user_agent,
-                    domain_blacklist=domain_blacklist,
-                )
-                await session.commit()
+            await run_cycle(
+                session_factory=session_factory,
+                embedder=embedder,
+                strategy=strategy,
+                llm_client=llm_client,
+                tavily_api_key=tavily_api_key,
+                tavily_daily_cap=tavily_daily_cap,
+                tavily_min_fetch_interval_hours=tavily_min_fetch_interval_hours,
+                newsapi_api_key=newsapi_api_key,
+                newsapi_enabled=newsapi_enabled,
+                newsapi_max_window_requests=newsapi_max_window_requests,
+                newsapi_min_fetch_interval_hours=newsapi_min_fetch_interval_hours,
+                guardian_api_key=guardian_api_key,
+                guardian_enabled=guardian_enabled,
+                guardian_daily_cap=guardian_daily_cap,
+                guardian_min_fetch_interval_hours=guardian_min_fetch_interval_hours,
+                reddit_user_agent=reddit_user_agent,
+                domain_blacklist=domain_blacklist,
+            )
         except Exception:
             log.error("scheduler.cycle_error", exc_info=True)
 

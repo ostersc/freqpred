@@ -19,7 +19,7 @@ from freqpred.ingestion.scheduler import (
     run_cycle,
     run_scheduler,
 )
-from freqpred.ingestion.store import DocumentSkipped, RawDocument
+from freqpred.ingestion.store import DocumentSkipped, RawDocument, UpsertStatus
 from freqpred.rag.models import Document
 
 NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
@@ -136,6 +136,16 @@ def _make_session() -> AsyncMock:
     return session
 
 
+def _make_session_factory(session: AsyncMock | None = None) -> MagicMock:
+    """Wrap a mock session as a minimal async session factory for run_cycle."""
+    if session is None:
+        session = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    return MagicMock(return_value=cm)
+
+
 def _make_embedder() -> MagicMock:
     embedder = MagicMock()
     embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
@@ -177,7 +187,7 @@ class TestRunCycleNoMarkets:
             new_callable=AsyncMock,
             return_value=[],
         ):
-            stats = await run_cycle(session, embedder)
+            stats = await run_cycle(_make_session_factory(session), embedder)
 
         assert stats["markets_processed"] == 0
         assert stats["docs_fetched"] == 0
@@ -225,11 +235,11 @@ class TestRunCycleFetchersCalled:
             patch(
                 "freqpred.ingestion.scheduler.upsert_document",
                 new_callable=AsyncMock,
-                return_value=doc,
+                return_value=(doc, UpsertStatus.INSERTED),
             ),
         ):
             await run_cycle(
-                session,
+                _make_session_factory(session),
                 embedder,
                 tavily_api_key="tv-key",
                 newsapi_api_key="na-key",
@@ -274,7 +284,7 @@ class TestRunCycleFetchersCalled:
                 return_value=[],
             ),
         ):
-            await run_cycle(session, embedder, tavily_api_key="")  # no key
+            await run_cycle(_make_session_factory(session), embedder, tavily_api_key="")  # no key
 
         mock_tavily.assert_not_called()
 
@@ -307,7 +317,7 @@ class TestRunCycleFetchersCalled:
                 return_value=[],
             ),
         ):
-            await run_cycle(session, embedder, newsapi_api_key="")  # no key
+            await run_cycle(_make_session_factory(session), embedder, newsapi_api_key="")  # no key
 
         mock_newsapi.assert_not_called()
 
@@ -341,7 +351,7 @@ class TestRunCycleFetchersCalled:
                 return_value=[],
             ) as mock_reddit,
         ):
-            await run_cycle(session, embedder, tavily_api_key="", newsapi_api_key="")
+            await run_cycle(_make_session_factory(session), embedder, tavily_api_key="", newsapi_api_key="")
 
         mock_reddit.assert_called_once()
 
@@ -383,7 +393,7 @@ class TestRunCycleErrorIsolation:
             ) as mock_reddit,
         ):
             stats = await run_cycle(
-                session, embedder, tavily_api_key="key", newsapi_api_key="key"
+                _make_session_factory(session), embedder, tavily_api_key="key", newsapi_api_key="key"
             )
 
         # NewsAPI and Reddit must still have been called
@@ -422,7 +432,7 @@ class TestRunCycleErrorIsolation:
             ) as mock_reddit,
         ):
             stats = await run_cycle(
-                session, embedder, tavily_api_key="key", newsapi_api_key="key"
+                _make_session_factory(session), embedder, tavily_api_key="key", newsapi_api_key="key"
             )
 
         mock_reddit.assert_called_once()
@@ -465,7 +475,7 @@ class TestRunCycleErrorIsolation:
             ),
         ):
             stats = await run_cycle(
-                session, embedder, tavily_api_key="key"
+                _make_session_factory(session), embedder, tavily_api_key="key"
             )
 
         assert stats["docs_error"] == 1
@@ -508,7 +518,7 @@ class TestRunCycleErrorIsolation:
             ),
         ):
             stats = await run_cycle(
-                session, embedder, tavily_api_key="key"
+                _make_session_factory(session), embedder, tavily_api_key="key"
             )
 
         assert stats["docs_error"] == 0
@@ -550,7 +560,7 @@ class TestRunCycleErrorIsolation:
             ) as mock_reddit,
         ):
             stats = await run_cycle(
-                session, embedder, tavily_api_key="key", newsapi_api_key="key"
+                _make_session_factory(session), embedder, tavily_api_key="key", newsapi_api_key="key"
             )
 
         # NewsAPI attempted once, then circuit breaker stops it for the second market.
@@ -599,9 +609,55 @@ class TestRunCycleMultipleMarkets:
                 return_value=[],
             ),
         ):
-            stats = await run_cycle(session, embedder)
+            stats = await run_cycle(_make_session_factory(session), embedder)
 
         assert stats["markets_processed"] == 2
+
+    @pytest.mark.asyncio
+    async def test_commit_called_once_per_market(self) -> None:
+        """run_cycle must commit the session once per market, not once at the end."""
+        embedder = _make_embedder()
+
+        market_queries = [
+            ("MKT-A", "politics", CLOSE_TIME, [("q1", None)]),
+            ("MKT-B", "economics", CLOSE_TIME, [("q2", None)]),
+            ("MKT-C", "technology", CLOSE_TIME, [("q3", None)]),
+        ]
+
+        # Track each session mock created by the factory so we can assert
+        # commit was called on each market session (not the setup session).
+        market_sessions: list[AsyncMock] = []
+
+        call_count = 0
+
+        def make_tracking_factory():
+            def factory():
+                nonlocal call_count
+                call_count += 1
+                session = _make_session()
+                if call_count > 1:  # first call is the setup session
+                    market_sessions.append(session)
+                cm = MagicMock()
+                cm.__aenter__ = AsyncMock(return_value=session)
+                cm.__aexit__ = AsyncMock(return_value=None)
+                return cm
+            return factory
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=market_queries,
+            ),
+            patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                  new_callable=AsyncMock, return_value=[]),
+        ):
+            await run_cycle(make_tracking_factory(), embedder)
+
+        # One market session per market — each must have been committed exactly once.
+        assert len(market_sessions) == 3
+        for ms in market_sessions:
+            ms.commit.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -645,11 +701,11 @@ class TestRunCycleStats:
             patch(
                 "freqpred.ingestion.scheduler.upsert_document",
                 new_callable=AsyncMock,
-                return_value=doc,
+                return_value=(doc, UpsertStatus.INSERTED),
             ),
         ):
             stats = await run_cycle(
-                session, embedder, tavily_api_key="k", newsapi_api_key="k"
+                _make_session_factory(session), embedder, tavily_api_key="k", newsapi_api_key="k"
             )
 
         # 2 markets × 2 docs each = 4 total
@@ -686,7 +742,7 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
         ):
-            await run_cycle(session, embedder, guardian_api_key="")
+            await run_cycle(_make_session_factory(session), embedder, guardian_api_key="")
 
         mock_guardian.assert_not_called()
 
@@ -705,7 +761,7 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
         ):
-            await run_cycle(session, embedder, guardian_api_key="key", guardian_enabled=False)
+            await run_cycle(_make_session_factory(session), embedder, guardian_api_key="key", guardian_enabled=False)
 
         mock_guardian.assert_not_called()
 
@@ -727,7 +783,7 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
         ):
-            await run_cycle(session, embedder, guardian_api_key="key")
+            await run_cycle(_make_session_factory(session), embedder, guardian_api_key="key")
 
         mock_guardian.assert_called_once()
         assert mock_guardian.call_args.kwargs["query"] == 'trump AND ("tariff" OR "tariffs")'
@@ -747,7 +803,7 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
         ):
-            await run_cycle(session, embedder, guardian_api_key="key")
+            await run_cycle(_make_session_factory(session), embedder, guardian_api_key="key")
 
         mock_guardian.assert_called_once()
         assert mock_guardian.call_args.kwargs["query"] == "Fed rate hike 2026"
@@ -775,7 +831,7 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
         ):
-            await run_cycle(session, embedder, tavily_api_key="key", tavily_daily_cap=33)
+            await run_cycle(_make_session_factory(session), embedder, tavily_api_key="key", tavily_daily_cap=33)
 
         mock_tavily.assert_not_called()
 
@@ -798,7 +854,7 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
         ):
-            await run_cycle(session, embedder, guardian_api_key="key", guardian_daily_cap=490)
+            await run_cycle(_make_session_factory(session), embedder, guardian_api_key="key", guardian_daily_cap=490)
 
         mock_guardian.assert_not_called()
 
@@ -828,7 +884,7 @@ class TestAdaptiveLimits:
                   new_callable=AsyncMock, return_value=[]),
         ):
             await run_cycle(
-                session, embedder,
+                _make_session_factory(session), embedder,
                 tavily_api_key="key",
                 tavily_min_fetch_interval_hours=1.0,
                 tavily_daily_cap=33,
@@ -858,10 +914,10 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
             patch("freqpred.ingestion.scheduler.upsert_document",
-                  new_callable=AsyncMock, return_value=doc),
+                  new_callable=AsyncMock, return_value=(doc, UpsertStatus.INSERTED)),
         ):
             await run_cycle(
-                session, embedder,
+                _make_session_factory(session), embedder,
                 tavily_api_key="key",
                 tavily_min_fetch_interval_hours=1.0,
                 tavily_daily_cap=33,
@@ -889,9 +945,9 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
             patch("freqpred.ingestion.scheduler.upsert_document",
-                  new_callable=AsyncMock, return_value=doc),
+                  new_callable=AsyncMock, return_value=(doc, UpsertStatus.INSERTED)),
         ):
-            await run_cycle(session, embedder, tavily_api_key="key")
+            await run_cycle(_make_session_factory(session), embedder, tavily_api_key="key")
 
         mock_tavily.assert_called_once()
 
@@ -919,9 +975,9 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
             patch("freqpred.ingestion.scheduler.upsert_document",
-                  new_callable=AsyncMock, return_value=doc),
+                  new_callable=AsyncMock, return_value=(doc, UpsertStatus.INSERTED)),
         ):
-            await run_cycle(session, embedder, tavily_api_key="key")
+            await run_cycle(_make_session_factory(session), embedder, tavily_api_key="key")
 
         tavily_cursor_calls = [c for c in mock_set_cursor.call_args_list
                                if c.args[1] == "tavily"]
@@ -951,7 +1007,7 @@ class TestAdaptiveLimits:
                   new_callable=AsyncMock, return_value=[]),
         ):
             await run_cycle(
-                session, embedder,
+                _make_session_factory(session), embedder,
                 tavily_api_key="key",
                 tavily_min_fetch_interval_hours=1.0,
             )
@@ -998,9 +1054,9 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
             patch("freqpred.ingestion.scheduler.upsert_document",
-                  new_callable=AsyncMock, return_value=doc),
+                  new_callable=AsyncMock, return_value=(doc, UpsertStatus.INSERTED)),
         ):
-            await run_cycle(session, embedder, tavily_api_key="key", tavily_daily_cap=1)
+            await run_cycle(_make_session_factory(session), embedder, tavily_api_key="key", tavily_daily_cap=1)
 
         # Only one market should have triggered a Tavily call; second was blocked by cap.
         assert call_count == 1
@@ -1038,7 +1094,7 @@ class TestAdaptiveLimits:
             patch("freqpred.ingestion.scheduler.reddit_fetcher.fetch",
                   new_callable=AsyncMock, return_value=[]),
         ):
-            await run_cycle(session, embedder, guardian_api_key="key")
+            await run_cycle(_make_session_factory(session), embedder, guardian_api_key="key")
 
         # Guardian should have been attempted for MKT-1 only; MKT-2 blocked.
         assert guardian_call_count == 1

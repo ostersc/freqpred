@@ -906,7 +906,7 @@ async def _ingestion_run(
             for raw_doc in raw_docs:
                 raw_doc.category = market.category
                 try:
-                    doc = await upsert_document(session, embedder, raw_doc)
+                    doc, _status = await upsert_document(session, embedder, raw_doc)
                     stored += 1
                 except Exception as exc:
                     click.echo(f"  ✗ Store error: {exc}", err=True)

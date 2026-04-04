@@ -35,7 +35,7 @@ from freqpred.ingestion.fetchers.truthsocial import (
     patch_api_for_block_detection,
 )
 from freqpred.ingestion.scheduler import _load_active_market_queries
-from freqpred.ingestion.store import DocumentSkipped, link_document_to_market, upsert_document
+from freqpred.ingestion.store import DocumentSkipped, UpsertStatus, link_document_to_market, upsert_document
 from freqpred.rag.embedder import LocalEmbedder
 
 if TYPE_CHECKING:
@@ -121,9 +121,10 @@ async def run_realtime_cycle(
                     raw_doc.category = category
                     try:
                         async with session.begin_nested():
-                            doc = await upsert_document(session, embedder, raw_doc)
+                            doc, status = await upsert_document(session, embedder, raw_doc)
                             await link_document_to_market(session, doc.id, market_id)
-                        total_stored += 1
+                        if status != UpsertStatus.DEDUPED:
+                            total_stored += 1
                     except DocumentSkipped:
                         pass
                     except Exception:
@@ -178,10 +179,11 @@ async def run_realtime_cycle(
                 for raw_doc in docs:
                     try:
                         async with session.begin_nested():
-                            doc = await upsert_document(session, embedder, raw_doc)
+                            doc, status = await upsert_document(session, embedder, raw_doc)
                             for mid in account_market_ids:
                                 await link_document_to_market(session, doc.id, mid)
-                        total_stored += 1
+                        if status != UpsertStatus.DEDUPED:
+                            total_stored += 1
                     except DocumentSkipped:
                         pass
                     except Exception:

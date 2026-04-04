@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.store import RawDocument, _sha256, _strip_html, upsert_document
+from freqpred.ingestion.store import RawDocument, UpsertStatus, _sha256, _strip_html, upsert_document
 from freqpred.rag.models import DocumentRow
 
 
@@ -142,7 +142,7 @@ async def test_upsert_new_document_calls_embedder():
     embedder = AsyncMock()
     embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
 
-    doc = await upsert_document(session, embedder, raw_doc)
+    doc, status = await upsert_document(session, embedder, raw_doc)
 
     embedder.embed_text.assert_awaited_once_with(body_clean)
     assert doc.source_url == raw_doc.source_url
@@ -188,7 +188,7 @@ async def test_same_url_same_hash_skips_embed():
     embedder = AsyncMock()
     embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
 
-    doc = await upsert_document(session, embedder, raw_doc)
+    doc, status = await upsert_document(session, embedder, raw_doc)
 
     embedder.embed_text.assert_not_awaited()
     assert doc.source_url == raw_doc.source_url
@@ -215,7 +215,7 @@ async def test_same_url_changed_hash_triggers_reembed():
     embedder = AsyncMock()
     embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
 
-    doc = await upsert_document(session, embedder, raw_doc)
+    doc, status = await upsert_document(session, embedder, raw_doc)
 
     embedder.embed_text.assert_awaited_once_with(body_clean)
     assert doc.content_hash == new_hash

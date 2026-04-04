@@ -65,6 +65,11 @@ async def engine():
     await eng.dispose()
 
 
+@pytest.fixture
+def session_factory(engine):
+    return make_session_factory(engine)
+
+
 @pytest_asyncio.fixture
 async def session(engine):
     factory = make_session_factory(engine)
@@ -162,7 +167,7 @@ async def _seed_catalyst_queries(
 
 
 @pytest.mark.asyncio
-async def test_scheduler_cycle_increases_document_count(session, mock_embedder):
+async def test_scheduler_cycle_increases_document_count(session, session_factory, mock_embedder):
     """Seeding a market with 1 active run + 2 queries then running one cycle
     must increase the documents table count."""
     market_id = "SCHED-TEST-MKT"
@@ -213,11 +218,10 @@ async def test_scheduler_cycle_increases_document_count(session, mock_embedder):
         ),
     ):
         stats = await run_cycle(
-            session,
+            session_factory,
             mock_embedder,
             tavily_api_key="test-key",
         )
-        await session.commit()
 
     after = (await session.execute(select(func.count()).select_from(DocumentRow))).scalar()
 
@@ -227,7 +231,7 @@ async def test_scheduler_cycle_increases_document_count(session, mock_embedder):
 
 
 @pytest.mark.asyncio
-async def test_inactive_catalyst_run_market_excluded(session, mock_embedder):
+async def test_inactive_catalyst_run_market_excluded(session, session_factory, mock_embedder):
     """Markets whose latest CatalystRun has is_active=False must not be fetched."""
     market_id = "SCHED-INACTIVE-MKT"
     await _seed_market(session, market_id)
@@ -257,7 +261,7 @@ async def test_inactive_catalyst_run_market_excluded(session, mock_embedder):
             return_value=[],
         ),
     ):
-        stats = await run_cycle(session, mock_embedder, tavily_api_key="key")
+        stats = await run_cycle(session_factory, mock_embedder, tavily_api_key="key")
 
     # Fetcher must not have been called — market excluded
     mock_tavily.assert_not_called()
@@ -265,7 +269,7 @@ async def test_inactive_catalyst_run_market_excluded(session, mock_embedder):
 
 
 @pytest.mark.asyncio
-async def test_cycle_completes_without_error(session, mock_embedder):
+async def test_cycle_completes_without_error(session, session_factory, mock_embedder):
     """A successful cycle with active queries must complete and report stats."""
     market_id = "SCHED-BASIC-TEST"
     await _seed_market(session, market_id)
@@ -295,13 +299,13 @@ async def test_cycle_completes_without_error(session, mock_embedder):
             return_value=[],
         ),
     ):
-        stats = await run_cycle(session, mock_embedder)
+        stats = await run_cycle(session_factory, mock_embedder)
 
     assert stats["markets_processed"] == 1
 
 
 @pytest.mark.asyncio
-async def test_duplicate_docs_not_reembedded(session, mock_embedder):
+async def test_duplicate_docs_not_reembedded(session, session_factory, mock_embedder):
     """Running the scheduler twice with the same documents must not
     call embed_text a second time for identical content."""
     market_id = "SCHED-DEDUP-TEST"
@@ -334,12 +338,10 @@ async def test_duplicate_docs_not_reembedded(session, mock_embedder):
             return_value=[],
         ),
     ):
-        await run_cycle(session, mock_embedder, tavily_api_key="key")
-        await session.commit()
+        await run_cycle(session_factory, mock_embedder, tavily_api_key="key")
         first_embed_count = mock_embedder.embed_text.await_count
 
-        await run_cycle(session, mock_embedder, tavily_api_key="key")
-        await session.commit()
+        await run_cycle(session_factory, mock_embedder, tavily_api_key="key")
         second_embed_count = mock_embedder.embed_text.await_count
 
     # Second run with same content must not trigger additional embeddings
@@ -347,7 +349,7 @@ async def test_duplicate_docs_not_reembedded(session, mock_embedder):
 
 
 @pytest.mark.asyncio
-async def test_tv_archive_fetcher_stores_transcript_docs(session, mock_embedder):
+async def test_tv_archive_fetcher_stores_transcript_docs(session, session_factory, mock_embedder):
     """When a catalyst query has a tv_query set, the scheduler calls the TV archive
     fetcher and stores the returned transcript clips as documents."""
     market_id = "SCHED-TV-TEST"
@@ -397,8 +399,7 @@ async def test_tv_archive_fetcher_stores_transcript_docs(session, mock_embedder)
             return_value=transcript_docs,
         ) as mock_tv,
     ):
-        stats = await run_cycle(session, mock_embedder)
-        await session.commit()
+        stats = await run_cycle(session_factory, mock_embedder)
 
     after = (await session.execute(select(func.count()).select_from(DocumentRow))).scalar()
 

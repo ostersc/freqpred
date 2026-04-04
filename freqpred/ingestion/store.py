@@ -32,6 +32,15 @@ _EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 class DocumentSkipped(Exception):
     """Raised when a document is intentionally skipped (e.g. empty body after cleaning)."""
 
+
+from enum import Enum
+
+
+class UpsertStatus(str, Enum):
+    INSERTED = "inserted"   # brand-new document
+    UPDATED = "updated"     # existing URL, content changed
+    DEDUPED = "deduped"     # existing URL, content unchanged — no DB write
+
 # Truncate body before embedding to keep token count reasonable.
 # all-MiniLM-L6-v2 has a 512-token limit; ~2000 chars ≈ 400 tokens.
 _MAX_EMBED_CHARS = 2_000
@@ -131,7 +140,7 @@ async def upsert_document(
     session: AsyncSession,
     embedder: LocalEmbedder,
     raw_doc: RawDocument,
-) -> Document:
+) -> tuple[Document, UpsertStatus]:
     """Embed and upsert a document, skipping re-embedding if content unchanged.
 
     Args:
@@ -140,7 +149,11 @@ async def upsert_document(
         raw_doc:  The raw fetched document.
 
     Returns:
-        The persisted Document domain object.
+        A (Document, UpsertStatus) tuple. Status is INSERTED for new docs,
+        UPDATED for existing URLs with changed content, DEDUPED for unchanged.
+
+    Raises:
+        DocumentSkipped: if the body is empty after HTML stripping.
     """
     body_clean = _sanitize(_strip_html(raw_doc.body))
 
@@ -163,13 +176,15 @@ async def upsert_document(
             source_url=raw_doc.source_url,
             reason="content_hash_unchanged",
         )
-        return _row_to_domain(existing)
+        return _row_to_domain(existing), UpsertStatus.DEDUPED
+
+    is_update = existing is not None
 
     # New doc or content changed — generate embedding.
     log.debug(
         "store.upsert_document.embed",
         source_url=raw_doc.source_url,
-        is_update=(existing is not None),
+        is_update=is_update,
     )
     embedding = await embedder.embed_text(embed_text)
 
@@ -217,7 +232,8 @@ async def upsert_document(
     row = row_result.scalar_one()
     await session.flush()
 
-    return _row_to_domain(row)
+    status = UpsertStatus.UPDATED if is_update else UpsertStatus.INSERTED
+    return _row_to_domain(row), status
 
 
 async def link_document_to_market(

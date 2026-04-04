@@ -86,6 +86,16 @@ def _make_session(market_rows: list, catalyst_rows: list) -> AsyncMock:
     return session
 
 
+def _make_session_factory(session: AsyncMock | None = None) -> MagicMock:
+    """Wrap a mock session as a minimal async session factory for run_cycle."""
+    if session is None:
+        session = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    return MagicMock(return_value=cm)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -219,7 +229,7 @@ class TestEnsureCatalysts:
             ),
         ):
             await run_cycle(
-                session=session,
+                session_factory=_make_session_factory(session),
                 embedder=embedder,
                 newsapi_api_key="some-key",
                 newsapi_enabled=False,
