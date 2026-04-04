@@ -272,9 +272,32 @@ def register_position_commands(
     # /forceexit [<position_id> | all]
     # ------------------------------------------------------------------
 
+    async def _resolve_to_position_id(target: str) -> str | None:
+        """Return a position UUID for *target*.
+
+        Accepts either a UUID string or a market ID (e.g. KXTRUMPSAY-26APR06-AUTO).
+        Returns None if no matching open position is found.
+        """
+        try:
+            _uuid.UUID(target)
+            return target  # already a valid UUID
+        except ValueError:
+            pass
+        # Treat as market_id — look up the open position
+        async with session_factory() as session:
+            result = await session.execute(
+                select(PositionRow.id).where(
+                    PositionRow.market_id == target,
+                    PositionRow.status == "open",
+                    PositionRow.mode == mode,
+                ).limit(1)
+            )
+            row = result.scalar_one_or_none()
+            return str(row) if row is not None else None
+
     async def handle_forceexit(chat_id: int, args: list[str]) -> str | None:
         if not args:
-            return "Usage: /forceexit <position_id> | /forceexit all"
+            return "Usage: /forceexit <position_id_or_market_id> | /forceexit all"
 
         target = args[0]
 
@@ -287,15 +310,20 @@ def register_position_commands(
             )
             return None
 
+        # Resolve market ID → position UUID if needed.
+        position_id = await _resolve_to_position_id(target)
+        if position_id is None:
+            return f"No open position found for: {target!r}"
+
         # Single position.
         if mode == "paper":
-            return await _close_position_paper(target)
+            return await _close_position_paper(position_id)
 
         # Live mode — require confirmation.
         await _require_confirmation(
             chat_id,
             f"Force-close position {target} in LIVE mode?",
-            lambda: _close_position_live(target),
+            lambda: _close_position_live(position_id),
         )
         return None
 

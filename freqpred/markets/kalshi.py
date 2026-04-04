@@ -16,6 +16,8 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from freqpred.markets.base import IMarketClient
 from freqpred.markets.models import (
+    KalshiEventSchema,
+    KalshiEventsResponse,
     KalshiMarketsResponse,
     KalshiSingleMarketResponse,
     Market,
@@ -34,80 +36,9 @@ class KalshiAPIError(Exception):
         self.body = body
         super().__init__(f"Kalshi API error {status_code}: {body}")
 
-# Known Kalshi event_ticker prefixes → our category label.
-# The event_ticker first segment (before the first '-') is the series ticker,
-# which encodes the market type.  This avoids the impractical /series approach
-# which returns thousands of series and requires an API call per series.
-_TICKER_PREFIX_TO_CATEGORY: dict[str, str] = {
-    # Sports — NBA props dominate open markets
-    "KXNBA": "sports",
-    "KXNFL": "sports",
-    "KXMLB": "sports",
-    "KXNHL": "sports",
-    "KXNCAA": "sports",
-    "KXSOC": "sports",
-    "KXPGA": "sports",
-    "KXTENNIS": "sports",
-    "KXUFC": "sports",
-    "KXMMA": "sports",
-    "KXF1": "sports",
-    "KXNASCAR": "sports",
-    "KXBOXING": "sports",
-    # Politics
-    "KXPRES": "politics",
-    "KXSEN": "politics",
-    "KXHOUSE": "politics",
-    "KXGOV": "politics",
-    "KXELECT": "politics",
-    "KXTRUMP": "politics",
-    "KXBIDEN": "politics",
-    # Economics
-    "KXECON": "economics",
-    "KXCPI": "economics",
-    "KXFED": "economics",
-    "KXGDP": "economics",
-    "WRECSS": "economics",
-    # Technology
-    "KXTECH": "technology",
-    "OAIAGI": "technology",
-    "NYTOAI": "technology",
-    "AMAZONFTC": "technology",
-    "APPLEUS": "technology",
-    "TESLAOPTIMUS": "technology",
-    "EVSHARE": "technology",
-    # Science / Space
-    "KXSPACE": "science",
-    "STARSHIPMARS": "science",
-    "MOON": "science",
-    # Climate
-    "KXCLIMATE": "climate",
-    "USCLIMATE": "climate",
-    # Finance
-    "KXSP500": "finance",
-    "KXNASDAQ": "finance",
-}
-
-
-def _infer_category(event_ticker: str) -> str:
-    """Map a Kalshi event_ticker to our category via known series prefix table.
-
-    The first dash-separated segment of ``event_ticker`` is the series ticker.
-    We do a longest-prefix match against ``_TICKER_PREFIX_TO_CATEGORY`` so that
-    e.g. ``KXNBA3PT`` (starts with ``KXNBA``) correctly resolves to 'sports'.
-    """
-    prefix = event_ticker.split("-")[0].upper() if event_ticker else ""
-    # Exact match first; then longest matching known prefix
-    if prefix in _TICKER_PREFIX_TO_CATEGORY:
-        return _TICKER_PREFIX_TO_CATEGORY[prefix]
-    best = ""
-    for known in _TICKER_PREFIX_TO_CATEGORY:
-        if prefix.startswith(known) and len(known) > len(best):
-            best = known
-    return _TICKER_PREFIX_TO_CATEGORY[best] if best else "other"
-
-
 _MAX_RETRIES = 3
 _PAGE_SIZE = 1000
+_EVENTS_PAGE_SIZE = 200  # Kalshi /events max page size
 
 
 class KalshiClient(IMarketClient):
@@ -226,24 +157,32 @@ class KalshiClient(IMarketClient):
             raise KalshiAPIError(resp.status_code, resp.text)
         return resp.json()
 
-    async def _paginate_markets(self, params: dict[str, Any]) -> list[Any]:
-        """Fetch all pages from GET /markets and return validated KalshiMarketSchema list."""
-        from freqpred.markets.models import KalshiMarketSchema
+    async def _paginate_events(self) -> list[KalshiEventSchema]:
+        """Fetch all open events with nested markets from GET /events.
 
-        results: list[KalshiMarketSchema] = []
+        Uses ``status=open`` and ``with_nested_markets=true`` so each event
+        includes the full list of market objects. Category and series_ticker
+        come from the event; market price/volume data come from the nested
+        market objects.
+        """
+        results: list[KalshiEventSchema] = []
         cursor: str | None = None
 
         while True:
-            page_params: dict[str, Any] = {**params, "limit": _PAGE_SIZE}
+            params: dict[str, Any] = {
+                "status": "open",
+                "with_nested_markets": "true",
+                "limit": _EVENTS_PAGE_SIZE,
+            }
             if cursor:
-                page_params["cursor"] = cursor
+                params["cursor"] = cursor
 
-            data = await self._get("/markets", params=page_params)
-            envelope = KalshiMarketsResponse.model_validate(data)
-            results.extend(envelope.markets)
+            data = await self._get("/events", params=params)
+            envelope = KalshiEventsResponse.model_validate(data)
+            results.extend(envelope.events)
 
             cursor = envelope.cursor or None
-            if not cursor or len(envelope.markets) < _PAGE_SIZE:
+            if not cursor or len(envelope.events) < _EVENTS_PAGE_SIZE:
                 break
 
         return results
@@ -262,7 +201,12 @@ class KalshiClient(IMarketClient):
         except (ValueError, TypeError):
             return 0.0
 
-    def _schema_to_market(self, schema: Any, category: str = "other") -> Market:
+    def _schema_to_market(
+        self,
+        schema: Any,
+        category: str = "other",
+        series_ticker: str | None = None,
+    ) -> Market:
         """Convert a validated KalshiMarketSchema to the Market domain object."""
         from freqpred.markets.models import KalshiMarketSchema
 
@@ -292,14 +236,17 @@ class KalshiClient(IMarketClient):
             mid_price=s.mid_price,
             last_price=s.last_price,
             volume_24h=float(s.volume_24h),
+            volume_total=float(s.volume_total),
             open_interest=float(s.open_interest),
             liquidity=s.liquidity,
             last_fetched_at=now,
             price_updated_at=now,
             metadata_fetched_at=now,
             open_time=open_time,
+            series_ticker=series_ticker,
             metadata={
                 "event_ticker": s.event_ticker,
+                "series_ticker": series_ticker,
                 "subtitle": s.subtitle,
                 "status": s.status,
             },
@@ -317,26 +264,27 @@ class KalshiClient(IMarketClient):
     # ------------------------------------------------------------------
 
     async def list_markets(self, category: str | None = None) -> list[Market]:
-        """Fetch all open binary markets, optionally filtered by category.
+        """Fetch all open markets via GET /events with nested markets.
 
-        Category is inferred from each market's ``event_ticker`` prefix via the
-        ``_TICKER_PREFIX_TO_CATEGORY`` table.  Always fetches all open markets in
-        one paginated pass (~2 seconds), then filters client-side.  This avoids
-        the ``/series`` approach which requires one API call per series and Kalshi
-        has thousands of series per category.
+        Category and series_ticker come directly from the Kalshi API (exact
+        strings, e.g. "Elections", "Sports"). Optionally filter by category;
+        comparison is exact (case-sensitive) to match Kalshi's values.
         """
-        schemas = await self._paginate_markets(
-            {"status": "open", "mve_filter": "exclude"}
-        )
+        events = await self._paginate_events()
         result: list[Market] = []
-        for s in schemas:
-            cat = _infer_category(s.event_ticker)
-            if category is None or cat == category.lower():
-                result.append(self._schema_to_market(s, cat))
+        for ev in events:
+            cat = ev.category
+            series = ev.series_ticker or None
+            if category is not None and cat != category:
+                continue
+            for market_schema in ev.markets:
+                result.append(self._schema_to_market(market_schema, cat, series))
+
+        total = sum(len(ev.markets) for ev in events)
         log.info(
             "kalshi_list_markets",
             category=category,
-            total_fetched=len(schemas),
+            total_fetched=total,
             returned=len(result),
         )
         return result

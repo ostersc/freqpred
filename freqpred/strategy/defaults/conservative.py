@@ -28,7 +28,7 @@ class ConservativeDefault(IPredictionStrategy):
         min_confidence=0.80,
         max_exposure_per_market=0.133,  # kelly_fraction × 0.133 ≈ 2% of bankroll max
         kelly_fraction=0.15,
-        categories=["technology"],
+        categories=["Science and Technology"],
         min_volume_24h=500.0,
         max_days_to_close=60,
         min_days_to_close=2,

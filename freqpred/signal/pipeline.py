@@ -12,7 +12,7 @@ from freqpred.llm.client import LLMClient, LLMError
 from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.models import Document, DocumentMarketLinkRow
 from freqpred.rag.retriever import Embedder, compute_retrieval_hash, retrieve
-from freqpred.signal.cache import should_skip
+from freqpred.signal.cache import scheduled_cooldown_remaining, should_skip
 from freqpred.signal.llm import PROMPT_VERSION, SYSTEM_PROMPT, build_prompt, parse_signal_response
 from freqpred.signal.models import Signal, SignalRow
 
@@ -121,6 +121,30 @@ class SignalPipeline:
                     retrieval_hash=new_hash,
                 )
                 return None
+
+            # Step 5b: low-confidence cooldown — skip LLM for scheduled analyses
+            # when the last scheduled signal was below the confidence threshold
+            # and was created recently.  Price-moved clones are still allowed.
+            if trigger == "scheduled" and not force:
+                cooldown_h = await scheduled_cooldown_remaining(session, market.id)
+                if cooldown_h > 0:
+                    log.debug(
+                        "signal.pipeline.cooldown_skip",
+                        market_id=market.id,
+                        cooldown_hours_remaining=round(cooldown_h, 1),
+                    )
+                    cloned = await self._clone_at_price(session, market)
+                    if cloned is not None:
+                        await session.commit()
+                        log.info(
+                            "signal.pipeline.price_reprice",
+                            market_id=market.id,
+                            signal_id=cloned.id,
+                            new_mid=market.mid_price,
+                            edge=cloned.edge,
+                        )
+                        return cloned
+                    return None
 
             # Step 6: build prompt and call LLM
             prompt = build_prompt(market, docs)

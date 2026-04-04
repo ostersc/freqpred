@@ -65,9 +65,9 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         min_confidence=0.60,
         max_exposure_per_market=0.20,
         kelly_fraction=0.25,
-        categories=["politics"],
-        min_volume_24h=100.0,
-        max_days_to_close=90,
+        categories=["Politics", "Elections", "Mentions"],
+        min_volume_24h=1000.0,
+        max_days_to_close=7,
         min_days_to_close=0.25,
         stoploss=-0.30,
         stoploss_cooldown_hours=48.0,
@@ -127,6 +127,9 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
             exit=bool(df["exit_long"].iloc[-1]),
         )
         return df
+
+    def is_market_interesting(self, market: "Market") -> bool:
+        return "Trump" in market.question and super().is_market_interesting(market)
 
     def should_trade(self, signal: "Signal", market: "Market") -> bool:
         return (

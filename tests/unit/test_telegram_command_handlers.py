@@ -63,14 +63,14 @@ def _async_session_ctx(return_value=None):
 def test_log_buffer_last_fewer_than_capacity():
     buf = LogBuffer(maxlen=100)
     for i in range(5):
-        buf.append(f"line {i}")
+        buf.append("test.logger", f"line {i}")
     assert buf.last(10) == [f"line {i}" for i in range(5)]
 
 
 def test_log_buffer_last_truncates_correctly():
     buf = LogBuffer(maxlen=100)
     for i in range(20):
-        buf.append(f"line {i}")
+        buf.append("test.logger", f"line {i}")
     result = buf.last(5)
     assert result == [f"line {i}" for i in range(15, 20)]
 
@@ -78,7 +78,7 @@ def test_log_buffer_last_truncates_correctly():
 def test_log_buffer_maxlen_evicts_oldest():
     buf = LogBuffer(maxlen=3)
     for i in range(5):
-        buf.append(f"line {i}")
+        buf.append("test.logger", f"line {i}")
     assert buf.last(10) == ["line 2", "line 3", "line 4"]
 
 
@@ -178,7 +178,7 @@ async def test_show_config_includes_key_fields():
 async def test_logs_returns_last_n_lines():
     cmd_handler, _, log_buffer = _make_handler_under_test()
     for i in range(30):
-        log_buffer.append(f"log line {i}")
+        log_buffer.append("freqpred.test", f"log line {i}")
 
     reply = await cmd_handler._handlers["logs"](42, ["5"])
     assert "log line 29" in reply
@@ -191,7 +191,7 @@ async def test_logs_returns_last_n_lines():
 async def test_logs_defaults_to_20():
     cmd_handler, _, log_buffer = _make_handler_under_test()
     for i in range(25):
-        log_buffer.append(f"line {i}")
+        log_buffer.append("freqpred.test", f"line {i}")
 
     reply = await cmd_handler._handlers["logs"](42, [])
     # Should contain the last 20
@@ -200,10 +200,15 @@ async def test_logs_defaults_to_20():
 
 
 @pytest.mark.asyncio
-async def test_logs_invalid_n_returns_usage():
-    cmd_handler, _, _ = _make_handler_under_test()
-    reply = await cmd_handler._handlers["logs"](42, ["notanumber"])
-    assert "Usage" in reply
+async def test_logs_filter_returns_matching_lines():
+    cmd_handler, _, log_buffer = _make_handler_under_test()
+    log_buffer.append("freqpred.ingestion.scheduler", "scheduler line A")
+    log_buffer.append("freqpred.signal.pipeline", "pipeline line B")
+    log_buffer.append("freqpred.ingestion.scheduler", "scheduler line C")
+    reply = await cmd_handler._handlers["logs"](42, ["scheduler"])
+    assert "scheduler line A" in reply
+    assert "scheduler line C" in reply
+    assert "pipeline line B" not in reply
 
 
 @pytest.mark.asyncio

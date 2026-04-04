@@ -55,8 +55,12 @@ class MarketRow(Base):
     mid_price: Mapped[float] = mapped_column(Float, nullable=False)
     last_price: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     volume_24h: Mapped[float] = mapped_column(Float, nullable=False)
+    volume_total: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     open_interest: Mapped[float] = mapped_column(Float, nullable=False)
     liquidity: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+
+    # Event metadata (populated from /events)
+    series_ticker: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Cache control
     last_fetched_at: Mapped[datetime] = mapped_column(
@@ -202,6 +206,8 @@ class Market:
     result: str | None = None
     last_price: float = 0.0
     liquidity: float = 0.0
+    series_ticker: str | None = None
+    volume_total: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +246,7 @@ class KalshiMarketSchema(BaseModel):
     last_price_dollars: str = "0.0000"
     liquidity_dollars: str = "0.0000"
     volume_24h: float = Field(default=0.0, alias="volume_24h_fp")
+    volume_total: float = Field(default=0.0, alias="volume_fp")
     open_interest: float = Field(default=0.0, alias="open_interest_fp")
 
     @field_validator(
@@ -280,6 +287,24 @@ class KalshiMarketsResponse(BaseModel):
     """Pydantic schema for GET /markets response envelope."""
 
     markets: list[KalshiMarketSchema] = Field(default_factory=list)
+    cursor: str = ""
+
+
+class KalshiEventSchema(BaseModel):
+    """Pydantic schema for a single event object from GET /events."""
+
+    event_ticker: str
+    category: str = ""
+    series_ticker: str = ""
+    title: str = ""
+    sub_title: str = ""
+    markets: list[KalshiMarketSchema] = Field(default_factory=list)
+
+
+class KalshiEventsResponse(BaseModel):
+    """Pydantic schema for GET /events response envelope."""
+
+    events: list[KalshiEventSchema] = Field(default_factory=list)
     cursor: str = ""
 
 

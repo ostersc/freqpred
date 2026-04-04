@@ -134,7 +134,7 @@ class OrderManager:
             )
             contracts = math.floor(decision.capped_size / entry_price)
             if contracts < 1:
-                logger.debug(
+                logger.info(
                     "order_manager.contracts_below_minimum",
                     market_id=market.id,
                     capped_size=decision.capped_size,

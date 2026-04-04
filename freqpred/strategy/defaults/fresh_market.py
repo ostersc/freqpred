@@ -26,7 +26,7 @@ class FreshMarketStrategy(IPredictionStrategy):
         min_confidence=0.68,
         max_exposure_per_market=0.04,
         kelly_fraction=0.20,
-        categories=["politics", "technology"],
+        categories=["Politics", "Elections", "Mentions", "Science and Technology"],
         min_volume_24h=0.0,
         max_days_to_close=7.0,
         min_days_to_close=0.25,

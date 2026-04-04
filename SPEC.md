@@ -195,15 +195,17 @@ class Market:
     id: str                          # Kalshi market ID
     platform: str                    # "kalshi"
     question: str                    # "Will X happen by Y?"
-    category: str                    # "politics" | "technology" | ...
+    category: str                    # Kalshi API string (e.g. "Elections", "Sports", "World")
     close_time: datetime             # when market resolves
 
     # --- Price snapshot (changes frequently) ---
     yes_bid: float                   # current best bid for YES (0.0-1.0)
     yes_ask: float                   # current best ask for YES (0.0-1.0)
     mid_price: float                 # (bid + ask) / 2
-    volume_24h: float                # liquidity proxy
+    volume_24h: float                # 24-hour volume (liquidity proxy)
+    volume_total: float              # total lifetime volume (from Kalshi volume_fp)
     open_interest: float
+    series_ticker: str | None        # Kalshi series identifier (e.g. "KXPRES")
 
     # --- Cache control ---
     last_fetched_at: datetime        # last time we polled Kalshi for this market
@@ -317,7 +319,7 @@ class StrategyConfig:
     min_confidence: float            # LLM confidence threshold (e.g. 0.70)
     max_exposure_per_market: float   # % of bankroll (e.g. 0.05)
     kelly_fraction: float            # fractional Kelly multiplier (e.g. 0.25)
-    categories: list[str]            # which categories this strategy trades
+    categories: list[str]            # Kalshi category strings to trade (e.g. ["Elections", "Sports"])
     min_volume_24h: float            # liquidity filter
     max_days_to_close: int           # don't trade markets closing too soon/late
     min_days_to_close: int
@@ -564,7 +566,7 @@ class IPredictionStrategy(ABC):
                 min_edge=0.18,
                 min_confidence=0.72,
                 kelly_fraction=0.25,
-                categories=["politics"],
+                categories=["Elections"],
                 stoploss=-0.20,
                 trailing_stop=True,
                 ...

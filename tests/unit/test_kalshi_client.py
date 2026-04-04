@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from freqpred.markets.kalshi import KalshiAPIError, KalshiClient, _infer_category
+from freqpred.markets.kalshi import KalshiAPIError, KalshiClient
 from freqpred.markets.models import Market, Order
 
 BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
@@ -45,6 +45,25 @@ _MARKET_PAYLOAD_2 = {
     "no_ask_dollars": "0.3800",
     "volume_24h_fp": 800,
     "open_interest_fp": 2000,
+}
+
+
+_EVENT_PAYLOAD_1 = {
+    "event_ticker": "KXPRES-25",
+    "category": "Elections",
+    "series_ticker": "KXPRES",
+    "title": "2025 Presidential Election",
+    "sub_title": "",
+    "markets": [_MARKET_PAYLOAD],
+}
+
+_EVENT_PAYLOAD_2 = {
+    "event_ticker": "KXTECH-25",
+    "category": "Technology",
+    "series_ticker": "KXTECH",
+    "title": "Tech markets",
+    "sub_title": "",
+    "markets": [_MARKET_PAYLOAD_2],
 }
 
 
@@ -142,17 +161,17 @@ class TestParseDollar:
 
 
 # ---------------------------------------------------------------------------
-# list_markets — no category
+# list_markets — events-based approach
 # ---------------------------------------------------------------------------
 
-class TestListMarketsNoCategory:
+class TestListMarkets:
     @pytest.mark.asyncio
     async def test_returns_all_open_markets(self) -> None:
         client = _make_client()
-        markets_page = {"markets": [_MARKET_PAYLOAD, _MARKET_PAYLOAD_2], "cursor": ""}
+        events_page = {"events": [_EVENT_PAYLOAD_1, _EVENT_PAYLOAD_2], "cursor": ""}
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = _mock_response(markets_page)
+            mock_get.return_value = _mock_response(events_page)
             result = await client.list_markets()
 
         assert len(result) == 2
@@ -160,136 +179,107 @@ class TestListMarketsNoCategory:
         assert result[1].id == "KXTECH-25-AI"
 
     @pytest.mark.asyncio
-    async def test_passes_status_open_param(self) -> None:
+    async def test_uses_events_endpoint_with_nested_markets(self) -> None:
+        """list_markets calls GET /events with status=open and with_nested_markets=true."""
         client = _make_client()
-        markets_page = {"markets": [], "cursor": ""}
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = _mock_response(markets_page)
+            mock_get.return_value = _mock_response({"events": [], "cursor": ""})
             await client.list_markets()
 
-        call_kwargs = mock_get.call_args
-        params = call_kwargs.kwargs.get("params") or call_kwargs.args[1] if call_kwargs.args else {}
-        # Extract params from call
-        if hasattr(call_kwargs, 'kwargs'):
-            params = call_kwargs.kwargs.get("params", {})
+        call_url: str = mock_get.call_args.args[0]
+        params = mock_get.call_args.kwargs.get("params", {})
+        assert call_url.endswith("/events")
         assert params.get("status") == "open"
+        assert params.get("with_nested_markets") == "true"
 
     @pytest.mark.asyncio
-    async def test_pagination_follows_cursor(self) -> None:
+    async def test_assigns_category_and_series_ticker_from_event(self) -> None:
+        """Markets inherit category and series_ticker from their parent event."""
         client = _make_client()
-        # First page returns 1000 items with cursor, second returns 1 with empty cursor
-        page1 = {"markets": [_MARKET_PAYLOAD] * 1000, "cursor": "abc123"}
-        page2 = {"markets": [_MARKET_PAYLOAD_2], "cursor": ""}
-
-        responses = [_mock_response(page1), _mock_response(page2)]
+        events_page = {"events": [_EVENT_PAYLOAD_1], "cursor": ""}
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
-            mock_get.side_effect = responses
+            mock_get.return_value = _mock_response(events_page)
             result = await client.list_markets()
 
-        assert len(result) == 1001
-        assert mock_get.call_count == 2
+        assert len(result) == 1
+        assert result[0].category == "Elections"
+        assert result[0].series_ticker == "KXPRES"
 
     @pytest.mark.asyncio
-    async def test_empty_response_returns_empty_list(self) -> None:
+    async def test_category_filter_excludes_non_matching_events(self) -> None:
+        """Only markets from events matching the requested category are returned."""
         client = _make_client()
+        events_page = {"events": [_EVENT_PAYLOAD_1, _EVENT_PAYLOAD_2], "cursor": ""}
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = _mock_response({"markets": [], "cursor": ""})
-            result = await client.list_markets()
-
-        assert result == []
-
-
-# ---------------------------------------------------------------------------
-# _infer_category
-# ---------------------------------------------------------------------------
-
-class TestInferCategory:
-    def test_known_prefix_exact(self) -> None:
-        assert _infer_category("KXPRES-25-DEM") == "politics"
-
-    def test_known_prefix_sports(self) -> None:
-        assert _infer_category("KXNBA-25-LAL") == "sports"
-
-    def test_longest_prefix_match(self) -> None:
-        # KXNBA3PT starts with KXNBA → sports
-        assert _infer_category("KXNBA3PT-26MAR") == "sports"
-
-    def test_unknown_prefix_returns_other(self) -> None:
-        assert _infer_category("UNKNOWN-TICKER") == "other"
-
-    def test_empty_string_returns_other(self) -> None:
-        assert _infer_category("") == "other"
-
-    def test_technology_prefix(self) -> None:
-        assert _infer_category("KXTECH-25-AI") == "technology"
-
-    def test_economics_prefix(self) -> None:
-        assert _infer_category("KXCPI-25-DEC") == "economics"
-
-    def test_case_insensitive_prefix(self) -> None:
-        # event_ticker should be uppercased before lookup
-        assert _infer_category("kxpres-25-dem") == "politics"
-
-
-# ---------------------------------------------------------------------------
-# list_markets — with category (prefix-inference approach)
-# ---------------------------------------------------------------------------
-
-class TestListMarketsWithCategory:
-    @pytest.mark.asyncio
-    async def test_filters_markets_by_inferred_category(self) -> None:
-        """Only markets whose event_ticker maps to the requested category are returned."""
-        client = _make_client()
-        # _MARKET_PAYLOAD has event_ticker="KXPRES-25" → politics
-        # _MARKET_PAYLOAD_2 has event_ticker="KXTECH-25" → technology
-        all_markets = {"markets": [_MARKET_PAYLOAD, _MARKET_PAYLOAD_2], "cursor": ""}
-
-        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = _mock_response(all_markets)
-            result = await client.list_markets(category="politics")
+            mock_get.return_value = _mock_response(events_page)
+            result = await client.list_markets(category="Elections")
 
         assert len(result) == 1
         assert result[0].id == "KXPRES-25-DEM"
-        assert result[0].category == "politics"
+        assert result[0].category == "Elections"
 
     @pytest.mark.asyncio
-    async def test_excludes_other_category_markets(self) -> None:
-        """Technology markets are excluded when filtering for politics."""
+    async def test_category_filter_no_match_returns_empty(self) -> None:
         client = _make_client()
-        all_markets = {"markets": [_MARKET_PAYLOAD, _MARKET_PAYLOAD_2], "cursor": ""}
+        events_page = {"events": [_EVENT_PAYLOAD_1, _EVENT_PAYLOAD_2], "cursor": ""}
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = _mock_response(all_markets)
-            result = await client.list_markets(category="technology")
+            mock_get.return_value = _mock_response(events_page)
+            result = await client.list_markets(category="Sports")
 
-        assert len(result) == 1
-        assert result[0].id == "KXTECH-25-AI"
-        assert result[0].category == "technology"
+        assert result == []
 
     @pytest.mark.asyncio
-    async def test_no_matching_markets_returns_empty(self) -> None:
-        """Category with no matching prefixes returns empty list."""
+    async def test_volume_total_populated_from_volume_fp(self) -> None:
+        """volume_total on the Market comes from volume_fp in the API response."""
         client = _make_client()
-        all_markets = {"markets": [_MARKET_PAYLOAD, _MARKET_PAYLOAD_2], "cursor": ""}
+        market_with_volume = {**_MARKET_PAYLOAD, "volume_fp": "66843.00"}
+        event_page = {
+            "events": [{**_EVENT_PAYLOAD_1, "markets": [market_with_volume]}],
+            "cursor": "",
+        }
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = _mock_response(all_markets)
-            result = await client.list_markets(category="sports")
+            mock_get.return_value = _mock_response(event_page)
+            result = await client.list_markets()
+
+        assert result[0].volume_total == pytest.approx(66843.0)
+
+    @pytest.mark.asyncio
+    async def test_pagination_continues_on_full_page(self) -> None:
+        """Pagination follows cursor when a page is full (200 events)."""
+        client = _make_client()
+        page1 = {"events": [_EVENT_PAYLOAD_1] * 200, "cursor": "abc123"}
+        page2 = {"events": [_EVENT_PAYLOAD_2], "cursor": ""}
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = [_mock_response(page1), _mock_response(page2)]
+            result = await client.list_markets()
+
+        assert len(result) == 201  # 200 × 1 market + 1 market
+        assert mock_get.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_events_returns_empty_list(self) -> None:
+        client = _make_client()
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response({"events": [], "cursor": ""})
+            result = await client.list_markets()
 
         assert result == []
 
     @pytest.mark.asyncio
     async def test_never_calls_series_endpoint(self) -> None:
-        """The new implementation never calls /series — it always uses /markets."""
+        """list_markets never calls /series."""
         client = _make_client()
-        all_markets = {"markets": [], "cursor": ""}
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = _mock_response(all_markets)
-            await client.list_markets(category="politics")
+            mock_get.return_value = _mock_response({"events": [], "cursor": ""})
+            await client.list_markets(category="Elections")
 
         for call in mock_get.call_args_list:
             url: str = call.args[0]
@@ -421,7 +411,7 @@ class TestRateLimiting:
             "429", request=MagicMock(), response=resp_429
         ))
 
-        resp_200 = _mock_response({"markets": [], "cursor": ""})
+        resp_200 = _mock_response({"events": [], "cursor": ""})
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
             mock_get.side_effect = [resp_429, resp_200]

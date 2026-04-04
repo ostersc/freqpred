@@ -54,13 +54,28 @@ class LogBuffer:
     """Bounded in-memory ring buffer that captures stdlib log lines."""
 
     def __init__(self, maxlen: int = 1000) -> None:
-        self._buf: collections.deque[str] = collections.deque(maxlen=maxlen)
+        self._buf: collections.deque[tuple[str, str]] = collections.deque(maxlen=maxlen)
 
-    def append(self, line: str) -> None:
-        self._buf.append(line)
+    def append(self, logger_name: str, line: str) -> None:
+        self._buf.append((logger_name, line))
 
-    def last(self, n: int) -> list[str]:
-        lines = list(self._buf)
+    def last(self, n: int, filter: str | None = None) -> list[str]:
+        """Return the last *n* lines, optionally filtered by logger prefix.
+
+        *filter* matches if the logger name equals it or starts with ``filter.``.
+        E.g. filter="scheduler" matches "freqpred.ingestion.scheduler" and
+        "freqpred.ingestion.scheduler.market_cycle_complete".
+        """
+        entries = list(self._buf)
+        if filter is not None:
+            entries = [
+                (name, line) for name, line in entries
+                if name == filter
+                or name.endswith(f".{filter}")
+                or f".{filter}." in name
+                or name.startswith(f"{filter}.")
+            ]
+        lines = [line for _, line in entries]
         return lines[-n:] if n < len(lines) else lines
 
 
@@ -73,7 +88,7 @@ class _LogBufferHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self._buf.append(self.format(record))
+            self._buf.append(record.name, self.format(record))
         except Exception:
             pass
 
@@ -238,18 +253,27 @@ def register_system_commands(
 
     async def handle_logs(chat_id: int, args: list[str]) -> str:
         n = 20
-        if args:
+        log_filter: str | None = None
+        remaining = list(args)
+        # Parse optional leading integer for count
+        if remaining:
             try:
-                n = int(args[0])
+                n = int(remaining[0])
+                remaining = remaining[1:]
             except ValueError:
-                return f"Usage: /logs [n] — n must be a number, got {args[0]!r}"
+                pass
+        # Remaining arg (if any) is the logger filter
+        if remaining:
+            log_filter = remaining[0]
         if log_buffer is None:
             return "Log capture not available."
-        lines = log_buffer.last(n)
+        lines = log_buffer.last(n, filter=log_filter)
         if not lines:
-            return "No log lines captured yet."
+            filter_str = f" matching {log_filter!r}" if log_filter else ""
+            return f"No log lines captured yet{filter_str}."
         body = "\n".join(lines)
-        return _clip(f"Last {len(lines)} log line(s):\n```\n{body}\n```")
+        filter_label = f" [{log_filter}]" if log_filter else ""
+        return _clip(f"Last {len(lines)} log line(s){filter_label}:\n```\n{body}\n```")
 
     # ------------------------------------------------------------------ #
     # /version                                                             #
@@ -384,7 +408,8 @@ def register_system_commands(
             mae_str = f"{pos.mae:+.4f}" if pos.mae is not None else "—"
             mfe_str = f"{pos.mfe:+.4f}" if pos.mfe is not None else "—"
             lines.append(
-                f"  [{pos.direction}] {q}\n"
+                f"  [{pos.direction}] {pos.market_id}\n"
+                f"    {q}\n"
                 f"    entry={pos.entry_price:.4f}  prob={prob_str}  unreal_pnl=${unreal_pnl:+.2f}"
                 f"  mae={mae_str}  mfe={mfe_str}"
             )

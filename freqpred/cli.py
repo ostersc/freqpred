@@ -623,7 +623,19 @@ def markets() -> None:
 @click.option(
     "--category",
     default=None,
-    help="Filter by category (e.g. politics, technology).",
+    help="Filter by Kalshi category string (e.g. Elections, Sports, World). Case-sensitive.",
+)
+@click.option(
+    "--min-volume",
+    default=None,
+    type=float,
+    help="Only show markets with volume_24h >= this value.",
+)
+@click.option(
+    "--max-days",
+    default=None,
+    type=float,
+    help="Only show markets closing within this many days.",
 )
 @click.option(
     "--no-db",
@@ -632,13 +644,25 @@ def markets() -> None:
     help="Skip writing results to the database.",
 )
 @click.pass_context
-def markets_list(ctx: click.Context, category: str | None, no_db: bool) -> None:
+def markets_list(
+    ctx: click.Context,
+    category: str | None,
+    min_volume: float | None,
+    max_days: float | None,
+    no_db: bool,
+) -> None:
     """Fetch active Kalshi markets and write them to the database."""
     config = ctx.obj["config"]
-    asyncio.run(_markets_list(config, category=category, skip_db=no_db))
+    asyncio.run(_markets_list(config, category=category, min_volume=min_volume, max_days=max_days, skip_db=no_db))
 
 
-async def _markets_list(config: object, category: str | None, skip_db: bool) -> None:
+async def _markets_list(
+    config: object,
+    category: str | None,
+    min_volume: float | None,
+    max_days: float | None,
+    skip_db: bool,
+) -> None:
     from freqpred.db import make_engine, make_session_factory
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.markets.repository import upsert_markets
@@ -661,7 +685,19 @@ async def _markets_list(config: object, category: str | None, skip_db: bool) -> 
         click.echo("No markets found.")
         return
 
-    # Write to DB
+    # Apply optional client-side filters
+    from datetime import datetime, timezone
+    now = datetime.now(tz=timezone.utc)
+    if min_volume is not None:
+        market_list = [m for m in market_list if m.volume_24h >= min_volume]
+    if max_days is not None:
+        market_list = [m for m in market_list if (m.close_time - now).total_seconds() / 86400 <= max_days]
+
+    if not market_list:
+        click.echo("No markets matched the filters.")
+        return
+
+    # Write to DB (pre-filter full list already written above if applicable)
     if not skip_db and config.database.url:
         engine = make_engine(config.database.url)
         session_factory = make_session_factory(engine)
@@ -671,13 +707,18 @@ async def _markets_list(config: object, category: str | None, skip_db: bool) -> 
         click.echo(f"Wrote {written} market(s) to database.")
 
     # Print table to stdout
-    header = f"{'TICKER':<30} {'CATEGORY':<14} {'BID':>6} {'ASK':>6} {'MID':>6}  QUESTION"
+    header = (
+        f"{'TICKER':<30} {'CATEGORY':<20} {'SERIES':<14} "
+        f"{'VOL_24H':>10} {'DAYS':>5} {'BID':>6} {'ASK':>6} {'MID':>6}  QUESTION"
+    )
     click.echo(header)
-    click.echo("-" * min(120, len(header) + 40))
+    click.echo("-" * min(160, len(header) + 20))
     for m in market_list:
-        question_preview = m.question[:60] + "…" if len(m.question) > 60 else m.question
+        days_to_close = (m.close_time - now).total_seconds() / 86400
+        question_preview = m.question[:55] + "…" if len(m.question) > 55 else m.question
         click.echo(
-            f"{m.id:<30} {m.category:<14} "
+            f"{m.id:<30} {m.category:<20} {(m.series_ticker or ''):<14} "
+            f"{m.volume_24h:>10.0f} {days_to_close:>5.1f} "
             f"{m.yes_bid:>6.3f} {m.yes_ask:>6.3f} {m.mid_price:>6.3f}  {question_preview}"
         )
     click.echo(f"\nTotal: {len(market_list)} market(s)")

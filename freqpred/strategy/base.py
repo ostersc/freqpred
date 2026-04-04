@@ -27,7 +27,7 @@ class IPredictionStrategy(ABC):
                 min_edge=0.18,
                 min_confidence=0.72,
                 kelly_fraction=0.25,
-                categories=["politics"],
+                categories=["Politics", "Elections"],
                 ...
             )
 

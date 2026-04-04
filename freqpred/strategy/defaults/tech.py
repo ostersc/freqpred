@@ -16,7 +16,7 @@ class TechNewsStrategy(IPredictionStrategy):
         min_confidence=0.68,
         max_exposure_per_market=0.20,  # kelly_fraction × 0.20 = 4% of bankroll max
         kelly_fraction=0.20,
-        categories=["technology", "fintech"],
+        categories=["Science and Technology"],
         min_volume_24h=500.0,
         max_days_to_close=30,
         min_days_to_close=1,

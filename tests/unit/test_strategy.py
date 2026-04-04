@@ -176,7 +176,7 @@ class TestIsMarketInteresting:
 
     def test_passes_with_technology_market(self) -> None:
         assert self.strategy.is_market_interesting(
-            _market(category="technology", volume_24h=1000.0, days_to_close=14)
+            _market(category="Science and Technology", volume_24h=1000.0, days_to_close=14)
         )
 
     def test_rejects_non_technology_categories(self) -> None:
@@ -203,27 +203,27 @@ class TestIsMarketInteresting:
         )
 
     def test_passes_within_days_window(self) -> None:
-        assert self.strategy.is_market_interesting(_market(category="technology", days_to_close=10))
-        assert self.strategy.is_market_interesting(_market(category="technology", days_to_close=30))
+        assert self.strategy.is_market_interesting(_market(category="Science and Technology", days_to_close=10))
+        assert self.strategy.is_market_interesting(_market(category="Science and Technology", days_to_close=30))
 
     def test_rejects_below_min_mid_price(self) -> None:
         assert not self.strategy.is_market_interesting(
-            _market(category="technology", mid_price=0.03)
+            _market(category="Science and Technology", mid_price=0.03)
         )
 
     def test_rejects_above_max_mid_price(self) -> None:
         assert not self.strategy.is_market_interesting(
-            _market(category="technology", mid_price=0.97)
+            _market(category="Science and Technology", mid_price=0.97)
         )
 
     def test_passes_at_min_mid_price_boundary(self) -> None:
         assert self.strategy.is_market_interesting(
-            _market(category="technology", mid_price=0.05)
+            _market(category="Science and Technology", mid_price=0.05)
         )
 
     def test_passes_at_max_mid_price_boundary(self) -> None:
         assert self.strategy.is_market_interesting(
-            _market(category="technology", mid_price=0.95)
+            _market(category="Science and Technology", mid_price=0.95)
         )
 
     def test_mid_price_filter_disabled_when_none(self) -> None:
@@ -236,7 +236,7 @@ class TestIsMarketInteresting:
                 min_confidence=0.70,
                 max_exposure_per_market=0.05,
                 kelly_fraction=0.25,
-                categories=["technology"],
+                categories=[],  # empty = all categories
                 min_volume_24h=0.0,
                 max_days_to_close=90,
                 min_days_to_close=0,
@@ -249,8 +249,8 @@ class TestIsMarketInteresting:
                 return 0.0
 
         strat = NoFilter()
-        assert strat.is_market_interesting(_market(category="technology", mid_price=0.01))
-        assert strat.is_market_interesting(_market(category="technology", mid_price=0.99))
+        assert strat.is_market_interesting(_market(category="Science and Technology", mid_price=0.01))
+        assert strat.is_market_interesting(_market(category="Science and Technology", mid_price=0.99))
 
     def test_category_filtered_strategy_rejects_wrong_category(self) -> None:
         from freqpred.strategy.config import StrategyConfig
@@ -287,9 +287,9 @@ class TestFilterMarkets:
     def test_delegates_to_is_market_interesting(self) -> None:
         strategy = ConservativeDefault()
 
-        good = _market(category="technology", volume_24h=1000.0, days_to_close=14)
-        bad_volume = _market(category="technology", volume_24h=10.0, days_to_close=14)
-        bad_days = _market(category="technology", volume_24h=1000.0, days_to_close=90)
+        good = _market(category="Science and Technology", volume_24h=1000.0, days_to_close=14)
+        bad_volume = _market(category="Science and Technology", volume_24h=10.0, days_to_close=14)
+        bad_days = _market(category="Science and Technology", volume_24h=1000.0, days_to_close=90)
 
         result = strategy.filter_markets([good, bad_volume, bad_days])
         assert result == [good]
@@ -298,7 +298,7 @@ class TestFilterMarkets:
         assert ConservativeDefault().filter_markets([]) == []
 
     def test_all_pass(self) -> None:
-        markets = [_market(category="technology") for _ in range(3)]
+        markets = [_market(category="Science and Technology") for _ in range(3)]
         result = ConservativeDefault().filter_markets(markets)
         assert result == markets
 

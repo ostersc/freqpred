@@ -25,16 +25,19 @@ Starts four concurrent async tasks: market watcher, ingestion scheduler, signal 
 
 ```bash
 uv run freqpred markets list
-uv run freqpred markets list --category politics
+uv run freqpred markets list --category Elections
+uv run freqpred markets list --min-volume 500 --max-days 30
 uv run freqpred markets list --no-db
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `--category` | none | Filter by category (`politics`, `technology`, `economics`, ...) |
+| `--category` | none | Filter by Kalshi category string, case-sensitive (e.g. `Elections`, `Sports`, `World`, `Science and Technology`) |
+| `--min-volume` | none | Only show markets with `volume_24h` >= this value |
+| `--max-days` | none | Only show markets closing within this many days |
 | `--no-db` | false | Print markets but skip writing to the database |
 
-Fetches live markets from the Kalshi API, writes them to the `markets` table, and prints a summary table.
+Fetches live markets from the Kalshi API, writes them to the `markets` table, and prints a summary table with `VOL_24H` and `DAYS` columns.
 
 ---
 
