@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-04-03
+**Last updated:** 2026-04-04
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -595,9 +595,15 @@ class IPredictionStrategy(ABC):
         """Return True if this signal warrants opening a new position."""
         ...
 
-    @abstractmethod
-    def position_size(self, signal: Signal, bankroll: float) -> float:
-        """Return dollar amount to risk on this position (before risk capping)."""
+    def position_size(self, signal: Signal, bankroll: float, assessment: SignalAssessment | None = None) -> float:
+        """Return dollar amount to risk on this position (before risk capping).
+
+        assessment is provided by order_manager after assess_signal_sources()
+        runs between should_trade and position_size.  The default implementation
+        applies assessment.size_multiplier to the Kelly result.  assessment is
+        None when no source quality data is available (neutral: multiplier=1.0).
+        Existing overrides that omit the assessment parameter continue to work.
+        """
         ...
 
     # -------------------------------------------------------------------------
@@ -929,6 +935,16 @@ Key design properties:
 - `kelly_fraction` controls overall aggression (quarter-Kelly = 0.25 is default). Lowering it shrinks all positions proportionally.
 - If `f* ≤ 0` (no edge after confidence blending), `position_size` returns 0.
 
+**Source quality multiplier** (T57): after `should_trade` passes, `order_manager.submit()` calls `assess_signal_sources()` which looks up the latest `source_quality_scores` snapshot for each source name used in the signal's evidence documents. A Claude Haiku call produces a `SignalAssessment` with a `size_multiplier` derived from the share-weighted average Brier delta vs the overall baseline:
+
+```
+weighted_delta = Σ (share_i × (source_brier_i - overall_brier))
+multiplier     = 1.0 - (weighted_delta / source_quality_delta_threshold) × (scale_range / 2)
+               clamped to [source_quality_scale_min, source_quality_scale_max]
+```
+
+Defaults: `scale_min=0.80`, `scale_max=1.20`, `delta_threshold=0.05`. Sources well below the baseline (negative delta) increase position size up to 20%; sources above the baseline reduce it down to 20%. The LLM call is skipped and `multiplier=1.0` when no quality snapshot data exists for the signal's sources. The probability estimate is **never modified** — the multiplier only affects sizing.
+
 ### Circuit Breakers
 
 - Daily loss > 15%: halt all new positions for 24 hours, alert via Telegram
@@ -1142,6 +1158,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [ ] **T47** [#47](https://github.com/ostersc/freqpred/issues/47) — `OrderTypes` config + limit order entry: `OrderTypes` dataclass on `StrategyConfig`; `custom_entry_price()` hook; entry at `estimated_prob - min_edge`; pending position fill-check + timeout cancellation; paper mode only.
 - [ ] **T48** [#48](https://github.com/ostersc/freqpred/issues/48) — Limit order exits + exchange-hosted stoploss: `exit=limit` posts resting ROI/trailing targets; `custom_exit_price()` hook; `stoploss_on_exchange` with interval refresh; emergency/circuit-breaker always market. Depends on: T47.
 - [x] **T49** [#49](https://github.com/ostersc/freqpred/issues/49) — `IAlgoStrategy`: DataFrame-driven exits via WebSocket tick data; freqtrade-style `populate_indicators()` + `populate_exit_trend()` hooks; OHLC candle buffer per market; `force_exit()` reads `exit_long` column; `PositionMonitor.on_tick()` feeds ticks to algo strategy buffers. OHLC is direction-corrected before being passed to `populate_indicators`/`populate_exit_trend`: NO positions receive inverted candles (`no_high = 1 - yes_low`, `no_low = 1 - yes_high`) so that indicator logic (RSI, EMA crossovers, etc.) operates on contract value from the holder's perspective. Candle cache is keyed by `(market_id, direction)` so YES and NO positions maintain independent OHLC series. Depends on: T39.
+- [ ] **T57** [#57](https://github.com/ostersc/freqpred/issues/57) — Source quality trust assessment: `source_quality_scores` table (daily rolling snapshot per source name × market category); `signal_assessments` table (one row per assessed signal); `assess_signal_sources()` in `freqpred/metrics/assessment.py` called between `should_trade` and `position_size` in `order_manager.submit()` — only fires when the strategy intends to trade; Claude Haiku assesses evidence quality from source Brier deltas vs overall baseline and returns a `SignalAssessment` with `size_multiplier`; default `position_size()` on `IPredictionStrategy` applies multiplier (share-weighted delta mapped linearly to `[source_quality_scale_min, source_quality_scale_max]`); neutral (`multiplier=1.0`) when no quality data exists; LLM call skipped in that case; `StrategyConfig` gains `source_quality_scale_min/max/delta_threshold` fields. Depends on: T56.
 - [ ] **T50** [#50](https://github.com/ostersc/freqpred/issues/50) — LLM-assisted exit analysis: `should_request_llm_exit()` predicate + `llm_exit_check()` async hook on `IAlgoStrategy`; PositionMonitor calls LLM when predicate fires; prompt includes candle metrics + P&L; response logged to `llm_queries`. Depends on: T49.
 - [x] **T51** [#51](https://github.com/ostersc/freqpred/issues/51) — TV chyron ingestion via Internet Archive Third Eye API + realtime scheduler: `tv_chyron.py` fetcher (`fetch_all`, `parse_and_groups`, `filter_chyrons`); new `realtime_scheduler.py` runs chyrons and Truth Social account feeds every 5 min (moved from main scheduler); `backoff.py` `tick_and_load` gains `services` filter so each scheduler manages its own counters independently; `ingestion.tv_chyron_enabled` and `ingestion.realtime_interval_seconds` config keys added.
 
