@@ -110,6 +110,25 @@ Prints overall Brier score vs. naive baseline and a probability-bucket breakdown
 
 ---
 
+### `metrics source-calibration` — weighted Brier score per document source name
+
+```bash
+uv run freqpred metrics source-calibration
+uv run freqpred metrics source-calibration --days 30
+uv run freqpred metrics source-calibration --period week
+uv run freqpred metrics source-calibration --min-docs 100
+uv run freqpred metrics source-calibration --min-docs 0   # show all sources including long tail
+```
+
+For each resolved signal, distributes the Brier loss across its evidence documents proportionally by `source_name` (e.g. `Tavily`, `r/politics`, `The Guardian`). Aggregates into a weighted-average Brier score per source — lower is better. Only signals with at least one linked document are included.
+
+Options:
+- `--days N` — restrict to signals created within the last N days
+- `--period day|week|month` — convenience aliases for `--days 1/7/30`
+- `--min-docs N` — hide sources with fewer than N total document appearances across qualifying signals (default: 50)
+
+---
+
 ### `report digest` — generate a daily summary
 
 ```bash
@@ -216,6 +235,7 @@ State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a 
 | `/balance` | Portfolio snapshot: bankroll, all-time P&L, net value, gross/net exposure, unrealized P&L, today's P&L, open position count, contract-weighted portfolio MAE/MFE |
 | `/budget` | LLM cost breakdown: today vs daily cap (%), per-query-type breakdown, this week, this month, all-time |
 | `/calibration [days]` | Brier score vs market baseline, improvement, sample count, per-probability-bucket breakdown. Optional `days` arg limits to last N days (e.g. `/calibration 30`); omit for all-time. |
+| `/source_calibration [days] [min_docs]` | Weighted Brier score per document source name. Optional `days` limits lookback; optional `min_docs` sets minimum doc appearances threshold (default 50). E.g. `/source_calibration 30 100`. |
 | `/digest` | On-demand daily digest: Claude Haiku natural-language summary of open positions, P&L, LLM spend, and calibration |
 
 Tabular responses use monospace code blocks. Rows are truncated at 4096 chars with `... and N more` footer.

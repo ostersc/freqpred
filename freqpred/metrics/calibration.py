@@ -4,10 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, case, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.markets.models import MarketRow
+from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
 
 
@@ -129,6 +130,136 @@ async def compute_calibration(
         lookback_days=lookback_days,
         buckets=buckets,
     )
+
+
+@dataclass
+class SourceBrierScore:
+    source_name: str
+    weighted_brier_score: float
+    n_signals: int        # number of (signal, source_name) appearances
+    total_doc_appearances: int  # total docs from this source used across all signals
+    total_share: float    # sum of per-signal shares (the denominator)
+
+
+async def compute_source_brier_scores(
+    session: AsyncSession,
+    lookback_days: int | None = None,
+    min_docs: int = 0,
+) -> list[SourceBrierScore]:
+    """Compute a weighted Brier score for each document source name.
+
+    For each resolved signal, the Brier loss is attributed to its evidence
+    documents in proportion to each source name's share of that signal's
+    document set.  Summing across signals and dividing by the total share
+    gives a weighted-average Brier score per source.
+
+    Only signals that have at least one linked document contribute.
+
+    Args:
+        session: Async DB session.
+        lookback_days: Restrict to signals created within the last N days.
+                       None means all-time.
+        min_docs: Exclude sources whose total document appearances across all
+                  qualifying signals is below this threshold.  Use to filter
+                  out the long tail of low-volume sources whose scores are
+                  statistically unreliable.
+
+    Returns:
+        List of SourceBrierScore, sorted ascending by weighted_brier_score
+        (best source first).  Empty list when there are no qualifying signals.
+    """
+    where_clauses: list = [
+        MarketRow.status == "finalized",
+        MarketRow.result.is_not(None),
+        SignalRow.model_used != "demo_harness",
+        SignalRow.prompt_version != "demo",
+        DocumentMarketLinkRow.signal_id.is_not(None),
+    ]
+    if lookback_days is not None:
+        cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+        where_clauses.append(SignalRow.created_at >= cutoff)
+
+    resolution_expr = case((MarketRow.result == "yes", 1), else_=0)
+
+    # Inner: per (signal, source_name) document count
+    inner = (
+        select(
+            SignalRow.id.label("signal_id"),
+            SignalRow.estimated_probability.label("estimated_probability"),
+            resolution_expr.label("resolution"),
+            DocumentRow.source_name.label("source_name"),
+            func.count(DocumentRow.id).label("source_count"),
+        )
+        .join(MarketRow, MarketRow.id == SignalRow.market_id)
+        .join(DocumentMarketLinkRow, DocumentMarketLinkRow.signal_id == SignalRow.id)
+        .join(DocumentRow, DocumentRow.id == DocumentMarketLinkRow.document_id)
+        .where(and_(*where_clauses))
+        .group_by(
+            SignalRow.id,
+            SignalRow.estimated_probability,
+            MarketRow.result,
+            DocumentRow.source_name,
+        )
+        .subquery()
+    )
+
+    # Outer: add total doc count per signal via window function
+    total_count_expr = func.sum(inner.c.source_count).over(
+        partition_by=inner.c.signal_id
+    )
+    stmt = select(
+        inner.c.estimated_probability,
+        inner.c.resolution,
+        inner.c.source_name,
+        inner.c.source_count,
+        total_count_expr.label("total_count"),
+    )
+
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return []
+
+    # Accumulate per source_name
+    error_pieces: dict[str, float] = {}
+    share_sums: dict[str, float] = {}
+    n_signals_counter: dict[str, int] = {}
+    doc_appearances: dict[str, int] = {}
+
+    for estimated_prob, resolution, source_name, source_count, total_count in rows:
+        if total_count == 0:
+            continue
+        p = float(estimated_prob)
+        y = float(resolution)
+        brier_loss = (p - y) ** 2
+        share = float(source_count) / float(total_count)
+        error_piece = brier_loss * share
+
+        error_pieces[source_name] = error_pieces.get(source_name, 0.0) + error_piece
+        share_sums[source_name] = share_sums.get(source_name, 0.0) + share
+        n_signals_counter[source_name] = n_signals_counter.get(source_name, 0) + 1
+        doc_appearances[source_name] = doc_appearances.get(source_name, 0) + int(source_count)
+
+    scores: list[SourceBrierScore] = []
+    for source_name, total_err in error_pieces.items():
+        total_appearances = doc_appearances[source_name]
+        if min_docs > 0 and total_appearances < min_docs:
+            continue
+        total_sh = share_sums[source_name]
+        weighted = total_err / total_sh if total_sh > 0 else 0.0
+        scores.append(
+            SourceBrierScore(
+                source_name=source_name,
+                weighted_brier_score=weighted,
+                n_signals=n_signals_counter[source_name],
+                total_doc_appearances=total_appearances,
+                total_share=total_sh,
+            )
+        )
+
+    scores.sort(key=lambda s: s.weighted_brier_score)
+    return scores
 
 
 def _empty_buckets() -> list[CalibrationBucket]:

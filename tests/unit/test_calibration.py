@@ -10,7 +10,9 @@ import pytest
 
 from freqpred.metrics.calibration import (
     CalibrationReport,
+    SourceBrierScore,
     compute_calibration,
+    compute_source_brier_scores,
 )
 
 # Ensure ORM relationships resolve
@@ -230,3 +232,137 @@ async def test_demo_harness_signals_excluded_from_query() -> None:
     )
     assert "demo_harness" in sql
     assert "'demo'" in sql
+
+
+# ---------------------------------------------------------------------------
+# compute_source_brier_scores tests
+# ---------------------------------------------------------------------------
+
+
+def _make_source_session(
+    rows: list[tuple[float, int, str, int, int]],
+) -> AsyncMock:
+    """Return a mock AsyncSession whose execute() returns the given rows.
+
+    Row shape: (estimated_probability, resolution, source_type, source_count, total_count)
+    """
+    mock_result = MagicMock()
+    mock_result.all.return_value = rows
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=mock_result)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_source_brier_empty_returns_empty_list() -> None:
+    """No qualifying signals → empty list."""
+    session = _make_source_session([])
+    scores = await compute_source_brier_scores(session)
+    assert scores == []
+
+
+@pytest.mark.asyncio
+async def test_source_brier_single_source_single_signal() -> None:
+    """Single signal, single source name (100% share) → weighted score = Brier loss."""
+    # estimated=1.0, resolution=1 → brier_loss=0.0, share=1.0 → weighted=0.0
+    session = _make_source_session([(1.0, 1, "Tavily", 3, 3)])
+    scores = await compute_source_brier_scores(session)
+    assert len(scores) == 1
+    assert scores[0].source_name == "Tavily"
+    assert scores[0].weighted_brier_score == pytest.approx(0.0)
+    assert scores[0].n_signals == 1
+    assert scores[0].total_share == pytest.approx(1.0)
+    assert scores[0].total_doc_appearances == 3
+
+
+@pytest.mark.asyncio
+async def test_source_brier_matches_example_from_issue() -> None:
+    """Verify the worked example from issue #56.
+
+    Source A:
+      Pred 1: brier=0.04, source_count=1, total=2 → share=0.50, piece=0.020
+      Pred 2: brier=0.25, source_count=1, total=5 → share=0.20, piece=0.050
+      Pred 3: brier=0.64, source_count=1, total=10 → share=0.10, piece=0.064
+      weighted = (0.020 + 0.050 + 0.064) / (0.50 + 0.20 + 0.10) = 0.134 / 0.80 = 0.1675
+    """
+    # estimated_prob, resolution chosen to produce the stated Brier losses:
+    # 0.04 → (0.8-1)^2, 0.25 → (0.5-1)^2, 0.64 → (0.2-1)^2
+    rows = [
+        (0.8, 1, "Tavily", 1, 2),   # piece 0.020
+        (0.5, 1, "Tavily", 1, 5),   # piece 0.050
+        (0.2, 1, "Tavily", 1, 10),  # piece 0.064
+    ]
+    session = _make_source_session(rows)
+    scores = await compute_source_brier_scores(session)
+    assert len(scores) == 1
+    assert scores[0].source_name == "Tavily"
+    assert scores[0].weighted_brier_score == pytest.approx(0.1675, rel=1e-4)
+    assert scores[0].total_share == pytest.approx(0.80, rel=1e-6)
+    assert scores[0].total_doc_appearances == 3
+
+
+@pytest.mark.asyncio
+async def test_source_brier_two_sources_sorted_ascending() -> None:
+    """Results sorted by weighted Brier score ascending (best source first)."""
+    # "r/politics" share=1.0, brier_loss=0.0 → score 0.0
+    # "Tavily"     share=1.0, brier_loss=1.0 → score 1.0
+    rows = [
+        (1.0, 1, "r/politics", 5, 5),  # brier_loss=0.0
+        (1.0, 0, "Tavily", 5, 5),      # brier_loss=1.0
+    ]
+    session = _make_source_session(rows)
+    scores = await compute_source_brier_scores(session)
+    assert len(scores) == 2
+    assert scores[0].source_name == "r/politics"
+    assert scores[1].source_name == "Tavily"
+    assert scores[0].weighted_brier_score < scores[1].weighted_brier_score
+
+
+@pytest.mark.asyncio
+async def test_source_brier_mixed_sources_same_signal() -> None:
+    """Signal with two source names: shares sum to 1, error split correctly.
+
+    Signal: estimated=0.8, resolution=1, brier_loss=0.04
+      Tavily: 2/5 = 0.40 share → piece=0.016
+      r/politics: 3/5 = 0.60 share → piece=0.024
+    """
+    rows = [
+        (0.8, 1, "Tavily", 2, 5),
+        (0.8, 1, "r/politics", 3, 5),
+    ]
+    session = _make_source_session(rows)
+    scores = await compute_source_brier_scores(session)
+    by_name = {s.source_name: s for s in scores}
+    assert by_name["Tavily"].weighted_brier_score == pytest.approx(0.016 / 0.40, rel=1e-6)
+    assert by_name["r/politics"].weighted_brier_score == pytest.approx(0.024 / 0.60, rel=1e-6)
+    # Both resolve to the same weighted score (0.04), since it's one signal
+    assert by_name["Tavily"].weighted_brier_score == pytest.approx(
+        by_name["r/politics"].weighted_brier_score, rel=1e-6
+    )
+
+
+@pytest.mark.asyncio
+async def test_source_brier_min_docs_filters_low_volume() -> None:
+    """Sources below min_docs threshold are excluded from results."""
+    # Tavily: 2 doc appearances, r/politics: 10 doc appearances
+    rows = [
+        (0.8, 1, "Tavily", 2, 12),
+        (0.8, 1, "r/politics", 10, 12),
+    ]
+    session = _make_source_session(rows)
+    scores = await compute_source_brier_scores(session, min_docs=5)
+    assert len(scores) == 1
+    assert scores[0].source_name == "r/politics"
+
+
+@pytest.mark.asyncio
+async def test_source_brier_min_docs_zero_includes_all() -> None:
+    """min_docs=0 disables filtering — all sources appear."""
+    rows = [
+        (0.8, 1, "Tavily", 1, 2),
+        (0.8, 1, "r/politics", 1, 2),
+    ]
+    session = _make_source_session(rows)
+    scores = await compute_source_brier_scores(session, min_docs=0)
+    assert len(scores) == 2

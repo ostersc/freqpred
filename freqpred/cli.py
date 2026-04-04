@@ -1307,6 +1307,93 @@ async def _metrics_calibration(config: object, lookback_days: int | None = None)
         )
 
 
+@metrics.command(name="source-calibration")
+@click.option("--days", type=int, default=None, help="Lookback window in days. Default: all time.")
+@click.option(
+    "--period",
+    type=click.Choice(["day", "week", "month"]),
+    default=None,
+    help="Convenience alias: day=1, week=7, month=30. Mutually exclusive with --days.",
+)
+@click.option(
+    "--min-docs",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Hide sources whose total document appearances are below this threshold.",
+)
+@click.pass_context
+def metrics_source_calibration(
+    ctx: click.Context, days: int | None, period: str | None, min_docs: int
+) -> None:
+    """Print weighted Brier score per document source name.
+
+    For each resolved signal, the Brier loss is distributed across its evidence
+    documents proportionally by source name.  The weighted average gives a
+    per-source quality score — lower is better.
+
+    Only signals that have at least one linked document are included.
+    Use --min-docs 0 to show all sources including the long tail.
+    """
+    if days is not None and period is not None:
+        raise click.UsageError("--days and --period are mutually exclusive.")
+    _period_map = {"day": 1, "week": 7, "month": 30}
+    lookback_days = days if days is not None else (_period_map[period] if period else None)
+    config = ctx.obj["config"]
+    asyncio.run(_metrics_source_calibration(config, lookback_days=lookback_days, min_docs=min_docs))
+
+
+async def _metrics_source_calibration(
+    config: object,
+    lookback_days: int | None = None,
+    min_docs: int = 50,
+) -> None:
+    import freqpred.signal.models  # noqa: F401
+    import freqpred.rag.models     # noqa: F401
+
+    from freqpred.db import make_engine, make_session_factory
+    from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            scores = await compute_source_brier_scores(
+                session, lookback_days=lookback_days, min_docs=min_docs
+            )
+            calibration = await compute_calibration(session, lookback_days=lookback_days)
+    finally:
+        await engine.dispose()
+
+    period_label = f"last {lookback_days}d" if lookback_days else "all time"
+    min_docs_label = f", min {min_docs} doc appearances" if min_docs > 0 else ""
+    if not scores:
+        click.echo(
+            f"No qualifying sources ({period_label}{min_docs_label}). "
+            "Try --min-docs 0 to include all sources."
+        )
+        return
+
+    overall = calibration.brier_score
+    click.echo(f"Source-weighted Brier scores ({period_label}{min_docs_label})  — lower is better")
+    click.echo(f"Overall Brier: {overall:.4f}  (+ above overall = hurting, - = helping)")
+    click.echo("")
+    header = f"{'Source Name':<32} {'Wtd Brier':>10} {'vs Overall':>11} {'Signals':>8} {'Doc Uses':>9}"
+    click.echo(header)
+    click.echo("-" * len(header))
+    for s in scores:
+        delta = s.weighted_brier_score - overall
+        click.echo(
+            f"{s.source_name:<32} {s.weighted_brier_score:>10.4f}"
+            f" {delta:>+11.4f} {s.n_signals:>8} {s.total_doc_appearances:>9}"
+        )
+
+
 @main.group()
 def report() -> None:
     """Reporting commands."""

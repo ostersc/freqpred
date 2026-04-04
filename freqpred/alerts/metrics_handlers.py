@@ -1,7 +1,7 @@
 """Telegram bot command handlers for T29: metrics and performance commands.
 
 Registers /profit /daily /weekly /monthly /stats /balance /budget /calibration
-onto a TelegramCommandHandler.
+/source_calibration onto a TelegramCommandHandler.
 
 Usage::
 
@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.alerts.command_handlers import _clip, _truncate
 from freqpred.alerts.run_state import get_drawdown_window
-from freqpred.metrics.calibration import compute_calibration
+from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
 from freqpred.trading.ledger import get_portfolio_summary
 
 if TYPE_CHECKING:
@@ -601,6 +601,47 @@ def register_metrics_commands(
         return _clip("\n".join(header_lines) + "\n" + table_block)
 
     # ------------------------------------------------------------------ #
+    # /source_calibration [days] [min_docs]                               #
+    # ------------------------------------------------------------------ #
+
+    async def handle_source_calibration(chat_id: int, args: list[str]) -> str:
+        lookback_days: int | None = None
+        min_docs = 50
+        if args:
+            try:
+                lookback_days = int(args[0])
+            except ValueError:
+                return f"Invalid days argument: {args[0]!r} — usage: /source_calibration [days] [min_docs]"
+        if len(args) >= 2:
+            try:
+                min_docs = int(args[1])
+            except ValueError:
+                return f"Invalid min_docs argument: {args[1]!r} — usage: /source_calibration [days] [min_docs]"
+
+        async with session_factory() as session:
+            scores = await compute_source_brier_scores(
+                session, lookback_days=lookback_days, min_docs=min_docs
+            )
+            calibration = await compute_calibration(session, lookback_days=lookback_days)
+
+        period = f"last {lookback_days}d" if lookback_days is not None else "all-time"
+        min_docs_label = f", min {min_docs} uses" if min_docs > 0 else ""
+        if not scores:
+            return f"No qualifying sources ({period}{min_docs_label}). Try /source_calibration {lookback_days or ''} 0"
+
+        overall = calibration.brier_score
+        header_line = f"Source Brier ({period}{min_docs_label}) — overall: {overall:.4f}"
+        tbl_header = f"{'Source':<22} {'Brier':>6} {'Delta':>7} {'Uses':>6}"
+        divider = "-" * len(tbl_header)
+        tbl_rows = [
+            f"{s.source_name:<22} {s.weighted_brier_score:>6.4f} {s.weighted_brier_score - overall:>+7.4f} {s.total_doc_appearances:>6}"
+            for s in scores
+        ]
+
+        table_block = _table_rows_clip(tbl_header, divider, tbl_rows)
+        return _clip(header_line + "\n" + table_block)
+
+    # ------------------------------------------------------------------ #
     # /digest  — on-demand daily digest via Claude Haiku                  #
     # ------------------------------------------------------------------ #
 
@@ -625,4 +666,5 @@ def register_metrics_commands(
     cmd_handler.register("balance", handle_balance)
     cmd_handler.register("budget", handle_budget)
     cmd_handler.register("calibration", handle_calibration)
+    cmd_handler.register("source_calibration", handle_source_calibration)
     cmd_handler.register("digest", handle_digest)
