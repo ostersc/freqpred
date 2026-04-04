@@ -299,6 +299,145 @@ async def test_local_embedder_embed_batch_empty():
     mock_model.encode.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Summarization behaviour in upsert_document
+# ---------------------------------------------------------------------------
+
+_LONG_BODY = "Federal Reserve holds interest rates steady. " * 30  # ~1350 chars
+_MARKET_Q = "Will the Federal Reserve raise rates before June 2026?\nIf yes this market resolves Yes."
+
+
+def _make_session_with_bm25(existing_row=None, bm25_score: float = 0.5, upserted_row=None) -> AsyncMock:
+    """Session mock that handles the dedup SELECT, optional BM25 query, and INSERT."""
+    session = AsyncMock()
+    session.begin_nested = MagicMock()
+
+    select_result = MagicMock()
+    select_result.scalar_one_or_none.return_value = existing_row
+
+    bm25_result = MagicMock()
+    bm25_result.scalar.return_value = bm25_score
+
+    insert_result = MagicMock()
+    insert_result.scalar_one.return_value = upserted_row
+
+    session.execute = AsyncMock(side_effect=[select_result, bm25_result, insert_result])
+    session.flush = AsyncMock()
+    return session
+
+
+@pytest.mark.asyncio
+async def test_upsert_uses_summary_for_embedding_when_present():
+    """When raw_doc.summary is pre-set, embed_text must use the summary."""
+    raw_doc = _make_raw_doc(summary="Pre-existing summary text.")
+    body_clean = _strip_html(raw_doc.body)
+    content_hash = _sha256(body_clean)
+
+    upserted_row = _make_document_row(raw_doc.source_url, content_hash)
+    session = _make_session(existing_row=None, upserted_row=upserted_row)
+
+    embedder = AsyncMock()
+    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+
+    await upsert_document(session, embedder, raw_doc)
+
+    embedder.embed_text.assert_awaited_once_with("Pre-existing summary text.")
+
+
+@pytest.mark.asyncio
+async def test_upsert_long_body_with_llm_client_calls_summarizer():
+    """Long body + llm_client + market_question above BM25 threshold → summarize_body called."""
+    raw_doc = _make_raw_doc(body=_LONG_BODY)
+    body_clean = _strip_html(raw_doc.body)
+    content_hash = _sha256(body_clean)
+
+    upserted_row = _make_document_row(raw_doc.source_url, content_hash)
+    session = _make_session_with_bm25(existing_row=None, bm25_score=0.3, upserted_row=upserted_row)
+
+    embedder = AsyncMock()
+    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+
+    llm_client = MagicMock()
+
+    with patch(
+        "freqpred.ingestion.body_summarizer.summarize_body",
+        new=AsyncMock(return_value="Fed held rates steady in March 2026."),
+    ):
+        doc, status = await upsert_document(
+            session, embedder, raw_doc,
+            llm_client=llm_client,
+            query_text="Fed interest rate",
+            market_question=_MARKET_Q,
+        )
+
+    embedder.embed_text.assert_awaited_once_with("Fed held rates steady in March 2026.")
+    assert doc.source_url == raw_doc.source_url
+
+
+@pytest.mark.asyncio
+async def test_upsert_deduped_doc_never_calls_summarizer():
+    """Deduped document (same content_hash) must never trigger LLM summarization."""
+    raw_doc = _make_raw_doc(body=_LONG_BODY)
+    body_clean = _strip_html(raw_doc.body)
+    content_hash = _sha256(body_clean)
+
+    existing_row = _make_document_row(raw_doc.source_url, content_hash)
+    session = AsyncMock()
+    select_result = MagicMock()
+    select_result.scalar_one_or_none.return_value = existing_row
+    session.execute = AsyncMock(return_value=select_result)
+    session.flush = AsyncMock()
+
+    embedder = AsyncMock()
+    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    llm_client = MagicMock()
+
+    with patch(
+        "freqpred.ingestion.body_summarizer.summarize_body",
+        new=AsyncMock(return_value="should not be called"),
+    ) as mock_summarize:
+        _, status = await upsert_document(
+            session, embedder, raw_doc,
+            llm_client=llm_client,
+            query_text="Fed interest rate",
+            market_question=_MARKET_Q,
+        )
+
+    assert status == UpsertStatus.DEDUPED
+    mock_summarize.assert_not_awaited()
+    embedder.embed_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_upsert_low_bm25_skips_summarizer():
+    """Body above threshold but BM25 score below minimum → summarize_body not called."""
+    raw_doc = _make_raw_doc(body=_LONG_BODY)
+    body_clean = _strip_html(raw_doc.body)
+    content_hash = _sha256(body_clean)
+
+    upserted_row = _make_document_row(raw_doc.source_url, content_hash)
+    session = _make_session_with_bm25(existing_row=None, bm25_score=0.001, upserted_row=upserted_row)
+
+    embedder = AsyncMock()
+    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    llm_client = MagicMock()
+
+    with patch(
+        "freqpred.ingestion.body_summarizer.summarize_body",
+        new=AsyncMock(return_value="should not be called"),
+    ) as mock_summarize:
+        await upsert_document(
+            session, embedder, raw_doc,
+            llm_client=llm_client,
+            query_text="unrelated topic",
+            market_question=_MARKET_Q,
+        )
+
+    mock_summarize.assert_not_awaited()
+    # Embedding should still happen, using body (no summary)
+    embedder.embed_text.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_local_embedder_embed_batch_multiple():
     """embed_batch must return one vector per input text."""

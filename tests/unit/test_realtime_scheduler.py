@@ -189,7 +189,7 @@ class TestChyronPhase:
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
         doc = _make_document()
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("fed rate", 'trump AND "iran"')])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("fed rate", 'trump AND "iran"')])]
 
         with (
             patch(
@@ -264,7 +264,7 @@ class TestChyronPhase:
         session = _make_session()
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("fed rate", 'trump')])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("fed rate", 'trump')])]
 
         with (
             patch(
@@ -303,7 +303,7 @@ class TestChyronPhase:
         session = _make_session()
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("fed rate", 'trump')])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("fed rate", 'trump')])]
 
         with (
             patch(

@@ -211,7 +211,7 @@ class TestEnsureCatalysts:
             patch(
                 "freqpred.ingestion.scheduler._load_active_market_queries",
                 new_callable=AsyncMock,
-                return_value=[("MKT-1", "politics", close_time, [("query one", None)])],
+                return_value=[("MKT-1", "politics", "Will tech dominate in 2026?", close_time, [("query one", None)])],
             ),
             patch(
                 "freqpred.ingestion.scheduler.newsapi_fetcher.fetch",

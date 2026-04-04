@@ -98,7 +98,7 @@ async def run_realtime_cycle(
 
     # Build category → [market_id] index for Truth Social category routing.
     _category_markets: dict[str, list[str]] = {}
-    for _mid, _cat, _ct, _qpairs in market_queries:
+    for _mid, _cat, _mq, _ct, _qpairs in market_queries:
         _category_markets.setdefault(_cat.lower(), []).append(_mid)
 
     # --- TV chyron phase ---
@@ -107,7 +107,7 @@ async def run_realtime_cycle(
         all_chyrons = await tv_chyron_fetcher.fetch_all(lookback_hours=1)
         chyrons_matched = 0
 
-        for market_id, category, _close_time, query_pairs in market_queries:
+        for market_id, category, _market_question, _close_time, query_pairs in market_queries:
             for _query_text, tv_query in query_pairs:
                 if not tv_query:
                     continue

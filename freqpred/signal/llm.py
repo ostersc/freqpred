@@ -56,10 +56,12 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
         "=== EVIDENCE ===",
     ]
 
+    _MAX_EVIDENCE_CHARS = 500
     if docs:
         for i, doc in enumerate(docs, start=1):
-            # Prefer summary when available; fall back to body excerpt
-            excerpt = doc.summary or doc.body[:500]
+            # Prefer summary when available; fall back to body excerpt. Both are
+            # capped at _MAX_EVIDENCE_CHARS so the prompt stays consistent.
+            excerpt = (doc.summary or doc.body)[:_MAX_EVIDENCE_CHARS]
             excerpt = excerpt.replace("\n", " ").strip()
             lines += [
                 f"[{i}] {doc.title}",

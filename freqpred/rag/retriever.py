@@ -64,9 +64,17 @@ async def retrieve(
     )
 
     distance_col = DocumentRow.embedding.cosine_distance(query_vector).label("cosine_distance")
+    # Use summary for BM25 when present — summaries are generated with market-question
+    # vocabulary so they score better against the market question than the raw body.
+    # Use only the first line of the question to avoid boilerplate resolution criteria
+    # inflating the tsquery with irrelevant terms (e.g. "market resolv accord rule").
+    question_first_line = func.split_part(question, "\n", 1)
     bm25_col = func.ts_rank(
-        func.to_tsvector(text("'english'"), DocumentRow.title + " " + DocumentRow.body),
-        func.plainto_tsquery(text("'english'"), question),
+        func.to_tsvector(
+            text("'english'"),
+            DocumentRow.title + " " + func.coalesce(DocumentRow.summary, DocumentRow.body),
+        ),
+        func.plainto_tsquery(text("'english'"), question_first_line),
     ).label("bm25_score")
 
     stmt = (

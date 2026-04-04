@@ -15,14 +15,18 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.rag.embedder import LocalEmbedder
 from freqpred.rag.models import Document, DocumentMarketLinkRow, DocumentRow
+
+if TYPE_CHECKING:
+    from freqpred.llm.client import LLMClient
 
 log = structlog.get_logger()
 
@@ -44,6 +48,13 @@ class UpsertStatus(str, Enum):
 # Truncate body before embedding to keep token count reasonable.
 # all-MiniLM-L6-v2 has a 512-token limit; ~2000 chars ≈ 400 tokens.
 _MAX_EMBED_CHARS = 2_000
+
+# LLM summarization thresholds.
+# Bodies longer than _SUMMARY_THRESHOLD are candidates for LLM summarization.
+# _MIN_BM25_SCORE is the ts_rank floor against the market question's first line;
+# documents scoring below this are off-topic and not worth summarizing.
+_SUMMARY_THRESHOLD = 1_000   # 2 × the 500-char evidence excerpt limit in signal/llm.py
+_MIN_BM25_SCORE = 0.01       # ~42% of long linked docs score below this when using first-line market question (live data)
 
 
 # ---------------------------------------------------------------------------
@@ -140,13 +151,24 @@ async def upsert_document(
     session: AsyncSession,
     embedder: LocalEmbedder,
     raw_doc: RawDocument,
+    *,
+    llm_client: LLMClient | None = None,
+    query_text: str = "",
+    market_question: str = "",
 ) -> tuple[Document, UpsertStatus]:
     """Embed and upsert a document, skipping re-embedding if content unchanged.
 
+    When llm_client, query_text, and market_question are provided, long bodies
+    that pass a BM25 relevance gate are summarized before embedding. The summary
+    is stored on the document and used as the embedding source.
+
     Args:
-        session:  An open async SQLAlchemy session (caller manages commit).
-        embedder: Voyage AI embedder instance.
-        raw_doc:  The raw fetched document.
+        session:          An open async SQLAlchemy session (caller manages commit).
+        embedder:         Local embedder instance.
+        raw_doc:          The raw fetched document.
+        llm_client:       Optional LLM client for body summarization.
+        query_text:       Catalyst query that retrieved this document (for prompt context).
+        market_question:  Full market question (for BM25 gate + summarizer prompt).
 
     Returns:
         A (Document, UpsertStatus) tuple. Status is INSERTED for new docs,
@@ -162,7 +184,6 @@ async def upsert_document(
         raise DocumentSkipped(raw_doc.source_url)
 
     content_hash = _sha256(body_clean)
-    embed_text = body_clean[:_MAX_EMBED_CHARS]
 
     # Check for an existing row with the same URL.
     result = await session.execute(
@@ -180,11 +201,55 @@ async def upsert_document(
 
     is_update = existing is not None
 
-    # New doc or content changed — generate embedding.
+    # New doc or content changed — optionally summarize long bodies before embedding.
+    # Summarization is gated on: body length > threshold AND BM25 score against the
+    # market question's first line meets the minimum. The dedup check above ensures
+    # we never call the LLM for content we've already processed.
+    if llm_client is not None and len(body_clean) > _SUMMARY_THRESHOLD and market_question:
+        question_first_line = market_question.split("\n")[0]
+        bm25_result = await session.execute(
+            sa_text(
+                "SELECT ts_rank("
+                "  to_tsvector('english', :title || ' ' || :body),"
+                "  plainto_tsquery('english', :query)"
+                ") AS score"
+            ),
+            {
+                "title": raw_doc.title,
+                "body": body_clean[:_SUMMARY_THRESHOLD],
+                "query": question_first_line,
+            },
+        )
+        bm25_score: float = bm25_result.scalar() or 0.0
+
+        if bm25_score >= _MIN_BM25_SCORE:
+            from freqpred.ingestion.body_summarizer import summarize_body
+            summary = await summarize_body(raw_doc, query_text, market_question, llm_client)
+            if summary is not None:
+                raw_doc.summary = summary
+                log.debug(
+                    "store.upsert_document.summarized",
+                    source_url=raw_doc.source_url,
+                    bm25_score=round(bm25_score, 4),
+                )
+        else:
+            log.debug(
+                "store.upsert_document.summarize_skip",
+                source_url=raw_doc.source_url,
+                reason="low_bm25",
+                bm25_score=round(bm25_score, 4),
+            )
+
+    # Use summary for embedding when present — aligns the embedding vector with
+    # the summarized content rather than an arbitrary body truncation.
+    summary_clean = _sanitize(raw_doc.summary) if raw_doc.summary else None
+    embed_text = summary_clean[:_MAX_EMBED_CHARS] if summary_clean else body_clean[:_MAX_EMBED_CHARS]
+
     log.debug(
         "store.upsert_document.embed",
         source_url=raw_doc.source_url,
         is_update=is_update,
+        embed_source="summary" if summary_clean else "body",
     )
     embedding = await embedder.embed_text(embed_text)
 

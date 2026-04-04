@@ -209,7 +209,7 @@ class TestRunCycleFetchersCalled:
         doc = _make_document()
         raw_doc = _make_raw_doc()
 
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("Fed rate decision March 2026", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("Fed rate decision March 2026", None)])]
 
         with (
             patch(
@@ -260,7 +260,7 @@ class TestRunCycleFetchersCalled:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("some query", None)])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("some query", None)])]
 
         with (
             patch(
@@ -293,7 +293,7 @@ class TestRunCycleFetchersCalled:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("some query", None)])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("some query", None)])]
 
         with (
             patch(
@@ -327,7 +327,7 @@ class TestRunCycleFetchersCalled:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("some query", None)])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("some query", None)])]
 
         with (
             patch(
@@ -368,7 +368,7 @@ class TestRunCycleErrorIsolation:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch(
@@ -407,7 +407,7 @@ class TestRunCycleErrorIsolation:
         session = AsyncMock()
         embedder = _make_embedder()
 
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch(
@@ -445,7 +445,7 @@ class TestRunCycleErrorIsolation:
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
 
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch(
@@ -488,7 +488,7 @@ class TestRunCycleErrorIsolation:
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
 
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch(
@@ -533,8 +533,8 @@ class TestRunCycleErrorIsolation:
 
         # Two markets, each with one query — NewsAPI should only be attempted once.
         market_queries = [
-            ("MKT-1", "economics", CLOSE_TIME, [("query-1", None)]),
-            ("MKT-2", "politics", CLOSE_TIME, [("query-2", None)]),
+            ("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query-1", None)]),
+            ("MKT-2", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("query-2", None)]),
         ]
 
         with (
@@ -583,8 +583,8 @@ class TestRunCycleMultipleMarkets:
         embedder = _make_embedder()
 
         market_queries = [
-            ("MKT-A", "politics", CLOSE_TIME, [("q1", None), ("q2", None)]),
-            ("MKT-B", "economics", CLOSE_TIME, [("q3", None)]),
+            ("MKT-A", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("q1", None), ("q2", None)]),
+            ("MKT-B", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("q3", None)]),
         ]
 
         with (
@@ -619,9 +619,9 @@ class TestRunCycleMultipleMarkets:
         embedder = _make_embedder()
 
         market_queries = [
-            ("MKT-A", "politics", CLOSE_TIME, [("q1", None)]),
-            ("MKT-B", "economics", CLOSE_TIME, [("q2", None)]),
-            ("MKT-C", "technology", CLOSE_TIME, [("q3", None)]),
+            ("MKT-A", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("q1", None)]),
+            ("MKT-B", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("q2", None)]),
+            ("MKT-C", "technology", "Will this market resolve Yes?", CLOSE_TIME, [("q3", None)]),
         ]
 
         # Track each session mock created by the factory so we can assert
@@ -673,8 +673,8 @@ class TestRunCycleStats:
         doc = _make_document()
 
         market_queries = [
-            ("MKT-A", "politics", CLOSE_TIME, [("query-a", None)]),
-            ("MKT-B", "economics", CLOSE_TIME, [("query-b", None)]),
+            ("MKT-A", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("query-a", None)]),
+            ("MKT-B", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query-b", None)]),
         ]
 
         with (
@@ -732,7 +732,7 @@ class TestAdaptiveLimits:
         """Guardian must not be called when guardian_api_key is empty."""
         session = AsyncMock()
         embedder = _make_embedder()
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("some query", None)])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("some query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -751,7 +751,7 @@ class TestAdaptiveLimits:
         """Guardian must not be called when guardian_enabled=False even if key is set."""
         session = AsyncMock()
         embedder = _make_embedder()
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("some query", None)])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("some query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -771,7 +771,7 @@ class TestAdaptiveLimits:
         session = AsyncMock()
         embedder = _make_embedder()
         market_queries = [
-            ("MKT-1", "politics", CLOSE_TIME,
+            ("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME,
              [("plain text query", 'trump AND ("tariff" OR "tariffs")')])
         ]
 
@@ -793,7 +793,7 @@ class TestAdaptiveLimits:
         """Guardian must use query_text when tv_query is None."""
         session = AsyncMock()
         embedder = _make_embedder()
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("Fed rate hike 2026", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("Fed rate hike 2026", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -821,7 +821,7 @@ class TestAdaptiveLimits:
         )
         session = AsyncMock()
         embedder = _make_embedder()
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -844,7 +844,7 @@ class TestAdaptiveLimits:
         )
         session = AsyncMock()
         embedder = _make_embedder()
-        market_queries = [("MKT-1", "politics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -873,7 +873,7 @@ class TestAdaptiveLimits:
         )
         session = AsyncMock()
         embedder = _make_embedder()
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -904,7 +904,7 @@ class TestAdaptiveLimits:
         session = _make_session()
         embedder = _make_embedder()
         doc = _make_document()
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -935,7 +935,7 @@ class TestAdaptiveLimits:
         session = _make_session()
         embedder = _make_embedder()
         doc = _make_document()
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -965,7 +965,7 @@ class TestAdaptiveLimits:
         session = _make_session()
         embedder = _make_embedder()
         doc = _make_document()
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -996,7 +996,7 @@ class TestAdaptiveLimits:
 
         session = AsyncMock()
         embedder = _make_embedder()
-        market_queries = [("MKT-1", "economics", CLOSE_TIME, [("query", None)])]
+        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query", None)])]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -1035,8 +1035,8 @@ class TestAdaptiveLimits:
         embedder = _make_embedder()
         doc = _make_document()
         market_queries = [
-            ("MKT-1", "economics", CLOSE_TIME, [("query 1", None)]),
-            ("MKT-2", "economics", CLOSE_TIME, [("query 2", None)]),
+            ("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query 1", None)]),
+            ("MKT-2", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("query 2", None)]),
         ]
 
         call_count = 0
@@ -1075,8 +1075,8 @@ class TestAdaptiveLimits:
         session = AsyncMock()
         embedder = _make_embedder()
         market_queries = [
-            ("MKT-1", "politics", CLOSE_TIME, [("query 1", None)]),
-            ("MKT-2", "politics", CLOSE_TIME, [("query 2", None)]),
+            ("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("query 1", None)]),
+            ("MKT-2", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("query 2", None)]),
         ]
 
         guardian_call_count = 0

@@ -206,7 +206,7 @@ async def run_cycle(
 
         # Adaptive per-market fetch intervals.
         # Formula: max(min_interval, min(24h, total_queries × 24h / daily_cap))
-        total_active_queries = sum(len(qp) for _, _, _, qp in market_queries)
+        total_active_queries = sum(len(qp) for _, _, _, _, qp in market_queries)
 
         def _compute_interval(daily_cap: float, min_hours: float) -> timedelta:
             if daily_cap > 0 and total_active_queries > 0:
@@ -240,7 +240,7 @@ async def run_cycle(
     # record_success once per service (it's idempotent but avoids extra DB hits).
     success_recorded: set[str] = set()
 
-    for market_id, category, close_time, query_pairs in market_queries:
+    for market_id, category, market_question, close_time, query_pairs in market_queries:
         market_start = time.monotonic()
         market_fetched = 0
         market_stored = 0
@@ -429,7 +429,14 @@ async def run_cycle(
                     raw_doc.category = category
                     try:
                         async with market_session.begin_nested():
-                            doc, status = await upsert_document(market_session, embedder, raw_doc)
+                            doc, status = await upsert_document(
+                                market_session,
+                                embedder,
+                                raw_doc,
+                                llm_client=llm_client,
+                                query_text=query_text,
+                                market_question=market_question,
+                            )
                             await link_document_to_market(market_session, doc.id, market_id)
                         if status == UpsertStatus.DEDUPED:
                             market_deduped += 1
@@ -703,8 +710,8 @@ def _market_row_to_domain(row: MarketRow) -> Market:
 
 async def _load_active_market_queries(
     session: AsyncSession,
-) -> list[tuple[str, str, datetime, list[tuple[str, str | None]]]]:
-    """Return (market_id, category, close_time, [(query_text, tv_query), ...]) for all active catalyst runs.
+) -> list[tuple[str, str, str, datetime, list[tuple[str, str | None]]]]:
+    """Return (market_id, category, market_question, close_time, [(query_text, tv_query), ...]) for all active catalyst runs.
 
     Only the latest active CatalystRun per market is considered.
     Markets whose latest run has is_active=False are excluded.
@@ -726,6 +733,7 @@ async def _load_active_market_queries(
             CatalystRunRow.id,
             MarketRow.id,
             MarketRow.category,
+            MarketRow.question,
             MarketRow.close_time,
             CatalystQueryRow.query_text,
             CatalystQueryRow.tv_query,
@@ -742,10 +750,10 @@ async def _load_active_market_queries(
     rows = result.all()
 
     # Group by market_id preserving insertion order.
-    grouped: dict[str, tuple[str, datetime, list[tuple[str, str | None]]]] = {}
-    for _run_id, market_id, category, close_time, query_text, tv_query in rows:
+    grouped: dict[str, tuple[str, str, datetime, list[tuple[str, str | None]]]] = {}
+    for _run_id, market_id, category, market_question, close_time, query_text, tv_query in rows:
         if market_id not in grouped:
-            grouped[market_id] = (category, close_time, [])
-        grouped[market_id][2].append((query_text, tv_query))
+            grouped[market_id] = (category, market_question, close_time, [])
+        grouped[market_id][3].append((query_text, tv_query))
 
-    return [(mid, cat, ct, queries) for mid, (cat, ct, queries) in grouped.items()]
+    return [(mid, cat, mq, ct, queries) for mid, (cat, mq, ct, queries) in grouped.items()]
