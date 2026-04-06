@@ -119,9 +119,14 @@ async def fetch(
     now = datetime.now(timezone.utc)
     filter_map = _build_filter_map(close_time)
 
+    # Strip '%' from the query — it is not a valid Lucene operator and the
+    # archive.org TV search API returns 400 when the query contains it
+    # (e.g. catalyst queries that include percentage literals like "40%").
+    sanitized_query = query.replace("%", "")
+
     params: dict[str, Any] = {
         "service_backend": "tvs",
-        "user_query": query,
+        "user_query": sanitized_query,
         "hits_per_page": max_results,
         "page": 1,
         "aggregations": "false",
@@ -133,20 +138,20 @@ async def fetch(
             response = await client.get(_TV_SEARCH_URL, params=params, timeout=_API_TIMEOUT)
             response.raise_for_status()
         except httpx.TimeoutException:
-            log.warning("tv_archive.fetch.timeout", query=query)
+            log.warning("tv_archive.fetch.timeout", query=sanitized_query)
             return []
         except httpx.ConnectError as exc:
-            log.warning("tv_archive.fetch.connect_error", query=query, error=str(exc))
+            log.warning("tv_archive.fetch.connect_error", query=sanitized_query, error=str(exc))
             return []
         except httpx.HTTPStatusError as exc:
             log.warning(
                 "tv_archive.fetch.http_error",
-                query=query,
+                query=sanitized_query,
                 status_code=exc.response.status_code,
             )
             return []
         except Exception:
-            log.warning("tv_archive.fetch.error", query=query, exc_info=True)
+            log.warning("tv_archive.fetch.error", query=sanitized_query, exc_info=True)
             return []
 
         try:
@@ -214,7 +219,7 @@ async def fetch(
 
     log.debug(
         "tv_archive.fetch.complete",
-        query=query,
+        query=sanitized_query,
         hits_returned=len(hits),
         docs_extracted=len(docs),
     )
