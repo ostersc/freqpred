@@ -11,7 +11,7 @@ from freqpred.rag.models import Document
 
 log = structlog.get_logger(__name__)
 
-PROMPT_VERSION = "signal-v3"
+PROMPT_VERSION = "signal-v4"
 
 SYSTEM_PROMPT = """\
 You are a prediction market probability analyst. Your task is to estimate the \
@@ -29,6 +29,10 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
     """
     now = datetime.now(tz=timezone.utc)
     days_to_close = (market.close_time - now).total_seconds() / 86400
+    days_elapsed = (
+        (now - market.open_time).total_seconds() / 86400
+        if market.open_time else 0.0
+    )
 
     open_time_str = (
         market.open_time.isoformat() if market.open_time else "unknown"
@@ -40,6 +44,7 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
         f"Current Date (UTC): {now.strftime('%Y-%m-%d %H:%M')}",
         f"Market Opened (Issuance Date): {open_time_str}",
         f"Market Closes: {market.close_time.isoformat()} ({days_to_close:.1f} days from now)",
+        f"Window elapsed: {days_elapsed:.1f} days  |  Window remaining: {days_to_close:.1f} days",
         "",
         "IMPORTANT — TEMPORAL EVIDENCE RULES:",
         "1. The resolution criterion requires the event to occur AFTER the market issuance date.",
@@ -52,6 +57,10 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
         "   do not assume the event occurred within the window simply because it has in the past.",
         "4. If you can identify a specific confirmed instance of the event occurring WITHIN",
         "   the market window, weight that evidence heavily.",
+        "5. ELAPSED TIME: Use 'Window remaining' — NOT the total window length — when",
+        "   reasoning about forward probability. If the elapsed portion has no confirmed",
+        "   in-window evidence, that absence is a meaningful negative signal for publicly",
+        "   observable events. Do not substitute base-rate reasoning for the elapsed portion.",
         "",
         "=== EVIDENCE ===",
     ]

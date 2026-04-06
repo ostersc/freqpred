@@ -199,6 +199,23 @@ async def upsert_document(
         )
         return _row_to_domain(existing), UpsertStatus.DEDUPED
 
+    # If no row matches the URL, check for a different URL with identical content.
+    # TV Archive and other sources can return the same snippet under multiple URLs
+    # across separate fetch runs — we don't want N copies in the evidence pool.
+    if existing is None:
+        hash_result = await session.execute(
+            select(DocumentRow).where(DocumentRow.content_hash == content_hash)
+        )
+        existing_by_hash = hash_result.scalars().first()
+        if existing_by_hash is not None:
+            log.debug(
+                "store.upsert_document.skip",
+                source_url=raw_doc.source_url,
+                reason="duplicate_content_hash",
+                existing_url=existing_by_hash.source_url,
+            )
+            return _row_to_domain(existing_by_hash), UpsertStatus.DEDUPED
+
     is_update = existing is not None
 
     # New doc or content changed — optionally summarize long bodies before embedding.

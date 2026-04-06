@@ -63,21 +63,44 @@ def _make_document_row(source_url: str, content_hash: str) -> DocumentRow:
     )
 
 
-def _make_session(existing_row=None, upserted_row=None) -> AsyncMock:
-    """Build a mock AsyncSession that returns *existing_row* on SELECT
-    and *upserted_row* on the INSERT … ON CONFLICT upsert."""
+def _make_session(
+    existing_row=None,
+    upserted_row=None,
+    hash_existing_row=None,
+) -> AsyncMock:
+    """Build a mock AsyncSession.
+
+    Call order when inserting a new document (existing_row=None):
+      1. SELECT by source_url  → None
+      2. SELECT by content_hash → hash_existing_row (None = no duplicate)
+      3. INSERT … RETURNING    → upserted_row
+
+    When existing_row is set (URL already in DB):
+      1. SELECT by source_url  → existing_row
+      2. INSERT … RETURNING    → upserted_row  (or skipped for DEDUPED)
+    """
     session = AsyncMock()
 
-    # SELECT result (scalar_one_or_none)
-    select_result = MagicMock()
-    select_result.scalar_one_or_none.return_value = existing_row
+    # SELECT by URL result
+    url_result = MagicMock()
+    url_result.scalar_one_or_none.return_value = existing_row
+
+    # SELECT by content_hash result (only used when existing_row is None)
+    # Store uses .scalars().first() so we need the scalars() chain.
+    hash_result = MagicMock()
+    hash_result.scalars.return_value.first.return_value = hash_existing_row
 
     # INSERT … RETURNING result (scalar_one)
     insert_result = MagicMock()
     insert_result.scalar_one.return_value = upserted_row
 
-    # session.execute: first call → select_result, second → insert_result
-    session.execute = AsyncMock(side_effect=[select_result, insert_result])
+    if existing_row is None:
+        # New URL: URL lookup → hash lookup → INSERT
+        session.execute = AsyncMock(side_effect=[url_result, hash_result, insert_result])
+    else:
+        # Existing URL: URL lookup → INSERT (or just return for DEDUPED)
+        session.execute = AsyncMock(side_effect=[url_result, insert_result])
+
     session.flush = AsyncMock()
 
     return session
@@ -196,6 +219,34 @@ async def test_same_url_same_hash_skips_embed():
 
 
 # ---------------------------------------------------------------------------
+# upsert_document — different URL, same content (cross-URL dedup)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_different_url_same_content_returns_deduped():
+    """A new URL whose body matches an existing document's content_hash must be
+    returned as DEDUPED without inserting a new row or calling the embedder."""
+    raw_doc = _make_raw_doc(url="https://mirror.example.com/article")
+    body_clean = _strip_html(raw_doc.body)
+    content_hash = _sha256(body_clean)
+
+    # Existing doc under a different URL but identical content.
+    existing_by_hash = _make_document_row("https://example.com/article", content_hash)
+    session = _make_session(existing_row=None, hash_existing_row=existing_by_hash)
+
+    embedder = AsyncMock()
+    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+
+    doc, status = await upsert_document(session, embedder, raw_doc)
+
+    assert status == UpsertStatus.DEDUPED
+    assert doc.source_url == "https://example.com/article"  # returns existing doc
+    embedder.embed_text.assert_not_awaited()
+    session.flush.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # upsert_document — same URL, changed content (re-embed)
 # ---------------------------------------------------------------------------
 
@@ -308,12 +359,22 @@ _MARKET_Q = "Will the Federal Reserve raise rates before June 2026?\nIf yes this
 
 
 def _make_session_with_bm25(existing_row=None, bm25_score: float = 0.5, upserted_row=None) -> AsyncMock:
-    """Session mock that handles the dedup SELECT, optional BM25 query, and INSERT."""
+    """Session mock that handles the dedup SELECTs, BM25 query, and INSERT.
+
+    Call order for a new document (existing_row=None):
+      1. SELECT by source_url → None
+      2. SELECT by content_hash → None
+      3. BM25 ts_rank query    → bm25_score
+      4. INSERT … RETURNING   → upserted_row
+    """
     session = AsyncMock()
     session.begin_nested = MagicMock()
 
-    select_result = MagicMock()
-    select_result.scalar_one_or_none.return_value = existing_row
+    url_result = MagicMock()
+    url_result.scalar_one_or_none.return_value = existing_row
+
+    hash_result = MagicMock()
+    hash_result.scalars.return_value.first.return_value = None  # no cross-URL duplicate
 
     bm25_result = MagicMock()
     bm25_result.scalar.return_value = bm25_score
@@ -321,7 +382,7 @@ def _make_session_with_bm25(existing_row=None, bm25_score: float = 0.5, upserted
     insert_result = MagicMock()
     insert_result.scalar_one.return_value = upserted_row
 
-    session.execute = AsyncMock(side_effect=[select_result, bm25_result, insert_result])
+    session.execute = AsyncMock(side_effect=[url_result, hash_result, bm25_result, insert_result])
     session.flush = AsyncMock()
     return session
 

@@ -196,16 +196,19 @@ class PositionWatcher:
         elif msg_type == "ticker":
             inner = msg.get("msg", {})
             market_id = inner.get("market_ticker")
+            log.debug("position_watcher.ticker_raw", market_id=market_id, raw=str(inner)[:500])
             # Kalshi WebSocket v2 sends prices as dollar strings (yes_bid_dollars,
             # yes_ask_dollars), not integer cents.
             yes_bid_raw = inner.get("yes_bid_dollars")
             yes_ask_raw = inner.get("yes_ask_dollars")
+            last_price_raw = inner.get("price_dollars")
             if market_id and yes_bid_raw is not None and yes_ask_raw is not None:
                 yes_bid = float(yes_bid_raw)
                 yes_ask = float(yes_ask_raw)
+                last_price = float(last_price_raw) if last_price_raw is not None else 0.0
                 # Only process ticks for markets where we hold positions.
                 if market_id in self._subscribed:
-                    await self._on_ticker_update(market_id, yes_bid, yes_ask)
+                    await self._on_ticker_update(market_id, yes_bid, yes_ask, last_price)
                 else:
                     log.warning("position_watcher.tick_not_subscribed", market_id=market_id)
             else:
@@ -247,33 +250,42 @@ class PositionWatcher:
             log.debug("position_watcher.unhandled_message", type=msg_type)
 
     async def _on_ticker_update(
-        self, market_id: str, yes_bid: float, yes_ask: float
+        self, market_id: str, yes_bid: float, yes_ask: float, last_price: float = 0.0
     ) -> None:
         """Process a ticker update: upsert DB price, log move, trigger monitor."""
         now = datetime.now(UTC)
-        new_mid = round((yes_bid + yes_ask) / 2, 4)
+        spread_mid = round((yes_bid + yes_ask) / 2, 4)
+        # Use last_price as mid when available — (bid+ask)/2 is misleading on
+        # illiquid markets where the ask side is momentarily wide.
+        new_mid = round(last_price, 4) if last_price > 0 else spread_mid
         log.debug(
             "position_watcher.tick",
             market_id=market_id,
             yes_bid=yes_bid,
             yes_ask=yes_ask,
+            last_price=last_price,
+            spread_mid=spread_mid,
             mid=new_mid,
         )
+
+        values: dict = {
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
+            "mid_price": new_mid,
+            "last_fetched_at": now,
+            "price_updated_at": case(
+                (MarketRow.yes_bid != yes_bid, now),
+                else_=MarketRow.price_updated_at,
+            ),
+        }
+        if last_price > 0:
+            values["last_price"] = last_price
 
         async with self._session_factory() as session:
             await session.execute(
                 update(MarketRow)
                 .where(MarketRow.id == market_id)
-                .values(
-                    yes_bid=yes_bid,
-                    yes_ask=yes_ask,
-                    mid_price=new_mid,
-                    last_fetched_at=now,
-                    price_updated_at=case(
-                        (MarketRow.yes_bid != yes_bid, now),
-                        else_=MarketRow.price_updated_at,
-                    ),
-                )
+                .values(**values)
             )
             await session.commit()
 
