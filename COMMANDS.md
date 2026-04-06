@@ -176,7 +176,9 @@ uv run freqpred dashboard --host 127.0.0.1 --port 9000
 | `--host` | `0.0.0.0` | Host to bind |
 | `--port` | `8000` | Port to listen on |
 
-Starts the FastAPI dashboard server. Exposes a JSON API for signals, positions, and calibration data.
+Starts the FastAPI dashboard server. Exposes a JSON API for signals, positions, calibration data, strategy config, and system health.
+
+Trading mode and active strategy are both auto-discovered per-request from the `run_state` DB table written by `freqpred run` on startup. Strategy config endpoints (`GET/PUT /api/strategy/config`) return 503 if `freqpred run` is not running. Config changes via PUT are persisted to `runtime_config_overrides` and picked up by the running signal loop on its next cycle. Overrides are cleared when a different strategy is started.
 
 ---
 

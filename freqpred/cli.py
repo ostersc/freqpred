@@ -239,7 +239,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     from freqpred.alerts.command_handlers import register_system_commands
     from freqpred.alerts.metrics_handlers import register_metrics_commands
     from freqpred.alerts.position_handlers import register_position_commands
-    from freqpred.alerts.run_state import get_run_state
+    from freqpred.alerts.run_state import get_run_state, set_cb_state, set_mode, set_strategy_name
 
     log_buffer = _get_or_create_log_buffer()
     register_system_commands(
@@ -305,9 +305,13 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         log.info("signal_loop.started")
         while True:
             try:
-                # Check run-loop state; skip cycle if paused/stopped.
+                # Check run-loop state; apply any runtime config overrides; skip if paused/stopped.
                 async with session_factory() as rs_session:
                     run_state = await get_run_state(rs_session)
+                    from freqpred.strategy.config_store import load_overrides  # noqa: PLC0415
+                    _overrides = await load_overrides(rs_session, strategy.config.name)
+                    for _k, _v in _overrides.items():
+                        setattr(strategy.config, _k, _v)
 
                 if run_state == "stopped":
                     log.debug("signal_loop.skipped", reason="stopped")
@@ -392,11 +396,15 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                 cb_session, _net_bankroll, mode=order_manager._mode,
                                 drawdown_reset_bankroll=_reset_bankroll,
                             )
+                            # CB check passed — clear any previously persisted CB state.
+                            await set_cb_state(cb_session, active=False, reason=None)
                     except TradingCircuitBreakerError as exc:
                         log.warning("signal_loop.circuit_breaker_fired", reason=str(exc))
                         circuit_breaker_active = True
                         cb_type = "daily_loss" if "daily loss" in str(exc) else "drawdown"
                         await alert_dispatcher.circuit_breaker_alert(cb_type, str(exc))
+                        async with session_factory() as _cb_persist_session:
+                            await set_cb_state(_cb_persist_session, active=True, reason=str(exc))
 
                 for market in interesting:
                     signal = await pipeline.analyze(market, trigger="scheduled")
@@ -583,6 +591,18 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
 
         async with session_factory() as _startup_session:
             _startup_state = await get_run_state(_startup_session)
+            from freqpred.alerts.run_state import get_strategy_name  # noqa: PLC0415
+            from freqpred.strategy.config_store import save_overrides  # noqa: PLC0415
+            _prev_strategy = await get_strategy_name(_startup_session)
+            if _prev_strategy is not None and _prev_strategy != strategy_name:
+                log.info(
+                    "startup.strategy_changed",
+                    prev=_prev_strategy,
+                    current=strategy_name,
+                )
+                await save_overrides(_startup_session, _prev_strategy, {})
+            await set_strategy_name(_startup_session, strategy_name)
+            await set_mode(_startup_session, mode)
         if _startup_state != "running":
             click.echo(
                 f"\n*** WARNING: run_state='{_startup_state}' — "
@@ -1560,21 +1580,22 @@ async def _alerts_test(config: object, channel: str) -> None:
 @main.command()
 @click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind.")
 @click.option("--port", default=8000, show_default=True, help="Port to listen on.")
-@click.option("--mode", default="paper", type=click.Choice(["paper", "live"]), show_default=True, help="Trading mode to display.")
 @click.pass_context
-def dashboard(ctx: click.Context, host: str, port: int, mode: str) -> None:
+def dashboard(ctx: click.Context, host: str, port: int) -> None:
     """Start the dashboard API server (read-only JSON API)."""
     config = ctx.obj["config"]
-    asyncio.run(_dashboard(config, host, port, mode))
+    asyncio.run(_dashboard(config, host, port))
 
 
-async def _dashboard(config: object, host: str, port: int, mode: str = "paper") -> None:
+async def _dashboard(config: object, host: str, port: int) -> None:
     import uvicorn
 
+    import freqpred.alerts.models     # noqa: F401
     import freqpred.ingestion.models  # noqa: F401
     import freqpred.llm.models        # noqa: F401
     import freqpred.rag.models        # noqa: F401
     import freqpred.signal.models     # noqa: F401
+    import freqpred.strategy.models   # noqa: F401
 
     from freqpred.dashboard.api.app import create_app
     from freqpred.db import make_engine, make_session_factory
@@ -1589,7 +1610,8 @@ async def _dashboard(config: object, host: str, port: int, mode: str = "paper") 
     app = create_app(
         session_factory=session_factory,
         daily_cap_usd=config.risk.max_daily_llm_spend_usd,
-        mode=mode,
+        risk_config=config.risk,
+        bankroll_usd=config.trading.bankroll_usd,
     )
 
     click.echo(f"Starting dashboard on http://{host}:{port}")

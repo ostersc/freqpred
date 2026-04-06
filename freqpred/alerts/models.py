@@ -32,3 +32,9 @@ class RunStateRow(Base):
     drawdown_reset_bankroll: Mapped[float | None] = mapped_column(
         nullable=True, default=None
     )
+    strategy_name: Mapped[str | None] = mapped_column(
+        VARCHAR(255), nullable=True, default=None
+    )
+    mode: Mapped[str | None] = mapped_column(VARCHAR(20), nullable=True, default=None)
+    cb_active: Mapped[bool] = mapped_column(nullable=False, default=False)
+    cb_reason: Mapped[str | None] = mapped_column(nullable=True, default=None)

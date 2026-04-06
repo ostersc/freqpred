@@ -19,8 +19,10 @@ from freqpred.signal.models import SignalRow
 from freqpred.trading.ledger import get_portfolio_summary
 
 from .schemas import (
+    ApiErrorStateOut,
     CalibrationBucketOut,
     CalibrationResponse,
+    CircuitBreakerStateOut,
     DocumentLinkOut,
     HealthResponse,
     LedgerResponse,
@@ -30,7 +32,14 @@ from .schemas import (
     SignalDetailOut,
     SignalListResponse,
     SignalOut,
+    StrategyConfigOut,
+    StrategyConfigUpdateRequest,
+    SystemHealthResponse,
+    WebSocketStateOut,
 )
+
+# Fields that cannot be changed at runtime (require a process restart).
+_IMMUTABLE_FIELDS: frozenset[str] = frozenset({"name", "categories"})
 
 router = APIRouter()
 log = structlog.get_logger(__name__)
@@ -56,8 +65,24 @@ def _daily_cap(request: Request) -> float:
     return float(request.app.state.daily_cap_usd)
 
 
-def _mode(request: Request) -> str:
-    return str(request.app.state.mode)
+async def _get_mode(session: AsyncSession) -> str:
+    """Read the active trading mode from run_state; default to 'paper' if not set."""
+    import freqpred.alerts.models  # noqa: F401 — register RunStateRow  # noqa: PLC0415
+    from freqpred.alerts.run_state import get_mode  # noqa: PLC0415
+
+    return (await get_mode(session)) or "paper"
+
+
+def _risk_config(request: Request) -> object | None:
+    return getattr(request.app.state, "risk_config", None)
+
+
+def _bankroll_usd(request: Request) -> float:
+    return float(getattr(request.app.state, "bankroll_usd", 0.0))
+
+
+def _started_at(request: Request) -> datetime:
+    return request.app.state.started_at
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +132,65 @@ def _position_row_to_out(row: PositionRow) -> PositionOut:
         pnl=row.pnl,
         pnl_pct=row.pnl_pct,
         created_at=row.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _load_active_strategy_config(session: AsyncSession) -> object | None:
+    """Load the active strategy config from the DB.
+
+    1. Read the strategy name written to ``run_state`` by ``freqpred run``.
+    2. Load the strategy's default config via the strategy loader.
+    3. Apply any runtime overrides persisted in ``runtime_config_overrides``.
+
+    Returns ``None`` if no strategy is active (run loop not started).
+    """
+    import freqpred.alerts.models  # noqa: F401 — register RunStateRow  # noqa: PLC0415
+    from freqpred.alerts.run_state import get_strategy_name  # noqa: PLC0415
+    from freqpred.strategy.config_store import load_overrides  # noqa: PLC0415
+    from freqpred.strategy.loader import load_strategy  # noqa: PLC0415
+
+    strategy_name = await get_strategy_name(session)
+    if strategy_name is None:
+        return None
+
+    try:
+        cfg = load_strategy(strategy_name).config
+    except Exception:
+        log.warning("dashboard.strategy_load_failed", strategy_name=strategy_name)
+        return None
+
+    overrides = await load_overrides(session, strategy_name)
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+
+    return cfg
+
+
+def _strategy_config_to_out(cfg: object) -> StrategyConfigOut:
+    return StrategyConfigOut(
+        name=cfg.name,
+        min_edge=cfg.min_edge,
+        min_confidence=cfg.min_confidence,
+        kelly_fraction=cfg.kelly_fraction,
+        max_exposure_per_market=cfg.max_exposure_per_market,
+        categories=list(cfg.categories),
+        min_volume_24h=cfg.min_volume_24h,
+        max_days_to_close=cfg.max_days_to_close,
+        min_days_to_close=cfg.min_days_to_close,
+        stoploss=cfg.stoploss,
+        trailing_stop=cfg.trailing_stop,
+        trailing_stop_positive=cfg.trailing_stop_positive,
+        trailing_stop_positive_offset=cfg.trailing_stop_positive_offset,
+        min_mid_price=cfg.min_mid_price,
+        max_mid_price=cfg.max_mid_price,
+        max_spread=cfg.max_spread,
+        block_reentry_after_stoploss=cfg.block_reentry_after_stoploss,
+        stoploss_cooldown_hours=cfg.stoploss_cooldown_hours,
     )
 
 
@@ -197,13 +281,11 @@ async def get_signal(
 @router.get("/positions", response_model=PositionListResponse)
 async def list_positions(
     session: Annotated[AsyncSession, Depends(get_db)],
-    app_mode: Annotated[str, Depends(_mode)],
     status: str = Query(default="all", pattern="^(open|closed|all)$"),
-    mode: str = Query(default="", pattern="^(paper|live|)$"),
 ) -> PositionListResponse:
-    effective_mode = mode or app_mode
-    stmt = select(PositionRow).where(PositionRow.mode == effective_mode).order_by(PositionRow.entry_time.desc())
-    count_stmt = select(func.count()).select_from(PositionRow).where(PositionRow.mode == effective_mode)
+    app_mode = await _get_mode(session)
+    stmt = select(PositionRow).where(PositionRow.mode == app_mode).order_by(PositionRow.entry_time.desc())
+    count_stmt = select(func.count()).select_from(PositionRow).where(PositionRow.mode == app_mode)
 
     if status != "all":
         stmt = stmt.where(PositionRow.status == status)
@@ -245,8 +327,8 @@ async def get_position(
 @router.get("/ledger", response_model=LedgerResponse)
 async def get_ledger(
     session: Annotated[AsyncSession, Depends(get_db)],
-    app_mode: Annotated[str, Depends(_mode)],
 ) -> LedgerResponse:
+    app_mode = await _get_mode(session)
     summary = await get_portfolio_summary(session, mode=app_mode)
     return LedgerResponse(
         open_count=summary["open_count"],
@@ -264,8 +346,8 @@ async def get_ledger(
 @router.get("/calibration", response_model=CalibrationResponse)
 async def get_calibration(
     session: Annotated[AsyncSession, Depends(get_db)],
-    app_mode: Annotated[str, Depends(_mode)],
 ) -> CalibrationResponse:
+    app_mode = await _get_mode(session)
     report = await compute_calibration(session, mode=app_mode)
     return CalibrationResponse(
         brier_score=report.brier_score,
@@ -334,12 +416,12 @@ async def get_llm_cost(
 async def health(
     session: Annotated[AsyncSession, Depends(get_db)],
     daily_cap: Annotated[float, Depends(_daily_cap)],
-    app_mode: Annotated[str, Depends(_mode)],
 ) -> HealthResponse:
     db_status = "connected"
     open_positions = 0
     llm_remaining = daily_cap
     try:
+        app_mode = await _get_mode(session)
         open_result = await session.execute(
             select(func.count()).where(PositionRow.status == "open", PositionRow.mode == app_mode)
         )
@@ -357,4 +439,186 @@ async def health(
         db=db_status,
         open_positions=open_positions,
         llm_daily_budget_remaining_usd=round(llm_remaining, 4),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Strategy config
+# ---------------------------------------------------------------------------
+
+
+@router.get("/strategy/config", response_model=StrategyConfigOut)
+async def get_strategy_config(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> StrategyConfigOut:
+    cfg = await _load_active_strategy_config(session)
+    if cfg is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No active strategy — freqpred run is not running.",
+        )
+    return _strategy_config_to_out(cfg)
+
+
+@router.put("/strategy/config", response_model=StrategyConfigOut)
+async def update_strategy_config(
+    update: StrategyConfigUpdateRequest,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> StrategyConfigOut:
+    cfg = await _load_active_strategy_config(session)
+    if cfg is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No active strategy — freqpred run is not running.",
+        )
+
+    # Detect immutable fields sent by the caller.
+    sent_fields = set(update.model_dump(exclude_unset=True).keys())
+    immutable_sent = sorted(sent_fields & _IMMUTABLE_FIELDS)
+    if immutable_sent:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Fields {immutable_sent} are immutable and require a process "
+                "restart to change."
+            ),
+        )
+
+    # Merge new updates on top of existing persisted overrides and save.
+    mutable_updates = {
+        k: v for k, v in update.model_dump(exclude_unset=True).items()
+        if k not in _IMMUTABLE_FIELDS and v is not None
+    }
+
+    from freqpred.strategy.config_store import load_overrides, save_overrides  # noqa: PLC0415
+
+    existing = await load_overrides(session, cfg.name)
+    existing.update(mutable_updates)
+    await save_overrides(session, cfg.name, existing)
+
+    # Return the fully merged config as confirmation.
+    for key, value in existing.items():
+        setattr(cfg, key, value)
+
+    return _strategy_config_to_out(cfg)
+
+
+# ---------------------------------------------------------------------------
+# System health
+# ---------------------------------------------------------------------------
+
+
+@router.get("/system/health", response_model=SystemHealthResponse)
+async def get_system_health(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    daily_cap: Annotated[float, Depends(_daily_cap)],
+    initial_bankroll: Annotated[float, Depends(_bankroll_usd)],
+    risk_cfg: Annotated[object | None, Depends(_risk_config)],
+    started_at: Annotated[datetime, Depends(_started_at)],
+) -> SystemHealthResponse:
+    import freqpred.alerts.models  # noqa: F401 — ensure RunStateRow is registered  # noqa: PLC0415
+    from freqpred.alerts.models import RunStateRow as _RunStateRow  # noqa: PLC0415
+    from freqpred.trading.ledger import get_net_bankroll  # noqa: PLC0415
+
+    db_ok = True
+    app_mode = "paper"
+    run_state = "running"
+    cb_halted = False
+    cb_reason: str | None = None
+    daily_pnl: float = 0.0
+    net_bankroll: float = initial_bankroll
+    llm_budget_used: float = 0.0
+    pending_orders: int = 0
+    open_positions: int = 0
+    llm_errors_last_hour: int = 0
+
+    today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    hour_ago = datetime.now(UTC) - timedelta(hours=1)
+
+    try:
+        app_mode = await _get_mode(session)
+
+        # Read run_state row directly to get CB state alongside run_state + drawdown.
+        rs_result = await session.execute(select(_RunStateRow).limit(1))
+        rs_row = rs_result.scalar_one_or_none()
+        if rs_row is not None:
+            run_state = rs_row.state
+            cb_halted = bool(rs_row.cb_active)
+            cb_reason = rs_row.cb_reason
+
+        net_bankroll = await get_net_bankroll(session, initial_bankroll, mode=app_mode)
+
+        daily_pnl_result = await session.execute(
+            select(func.coalesce(func.sum(PositionRow.pnl), 0.0)).where(
+                PositionRow.status == "closed",
+                PositionRow.exit_time >= today_start,
+                PositionRow.mode == app_mode,
+            )
+        )
+        daily_pnl = float(daily_pnl_result.scalar_one())
+
+        llm_budget_used = await get_daily_spend_usd(session)
+
+        pending_result = await session.execute(
+            select(func.count(PositionRow.id)).where(
+                PositionRow.status == "pending",
+                PositionRow.mode == app_mode,
+            )
+        )
+        pending_orders = int(pending_result.scalar_one())
+
+        open_result = await session.execute(
+            select(func.count(PositionRow.id)).where(
+                PositionRow.status == "open",
+                PositionRow.mode == app_mode,
+            )
+        )
+        open_positions = int(open_result.scalar_one())
+
+        llm_errors_result = await session.execute(
+            select(func.count(LLMQueryRow.id)).where(
+                LLMQueryRow.success.is_(False),
+                LLMQueryRow.timestamp >= hour_ago,
+            )
+        )
+        llm_errors_last_hour = int(llm_errors_result.scalar_one())
+
+    except Exception:
+        log.exception("system_health.db_query_failed")
+        db_ok = False
+
+    max_daily_loss_pct: float = (
+        risk_cfg.max_daily_loss_pct if risk_cfg is not None else 0.15
+    )
+    daily_loss_pct: float = (
+        abs(daily_pnl) / net_bankroll if (net_bankroll > 0 and daily_pnl < 0) else 0.0
+    )
+
+    uptime_seconds = int((datetime.now(UTC) - started_at).total_seconds())
+
+    return SystemHealthResponse(
+        run_state=run_state,
+        mode=app_mode,
+        circuit_breakers=CircuitBreakerStateOut(
+            trading_halted=cb_halted,
+            reason=cb_reason,
+            daily_loss_pct=round(daily_loss_pct, 4),
+            daily_loss_limit_pct=max_daily_loss_pct,
+            llm_budget_used_usd=round(llm_budget_used, 4),
+            llm_budget_cap_usd=daily_cap,
+        ),
+        websocket=WebSocketStateOut(
+            connected=None,
+            subscribed_markets=None,
+            last_message_at=None,
+        ),
+        api_errors=ApiErrorStateOut(
+            kalshi_errors_last_hour=0,
+            llm_errors_last_hour=llm_errors_last_hour,
+            consecutive_llm_errors=None,
+        ),
+        pending_orders=pending_orders,
+        open_positions=open_positions,
+        db_ok=db_ok,
+        uptime_seconds=uptime_seconds,
     )

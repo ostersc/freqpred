@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 # ---------------------------------------------------------------------------
@@ -135,3 +135,100 @@ class HealthResponse(BaseModel):
     db: str                              # "connected" | "error"
     open_positions: int
     llm_daily_budget_remaining_usd: float
+
+
+# ---------------------------------------------------------------------------
+# Strategy config
+# ---------------------------------------------------------------------------
+
+
+class StrategyConfigOut(BaseModel):
+    name: str
+    min_edge: float
+    min_confidence: float
+    kelly_fraction: float
+    max_exposure_per_market: float
+    categories: list[str]
+    min_volume_24h: float
+    max_days_to_close: float
+    min_days_to_close: float
+    stoploss: float
+    trailing_stop: bool
+    trailing_stop_positive: float | None
+    trailing_stop_positive_offset: float
+    min_mid_price: float | None
+    max_mid_price: float | None
+    max_spread: float | None
+    block_reentry_after_stoploss: bool
+    stoploss_cooldown_hours: float
+
+
+class StrategyConfigUpdateRequest(BaseModel):
+    """Mutable fields accepted by PUT /api/strategy/config.
+
+    ``name`` and ``categories`` are intentionally included so the endpoint can
+    detect them and return a 422 explaining they require a restart.
+    All other fields are truly mutable at runtime.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Immutable — included only to return a clear 422 if a client sends them.
+    name: str | None = None
+    categories: list[str] | None = None
+
+    # Mutable
+    min_edge: float | None = None
+    min_confidence: float | None = None
+    kelly_fraction: float | None = None
+    max_exposure_per_market: float | None = None
+    min_volume_24h: float | None = None
+    max_days_to_close: float | None = None
+    min_days_to_close: float | None = None
+    stoploss: float | None = None
+    trailing_stop: bool | None = None
+    trailing_stop_positive: float | None = None
+    trailing_stop_positive_offset: float | None = None
+    min_mid_price: float | None = None
+    max_mid_price: float | None = None
+    max_spread: float | None = None
+    block_reentry_after_stoploss: bool | None = None
+    stoploss_cooldown_hours: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# System health
+# ---------------------------------------------------------------------------
+
+
+class CircuitBreakerStateOut(BaseModel):
+    trading_halted: bool
+    reason: str | None
+    daily_loss_pct: float
+    daily_loss_limit_pct: float
+    llm_budget_used_usd: float
+    llm_budget_cap_usd: float
+
+
+class WebSocketStateOut(BaseModel):
+    connected: bool | None          # null = not applicable (paper/standalone)
+    subscribed_markets: int | None
+    last_message_at: datetime | None
+
+
+class ApiErrorStateOut(BaseModel):
+    kalshi_errors_last_hour: int
+    llm_errors_last_hour: int
+    consecutive_llm_errors: int | None  # null = not available in standalone mode
+
+
+class SystemHealthResponse(BaseModel):
+    run_state: str                  # "running" | "paused" | "stopped"
+    mode: str                       # "paper" | "live"
+    circuit_breakers: CircuitBreakerStateOut
+    websocket: WebSocketStateOut
+    api_errors: ApiErrorStateOut
+    pending_orders: int
+    open_positions: int
+    db_ok: bool
+    uptime_seconds: int

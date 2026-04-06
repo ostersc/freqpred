@@ -84,3 +84,70 @@ async def set_run_state(session: AsyncSession, state: str) -> None:
         row.state = state
         row.updated_at = now
     await session.commit()
+
+
+async def get_strategy_name(session: AsyncSession) -> str | None:
+    """Return the strategy name written by the active run loop, or None."""
+    result = await session.execute(select(RunStateRow).limit(1))
+    row = result.scalar_one_or_none()
+    return row.strategy_name if row is not None else None
+
+
+async def set_strategy_name(session: AsyncSession, strategy_name: str) -> None:
+    """Write (or update) the active strategy name in the run_state row and commit."""
+    result = await session.execute(select(RunStateRow).limit(1))
+    row = result.scalar_one_or_none()
+    now = datetime.now(UTC)
+    if row is None:
+        session.add(
+            RunStateRow(id=1, state=_DEFAULT_STATE, updated_at=now, strategy_name=strategy_name)
+        )
+    else:
+        row.strategy_name = strategy_name
+        row.updated_at = now
+    await session.commit()
+
+
+async def get_mode(session: AsyncSession) -> str | None:
+    """Return the trading mode written by the active run loop, or None."""
+    result = await session.execute(select(RunStateRow).limit(1))
+    row = result.scalar_one_or_none()
+    return row.mode if row is not None else None
+
+
+async def set_mode(session: AsyncSession, mode: str) -> None:
+    """Write (or update) the trading mode in the run_state row and commit."""
+    result = await session.execute(select(RunStateRow).limit(1))
+    row = result.scalar_one_or_none()
+    now = datetime.now(UTC)
+    if row is None:
+        session.add(RunStateRow(id=1, state=_DEFAULT_STATE, updated_at=now, mode=mode))
+    else:
+        row.mode = mode
+        row.updated_at = now
+    await session.commit()
+
+
+async def set_cb_state(
+    session: AsyncSession, active: bool, reason: str | None = None
+) -> None:
+    """Persist circuit breaker state to run_state and commit.
+
+    Call with ``active=True, reason=<message>`` when a CB fires.
+    Call with ``active=False, reason=None`` when a CB clears.
+    """
+    result = await session.execute(select(RunStateRow).limit(1))
+    row = result.scalar_one_or_none()
+    now = datetime.now(UTC)
+    if row is None:
+        session.add(
+            RunStateRow(
+                id=1, state=_DEFAULT_STATE, updated_at=now,
+                cb_active=active, cb_reason=reason,
+            )
+        )
+    else:
+        row.cb_active = active
+        row.cb_reason = reason
+        row.updated_at = now
+    await session.commit()

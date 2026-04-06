@@ -23,6 +23,7 @@ from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
+from freqpred.strategy.models import RuntimeConfigOverrideRow  # registers the table
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +57,7 @@ def test_all_tables_registered():
         "fetcher_cursors",
         "fetcher_rate_limits",
         "run_state",
+        "runtime_config_overrides",
     }
     registered = set(Base.metadata.tables.keys())
     assert expected == registered
