@@ -110,6 +110,7 @@ class RiskConfig(BaseModel):
     min_edge_floor: float = Field(default=0.10)
     max_open_positions: int = Field(default=20)
     max_daily_llm_spend_usd: float = Field(default=10.0)
+    max_consecutive_llm_errors: int = Field(default=3)
 
 
 class TradingConfig(BaseModel):

@@ -247,3 +247,30 @@ async def test_resolution_alert_win_vs_loss_prefix() -> None:
 
     assert captured[0].startswith("WIN")
     assert captured[1].startswith("LOSS")
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker alert format
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_alert_format() -> None:
+    """circuit_breaker_alert() produces the standard structured format."""
+    captured: list[str] = []
+
+    class CaptureSender:
+        async def send(self, message: str) -> None:
+            captured.append(message)
+
+    dispatcher = AlertDispatcher([CaptureSender()])
+    await dispatcher.circuit_breaker_alert("daily_loss", "Daily loss 16.2% exceeded 15% limit")
+
+    assert len(captured) == 1
+    msg = captured[0]
+    assert "🚨" in msg
+    assert "CIRCUIT BREAKER TRIPPED" in msg
+    assert "Type: daily_loss" in msg
+    assert "Reason: Daily loss 16.2% exceeded 15% limit" in msg
+    assert "Action required:" in msg
+    assert "Resume:" in msg

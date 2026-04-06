@@ -175,7 +175,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     from freqpred.db import make_engine, make_session_factory
     from freqpred.ingestion.scheduler import run_scheduler
     from freqpred.ingestion.realtime_scheduler import run_realtime_scheduler
-    from freqpred.llm.client import LLMClient
+    from freqpred.llm.audit import LLMBudgetExceededError
+    from freqpred.llm.client import LLMClient, LLMConsecutiveErrorsError
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.markets.models import Market, MarketRow
     from freqpred.markets.watcher import MarketWatcher
@@ -205,6 +206,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         session_factory,
         prompt_version="signal-v1",
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
+        max_consecutive_errors=config.risk.max_consecutive_llm_errors,
     )
     pipeline = SignalPipeline(
         session_factory=session_factory,
@@ -393,7 +395,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     except TradingCircuitBreakerError as exc:
                         log.warning("signal_loop.circuit_breaker_fired", reason=str(exc))
                         circuit_breaker_active = True
-                        await alert_dispatcher.circuit_breaker_alert(str(exc))
+                        cb_type = "daily_loss" if "daily loss" in str(exc) else "drawdown"
+                        await alert_dispatcher.circuit_breaker_alert(cb_type, str(exc))
 
                 for market in interesting:
                     signal = await pipeline.analyze(market, trigger="scheduled")
@@ -433,6 +436,12 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                 strategy.on_order_failed(market)
             except asyncio.CancelledError:
                 raise
+            except LLMBudgetExceededError as exc:
+                log.warning("signal_loop.llm_budget_exceeded", reason=str(exc))
+                await alert_dispatcher.circuit_breaker_alert("llm_budget", str(exc))
+            except LLMConsecutiveErrorsError as exc:
+                log.warning("signal_loop.llm_consecutive_errors", reason=str(exc))
+                await alert_dispatcher.circuit_breaker_alert("llm_errors", str(exc))
             except Exception:
                 import structlog
                 structlog.get_logger("freqpred.cli.signal_loop").exception("signal_loop.error")
@@ -462,8 +471,9 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     err=True,
                 )
                 await alert_dispatcher.circuit_breaker_alert(
+                    "startup_balance",
                     f"Startup aborted: Kalshi balance ${balance:.2f} < "
-                    f"bankroll ${config.trading.bankroll_usd:.2f}"
+                    f"bankroll ${config.trading.bankroll_usd:.2f}",
                 )
                 return
             _log.info(

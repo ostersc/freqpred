@@ -21,6 +21,10 @@ class LLMError(Exception):
     """Raised when the Anthropic API call fails."""
 
 
+class LLMConsecutiveErrorsError(Exception):
+    """Raised when the LLM API has failed N consecutive times without recovery."""
+
+
 class LLMClient:
     """Thin wrapper around the Anthropic async client that ensures every
     call is audited in the ``llm_queries`` table.
@@ -42,12 +46,15 @@ class LLMClient:
         default_strategy: str = "system",
         prompt_version: str = "v1",
         daily_spend_cap_usd: float | None = None,
+        max_consecutive_errors: int = 3,
     ) -> None:
         self._client = anthropic_client
         self._session_factory = session_factory
         self._default_strategy = default_strategy
         self._prompt_version = prompt_version
         self._daily_spend_cap_usd = daily_spend_cap_usd
+        self._max_consecutive_errors = max_consecutive_errors
+        self._consecutive_errors = 0
 
     async def complete(
         self,
@@ -130,8 +137,14 @@ class LLMClient:
                 signal_id=signal_id,
                 error_message=str(exc),
             )
+            self._consecutive_errors += 1
+            if self._consecutive_errors >= self._max_consecutive_errors:
+                raise LLMConsecutiveErrorsError(
+                    f"LLM API failed {self._consecutive_errors} consecutive times"
+                ) from exc
             raise LLMError(str(exc)) from exc
 
+        self._consecutive_errors = 0
         latency_ms = int((time.monotonic() - start) * 1000)
         content = message.content[0].text
         tokens_in = message.usage.input_tokens

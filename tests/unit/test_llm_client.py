@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from freqpred.llm.audit import LLMBudgetExceededError
-from freqpred.llm.client import LLMClient, LLMError
+from freqpred.llm.client import LLMClient, LLMConsecutiveErrorsError, LLMError
 from freqpred.llm.models import LLMResponse
 
 import freqpred.ingestion.models  # noqa: F401
@@ -256,3 +256,86 @@ class TestBudgetCircuitBreaker:
                 mock_log.return_value = 1
                 await client.complete(PROMPT, MODEL, QUERY_TYPE)
         mock_spend.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Consecutive-error circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def _make_error_client(max_consecutive_errors: int = 3) -> LLMClient:
+    """Return an LLMClient wired to always fail the Anthropic API call."""
+    anth = MagicMock()
+    anth.messages = MagicMock()
+    anth.messages.create = AsyncMock(side_effect=Exception("api down"))
+
+    session_factory = MagicMock()
+    session = AsyncMock()
+    session.commit = AsyncMock()
+    session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    return LLMClient(
+        anth,
+        session_factory,
+        max_consecutive_errors=max_consecutive_errors,
+    )
+
+
+class TestConsecutiveErrorCircuitBreaker:
+    @pytest.mark.asyncio
+    async def test_fires_after_threshold(self) -> None:
+        """Third consecutive failure raises LLMConsecutiveErrorsError."""
+        client = _make_error_client(max_consecutive_errors=3)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+            with pytest.raises(LLMConsecutiveErrorsError, match="3 consecutive"):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_raises_llm_error(self) -> None:
+        """Failures below threshold raise LLMError, not the CB exception."""
+        client = _make_error_client(max_consecutive_errors=3)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+        assert client._consecutive_errors == 2
+
+    @pytest.mark.asyncio
+    async def test_resets_on_success(self) -> None:
+        """Counter resets to 0 after a successful call; subsequent failure is LLMError, not CB."""
+        anth = MagicMock()
+        anth.messages = MagicMock()
+        # First two calls fail, third succeeds, fourth fails
+        anth.messages.create = AsyncMock(
+            side_effect=[
+                Exception("fail 1"),
+                Exception("fail 2"),
+                _make_anthropic_response(),
+                Exception("fail 4"),
+            ]
+        )
+        session_factory = MagicMock()
+        session = AsyncMock()
+        session.commit = AsyncMock()
+        session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
+        session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+        client = LLMClient(anth, session_factory, max_consecutive_errors=3)
+
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+            # Success — counter resets
+            await client.complete(PROMPT, MODEL, QUERY_TYPE)
+            assert client._consecutive_errors == 0
+            # One more failure — counter = 1, not CB
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, MODEL, QUERY_TYPE)
+            assert client._consecutive_errors == 1

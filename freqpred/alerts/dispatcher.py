@@ -69,8 +69,14 @@ class AlertDispatcher:
         )
         await self.send(msg)
 
-    async def circuit_breaker_alert(self, reason: str) -> None:
-        msg = f"CIRCUIT BREAKER: {reason}. Trading halted."
+    async def circuit_breaker_alert(self, cb_type: str, reason: str) -> None:
+        msg = (
+            "🚨 CIRCUIT BREAKER TRIPPED\n"
+            f"Type: {cb_type}\n"
+            f"Reason: {reason}\n"
+            "Action required: freqpred will not enter new positions until manually resumed.\n"
+            "Resume: /start (Telegram) or freqpred run (restart)"
+        )
         await self.send(msg)
 
     async def digest_alert(self, digest_text: str) -> None:

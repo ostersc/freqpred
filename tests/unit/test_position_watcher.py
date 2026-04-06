@@ -191,10 +191,10 @@ async def test_handle_message_ticker_parses_dollar_strings() -> None:
     """Kalshi WS v2 sends yes_bid_dollars/yes_ask_dollars as dollar strings; _handle_message parses them."""
     watcher, _, _, _, _ = _make_watcher(open_market_ids={"MKT-1"})
 
-    calls: list[tuple[str, float, float]] = []
+    calls: list[tuple[str, float, float, float]] = []
 
-    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float) -> None:
-        calls.append((market_id, yes_bid, yes_ask))
+    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float, last_price: float) -> None:
+        calls.append((market_id, yes_bid, yes_ask, last_price))
 
     watcher._on_ticker_update = fake_on_ticker  # type: ignore[method-assign]
 
@@ -208,10 +208,11 @@ async def test_handle_message_ticker_parses_dollar_strings() -> None:
     })
 
     assert len(calls) == 1
-    market_id, yes_bid, yes_ask = calls[0]
+    market_id, yes_bid, yes_ask, last_price = calls[0]
     assert market_id == "MKT-1"
     assert yes_bid == pytest.approx(0.62)
     assert yes_ask == pytest.approx(0.66)
+    assert last_price == pytest.approx(0.0)
 
 
 @pytest.mark.asyncio
@@ -221,8 +222,8 @@ async def test_handle_message_ticker_ignores_old_cents_field() -> None:
 
     calls: list[tuple] = []
 
-    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float) -> None:
-        calls.append((market_id, yes_bid, yes_ask))
+    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float, last_price: float) -> None:
+        calls.append((market_id, yes_bid, yes_ask, last_price))
 
     watcher._on_ticker_update = fake_on_ticker  # type: ignore[method-assign]
 
@@ -246,8 +247,8 @@ async def test_handle_message_ticker_skips_unsubscribed_market() -> None:
 
     calls: list[tuple] = []
 
-    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float) -> None:
-        calls.append((market_id, yes_bid, yes_ask))
+    async def fake_on_ticker(market_id: str, yes_bid: float, yes_ask: float, last_price: float) -> None:
+        calls.append((market_id, yes_bid, yes_ask, last_price))
 
     watcher._on_ticker_update = fake_on_ticker  # type: ignore[method-assign]
 

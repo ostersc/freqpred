@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-04-04
+**Last updated:** 2026-04-05
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -949,9 +949,12 @@ Defaults: `scale_min=0.80`, `scale_max=1.20`, `delta_threshold=0.05`. Sources we
 
 ### Circuit Breakers
 
-- Daily loss > 15%: halt all new positions for 24 hours, alert via Telegram
-- Total drawdown > 30%: halt all trading, require manual restart
-- LLM API errors > 3 consecutive: halt signal pipeline, alert
+- Daily loss > 15% (`max_daily_loss_pct`): halt all new positions, alert via Telegram
+- Total drawdown > 30% from reset baseline: halt all trading, require manual restart
+- LLM API errors > `max_consecutive_llm_errors` consecutive (default 3): halt signal pipeline, alert
+- LLM daily spend ≥ `max_daily_llm_spend_usd` (default $10): halt signal pipeline, alert
+
+All circuit breaker alerts use a standard format (🚨 CIRCUIT BREAKER TRIPPED, type, reason, resume instructions). See `docs/runbook.md` for response procedures.
 
 ---
 
