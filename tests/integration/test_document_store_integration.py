@@ -96,7 +96,7 @@ def _make_raw_doc(url: str, body: str = "Article body.") -> RawDocument:
 @pytest.mark.asyncio
 async def test_insert_three_unique_urls_three_embed_calls(session, mock_embedder):
     """3 distinct URLs → 3 embedding calls, 3 rows inserted."""
-    docs = [_make_raw_doc(f"https://example.com/article-{i}") for i in range(3)]
+    docs = [_make_raw_doc(f"https://example.com/article-{i}", body=f"Article body {i}.") for i in range(3)]
     for doc in docs:
         await upsert_document(session, mock_embedder, doc)
     await session.flush()
