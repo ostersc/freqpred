@@ -90,8 +90,8 @@ def _make_raw_docs(urls: list[str]) -> list[RawDocument]:
     return [
         RawDocument(
             source_url=url,
-            title=f"Article {i}",
-            body=f"Body content for article {i}.",
+            title=f"Article {i}: {url}",
+            body=f"Body content for article {i} sourced from {url}.",
             source_type="news",
             source_name="Reuters",
             category="economics",
