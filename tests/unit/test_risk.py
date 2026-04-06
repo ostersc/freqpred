@@ -21,6 +21,8 @@ import freqpred.markets.models     # noqa: F401
 import freqpred.rag.models         # noqa: F401
 import freqpred.signal.models      # noqa: F401
 
+from datetime import timedelta
+
 NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
 BANKROLL = 2000.0
 
@@ -296,6 +298,56 @@ async def test_circuit_breaker_fires_on_daily_loss() -> None:
 
     with pytest.raises(TradingCircuitBreakerError, match="daily loss"):
         await engine.check_circuit_breakers(session, bankroll=BANKROLL, mode="paper")
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_does_not_refire_after_ack() -> None:
+    """After /start, losses before ack_at don't immediately re-trip the breaker.
+
+    The mock returns 0.0 pnl to represent the post-ack window (no new losses).
+    The breaker should not fire.
+    """
+    engine = RiskEngine(_make_config(max_daily_loss_pct=0.15))
+    # Post-ack window has no new losses
+    session = _make_circuit_session(daily_pnl=0.0)
+    ack_at = NOW  # acknowledged right now
+
+    # Should NOT raise — the loss window starts at ack_at, so daily_pnl = 0
+    await engine.check_circuit_breakers(
+        session, bankroll=BANKROLL, mode="paper", daily_loss_ack_at=ack_at
+    )
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_refires_on_new_losses_after_ack() -> None:
+    """New losses after ack_at that exceed the threshold still trip the breaker."""
+    engine = RiskEngine(_make_config(max_daily_loss_pct=0.15))
+    # New losses since ack_at: -320 (exceeds 15% of 2000 = 300)
+    session = _make_circuit_session(daily_pnl=-320.0)
+    ack_at = NOW - timedelta(hours=1)
+
+    with pytest.raises(TradingCircuitBreakerError, match="daily loss"):
+        await engine.check_circuit_breakers(
+            session, bankroll=BANKROLL, mode="paper", daily_loss_ack_at=ack_at
+        )
+
+
+@pytest.mark.asyncio
+async def test_check_position_skips_pre_ack_losses() -> None:
+    """check_position also respects daily_loss_ack_at: zero post-ack losses → allowed."""
+    engine = RiskEngine(_make_config(max_daily_loss_pct=0.15))
+    signal = _make_signal(edge=0.20)
+    # daily_pnl=0 represents post-ack window only
+    session = _make_session(open_count=0, total_exposure=0.0, daily_pnl=0.0)
+    ack_at = NOW
+
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+        daily_loss_ack_at=ack_at,
+    )
+
+    assert decision.allowed is True
 
 
 @pytest.mark.asyncio

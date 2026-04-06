@@ -73,16 +73,42 @@ async def reset_drawdown(session: AsyncSession, net_bankroll: float) -> datetime
     return now
 
 
+async def get_daily_loss_ack_at(session: AsyncSession) -> datetime | None:
+    """Return the timestamp when the daily loss circuit breaker was last acknowledged.
+
+    Set whenever run state transitions to 'running'. The daily loss window in
+    risk checks uses ``max(today_start, daily_loss_ack_at)`` so that losses
+    incurred *before* the acknowledgement don't immediately re-trip the breaker.
+    Returns None if never acknowledged (full day window applies).
+    """
+    result = await session.execute(select(RunStateRow).limit(1))
+    row = result.scalar_one_or_none()
+    return row.daily_loss_ack_at if row is not None else None
+
+
 async def set_run_state(session: AsyncSession, state: str) -> None:
-    """Upsert the run state singleton row and commit."""
+    """Upsert the run state singleton row and commit.
+
+    When transitioning to 'running', stamps ``daily_loss_ack_at = now`` so
+    that the daily loss circuit breaker window resets to the current moment.
+    This prevents an already-tripped breaker from immediately re-firing on
+    the next loop cycle after the user resumes via /start.
+    """
     result = await session.execute(select(RunStateRow).limit(1))
     row = result.scalar_one_or_none()
     now = datetime.now(UTC)
     if row is None:
-        session.add(RunStateRow(id=1, state=state, updated_at=now))
+        session.add(RunStateRow(
+            id=1,
+            state=state,
+            updated_at=now,
+            daily_loss_ack_at=now if state == "running" else None,
+        ))
     else:
         row.state = state
         row.updated_at = now
+        if state == "running":
+            row.daily_loss_ack_at = now
     await session.commit()
 
 

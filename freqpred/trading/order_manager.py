@@ -98,11 +98,16 @@ class OrderManager:
             raw_size = strategy.position_size(signal, net_bankroll)
 
             # Circuit breakers fire before any position check.
-            from freqpred.alerts.run_state import get_drawdown_window  # noqa: PLC0415
+            from freqpred.alerts.run_state import (  # noqa: PLC0415
+                get_daily_loss_ack_at,
+                get_drawdown_window,
+            )
             _, drawdown_reset_bankroll = await get_drawdown_window(session)
+            daily_loss_ack_at = await get_daily_loss_ack_at(session)
             await self._risk.check_circuit_breakers(
                 session, net_bankroll, mode=self._mode,
                 drawdown_reset_bankroll=drawdown_reset_bankroll,
+                daily_loss_ack_at=daily_loss_ack_at,
             )
 
             # Step 3: risk enforcement
@@ -116,6 +121,7 @@ class OrderManager:
                 mode=self._mode,
                 stoploss_cooldown_hours=strategy.config.stoploss_cooldown_hours,
                 block_reentry_after_stoploss=strategy.config.block_reentry_after_stoploss,
+                daily_loss_ack_at=daily_loss_ack_at,
             )
             if not decision.allowed:
                 logger.info(
