@@ -38,3 +38,6 @@ class RunStateRow(Base):
     mode: Mapped[str | None] = mapped_column(VARCHAR(20), nullable=True, default=None)
     cb_active: Mapped[bool] = mapped_column(nullable=False, default=False)
     cb_reason: Mapped[str | None] = mapped_column(nullable=True, default=None)
+    daily_loss_ack_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True, default=None
+    )

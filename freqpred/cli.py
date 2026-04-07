@@ -386,15 +386,20 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 if order_manager is not None:
                     try:
                         async with session_factory() as cb_session:
-                            from freqpred.alerts.run_state import get_drawdown_window  # noqa: PLC0415
+                            from freqpred.alerts.run_state import (  # noqa: PLC0415
+                                get_daily_loss_ack_at,
+                                get_drawdown_window,
+                            )
                             from freqpred.trading import ledger as _ledger  # noqa: PLC0415
                             _net_bankroll = await _ledger.get_net_bankroll(
                                 cb_session, order_manager._bankroll, mode=order_manager._mode
                             )
                             _, _reset_bankroll = await get_drawdown_window(cb_session)
+                            _daily_loss_ack_at = await get_daily_loss_ack_at(cb_session)
                             await order_manager._risk.check_circuit_breakers(
                                 cb_session, _net_bankroll, mode=order_manager._mode,
                                 drawdown_reset_bankroll=_reset_bankroll,
+                                daily_loss_ack_at=_daily_loss_ack_at,
                             )
                             # CB check passed — clear any previously persisted CB state.
                             await set_cb_state(cb_session, active=False, reason=None)

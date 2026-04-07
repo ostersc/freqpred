@@ -6,7 +6,7 @@ Strategy position_size() output is ALWAYS passed through here before any order.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import func, select
@@ -45,6 +45,7 @@ class RiskEngine:
         mode: str = "paper",
         stoploss_cooldown_hours: float = 0.0,
         block_reentry_after_stoploss: bool = False,
+        daily_loss_ack_at: datetime | None = None,
     ) -> RiskDecision:
         """Enforce all hard caps. Returns RiskDecision(allowed=False) if any
         limit is breached. Never raises — callers check .allowed.
@@ -181,10 +182,20 @@ class RiskEngine:
         today_start = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
+        # If the operator acknowledged the circuit breaker via /start, measure
+        # losses only since that acknowledgement (not since midnight).  This
+        # prevents a previously-tripped breaker from immediately re-blocking
+        # after resume while still protecting against *new* losses of the same
+        # magnitude.
+        loss_window_start = (
+            max(today_start, daily_loss_ack_at)
+            if daily_loss_ack_at is not None
+            else today_start
+        )
         daily_pnl_result = await session.execute(
             select(func.sum(PositionRow.pnl)).where(
                 PositionRow.status == "closed",
-                PositionRow.exit_time >= today_start,
+                PositionRow.exit_time >= loss_window_start,
                 PositionRow.mode == mode,
             )
         )
@@ -219,6 +230,7 @@ class RiskEngine:
         bankroll: float,
         mode: str,
         drawdown_reset_bankroll: "float | None" = None,
+        daily_loss_ack_at: "datetime | None" = None,
     ) -> None:
         """Query current state and raise TradingCircuitBreakerError if:
         - daily loss > config.max_daily_loss_pct * bankroll
@@ -230,15 +242,25 @@ class RiskEngine:
         closed P&L).  ``drawdown_reset_bankroll`` is the net bankroll stored
         when /reset_drawdown was last called; if None the drawdown check is
         skipped (no baseline established yet).
+
+        ``daily_loss_ack_at`` is set by /start.  When provided, the daily loss
+        window starts at ``max(today_start, daily_loss_ack_at)`` so that losses
+        incurred before the operator acknowledged the breaker do not immediately
+        re-trip it on the next cycle.
         """
         # Daily loss circuit breaker
         today_start = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
+        loss_window_start = (
+            max(today_start, daily_loss_ack_at)
+            if daily_loss_ack_at is not None
+            else today_start
+        )
         daily_pnl_result = await session.execute(
             select(func.sum(PositionRow.pnl)).where(
                 PositionRow.status == "closed",
-                PositionRow.exit_time >= today_start,
+                PositionRow.exit_time >= loss_window_start,
                 PositionRow.mode == mode,
             )
         )

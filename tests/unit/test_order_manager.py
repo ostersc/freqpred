@@ -193,6 +193,17 @@ def _patch_get_drawdown_window():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _patch_get_daily_loss_ack_at():
+    """Patch get_daily_loss_ack_at so order_manager.submit() doesn't need a real DB."""
+    with patch(
+        "freqpred.alerts.run_state.get_daily_loss_ack_at",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
