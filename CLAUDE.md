@@ -30,6 +30,14 @@ freqpred/
 │   ├── llm/                # Claude client + LLM audit logging
 │   ├── metrics/            # calibration, reporting
 │   ├── dashboard/          # FastAPI backend + React frontend
+│   │   ├── api/            # routes.py, schemas.py, app.py
+│   │   └── ui/             # React app (Vite, Tailwind, TanStack Query)
+│   │       ├── package.json
+│   │       ├── vite.config.ts
+│   │       └── src/
+│   │           ├── api/    # typed fetch wrappers
+│   │           ├── components/
+│   │           └── pages/  # 7 dashboard pages
 │   └── alerts/             # Telegram, Discord
 ├── strategies/             # user strategy files (gitignored)
 ├── config/                 # config.example.yaml + local config.yaml (gitignored)
@@ -56,6 +64,10 @@ freqpred/
 - **Pydantic v2** — config validation and data models
 - **uv** — dependency management (not pip)
 - **Kalshi Trade API v2** — REST base `https://api.elections.kalshi.com/trade-api/v2`; WebSocket `wss://api.elections.kalshi.com/trade-api/ws/v2`
+- **React 18 + TypeScript + Vite** — dashboard frontend
+- **TanStack Query v5** — data fetching + auto-polling in the dashboard
+- **Recharts** — calibration curve + LLM cost charts
+- **Tailwind CSS v3** — utility-first styling for the dashboard UI
 
 ### Kalshi WS v2 channel names (gotcha)
 The WebSocket uses **`market_lifecycle_v2`** (not `market_lifecycle`). Valid channels: `ticker`, `market_lifecycle_v2`, `orderbook_delta`, `trade`, `fill`, `market_positions`, `user_orders`.

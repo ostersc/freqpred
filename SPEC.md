@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-04-05
+**Last updated:** 2026-04-07
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -991,7 +991,11 @@ All circuit breaker alerts use a standard format (🚨 CIRCUIT BREAKER TRIPPED, 
 
 ### Web Dashboard
 
-Built with **FastAPI** (backend) + **React** (frontend), served via ECS.
+Built with **FastAPI** (backend) + **React 18 + TypeScript** (frontend), served via ECS.
+
+**Frontend stack:** React 18, TypeScript, Vite, TanStack Query v5 (data fetching + polling), React Router v6, Recharts (calibration + cost charts), Tailwind CSS v3.
+
+**Serve path:** `freqpred/dashboard/ui/` contains the React app. `npm run build` produces `freqpred/dashboard/ui/dist/`. FastAPI mounts this directory at `/` via `StaticFiles(html=True)` if it exists; otherwise falls back to Swagger UI redirect. In dev, Vite proxies `/api` to `localhost:8000`.
 
 **Pages:**
 
@@ -1158,7 +1162,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T41** [#41](https://github.com/ostersc/freqpred/issues/41) — Dashboard: Strategy Config + System Health API endpoints; GET/PUT strategy params at runtime; circuit breaker state, WebSocket status, pending order count. Depends on: T36.
 - [ ] **T42** [#42](https://github.com/ostersc/freqpred/issues/42) — Production AWS deployment: ECS Fargate, RDS Postgres 16 + pgvector, Secrets Manager, CloudWatch alarms, deployment runbook. Depends on: T36.
 - [ ] **T43** [#43](https://github.com/ostersc/freqpred/issues/43) — GitHub Actions CI/CD: lint → test → build Docker → push to ECR → migrate → deploy to ECS. Depends on: T42.
-- [ ] **T44** [#44](https://github.com/ostersc/freqpred/issues/44) — React dashboard frontend: all 7 pages (Signal Feed, Positions, Ledger, Calibration, LLM Cost & Audit, Strategy Config, System Health). Depends on: T41.
+- [x] **T44** [#44](https://github.com/ostersc/freqpred/issues/44) — React dashboard frontend: all 7 pages (Signal Feed, Positions, Ledger, Calibration, LLM Cost & Audit, Strategy Config, System Health). Depends on: T41.
 - [x] **T45** [#45](https://github.com/ostersc/freqpred/issues/45) — Circuit breaker hardening: drawdown breaker implementation; all four breakers verified; Telegram alert format; incident runbook. Depends on: T36.
 - [ ] **T47** [#47](https://github.com/ostersc/freqpred/issues/47) — `OrderTypes` config + limit order entry: `OrderTypes` dataclass on `StrategyConfig`; `custom_entry_price()` hook; entry at `estimated_prob - min_edge`; pending position fill-check + timeout cancellation; paper mode only.
 - [ ] **T48** [#48](https://github.com/ostersc/freqpred/issues/48) — Limit order exits + exchange-hosted stoploss: `exit=limit` posts resting ROI/trailing targets; `custom_exit_price()` hook; `stoploss_on_exchange` with interval refresh; emergency/circuit-breaker always market. Depends on: T47.
@@ -1266,8 +1270,14 @@ freqpred/
 │   │   ├── calibration.py       # Brier score, calibration curve
 │   │   └── reporting.py         # daily digest generation
 │   ├── dashboard/
-│   │   ├── api/                 # FastAPI routes
-│   │   └── ui/                  # React frontend
+│   │   ├── api/                 # FastAPI routes + schemas
+│   │   └── ui/                  # React frontend (Vite, Tailwind, TanStack Query)
+│   │       ├── package.json
+│   │       ├── vite.config.ts
+│   │       └── src/
+│   │           ├── api/         # typed fetch wrappers per endpoint
+│   │           ├── components/  # NavBar, StatusBadge, LoadingSpinner, ErrorBanner
+│   │           └── pages/       # 7 dashboard pages
 │   └── alerts/
 │       ├── telegram.py
 │       └── discord.py

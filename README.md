@@ -223,6 +223,9 @@ uv run alembic revision --autogenerate -m "description"
 
 # Apply migrations
 uv run freqpred db migrate
+
+# Dashboard dev server (frontend hot-reload, proxies /api to localhost:8000)
+cd freqpred/dashboard/ui && npm install && npm run dev
 ```
 
 Adminer (database UI): `docker-compose up -d adminer` → `http://localhost:8080` (server: `db`, user/pass/db: `freqpred`)
@@ -236,6 +239,7 @@ Adminer (database UI): `docker-compose up -d adminer` → `http://localhost:8080
 - **Claude (Anthropic)** — signal analysis (`claude-sonnet-4-6`) + catalyst generation (`claude-haiku-4-5`)
 - **sentence-transformers** — local document embeddings (`all-MiniLM-L6-v2`, 384 dims, no API key)
 - **Tavily + NewsAPI + Reddit + GDELT + Internet Archive TV** — news ingestion
+- **React 18 + TypeScript + Vite + Tailwind CSS** — dashboard frontend (served from FastAPI `/`)
 - **uv** — dependency management
 
 ---

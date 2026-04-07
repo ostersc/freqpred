@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict
 class SignalOut(BaseModel):
     id: str
     market_id: str
+    market_question: str | None
     estimated_probability: float
     confidence: float
     edge: float
@@ -123,6 +124,36 @@ class LLMCostResponse(BaseModel):
     daily_cap_usd: float
     pct_used: float
     by_query_type: dict[str, float]
+
+
+# ---------------------------------------------------------------------------
+# LLM query list / detail
+# ---------------------------------------------------------------------------
+
+
+class LLMQueryOut(BaseModel):
+    id: int
+    timestamp: datetime
+    query_type: str
+    market_id: str | None
+    model_used: str
+    tokens_total: int
+    cost_usd: float
+    latency_ms: int
+    success: bool
+
+
+class LLMQueryListResponse(BaseModel):
+    items: list[LLMQueryOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class LLMQueryDetailOut(LLMQueryOut):
+    prompt: str
+    response: str
+    error_message: str | None
 
 
 # ---------------------------------------------------------------------------

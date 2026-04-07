@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .routes import router
@@ -44,9 +46,24 @@ def create_app(
     app.state.bankroll_usd = bankroll_usd
     app.state.started_at = datetime.now(UTC)
 
-    @app.get("/", include_in_schema=False)
-    async def root() -> RedirectResponse:
-        return RedirectResponse(url="/docs")
-
     app.include_router(router, prefix="/api")
+
+    # Serve the built React SPA if the dist directory exists; otherwise fall
+    # back to the Swagger UI redirect so the API stays usable in dev.
+    dist_dir = Path(__file__).parent.parent / "ui" / "dist"
+    if dist_dir.exists():
+        # Mount /assets separately so static asset requests resolve correctly.
+        app.mount("/assets", StaticFiles(directory=str(dist_dir / "assets")), name="assets")
+
+        # Catch-all: serve index.html for every non-/api path so React Router works.
+        from fastapi.responses import FileResponse  # noqa: PLC0415
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def spa_fallback(full_path: str) -> FileResponse:
+            return FileResponse(str(dist_dir / "index.html"))
+    else:
+        @app.get("/", include_in_schema=False)
+        async def root() -> RedirectResponse:
+            return RedirectResponse(url="/docs")
+
     return app

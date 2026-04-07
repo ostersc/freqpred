@@ -154,14 +154,21 @@ def _make_position_row(**kw) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
+def _signals_list_result(rows: list) -> MagicMock:
+    """Mock result for the signals list query, which returns (SignalRow, question) tuples."""
+    r = MagicMock()
+    r.all.return_value = rows
+    return r
+
+
 def test_signals_endpoint_returns_paginated_list() -> None:
     row1 = _make_signal_row()
     row2 = _make_signal_row()
 
     session = AsyncMock()
     session.execute = _execute_side_effects(
-        _scalar_result(2),          # count query
-        _scalars_result([row1, row2]),  # data query
+        _scalar_result(2),                                              # count query
+        _signals_list_result([(row1, "Q1"), (row2, "Q2")]),            # data query
     )
 
     client = TestClient(_make_app(session))
@@ -173,12 +180,12 @@ def test_signals_endpoint_returns_paginated_list() -> None:
     assert data["total"] == 2
     assert data["limit"] == 20
     assert data["offset"] == 0
-    # Required fields present
     item = data["items"][0]
     assert "estimated_probability" in item
     assert "edge" in item
     assert "direction" in item
     assert "created_at" in item
+    assert item["market_question"] == "Q1"
 
 
 def test_signals_endpoint_filters_by_market_id() -> None:
@@ -187,7 +194,7 @@ def test_signals_endpoint_filters_by_market_id() -> None:
     session = AsyncMock()
     session.execute = _execute_side_effects(
         _scalar_result(1),
-        _scalars_result([row]),
+        _signals_list_result([(row, "Will X happen?")]),
     )
 
     client = TestClient(_make_app(session))
@@ -199,13 +206,26 @@ def test_signals_endpoint_filters_by_market_id() -> None:
     assert data["items"][0]["market_id"] == "MKTX-42"
 
 
-def test_signals_endpoint_unknown_id_returns_404() -> None:
-    session = AsyncMock()
-    session.execute = AsyncMock(return_value=_scalar_result(None))  # scalar_one_or_none
+def test_signals_endpoint_market_question_none_when_market_missing() -> None:
+    row = _make_signal_row()
 
-    # Patch scalar_one_or_none to return None
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _scalar_result(1),
+        _signals_list_result([(row, None)]),
+    )
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/signals")
+
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["market_question"] is None
+
+
+def test_signals_endpoint_unknown_id_returns_404() -> None:
     result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = None
+    result_mock.one_or_none.return_value = None
+    session = AsyncMock()
     session.execute = AsyncMock(return_value=result_mock)
 
     client = TestClient(_make_app(session))
@@ -656,3 +676,103 @@ def test_system_health_db_error_returns_degraded_db_ok_false() -> None:
 
     assert resp.status_code == 200
     assert resp.json()["db_ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# /api/llm/queries
+# ---------------------------------------------------------------------------
+
+
+def _make_llm_query_row(**kw) -> MagicMock:
+    row = MagicMock()
+    row.id = kw.get("id", 1)
+    row.timestamp = kw.get("timestamp", datetime(2026, 1, 1, tzinfo=UTC))
+    row.query_type = kw.get("query_type", "market_analysis")
+    row.market_id = kw.get("market_id", "MARKET-1")
+    row.model_used = kw.get("model_used", "claude-sonnet-4-6")
+    row.tokens_total = kw.get("tokens_total", 500)
+    row.cost_usd = kw.get("cost_usd", 0.01)
+    row.latency_ms = kw.get("latency_ms", 1200)
+    row.success = kw.get("success", True)
+    row.prompt = kw.get("prompt", "Test prompt text")
+    row.response = kw.get("response", "Test response text")
+    row.error_message = kw.get("error_message", None)
+    return row
+
+
+def test_llm_queries_empty_list() -> None:
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _scalar_result(0),          # count
+        _scalars_result([]),        # rows
+    )
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/llm/queries")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["items"] == []
+    assert data["total"] == 0
+    assert data["limit"] == 50
+    assert data["offset"] == 0
+
+
+def test_llm_queries_returns_rows_ordered_by_timestamp() -> None:
+    row1 = _make_llm_query_row(id=2, timestamp=datetime(2026, 1, 2, tzinfo=UTC))
+    row2 = _make_llm_query_row(id=1, timestamp=datetime(2026, 1, 1, tzinfo=UTC))
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _scalar_result(2),
+        _scalars_result([row1, row2]),
+    )
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/llm/queries")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) == 2
+    assert data["total"] == 2
+    # First row should be the more recent one (id=2)
+    assert data["items"][0]["id"] == 2
+    assert data["items"][0]["query_type"] == "market_analysis"
+    assert data["items"][0]["cost_usd"] == pytest.approx(0.01)
+    assert data["items"][0]["success"] is True
+
+
+def test_llm_queries_detail_returns_prompt_and_response() -> None:
+    row = _make_llm_query_row(
+        id=42,
+        prompt="What is the probability?",
+        response="The probability is 0.7.",
+    )
+
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = row
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/llm/queries/42")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["id"] == 42
+    assert data["prompt"] == "What is the probability?"
+    assert data["response"] == "The probability is 0.7."
+    assert data["error_message"] is None
+
+
+def test_llm_queries_detail_unknown_id_returns_404() -> None:
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = None
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/llm/queries/9999")
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "LLM query not found"

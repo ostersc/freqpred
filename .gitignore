@@ -56,3 +56,7 @@ logs/
 config/config.yaml
 strategies/*
 !strategies/.gitkeep
+
+# Node / frontend
+freqpred/dashboard/ui/node_modules/
+freqpred/dashboard/ui/dist/

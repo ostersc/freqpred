@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.llm.audit import get_daily_spend_usd
 from freqpred.llm.models import LLMQueryRow
-from freqpred.markets.models import PositionRow
+from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.metrics.calibration import compute_calibration
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
@@ -27,6 +27,9 @@ from .schemas import (
     HealthResponse,
     LedgerResponse,
     LLMCostResponse,
+    LLMQueryDetailOut,
+    LLMQueryListResponse,
+    LLMQueryOut,
     PositionListResponse,
     PositionOut,
     SignalDetailOut,
@@ -90,10 +93,11 @@ def _started_at(request: Request) -> datetime:
 # ---------------------------------------------------------------------------
 
 
-def _signal_row_to_out(row: SignalRow) -> SignalOut:
+def _signal_row_to_out(row: SignalRow, market_question: str | None = None) -> SignalOut:
     return SignalOut(
         id=str(row.id),
         market_id=row.market_id,
+        market_question=market_question,
         estimated_probability=row.estimated_probability,
         confidence=row.confidence,
         edge=row.edge,
@@ -207,7 +211,11 @@ async def list_signals(
     market_id: str | None = Query(default=None),
     direction: str | None = Query(default=None),
 ) -> SignalListResponse:
-    stmt = select(SignalRow).order_by(SignalRow.created_at.desc())
+    stmt = (
+        select(SignalRow, MarketRow.question)
+        .outerjoin(MarketRow, MarketRow.id == SignalRow.market_id)
+        .order_by(SignalRow.created_at.desc())
+    )
     count_stmt = select(func.count()).select_from(SignalRow)
 
     if market_id:
@@ -218,10 +226,10 @@ async def list_signals(
         count_stmt = count_stmt.where(SignalRow.direction == direction.upper())
 
     total = int((await session.execute(count_stmt)).scalar_one())
-    rows = (await session.execute(stmt.offset(offset).limit(limit))).scalars().all()
+    result_rows = (await session.execute(stmt.offset(offset).limit(limit))).all()
 
     return SignalListResponse(
-        items=[_signal_row_to_out(r) for r in rows],
+        items=[_signal_row_to_out(r, q) for r, q in result_rows],
         total=total,
         limit=limit,
         offset=offset,
@@ -238,11 +246,16 @@ async def get_signal(
     except ValueError:
         raise HTTPException(status_code=404, detail="Signal not found")
 
-    row = (
-        await session.execute(select(SignalRow).where(SignalRow.id == uid))
-    ).scalar_one_or_none()
-    if row is None:
+    result = (
+        await session.execute(
+            select(SignalRow, MarketRow.question)
+            .outerjoin(MarketRow, MarketRow.id == SignalRow.market_id)
+            .where(SignalRow.id == uid)
+        )
+    ).one_or_none()
+    if result is None:
         raise HTTPException(status_code=404, detail="Signal not found")
+    row, market_question = result
 
     # Fetch document links with source URL and title
     link_rows = (
@@ -269,7 +282,7 @@ async def get_signal(
         for doc_id, relevance_score, source_url, title in link_rows
     ]
 
-    base = _signal_row_to_out(row)
+    base = _signal_row_to_out(row, market_question)
     return SignalDetailOut(**base.model_dump(), document_links=doc_links)
 
 
@@ -404,6 +417,72 @@ async def get_llm_cost(
         daily_cap_usd=daily_cap,
         pct_used=round(pct_used, 2),
         by_query_type=by_query_type,
+    )
+
+
+@router.get("/llm/queries", response_model=LLMQueryListResponse)
+async def list_llm_queries(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> LLMQueryListResponse:
+    count_result = await session.execute(select(func.count()).select_from(LLMQueryRow))
+    total = int(count_result.scalar_one())
+
+    rows = (
+        await session.execute(
+            select(LLMQueryRow)
+            .order_by(LLMQueryRow.timestamp.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    return LLMQueryListResponse(
+        items=[
+            LLMQueryOut(
+                id=r.id,
+                timestamp=r.timestamp,
+                query_type=r.query_type,
+                market_id=r.market_id,
+                model_used=r.model_used,
+                tokens_total=r.tokens_total,
+                cost_usd=r.cost_usd,
+                latency_ms=r.latency_ms,
+                success=r.success,
+            )
+            for r in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/llm/queries/{query_id}", response_model=LLMQueryDetailOut)
+async def get_llm_query(
+    query_id: int,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> LLMQueryDetailOut:
+    row = (
+        await session.execute(select(LLMQueryRow).where(LLMQueryRow.id == query_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="LLM query not found")
+
+    return LLMQueryDetailOut(
+        id=row.id,
+        timestamp=row.timestamp,
+        query_type=row.query_type,
+        market_id=row.market_id,
+        model_used=row.model_used,
+        tokens_total=row.tokens_total,
+        cost_usd=row.cost_usd,
+        latency_ms=row.latency_ms,
+        success=row.success,
+        prompt=row.prompt,
+        response=row.response,
+        error_message=row.error_message,
     )
 
 
