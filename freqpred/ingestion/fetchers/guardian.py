@@ -42,6 +42,18 @@ def _strip_html(raw: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _sanitize_query(query: str) -> str:
+    """Remove Google Search syntax unsupported by the Guardian Solr/Lucene API.
+
+    The catalyst generator produces ``query_text`` for general web search
+    (Tavily, Google) which may include ``site:`` filters.  These are not valid
+    Lucene syntax and cause the Guardian API to return HTTP 400.
+    """
+    # Strip bare site: tokens (e.g. "site:truthsocial.com").
+    sanitized = re.sub(r"\bsite:\S+", "", query, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", sanitized).strip()
+
+
 async def fetch(
     api_key: str,
     query: str,
@@ -70,6 +82,10 @@ async def fetch(
         GuardianRateLimitError: if the API returns HTTP 429.
     """
     now = datetime.now(timezone.utc)
+    query = _sanitize_query(query)
+    if not query:
+        log.debug("guardian.fetch.skip", reason="empty_query_after_sanitize")
+        return []
 
     params: dict[str, str | int] = {
         "q": query,

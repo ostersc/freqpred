@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.fetchers.guardian import GuardianRateLimitError, _strip_html, fetch
+from freqpred.ingestion.fetchers.guardian import GuardianRateLimitError, _sanitize_query, _strip_html, fetch
 from freqpred.ingestion.store import RawDocument
 
 _API_KEY = "test-guardian-key"
@@ -78,6 +78,31 @@ def test_strip_html_collapses_whitespace():
 
 def test_strip_html_empty_string():
     assert _strip_html("") == ""
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_query helper
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_query_strips_site_prefix():
+    assert _sanitize_query('site:truthsocial.com Trump "golden dome"') == 'Trump "golden dome"'
+
+
+def test_sanitize_query_strips_site_prefix_case_insensitive():
+    assert _sanitize_query("SITE:example.com foo bar") == "foo bar"
+
+
+def test_sanitize_query_strips_multiple_site_tokens():
+    assert _sanitize_query("site:a.com site:b.com climate policy") == "climate policy"
+
+
+def test_sanitize_query_passthrough_clean_query():
+    assert _sanitize_query('Trump AND "golden dome"') == 'Trump AND "golden dome"'
+
+
+def test_sanitize_query_empty_after_strip_returns_empty():
+    assert _sanitize_query("site:foo.com") == ""
 
 
 # ---------------------------------------------------------------------------
