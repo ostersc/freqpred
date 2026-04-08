@@ -254,7 +254,7 @@ def test_positions_endpoint_filters_by_status() -> None:
     session.execute = _execute_side_effects(
         _mode_result(),              # _get_mode
         _scalar_result(1),
-        _scalars_result([open_pos]),
+        _all_result([(open_pos, 0.20)]),   # (PositionRow, mid_price) tuples
     )
 
     client = TestClient(_make_app(session))
@@ -276,7 +276,7 @@ def test_positions_endpoint_all_statuses() -> None:
     session.execute = _execute_side_effects(
         _mode_result(),              # _get_mode
         _scalar_result(2),
-        _scalars_result(rows),
+        _all_result([(r, 0.50) for r in rows]),   # (PositionRow, mid_price) tuples
     )
 
     client = TestClient(_make_app(session))

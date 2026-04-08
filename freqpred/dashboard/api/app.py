@@ -56,10 +56,15 @@ def create_app(
         app.mount("/assets", StaticFiles(directory=str(dist_dir / "assets")), name="assets")
 
         # Catch-all: serve index.html for every non-/api path so React Router works.
+        # Guard: never intercept /api/* — those are backend routes; return 404 so
+        # the browser sees a real error rather than silently getting back HTML.
+        from fastapi import HTTPException  # noqa: PLC0415
         from fastapi.responses import FileResponse  # noqa: PLC0415
 
         @app.get("/{full_path:path}", include_in_schema=False)
         async def spa_fallback(full_path: str) -> FileResponse:
+            if full_path.startswith("api/") or full_path == "api":
+                raise HTTPException(status_code=404, detail="Not found")
             return FileResponse(str(dist_dir / "index.html"))
     else:
         @app.get("/", include_in_schema=False)

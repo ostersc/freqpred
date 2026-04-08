@@ -30,6 +30,7 @@ from .schemas import (
     LLMQueryDetailOut,
     LLMQueryListResponse,
     LLMQueryOut,
+    PositionDetailOut,
     PositionListResponse,
     PositionOut,
     SignalDetailOut,
@@ -114,7 +115,17 @@ def _signal_row_to_out(row: SignalRow, market_question: str | None = None) -> Si
     )
 
 
-def _position_row_to_out(row: PositionRow) -> PositionOut:
+def _position_row_to_out(row: PositionRow, current_mid: float | None = None) -> PositionOut:
+    unrealized_pnl: float | None = None
+    unrealized_pnl_pct: float | None = None
+    if row.status == "open" and current_mid is not None:
+        if row.direction == "YES":
+            unrealized_pnl = row.contracts * (current_mid - row.entry_price)
+        else:
+            unrealized_pnl = row.contracts * ((1.0 - current_mid) - row.entry_price)
+        cost_basis = row.entry_price * row.contracts
+        unrealized_pnl_pct = unrealized_pnl / cost_basis if cost_basis else 0.0
+
     return PositionOut(
         id=str(row.id),
         market_id=row.market_id,
@@ -135,6 +146,8 @@ def _position_row_to_out(row: PositionRow) -> PositionOut:
         resolution=row.resolution,
         pnl=row.pnl,
         pnl_pct=row.pnl_pct,
+        unrealized_pnl=unrealized_pnl,
+        unrealized_pnl_pct=unrealized_pnl_pct,
         created_at=row.created_at,
     )
 
@@ -297,7 +310,12 @@ async def list_positions(
     status: str = Query(default="all", pattern="^(open|closed|all)$"),
 ) -> PositionListResponse:
     app_mode = await _get_mode(session)
-    stmt = select(PositionRow).where(PositionRow.mode == app_mode).order_by(PositionRow.entry_time.desc())
+    stmt = (
+        select(PositionRow, MarketRow.mid_price)
+        .outerjoin(MarketRow, MarketRow.id == PositionRow.market_id)
+        .where(PositionRow.mode == app_mode)
+        .order_by(PositionRow.entry_time.desc())
+    )
     count_stmt = select(func.count()).select_from(PositionRow).where(PositionRow.mode == app_mode)
 
     if status != "all":
@@ -305,10 +323,10 @@ async def list_positions(
         count_stmt = count_stmt.where(PositionRow.status == status)
 
     total = int((await session.execute(count_stmt)).scalar_one())
-    rows = (await session.execute(stmt)).scalars().all()
+    rows = (await session.execute(stmt)).all()
 
     return PositionListResponse(
-        items=[_position_row_to_out(r) for r in rows],
+        items=[_position_row_to_out(r, current_mid=mid) for r, mid in rows],
         total=total,
     )
 
@@ -330,6 +348,88 @@ async def get_position(
         raise HTTPException(status_code=404, detail="Position not found")
 
     return _position_row_to_out(row)
+
+
+@router.get("/positions/{position_id}/detail", response_model=PositionDetailOut)
+async def get_position_detail(
+    position_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> PositionDetailOut:
+    try:
+        uid = _uuid.UUID(position_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Position not found")
+
+    pos_row = (
+        await session.execute(select(PositionRow).where(PositionRow.id == uid))
+    ).scalar_one_or_none()
+    if pos_row is None:
+        raise HTTPException(status_code=404, detail="Position not found")
+
+    # Fetch market for question + current mid
+    market_row = (
+        await session.execute(select(MarketRow).where(MarketRow.id == pos_row.market_id))
+    ).scalar_one_or_none()
+    market_question = market_row.question if market_row else None
+    current_mid = market_row.mid_price if market_row else None
+
+    # Fetch entry signal + document links
+    entry_signal_uid = pos_row.signal_id
+    sig_result = (
+        await session.execute(
+            select(SignalRow, MarketRow.question)
+            .outerjoin(MarketRow, MarketRow.id == SignalRow.market_id)
+            .where(SignalRow.id == entry_signal_uid)
+        )
+    ).one_or_none()
+    if sig_result is None:
+        raise HTTPException(status_code=404, detail="Entry signal not found")
+    sig_row, _ = sig_result
+
+    link_rows = (
+        await session.execute(
+            select(
+                DocumentMarketLinkRow.document_id,
+                DocumentMarketLinkRow.relevance_score,
+                DocumentRow.source_url,
+                DocumentRow.title,
+            )
+            .join(DocumentRow, DocumentRow.id == DocumentMarketLinkRow.document_id)
+            .where(DocumentMarketLinkRow.signal_id == entry_signal_uid)
+            .order_by(DocumentMarketLinkRow.relevance_score.desc())
+        )
+    ).all()
+
+    doc_links = [
+        DocumentLinkOut(
+            document_id=str(doc_id),
+            source_url=source_url,
+            title=title or "",
+            relevance_score=relevance_score,
+        )
+        for doc_id, relevance_score, source_url, title in link_rows
+    ]
+    entry_signal_base = _signal_row_to_out(sig_row, market_question)
+    entry_signal = SignalDetailOut(**entry_signal_base.model_dump(), document_links=doc_links)
+
+    # Fetch all signals for this market (chronological, capped at 100)
+    market_sig_rows = (
+        await session.execute(
+            select(SignalRow)
+            .where(SignalRow.market_id == pos_row.market_id)
+            .order_by(SignalRow.created_at.asc())
+            .limit(100)
+        )
+    ).scalars().all()
+    market_signals = [_signal_row_to_out(r, market_question) for r in market_sig_rows]
+
+    return PositionDetailOut(
+        **_position_row_to_out(pos_row, current_mid=current_mid).model_dump(),
+        market_question=market_question,
+        current_mid=current_mid,
+        entry_signal=entry_signal,
+        market_signals=market_signals,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -359,14 +459,13 @@ async def get_ledger(
 @router.get("/calibration", response_model=CalibrationResponse)
 async def get_calibration(
     session: Annotated[AsyncSession, Depends(get_db)],
+    lookback_days: Annotated[int | None, Query(ge=1)] = None,
 ) -> CalibrationResponse:
     app_mode = await _get_mode(session)
-    report = await compute_calibration(session, mode=app_mode)
-    return CalibrationResponse(
-        brier_score=report.brier_score,
-        market_brier_score=report.market_brier_score,
-        n_samples=report.n_samples,
-        buckets=[
+    report = await compute_calibration(session, mode=app_mode, lookback_days=lookback_days)
+
+    def _map_buckets(buckets: list) -> list[CalibrationBucketOut]:
+        return [
             CalibrationBucketOut(
                 lower=b.lower,
                 upper=b.upper,
@@ -374,8 +473,15 @@ async def get_calibration(
                 mean_estimated_prob=b.mean_estimated_prob,
                 actual_resolution_rate=b.actual_resolution_rate,
             )
-            for b in report.buckets
-        ],
+            for b in buckets
+        ]
+
+    return CalibrationResponse(
+        brier_score=report.brier_score,
+        market_brier_score=report.market_brier_score,
+        n_samples=report.n_samples,
+        buckets=_map_buckets(report.buckets),
+        market_buckets=_map_buckets(report.market_buckets),
     )
 
 

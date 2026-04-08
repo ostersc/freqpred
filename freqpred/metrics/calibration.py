@@ -28,6 +28,7 @@ class CalibrationReport:
     n_samples: int
     lookback_days: int | None = None
     buckets: list[CalibrationBucket] = field(default_factory=list)
+    market_buckets: list[CalibrationBucket] = field(default_factory=list)
 
 
 async def compute_calibration(
@@ -79,6 +80,7 @@ async def compute_calibration(
             n_samples=0,
             lookback_days=lookback_days,
             buckets=_empty_buckets(),
+            market_buckets=_empty_buckets(),
         )
 
     brier_sum = 0.0
@@ -87,6 +89,10 @@ async def compute_calibration(
     bucket_prob_sums = [0.0] * 10
     bucket_resolution_sums = [0.0] * 10
     bucket_counts = [0] * 10
+    # Market buckets: same structure but binned by market_mid
+    market_prob_sums = [0.0] * 10
+    market_resolution_sums = [0.0] * 10
+    market_bucket_counts = [0] * 10
 
     for estimated_prob, market_mid, resolution in rows:
         y = float(resolution)
@@ -96,23 +102,27 @@ async def compute_calibration(
         brier_sum += (p - y) ** 2
         naive_sum += (mid - y) ** 2
 
-        # Assign to bucket: bin index = floor(p * 10), clamped to [0, 9]
+        # Model bucket: bin by estimated_prob
         idx = min(int(p * 10), 9)
         bucket_counts[idx] += 1
         bucket_prob_sums[idx] += p
         bucket_resolution_sums[idx] += y
 
+        # Market bucket: bin by market_mid
+        midx = min(int(mid * 10), 9)
+        market_bucket_counts[midx] += 1
+        market_prob_sums[midx] += mid
+        market_resolution_sums[midx] += y
+
     buckets = []
+    market_buckets = []
     for i in range(10):
         lower = i / 10.0
         upper = (i + 1) / 10.0
+
         count = bucket_counts[i]
-        if count > 0:
-            mean_p = bucket_prob_sums[i] / count
-            resolution_rate = bucket_resolution_sums[i] / count
-        else:
-            mean_p = (lower + upper) / 2.0
-            resolution_rate = 0.0
+        mean_p = bucket_prob_sums[i] / count if count > 0 else (lower + upper) / 2.0
+        resolution_rate = bucket_resolution_sums[i] / count if count > 0 else 0.0
         buckets.append(
             CalibrationBucket(
                 lower=lower,
@@ -123,12 +133,26 @@ async def compute_calibration(
             )
         )
 
+        mcount = market_bucket_counts[i]
+        mean_mid = market_prob_sums[i] / mcount if mcount > 0 else (lower + upper) / 2.0
+        market_resolution_rate = market_resolution_sums[i] / mcount if mcount > 0 else 0.0
+        market_buckets.append(
+            CalibrationBucket(
+                lower=lower,
+                upper=upper,
+                count=mcount,
+                mean_estimated_prob=mean_mid,
+                actual_resolution_rate=market_resolution_rate,
+            )
+        )
+
     return CalibrationReport(
         brier_score=brier_sum / n,
         market_brier_score=naive_sum / n,
         n_samples=n,
         lookback_days=lookback_days,
         buckets=buckets,
+        market_buckets=market_buckets,
     )
 
 

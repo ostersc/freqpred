@@ -55,7 +55,18 @@ export interface PositionOut {
   resolution: number | null
   pnl: number | null
   pnl_pct: number | null
+  unrealized_pnl: number | null
+  unrealized_pnl_pct: number | null
   created_at: string
+}
+
+export interface PositionDetailOut extends PositionOut {
+  market_question: string | null
+  current_mid: number | null
+  unrealized_pnl: number | null
+  unrealized_pnl_pct: number | null
+  entry_signal: SignalDetailOut
+  market_signals: SignalOut[]
 }
 
 export interface PositionListResponse {
@@ -83,6 +94,7 @@ export interface CalibrationResponse {
   market_brier_score: number
   n_samples: number
   buckets: CalibrationBucketOut[]
+  market_buckets: CalibrationBucketOut[]
 }
 
 export interface LLMCostResponse {

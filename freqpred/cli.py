@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal as _signal
+from pathlib import Path
 
 import click
 import structlog
@@ -1585,14 +1586,15 @@ async def _alerts_test(config: object, channel: str) -> None:
 @main.command()
 @click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind.")
 @click.option("--port", default=8000, show_default=True, help="Port to listen on.")
+@click.option("--dev", is_flag=True, default=False, help="Also start the Vite dev server (hot-reload UI on localhost:5173).")
 @click.pass_context
-def dashboard(ctx: click.Context, host: str, port: int) -> None:
+def dashboard(ctx: click.Context, host: str, port: int, dev: bool) -> None:
     """Start the dashboard API server (read-only JSON API)."""
     config = ctx.obj["config"]
-    asyncio.run(_dashboard(config, host, port))
+    asyncio.run(_dashboard(config, host, port, dev=dev))
 
 
-async def _dashboard(config: object, host: str, port: int) -> None:
+async def _dashboard(config: object, host: str, port: int, dev: bool = False) -> None:
     import uvicorn
 
     import freqpred.alerts.models     # noqa: F401
@@ -1622,10 +1624,26 @@ async def _dashboard(config: object, host: str, port: int) -> None:
     click.echo(f"Starting dashboard on http://{host}:{port}")
     server_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(server_config)
-    try:
-        await server.serve()
-    finally:
-        await engine.dispose()
+
+    if dev:
+        ui_dir = Path(__file__).parent / "dashboard" / "ui"
+        click.echo("Starting Vite dev server on http://localhost:5173")
+        vite_proc = await asyncio.create_subprocess_exec(
+            "npm", "run", "dev",
+            cwd=str(ui_dir),
+        )
+        try:
+            await asyncio.gather(server.serve(), vite_proc.wait())
+        finally:
+            if vite_proc.returncode is None:
+                vite_proc.terminate()
+                await vite_proc.wait()
+            await engine.dispose()
+    else:
+        try:
+            await server.serve()
+        finally:
+            await engine.dispose()
 
 
 @main.group()

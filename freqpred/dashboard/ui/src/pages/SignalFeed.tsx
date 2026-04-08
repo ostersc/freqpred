@@ -40,14 +40,6 @@ function SignalDetail({ id }: { id: string }) {
           <p className="mt-1 text-gray-600">{data.social_sentiment_summary}</p>
         </div>
       )}
-      {data.sources.length > 0 && (
-        <div>
-          <span className="font-medium text-gray-700">Sources:</span>
-          <ul className="mt-1 list-disc list-inside text-gray-600 space-y-0.5">
-            {data.sources.map((s, i) => <li key={i}>{s}</li>)}
-          </ul>
-        </div>
-      )}
       {data.document_links.length > 0 && (
         <div>
           <span className="font-medium text-gray-700">Evidence documents:</span>

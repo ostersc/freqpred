@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   ScatterChart,
@@ -9,20 +10,59 @@ import {
   ReferenceLine,
   ResponsiveContainer,
   ZAxis,
+  Legend,
 } from 'recharts'
 import { getCalibration } from '../api/calibration'
+import type { CalibrationBucketOut } from '../api/types'
 import LoadingSpinner from '../components/LoadingSpinner'
 import ErrorBanner from '../components/ErrorBanner'
 
+const PRESETS = [
+  { label: '7d', days: 7 },
+  { label: '30d', days: 30 },
+  { label: '90d', days: 90 },
+  { label: 'All time', days: undefined },
+] as const
+
+type BucketPoint = CalibrationBucketOut & { _series: 'model' | 'market' }
+
 export default function Calibration() {
+  const [lookbackDays, setLookbackDays] = useState<number | undefined>(undefined)
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ['calibration'],
-    queryFn: getCalibration,
+    queryKey: ['calibration', lookbackDays],
+    queryFn: () => getCalibration(lookbackDays),
   })
+
+  const modelPoints: BucketPoint[] = (data?.buckets ?? [])
+    .filter((b) => b.count > 0)
+    .map((b) => ({ ...b, _series: 'model' }))
+
+  const marketPoints: BucketPoint[] = (data?.market_buckets ?? [])
+    .filter((b) => b.count > 0)
+    .map((b) => ({ ...b, _series: 'market' }))
 
   return (
     <div>
-      <h1 className="text-xl font-bold text-gray-900 mb-4">Calibration</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-xl font-bold text-gray-900">Calibration</h1>
+        <div className="flex gap-1">
+          {PRESETS.map((p) => (
+            <button
+              key={p.label}
+              onClick={() => setLookbackDays(p.days)}
+              className={`px-3 py-1 text-sm rounded border transition-colors ${
+                lookbackDays === p.days
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {isLoading && <LoadingSpinner />}
       {error && <ErrorBanner message={String(error)} />}
       {data && (
@@ -47,7 +87,9 @@ export default function Calibration() {
 
           {data.n_samples > 0 ? (
             <div className="bg-white rounded shadow p-4">
-              <h2 className="text-sm font-semibold text-gray-700 mb-3">Calibration curve — estimated probability vs. actual resolution rate</h2>
+              <h2 className="text-sm font-semibold text-gray-700 mb-3">
+                Calibration curve — estimated probability vs. actual resolution rate
+              </h2>
               <ResponsiveContainer width="100%" height={340}>
                 <ScatterChart margin={{ top: 10, right: 30, bottom: 30, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -67,22 +109,28 @@ export default function Calibration() {
                   />
                   <ZAxis dataKey="count" range={[40, 400]} />
                   <Tooltip
-                    formatter={(value: number, name: string) => [
-                      `${(value * 100).toFixed(1)}%`,
-                      name === 'actual_resolution_rate' ? 'Resolution rate' : name,
-                    ]}
-                    labelFormatter={() => ''}
                     content={({ payload }) => {
                       if (!payload?.length) return null
-                      const d = payload[0]?.payload as { mean_estimated_prob: number; actual_resolution_rate: number; count: number }
+                      const d = payload[0]?.payload as BucketPoint
                       return (
                         <div className="bg-white border rounded p-2 text-xs shadow">
+                          <div className="font-semibold mb-1" style={{ color: d._series === 'model' ? '#3b82f6' : '#f97316' }}>
+                            {d._series === 'model' ? 'Model' : 'Market'}
+                          </div>
                           <div>Est. prob: {(d.mean_estimated_prob * 100).toFixed(1)}%</div>
                           <div>Resolution rate: {(d.actual_resolution_rate * 100).toFixed(1)}%</div>
                           <div>Count: {d.count}</div>
                         </div>
                       )
                     }}
+                  />
+                  <Legend
+                    verticalAlign="top"
+                    align="right"
+                    payload={[
+                      { value: 'Model', type: 'circle', color: '#3b82f6' },
+                      { value: 'Market', type: 'circle', color: '#f97316' },
+                    ]}
                   />
                   <ReferenceLine
                     segment={[{ x: 0, y: 0 }, { x: 1, y: 1 }]}
@@ -91,8 +139,15 @@ export default function Calibration() {
                     label={{ value: 'Perfect calibration', position: 'insideTopLeft', fontSize: 11, fill: '#94a3b8' }}
                   />
                   <Scatter
-                    data={data.buckets.filter((b) => b.count > 0)}
+                    name="Model"
+                    data={modelPoints}
                     fill="#3b82f6"
+                    fillOpacity={0.7}
+                  />
+                  <Scatter
+                    name="Market"
+                    data={marketPoints}
+                    fill="#f97316"
                     fillOpacity={0.7}
                   />
                 </ScatterChart>

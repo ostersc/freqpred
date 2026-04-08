@@ -73,12 +73,21 @@ class PositionOut(BaseModel):
     resolution: int | None
     pnl: float | None
     pnl_pct: float | None
+    unrealized_pnl: float | None
+    unrealized_pnl_pct: float | None
     created_at: datetime
 
 
 class PositionListResponse(BaseModel):
     items: list[PositionOut]
     total: int
+
+
+class PositionDetailOut(PositionOut):
+    market_question: str | None
+    current_mid: float | None
+    entry_signal: SignalDetailOut
+    market_signals: list[SignalOut]
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +120,7 @@ class CalibrationResponse(BaseModel):
     market_brier_score: float
     n_samples: int
     buckets: list[CalibrationBucketOut]
+    market_buckets: list[CalibrationBucketOut]
 
 
 # ---------------------------------------------------------------------------

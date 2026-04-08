@@ -168,6 +168,7 @@ Equivalent to `alembic upgrade head`. Safe to run repeatedly.
 
 ```bash
 uv run freqpred dashboard
+uv run freqpred dashboard --dev
 uv run freqpred dashboard --host 127.0.0.1 --port 9000
 ```
 
@@ -175,6 +176,7 @@ uv run freqpred dashboard --host 127.0.0.1 --port 9000
 |---|---|---|
 | `--host` | `0.0.0.0` | Host to bind |
 | `--port` | `8000` | Port to listen on |
+| `--dev` | off | Also start the Vite dev server (hot-reload UI on `localhost:5173`) |
 
 Starts the FastAPI dashboard server. Exposes a JSON API for signals, positions, calibration data, strategy config, and system health.
 
