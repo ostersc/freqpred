@@ -35,6 +35,12 @@ class DocumentLinkOut(BaseModel):
     source_url: str
     title: str
     relevance_score: float
+    source_type: str
+    source_name: str
+    published_at: datetime | None
+    fetched_at: datetime
+    summary: str | None
+    body_excerpt: str  # first 400 chars of body, for display when summary is absent
 
 
 class SignalDetailOut(SignalOut):

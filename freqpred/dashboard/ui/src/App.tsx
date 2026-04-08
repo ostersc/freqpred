@@ -2,7 +2,6 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import NavBar from './components/NavBar'
 import SignalFeed from './pages/SignalFeed'
 import Positions from './pages/Positions'
-import Ledger from './pages/Ledger'
 import Calibration from './pages/Calibration'
 import LLMCost from './pages/LLMCost'
 import StrategyConfig from './pages/StrategyConfig'
@@ -17,7 +16,6 @@ export default function App() {
           <Route path="/" element={<Navigate to="/signals" replace />} />
           <Route path="/signals" element={<SignalFeed />} />
           <Route path="/positions" element={<Positions />} />
-          <Route path="/ledger" element={<Ledger />} />
           <Route path="/calibration" element={<Calibration />} />
           <Route path="/llm" element={<LLMCost />} />
           <Route path="/strategy" element={<StrategyConfig />} />

@@ -270,7 +270,7 @@ async def get_signal(
         raise HTTPException(status_code=404, detail="Signal not found")
     row, market_question = result
 
-    # Fetch document links with source URL and title
+    # Fetch document links with metadata
     link_rows = (
         await session.execute(
             select(
@@ -278,6 +278,12 @@ async def get_signal(
                 DocumentMarketLinkRow.relevance_score,
                 DocumentRow.source_url,
                 DocumentRow.title,
+                DocumentRow.source_type,
+                DocumentRow.source_name,
+                DocumentRow.published_at,
+                DocumentRow.fetched_at,
+                DocumentRow.summary,
+                DocumentRow.body,
             )
             .join(DocumentRow, DocumentRow.id == DocumentMarketLinkRow.document_id)
             .where(DocumentMarketLinkRow.signal_id == uid)
@@ -291,8 +297,16 @@ async def get_signal(
             source_url=source_url,
             title=title or "",
             relevance_score=relevance_score,
+            source_type=source_type,
+            source_name=source_name,
+            published_at=published_at,
+            fetched_at=fetched_at,
+            summary=summary,
+            body_excerpt=(body or "")[:400],
         )
-        for doc_id, relevance_score, source_url, title in link_rows
+        for doc_id, relevance_score, source_url, title,
+            source_type, source_name, published_at, fetched_at, summary, body
+        in link_rows
     ]
 
     base = _signal_row_to_out(row, market_question)
@@ -393,6 +407,12 @@ async def get_position_detail(
                 DocumentMarketLinkRow.relevance_score,
                 DocumentRow.source_url,
                 DocumentRow.title,
+                DocumentRow.source_type,
+                DocumentRow.source_name,
+                DocumentRow.published_at,
+                DocumentRow.fetched_at,
+                DocumentRow.summary,
+                DocumentRow.body,
             )
             .join(DocumentRow, DocumentRow.id == DocumentMarketLinkRow.document_id)
             .where(DocumentMarketLinkRow.signal_id == entry_signal_uid)
@@ -406,8 +426,16 @@ async def get_position_detail(
             source_url=source_url,
             title=title or "",
             relevance_score=relevance_score,
+            source_type=source_type,
+            source_name=source_name,
+            published_at=published_at,
+            fetched_at=fetched_at,
+            summary=summary,
+            body_excerpt=(body or "")[:400],
         )
-        for doc_id, relevance_score, source_url, title in link_rows
+        for doc_id, relevance_score, source_url, title,
+            source_type, source_name, published_at, fetched_at, summary, body
+        in link_rows
     ]
     entry_signal_base = _signal_row_to_out(sig_row, market_question)
     entry_signal = SignalDetailOut(**entry_signal_base.model_dump(), document_links=doc_links)

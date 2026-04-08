@@ -13,9 +13,11 @@ import {
   Legend,
 } from 'recharts'
 import { getPositions, getPositionDetail } from '../api/positions'
-import type { PositionOut, PositionDetailOut, SignalOut } from '../api/types'
+import { getSignal } from '../api/signals'
+import type { PositionOut, PositionDetailOut, SignalOut, SignalDetailOut } from '../api/types'
 import LoadingSpinner from '../components/LoadingSpinner'
 import ErrorBanner from '../components/ErrorBanner'
+import { DocLinkItem } from '../components/DocLinkItem'
 
 type StatusFilter = 'open' | 'closed' | 'all'
 
@@ -45,6 +47,18 @@ function fmtTs(ts: number) {
     ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
 }
 
+function triggerLabel(trigger: string): string {
+  const t = trigger.toLowerCase()
+  switch (t) {
+    case 'entry': return 'Entry signal'
+    case 'scheduled': return 'Scheduled signal'
+    case 'price_moved': return 'Price-moved signal'
+    case 'market_update': return 'Market update signal'
+    case 'manual': return 'Manual signal'
+    default: return trigger.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) + ' signal'
+  }
+}
+
 // ---- Signal price timeline chart ----------------------------------------
 
 type ChartPoint = {
@@ -52,6 +66,59 @@ type ChartPoint = {
   our_prob: number
   market_mid: number
   isEntry: boolean
+  signalId: string
+  trigger: string
+}
+
+function renderDotShape(
+  trigger: string,
+  cx: number,
+  cy: number,
+  r: number,
+  fill: string,
+  stroke: string,
+  strokeWidth: number,
+  key: string,
+) {
+  const t = trigger.toLowerCase()
+  if (t === 'scheduled') {
+    // Diamond
+    return (
+      <polygon
+        key={key}
+        points={`${cx},${cy - r} ${cx + r},${cy} ${cx},${cy + r} ${cx - r},${cy}`}
+        fill={fill} stroke={stroke} strokeWidth={strokeWidth}
+      />
+    )
+  }
+  if (t === 'price_moved') {
+    // Triangle (pointing up)
+    return (
+      <polygon
+        key={key}
+        points={`${cx},${cy - r} ${cx + r},${cy + r} ${cx - r},${cy + r}`}
+        fill={fill} stroke={stroke} strokeWidth={strokeWidth}
+      />
+    )
+  }
+  if (t === 'market_update') {
+    // Square
+    return (
+      <rect
+        key={key}
+        x={cx - r} y={cy - r} width={r * 2} height={r * 2}
+        fill={fill} stroke={stroke} strokeWidth={strokeWidth}
+      />
+    )
+  }
+  // Default: circle (entry, manual, unknown)
+  return (
+    <circle
+      key={key}
+      cx={cx} cy={cy} r={r}
+      fill={fill} stroke={stroke} strokeWidth={strokeWidth}
+    />
+  )
 }
 
 function PriceTimeline({
@@ -60,12 +127,16 @@ function PriceTimeline({
   entryPrice,
   currentMid,
   direction,
+  selectedSignalId,
+  onSignalClick,
 }: {
   signals: SignalOut[]
   entrySignalId: string
   entryPrice: number
   currentMid: number | null
   direction: string
+  selectedSignalId: string | null
+  onSignalClick: (id: string) => void
 }) {
   if (signals.length === 0) return null
 
@@ -74,6 +145,8 @@ function PriceTimeline({
     our_prob: s.estimated_probability,
     market_mid: s.market_mid_at_signal,
     isEntry: s.id === entrySignalId,
+    signalId: s.id,
+    trigger: s.trigger,
   }))
 
   // For NO trades: entry_price is the NO price paid; chart Y-axis is in YES terms
@@ -92,20 +165,57 @@ function PriceTimeline({
     }
   })
 
-  // Custom dot: larger blue circle on entry signal
   const renderDot = (props: { cx?: number; cy?: number; payload?: ChartPoint }) => {
     const { cx = 0, cy = 0, payload } = props
-    if (!payload?.isEntry) return <circle key={`${cx}-${cy}`} />
-    return <circle key={`${cx}-${cy}-entry`} cx={cx} cy={cy} r={5} fill="#3b82f6" stroke="#fff" strokeWidth={1.5} />
+    if (!payload) return <g key={`${cx}-${cy}`} />
+
+    const isEntry = payload.isEntry
+    const isSelected = payload.signalId === selectedSignalId
+    const r = isEntry ? 6 : 4
+    const fill = isEntry ? '#3b82f6' : '#6366f1'
+    const stroke = isSelected ? '#1e1b4b' : '#fff'
+    const strokeWidth = isSelected ? 2.5 : 1.5
+
+    return renderDotShape(
+      payload.trigger, cx, cy, r, fill, stroke, strokeWidth,
+      `dot-${payload.signalId}`,
+    )
+  }
+
+  // Recharts intercepts pointer events before custom dot onClick fires.
+  // Handle clicks at the chart level instead — activePayload gives nearest point.
+  // Entry signal takes precedence: if the clicked point shares a timestamp with the
+  // entry signal, always select the entry signal instead.
+  function handleChartClick(chartData: { activePayload?: Array<{ dataKey?: string; payload?: ChartPoint }> } | null) {
+    if (!chartData?.activePayload?.length) return
+    const point = chartData.activePayload.find((p) => p.dataKey === 'our_prob')
+    if (!point?.payload?.signalId) return
+
+    const clickedId = point.payload.signalId
+    const clickedTs = point.payload.ts
+    const entryPoint = data.find((p) => p.signalId === entrySignalId)
+
+    if (entryPoint && entryPoint.ts === clickedTs && clickedId !== entrySignalId) {
+      onSignalClick(entrySignalId)
+    } else {
+      onSignalClick(clickedId)
+    }
   }
 
   return (
     <div>
-      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
         Signal history — estimated probability vs. market mid
       </div>
+      <div className="text-xs text-gray-400 mb-2">
+        Click any point to view that signal's detail below.
+        Shapes: <span className="font-medium">●</span> entry/manual &nbsp;
+        <span className="font-medium">◆</span> scheduled &nbsp;
+        <span className="font-medium">▲</span> price moved &nbsp;
+        <span className="font-medium">■</span> market update
+      </div>
       <ResponsiveContainer width="100%" height={220}>
-        <ComposedChart data={data} margin={{ top: 8, right: 16, bottom: 5, left: 0 }}>
+        <ComposedChart data={data} margin={{ top: 8, right: 16, bottom: 5, left: 0 }} onClick={handleChartClick} style={{ cursor: 'pointer' }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
           <XAxis
             dataKey="ts"
@@ -134,7 +244,9 @@ function PriceTimeline({
                   <div className={edge >= 0 ? 'text-green-700 font-semibold' : 'text-red-600 font-semibold'}>
                     Edge: {edge >= 0 ? '+' : ''}{(edge * 100).toFixed(1)}%
                   </div>
-                  {d.isEntry && <div className="text-blue-600 font-semibold pt-0.5">← entry signal</div>}
+                  <div className="text-gray-400 capitalize pt-0.5">
+                    {d.trigger.replace(/_/g, ' ')}{d.isEntry ? ' · entry' : ''}
+                  </div>
                 </div>
               )
             }}
@@ -206,10 +318,70 @@ function PriceTimeline({
   )
 }
 
+// ---- Signal detail (shared renderer) ------------------------------------
+
+function SignalDetail({ signal }: { signal: SignalDetailOut }) {
+  return (
+    <div className="bg-white rounded border p-3 space-y-3">
+      <div className="flex flex-wrap gap-4 text-xs text-gray-500">
+        <span>Our prob: <span className="font-semibold text-gray-800">{(signal.estimated_probability * 100).toFixed(1)}%</span></span>
+        <span>Market mid: <span className="font-semibold text-gray-800">{(signal.market_mid_at_signal * 100).toFixed(1)}%</span></span>
+        <span>Edge: <span className={`font-semibold ${signal.edge >= 0 ? 'text-green-700' : 'text-red-700'}`}>{fmtPct(signal.edge)}</span></span>
+        <span>Confidence: <span className="font-semibold text-gray-800">{(signal.confidence * 100).toFixed(1)}%</span></span>
+        <span className="text-gray-400">{relTime(signal.created_at)}</span>
+      </div>
+      <div>
+        <div className="font-medium text-gray-700 mb-1">Reasoning:</div>
+        <p className="text-gray-600 whitespace-pre-wrap">{signal.reasoning}</p>
+      </div>
+      {signal.social_sentiment_summary && (
+        <div>
+          <div className="font-medium text-gray-700 mb-1">Social sentiment:</div>
+          <p className="text-gray-600">{signal.social_sentiment_summary}</p>
+        </div>
+      )}
+      {signal.document_links.length > 0 && (
+        <div>
+          <div className="font-medium text-gray-700 mb-1">Evidence documents:</div>
+          <ul className="space-y-1.5">
+            {signal.document_links.map((doc) => (
+              <DocLinkItem key={doc.document_id} doc={doc} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Fetches signal detail on demand (for non-entry signals clicked in chart)
+function SelectedSignalPanel({
+  signalId,
+  entrySignal,
+}: {
+  signalId: string
+  entrySignal: SignalDetailOut
+}) {
+  const isEntry = signalId === entrySignal.id
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['signal', signalId],
+    queryFn: () => getSignal(signalId),
+    staleTime: 60_000,
+    enabled: !isEntry,
+  })
+
+  if (isEntry) return <SignalDetail signal={entrySignal} />
+  if (isLoading) return <div className="p-3 text-sm text-gray-400">Loading signal…</div>
+  if (!data) return null
+  return <SignalDetail signal={data} />
+}
+
 // ---- Position detail panel -----------------------------------------------
 
 function PositionDetail({ positionId }: { positionId: string }) {
-  const [showOtherSignals, setShowOtherSignals] = useState(false)
+  // null = show entry signal (default)
+  const [selectedSignalId, setSelectedSignalId] = useState<string | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['position-detail', positionId],
@@ -222,7 +394,14 @@ function PositionDetail({ positionId }: { positionId: string }) {
   if (!data) return null
 
   const d: PositionDetailOut = data
-  const otherSignals = d.market_signals.filter((s) => s.id !== d.entry_signal.id)
+  const activeSignalId = selectedSignalId ?? d.entry_signal.id
+  const isEntryActive = activeSignalId === d.entry_signal.id
+
+  // Entry signal always labelled "Entry signal" regardless of its trigger field.
+  // For other signals, look up the trigger from market_signals.
+  const activeTrigger = isEntryActive
+    ? 'entry'
+    : (d.market_signals.find((s) => s.id === activeSignalId)?.trigger ?? 'entry')
 
   return (
     <div className="bg-gray-50 border-t px-4 py-4 space-y-5 text-sm">
@@ -275,71 +454,27 @@ function PositionDetail({ positionId }: { positionId: string }) {
         entryPrice={d.entry_price}
         currentMid={d.status === 'open' ? d.current_mid : null}
         direction={d.direction}
+        selectedSignalId={activeSignalId}
+        onSignalClick={(id) => setSelectedSignalId(id)}
       />
 
-      {/* Entry signal */}
+      {/* Selected signal panel — label changes to match clicked signal's trigger */}
       <div>
-        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Entry signal</div>
-        <div className="bg-white rounded border p-3 space-y-3">
-          <div className="flex flex-wrap gap-4 text-xs text-gray-500">
-            <span>Our prob: <span className="font-semibold text-gray-800">{(d.entry_signal.estimated_probability * 100).toFixed(1)}%</span></span>
-            <span>Market mid: <span className="font-semibold text-gray-800">{(d.entry_signal.market_mid_at_signal * 100).toFixed(1)}%</span></span>
-            <span>Edge: <span className={`font-semibold ${d.entry_signal.edge >= 0 ? 'text-green-700' : 'text-red-700'}`}>{fmtPct(d.entry_signal.edge)}</span></span>
-            <span>Confidence: <span className="font-semibold text-gray-800">{(d.entry_signal.confidence * 100).toFixed(1)}%</span></span>
-            <span className="text-gray-400">{relTime(d.entry_signal.created_at)}</span>
+        <div className="flex items-center gap-3 mb-2">
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            {triggerLabel(activeTrigger)}
           </div>
-          <div>
-            <div className="font-medium text-gray-700 mb-1">Reasoning:</div>
-            <p className="text-gray-600 whitespace-pre-wrap">{d.entry_signal.reasoning}</p>
-          </div>
-          {d.entry_signal.social_sentiment_summary && (
-            <div>
-              <div className="font-medium text-gray-700 mb-1">Social sentiment:</div>
-              <p className="text-gray-600">{d.entry_signal.social_sentiment_summary}</p>
-            </div>
-          )}
-          {d.entry_signal.document_links.length > 0 && (
-            <div>
-              <div className="font-medium text-gray-700 mb-1">Evidence documents:</div>
-              <ul className="space-y-1">
-                {d.entry_signal.document_links.map((doc) => (
-                  <li key={doc.document_id} className="flex items-center gap-2">
-                    <span className="text-xs text-gray-400">{doc.relevance_score.toFixed(3)}</span>
-                    <a href={doc.source_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline truncate max-w-xl">
-                      {doc.title || doc.source_url}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
+          {!isEntryActive && (
+            <button
+              onClick={() => setSelectedSignalId(null)}
+              className="text-xs text-blue-500 hover:underline"
+            >
+              ← back to entry signal
+            </button>
           )}
         </div>
+        <SelectedSignalPanel signalId={activeSignalId} entrySignal={d.entry_signal} />
       </div>
-
-      {/* Other signals */}
-      {otherSignals.length > 0 && (
-        <div>
-          <button
-            className="text-xs font-semibold text-gray-500 uppercase tracking-wide hover:text-gray-700"
-            onClick={() => setShowOtherSignals((v) => !v)}
-          >
-            {showOtherSignals ? '▲' : '▼'} Other signals for this market ({otherSignals.length})
-          </button>
-          {showOtherSignals && (
-            <div className="mt-2 space-y-1">
-              {otherSignals.map((s) => (
-                <div key={s.id} className="bg-white rounded border px-3 py-2 flex flex-wrap gap-4 text-xs text-gray-500">
-                  <span className="text-gray-400">{relTime(s.created_at)}</span>
-                  <span>Our prob: <span className="font-semibold text-gray-800">{(s.estimated_probability * 100).toFixed(1)}%</span></span>
-                  <span>Market mid: <span className="font-semibold text-gray-800">{(s.market_mid_at_signal * 100).toFixed(1)}%</span></span>
-                  <span>Edge: <span className={`font-semibold ${s.edge >= 0 ? 'text-green-700' : 'text-red-700'}`}>{fmtPct(s.edge)}</span></span>
-                  <span className={s.direction === 'YES' ? 'text-green-700 font-semibold' : 'text-red-700 font-semibold'}>{s.direction}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   )
 }
@@ -389,6 +524,7 @@ export default function Positions() {
                   <th className="px-3 py-2 text-center">Dir</th>
                   <th className="px-3 py-2 text-center">Contracts</th>
                   <th className="px-3 py-2 text-center">Entry</th>
+                  <th className="px-3 py-2 text-center">Exposure</th>
                   <th className="px-3 py-2 text-center">Exit</th>
                   <th className="px-3 py-2 text-center">P&L (unreal.)</th>
                   <th className="px-3 py-2 text-center">P&L %</th>
@@ -414,6 +550,7 @@ export default function Positions() {
                       </td>
                       <td className="px-3 py-2 text-center">{p.contracts}</td>
                       <td className="px-3 py-2 text-center">${fmt(p.entry_price)}</td>
+                      <td className="px-3 py-2 text-center text-gray-700">${fmt(p.entry_price * p.contracts)}</td>
                       <td className="px-3 py-2 text-center">{p.exit_price !== null ? `$${fmt(p.exit_price)}` : '—'}</td>
                       <td className={`px-3 py-2 text-center ${pnlColor(p.status === 'open' ? p.unrealized_pnl : p.pnl)}`}>
                         {p.status === 'open'
@@ -438,7 +575,7 @@ export default function Positions() {
                     </tr>
                     {expandedId === p.id && (
                       <tr key={`${p.id}-detail`}>
-                        <td colSpan={11} className="p-0">
+                        <td colSpan={12} className="p-0">
                           <PositionDetail positionId={p.id} />
                         </td>
                       </tr>
@@ -447,9 +584,32 @@ export default function Positions() {
                 ))}
                 {data.items.length === 0 && (
                   <tr>
-                    <td colSpan={11} className="px-3 py-6 text-center text-gray-400">No positions</td>
+                    <td colSpan={12} className="px-3 py-6 text-center text-gray-400">No positions</td>
                   </tr>
                 )}
+                {data.items.length > 0 && (() => {
+                  const totalContracts = data.items.reduce((s, p) => s + p.contracts, 0)
+                  const totalPnl = data.items.reduce((s, p) => {
+                    const v = p.status === 'open' ? p.unrealized_pnl : p.pnl
+                    return s + (v ?? 0)
+                  }, 0)
+                  const totalCostBasis = data.items.reduce((s, p) => s + p.entry_price * p.contracts, 0)
+                  const weightedPct = totalCostBasis > 0 ? totalPnl / totalCostBasis : null
+                  const weightedAvgEntry = totalContracts > 0 ? totalCostBasis / totalContracts : null
+                  return (
+                    <tr className="border-t-2 border-gray-300 bg-gray-50 font-semibold text-xs">
+                      <td className="px-3 py-2 text-gray-500 uppercase tracking-wide">Total</td>
+                      <td />
+                      <td className="px-3 py-2 text-center">{totalContracts}</td>
+                      <td className="px-3 py-2 text-center text-gray-600">{weightedAvgEntry !== null ? `$${fmt(weightedAvgEntry)}` : '—'}</td>
+                      <td className="px-3 py-2 text-center text-gray-700">${fmt(totalCostBasis)}</td>
+                      <td />
+                      <td className={`px-3 py-2 text-center ${pnlColor(totalPnl)}`}>${fmt(totalPnl)}</td>
+                      <td className={`px-3 py-2 text-center ${pnlColor(weightedPct)}`}>{fmtPct(weightedPct)}</td>
+                      <td /><td /><td /><td />
+                    </tr>
+                  )
+                })()}
               </tbody>
             </table>
           </div>

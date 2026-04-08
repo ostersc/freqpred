@@ -22,6 +22,12 @@ export interface DocumentLinkOut {
   source_url: string
   title: string
   relevance_score: number
+  source_type: string
+  source_name: string
+  published_at: string | null
+  fetched_at: string
+  summary: string | null
+  body_excerpt: string
 }
 
 export interface SignalDetailOut extends SignalOut {
@@ -72,13 +78,6 @@ export interface PositionDetailOut extends PositionOut {
 export interface PositionListResponse {
   items: PositionOut[]
   total: number
-}
-
-export interface LedgerResponse {
-  open_count: number
-  total_exposure_usd: number
-  daily_pnl_usd: number
-  all_time_pnl_usd: number
 }
 
 export interface CalibrationBucketOut {

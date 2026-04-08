@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getSignals, getSignal } from '../api/signals'
 import LoadingSpinner from '../components/LoadingSpinner'
 import ErrorBanner from '../components/ErrorBanner'
+import { DocLinkItem } from '../components/DocLinkItem'
 import type { SignalOut } from '../api/types'
 
 const PAGE_SIZE = 20
@@ -43,14 +44,9 @@ function SignalDetail({ id }: { id: string }) {
       {data.document_links.length > 0 && (
         <div>
           <span className="font-medium text-gray-700">Evidence documents:</span>
-          <ul className="mt-1 space-y-1">
+          <ul className="mt-1 space-y-1.5">
             {data.document_links.map((d) => (
-              <li key={d.document_id} className="flex items-center gap-2">
-                <span className="text-xs text-gray-400">{d.relevance_score.toFixed(3)}</span>
-                <a href={d.source_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline truncate max-w-xl">
-                  {d.title || d.source_url}
-                </a>
-              </li>
+              <DocLinkItem key={d.document_id} doc={d} />
             ))}
           </ul>
         </div>
@@ -62,6 +58,7 @@ function SignalDetail({ id }: { id: string }) {
 function SignalRow({ signal }: { signal: SignalOut }) {
   const [expanded, setExpanded] = useState(false)
   const edgeColor = signal.edge >= 0.15 ? 'text-green-700' : signal.edge >= 0.08 ? 'text-yellow-700' : 'text-gray-500'
+  const confColor = signal.confidence >= 0.7 ? 'text-green-700 font-semibold' : signal.confidence >= 0.5 ? 'text-yellow-700' : 'text-red-600'
   const dirColor = signal.direction === 'YES' ? 'text-green-700 font-semibold' : signal.direction === 'NO' ? 'text-red-700 font-semibold' : 'text-gray-500'
 
   return (
@@ -79,6 +76,7 @@ function SignalRow({ signal }: { signal: SignalOut }) {
         <td className="px-3 py-2 text-sm text-center">{pct(signal.estimated_probability)}</td>
         <td className="px-3 py-2 text-sm text-center">{pct(signal.market_mid_at_signal)}</td>
         <td className={`px-3 py-2 text-sm text-center ${edgeColor}`}>+{pct(signal.edge)}</td>
+        <td className={`px-3 py-2 text-sm text-center ${confColor}`}>{pct(signal.confidence)}</td>
         <td className={`px-3 py-2 text-sm text-center ${dirColor}`}>{signal.direction}</td>
         <td className="px-3 py-2 text-sm text-center text-gray-500">{age(signal.created_at)}</td>
         <td className="px-3 py-2 text-sm text-center">
@@ -87,7 +85,7 @@ function SignalRow({ signal }: { signal: SignalOut }) {
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={7} className="p-0">
+          <td colSpan={8} className="p-0">
             <SignalDetail id={signal.id} />
           </td>
         </tr>
@@ -121,6 +119,7 @@ export default function SignalFeed() {
                   <th className="px-3 py-2 text-center">Our Prob</th>
                   <th className="px-3 py-2 text-center">Market Mid</th>
                   <th className="px-3 py-2 text-center">Edge</th>
+                  <th className="px-3 py-2 text-center">Confidence</th>
                   <th className="px-3 py-2 text-center">Dir</th>
                   <th className="px-3 py-2 text-center">Age</th>
                   <th className="px-3 py-2" />
