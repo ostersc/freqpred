@@ -80,6 +80,35 @@ export interface PositionListResponse {
   total: number
 }
 
+export interface MarketOut {
+  id: string
+  question: string
+  status: string
+  yes_bid: number
+  yes_ask: number
+  mid_price: number
+  volume_24h: number
+  close_time: string
+  last_fetched_at: string
+  current_signal_id: string | null
+}
+
+export interface MarketDetailOut extends MarketOut {
+  current_signal: SignalOut | null
+}
+
+export interface MarketListResponse {
+  items: MarketOut[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface AnalyzeResponse {
+  signal: SignalOut
+  cached: boolean
+}
+
 export interface CalibrationBucketOut {
   lower: number
   upper: number

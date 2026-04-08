@@ -244,6 +244,40 @@ class StrategyConfigUpdateRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Markets
+# ---------------------------------------------------------------------------
+
+
+class MarketOut(BaseModel):
+    id: str
+    question: str
+    status: str
+    yes_bid: float
+    yes_ask: float
+    mid_price: float
+    volume_24h: float
+    close_time: datetime
+    last_fetched_at: datetime
+    current_signal_id: str | None
+
+
+class MarketDetailOut(MarketOut):
+    current_signal: SignalOut | None
+
+
+class MarketListResponse(BaseModel):
+    items: list[MarketOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class AnalyzeResponse(BaseModel):
+    signal: SignalOut
+    cached: bool
+
+
+# ---------------------------------------------------------------------------
 # System health
 # ---------------------------------------------------------------------------
 

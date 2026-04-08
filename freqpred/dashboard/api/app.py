@@ -21,6 +21,7 @@ def create_app(
     daily_cap_usd: float = 10.0,
     risk_config: "RiskConfig | None" = None,
     bankroll_usd: float = 0.0,
+    signal_pipeline: object | None = None,
 ) -> FastAPI:
     """Create and configure the dashboard FastAPI application.
 
@@ -30,6 +31,8 @@ def create_app(
         risk_config:      Risk engine config; used by /api/system/health circuit-breaker
                           fields.  Pass ``None`` to use default thresholds.
         bankroll_usd:     Trading bankroll; used by /api/system/health to compute loss %.
+        signal_pipeline:  Optional ``SignalPipeline`` instance; when provided, the
+                          ``POST /api/markets/{id}/analyze`` endpoint is enabled.
 
     Trading mode and active strategy are both discovered at request time from the
     ``run_state`` DB table written by ``freqpred run`` — no mode or strategy
@@ -45,6 +48,7 @@ def create_app(
     app.state.risk_config = risk_config
     app.state.bankroll_usd = bankroll_usd
     app.state.started_at = datetime.now(UTC)
+    app.state.signal_pipeline = signal_pipeline
 
     app.include_router(router, prefix="/api")
 

@@ -86,13 +86,18 @@ class SignalPipeline:
                 top_k=self._top_k,
             )
 
-            # Step 2: skip if no documents were retrieved
+            # Step 2: skip if no documents were retrieved (unless forced)
             if not doc_pairs:
-                log.debug(
-                    "signal.pipeline.skip_no_docs",
+                if not force:
+                    log.debug(
+                        "signal.pipeline.skip_no_docs",
+                        market_id=market.id,
+                    )
+                    return None
+                log.info(
+                    "signal.pipeline.force_no_docs",
                     market_id=market.id,
                 )
-                return None
 
             docs = [doc for doc, _ in doc_pairs]
 

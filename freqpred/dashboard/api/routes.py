@@ -19,6 +19,7 @@ from freqpred.signal.models import SignalRow
 from freqpred.trading.ledger import get_portfolio_summary
 
 from .schemas import (
+    AnalyzeResponse,
     ApiErrorStateOut,
     CalibrationBucketOut,
     CalibrationResponse,
@@ -30,6 +31,9 @@ from .schemas import (
     LLMQueryDetailOut,
     LLMQueryListResponse,
     LLMQueryOut,
+    MarketDetailOut,
+    MarketListResponse,
+    MarketOut,
     PositionDetailOut,
     PositionListResponse,
     PositionOut,
@@ -83,6 +87,10 @@ def _risk_config(request: Request) -> object | None:
 
 def _bankroll_usd(request: Request) -> float:
     return float(getattr(request.app.state, "bankroll_usd", 0.0))
+
+
+def _signal_pipeline(request: Request) -> object | None:
+    return getattr(request.app.state, "signal_pipeline", None)
 
 
 def _started_at(request: Request) -> datetime:
@@ -457,6 +465,171 @@ async def get_position_detail(
         current_mid=current_mid,
         entry_signal=entry_signal,
         market_signals=market_signals,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Markets
+# ---------------------------------------------------------------------------
+
+_ANALYZE_COOLDOWN_SECS = 60
+
+
+def _market_row_to_out(row: MarketRow) -> MarketOut:
+    return MarketOut(
+        id=row.id,
+        question=row.question,
+        status=row.status,
+        yes_bid=row.yes_bid,
+        yes_ask=row.yes_ask,
+        mid_price=row.mid_price,
+        volume_24h=row.volume_24h,
+        close_time=row.close_time,
+        last_fetched_at=row.last_fetched_at,
+        current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
+    )
+
+
+@router.get("/markets", response_model=MarketListResponse)
+async def list_markets(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    search: str | None = Query(default=None),
+    status: str = Query(default="open", pattern="^(open|closed|all)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> MarketListResponse:
+    from sqlalchemy import or_  # noqa: PLC0415
+
+    stmt = select(MarketRow).order_by(MarketRow.last_fetched_at.desc())
+    count_stmt = select(func.count()).select_from(MarketRow)
+
+    if status != "all":
+        db_status = "active" if status == "open" else status
+        stmt = stmt.where(MarketRow.status == db_status)
+        count_stmt = count_stmt.where(MarketRow.status == db_status)
+
+    if search:
+        like = f"%{search}%"
+        condition = or_(MarketRow.question.ilike(like), MarketRow.id.ilike(like))
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
+
+    total = int((await session.execute(count_stmt)).scalar_one())
+    rows = (await session.execute(stmt.offset(offset).limit(limit))).scalars().all()
+
+    return MarketListResponse(
+        items=[_market_row_to_out(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/markets/{market_id}", response_model=MarketDetailOut)
+async def get_market(
+    market_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> MarketDetailOut:
+    row = (
+        await session.execute(select(MarketRow).where(MarketRow.id == market_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Market not found")
+
+    current_signal: SignalOut | None = None
+    if row.current_signal_id:
+        sig_result = (
+            await session.execute(
+                select(SignalRow, MarketRow.question)
+                .outerjoin(MarketRow, MarketRow.id == SignalRow.market_id)
+                .where(SignalRow.id == row.current_signal_id)
+            )
+        ).one_or_none()
+        if sig_result is not None:
+            sig_row, market_question = sig_result
+            current_signal = _signal_row_to_out(sig_row, market_question)
+
+    base = _market_row_to_out(row)
+    return MarketDetailOut(**base.model_dump(), current_signal=current_signal)
+
+
+@router.post("/markets/{market_id}/analyze", response_model=AnalyzeResponse)
+async def analyze_market(
+    market_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    pipeline: Annotated[object | None, Depends(_signal_pipeline)],
+) -> AnalyzeResponse:
+    if pipeline is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Signal pipeline not available — start freqpred with API credentials.",
+        )
+
+    market_row = (
+        await session.execute(select(MarketRow).where(MarketRow.id == market_id))
+    ).scalar_one_or_none()
+    if market_row is None:
+        raise HTTPException(status_code=404, detail="Market not found")
+
+    # 429 cooldown: if current signal was created within the last 60 s, return it cached.
+    if market_row.current_signal_id:
+        sig_row = (
+            await session.execute(
+                select(SignalRow).where(SignalRow.id == market_row.current_signal_id)
+            )
+        ).scalar_one_or_none()
+        if sig_row is not None:
+            age_secs = (datetime.now(UTC) - sig_row.created_at).total_seconds()
+            if age_secs < _ANALYZE_COOLDOWN_SECS:
+                return AnalyzeResponse(
+                    signal=_signal_row_to_out(sig_row, market_row.question),
+                    cached=True,
+                )
+
+    from freqpred.markets.models import Market  # noqa: PLC0415
+
+    market = Market(
+        id=market_row.id,
+        platform=market_row.platform,
+        question=market_row.question,
+        category=market_row.category,
+        status=market_row.status,
+        result=market_row.result,
+        close_time=market_row.close_time,
+        yes_bid=market_row.yes_bid,
+        yes_ask=market_row.yes_ask,
+        mid_price=market_row.mid_price,
+        last_price=market_row.last_price,
+        volume_24h=market_row.volume_24h,
+        open_interest=market_row.open_interest,
+        liquidity=market_row.liquidity,
+        last_fetched_at=market_row.last_fetched_at,
+        price_updated_at=market_row.price_updated_at,
+        metadata_fetched_at=market_row.metadata_fetched_at,
+        current_signal_id=(
+            str(market_row.current_signal_id) if market_row.current_signal_id else None
+        ),
+    )
+
+    new_signal = await pipeline.analyze(market, trigger="manual", force=True)  # type: ignore[union-attr]
+    if new_signal is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No documents have been ingested for this market yet. Run the ingestion pipeline first.",
+        )
+
+    # Reload the saved SignalRow to build the response (new_signal is a domain Signal dataclass).
+    sig_row = (
+        await session.execute(
+            select(SignalRow).where(SignalRow.id == _uuid.UUID(new_signal.id))
+        )
+    ).scalar_one_or_none()
+    if sig_row is None:
+        raise HTTPException(status_code=500, detail="Signal was generated but could not be retrieved.")
+
+    return AnalyzeResponse(
+        signal=_signal_row_to_out(sig_row, market_row.question),
+        cached=False,
     )
 
 

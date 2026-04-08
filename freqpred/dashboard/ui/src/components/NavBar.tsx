@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom'
 const links = [
   { to: '/signals', label: 'Signal Feed' },
   { to: '/positions', label: 'Positions' },
+  { to: '/markets', label: 'Markets' },
   { to: '/calibration', label: 'Calibration' },
   { to: '/llm', label: 'LLM Cost' },
   { to: '/strategy', label: 'Strategy Config' },

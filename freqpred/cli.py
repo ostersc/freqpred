@@ -1614,11 +1614,35 @@ async def _dashboard(config: object, host: str, port: int, dev: bool = False) ->
     engine = make_engine(config.database.url)
     session_factory = make_session_factory(engine)
 
+    # Construct a signal pipeline when LLM credentials are available so the
+    # "Analyze now" button on the Markets page works in standalone dashboard mode.
+    signal_pipeline = None
+    if config.anthropic.api_key:
+        import anthropic as _anthropic  # noqa: PLC0415
+        from freqpred.llm.client import LLMClient  # noqa: PLC0415
+        from freqpred.rag.embedder import LocalEmbedder  # noqa: PLC0415
+        from freqpred.signal.pipeline import SignalPipeline  # noqa: PLC0415
+
+        _llm_client = LLMClient(
+            _anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
+            session_factory,
+            prompt_version="signal-v1",
+            daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
+            max_consecutive_errors=config.risk.max_consecutive_llm_errors,
+        )
+        signal_pipeline = SignalPipeline(
+            session_factory=session_factory,
+            embedder=LocalEmbedder(),
+            llm_client=_llm_client,
+            top_k=config.signal.top_k_documents,
+        )
+
     app = create_app(
         session_factory=session_factory,
         daily_cap_usd=config.risk.max_daily_llm_spend_usd,
         risk_config=config.risk,
         bankroll_usd=config.trading.bankroll_usd,
+        signal_pipeline=signal_pipeline,
     )
 
     click.echo(f"Starting dashboard on http://{host}:{port}")

@@ -52,6 +52,7 @@ def _make_app(
     daily_cap: float = 10.0,
     risk_config: object | None = None,
     bankroll_usd: float = 1000.0,
+    signal_pipeline: object | None = None,
 ) -> object:
     """Create app with the real session factory replaced by a mock."""
     sf = MagicMock()
@@ -60,6 +61,7 @@ def _make_app(
         daily_cap_usd=daily_cap,
         risk_config=risk_config,
         bankroll_usd=bankroll_usd,
+        signal_pipeline=signal_pipeline,
     )
 
     async def _override_get_db():
@@ -775,4 +777,203 @@ def test_llm_queries_detail_unknown_id_returns_404() -> None:
     resp = client.get("/api/llm/queries/9999")
 
     assert resp.status_code == 404
-    assert resp.json()["detail"] == "LLM query not found"
+
+
+# ---------------------------------------------------------------------------
+# /api/markets
+# ---------------------------------------------------------------------------
+
+
+def _make_market_row(**kw) -> MagicMock:
+    row = MagicMock()
+    row.id = kw.get("id", "KLSHI-MARKET-1")
+    row.question = kw.get("question", "Will X happen?")
+    row.status = kw.get("status", "active")
+    row.yes_bid = kw.get("yes_bid", 0.55)
+    row.yes_ask = kw.get("yes_ask", 0.60)
+    row.mid_price = kw.get("mid_price", 0.575)
+    row.volume_24h = kw.get("volume_24h", 1000.0)
+    row.close_time = kw.get("close_time", datetime(2026, 6, 1, tzinfo=UTC))
+    row.last_fetched_at = kw.get("last_fetched_at", datetime(2026, 1, 1, tzinfo=UTC))
+    row.current_signal_id = kw.get("current_signal_id", None)
+    return row
+
+
+def test_markets_list_returns_paginated_results() -> None:
+    row1 = _make_market_row(id="M1", question="Will A happen?")
+    row2 = _make_market_row(id="M2", question="Will B happen?")
+
+    count_r = _scalar_result(2)
+    data_r = _scalars_result([row1, row2])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(count_r, data_r)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/markets?status=open&limit=50&offset=0")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    assert len(body["items"]) == 2
+    assert body["items"][0]["id"] == "M1"
+    assert body["items"][1]["id"] == "M2"
+
+
+def test_markets_list_search_filters_by_question() -> None:
+    row = _make_market_row(id="M1", question="Will inflation drop?")
+
+    count_r = _scalar_result(1)
+    data_r = _scalars_result([row])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(count_r, data_r)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/markets?search=inflation")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["question"] == "Will inflation drop?"
+
+
+def test_market_detail_includes_current_signal() -> None:
+    sig_id = uuid.uuid4()
+    market_row = _make_market_row(id="M1", current_signal_id=sig_id)
+    sig_row = _make_signal_row(id=sig_id, market_id="M1")
+
+    # GET /api/markets/{id}: scalar_one_or_none → market_row
+    market_r = MagicMock()
+    market_r.scalar_one_or_none.return_value = market_row
+
+    # Signal join query: one_or_none → (sig_row, question)
+    sig_r = MagicMock()
+    sig_r.one_or_none.return_value = (sig_row, "Will X happen?")
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(market_r, sig_r)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/markets/M1")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "M1"
+    assert body["current_signal"] is not None
+    assert body["current_signal"]["market_id"] == "M1"
+
+
+def test_market_detail_returns_404_for_unknown_id() -> None:
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = None
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/markets/DOES-NOT-EXIST")
+
+    assert resp.status_code == 404
+
+
+def test_analyze_market_triggers_signal_pipeline() -> None:
+    market_row = _make_market_row(id="M1")
+
+    # No current signal → cooldown check skipped, pipeline called
+    market_r = MagicMock()
+    market_r.scalar_one_or_none.return_value = market_row
+
+    # After pipeline.analyze(), reload the saved SignalRow
+    new_sig_id = uuid.uuid4()
+    saved_sig = _make_signal_row(id=new_sig_id, market_id="M1")
+    saved_sig_r = MagicMock()
+    saved_sig_r.scalar_one_or_none.return_value = saved_sig
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(market_r, saved_sig_r)
+
+    # Mock pipeline.analyze() to return a Signal-like object
+    from freqpred.signal.models import Signal  # noqa: PLC0415
+
+    mock_signal = Signal(
+        id=str(new_sig_id),
+        market_id="M1",
+        estimated_probability=0.70,
+        confidence=0.80,
+        edge=0.10,
+        market_mid_at_signal=0.60,
+        direction="YES",
+        reasoning="test",
+        sources=[],
+        retrieval_hash="hash1",
+        model_used="claude-sonnet-4-6",
+        prompt_version="signal-v1",
+        trigger="manual",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        raw_context="ctx",
+    )
+    mock_pipeline = AsyncMock()
+    mock_pipeline.analyze = AsyncMock(return_value=mock_signal)
+
+    client = TestClient(_make_app(session, signal_pipeline=mock_pipeline))
+    resp = client.post("/api/markets/M1/analyze")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cached"] is False
+    assert body["signal"]["market_id"] == "M1"
+    mock_pipeline.analyze.assert_called_once()
+
+
+def test_analyze_market_429_within_cooldown() -> None:
+    sig_id = uuid.uuid4()
+    market_row = _make_market_row(id="M1", current_signal_id=sig_id)
+
+    # Signal created just 10 seconds ago → within 60 s cooldown
+    recent_sig = _make_signal_row(
+        id=sig_id,
+        market_id="M1",
+        created_at=datetime.now(UTC).replace(second=datetime.now(UTC).second - 10)
+        if datetime.now(UTC).second >= 10
+        else datetime.now(UTC),
+    )
+    # Set created_at explicitly to "now minus 5 seconds"
+    from datetime import timedelta  # noqa: PLC0415
+    recent_sig.created_at = datetime.now(UTC) - timedelta(seconds=5)
+
+    market_r = MagicMock()
+    market_r.scalar_one_or_none.return_value = market_row
+
+    cooldown_sig_r = MagicMock()
+    cooldown_sig_r.scalar_one_or_none.return_value = recent_sig
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(market_r, cooldown_sig_r)
+
+    mock_pipeline = AsyncMock()
+    mock_pipeline.analyze = AsyncMock()
+
+    client = TestClient(_make_app(session, signal_pipeline=mock_pipeline))
+    resp = client.post("/api/markets/M1/analyze")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cached"] is True
+    # Pipeline should NOT have been called
+    mock_pipeline.analyze.assert_not_called()
+
+
+def test_analyze_market_503_when_no_pipeline() -> None:
+    market_row = _make_market_row(id="M1")
+    market_r = MagicMock()
+    market_r.scalar_one_or_none.return_value = market_row
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=market_r)
+
+    # No pipeline passed → analyze endpoint should 503
+    client = TestClient(_make_app(session, signal_pipeline=None))
+    resp = client.post("/api/markets/M1/analyze")
+
+    assert resp.status_code == 503

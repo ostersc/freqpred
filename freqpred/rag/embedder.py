@@ -31,17 +31,34 @@ class LocalEmbedder:
     All encoding runs in a thread-pool executor so the asyncio event loop is
     never blocked, even on CPU-only hardware.
 
+    The model is loaded lazily on the first encode call, not at construction
+    time. This avoids triggering torch's multiprocessing initialisation at
+    import time (which on macOS uses the ``spawn`` start method and can
+    conflict with same-named packages in the project).
+
     Args:
         model_name: HuggingFace model ID. Defaults to ``all-MiniLM-L6-v2``
                     (384-dim, ~90 MB).
     """
 
     def __init__(self, model_name: str = _DEFAULT_MODEL) -> None:
-        log.info("embedder.loading_model", model=model_name)
-        self._model = SentenceTransformer(model_name)
         self.model = model_name
-        self.dim: int = self._model.get_sentence_embedding_dimension()
-        log.info("embedder.model_loaded", model=model_name, dim=self.dim)
+        self.dim: int = 0  # set after first load
+        self._model: SentenceTransformer | None = None
+
+    def _load(self) -> SentenceTransformer:
+        """Load the model synchronously (called once from the thread pool)."""
+        log.info("embedder.loading_model", model=self.model)
+        m = SentenceTransformer(self.model)
+        self.dim = m.get_sentence_embedding_dimension()
+        log.info("embedder.model_loaded", model=self.model, dim=self.dim)
+        return m
+
+    async def _ensure_loaded(self) -> SentenceTransformer:
+        if self._model is None:
+            loop = asyncio.get_event_loop()
+            self._model = await loop.run_in_executor(_EXECUTOR, self._load)
+        return self._model
 
     async def embed_text(self, text: str) -> list[float]:
         """Embed a single string. Returns a dim-length float list."""
@@ -53,9 +70,10 @@ class LocalEmbedder:
         if not texts:
             return []
 
+        model = await self._ensure_loaded()
         loop = asyncio.get_event_loop()
         encode_fn = functools.partial(
-            self._model.encode,
+            model.encode,
             texts,
             convert_to_tensor=False,
             show_progress_bar=False,

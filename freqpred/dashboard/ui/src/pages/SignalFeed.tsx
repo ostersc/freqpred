@@ -4,6 +4,7 @@ import { getSignals, getSignal } from '../api/signals'
 import LoadingSpinner from '../components/LoadingSpinner'
 import ErrorBanner from '../components/ErrorBanner'
 import { DocLinkItem } from '../components/DocLinkItem'
+import AnalyzeButton from '../components/AnalyzeButton'
 import type { SignalOut } from '../api/types'
 
 const PAGE_SIZE = 20
@@ -20,7 +21,7 @@ function age(iso: string) {
   return `${Math.round(secs / 86400)}d`
 }
 
-function SignalDetail({ id }: { id: string }) {
+function SignalDetail({ id, marketId }: { id: string; marketId: string }) {
   const { data, isLoading } = useQuery({
     queryKey: ['signal', id],
     queryFn: () => getSignal(id),
@@ -31,10 +32,11 @@ function SignalDetail({ id }: { id: string }) {
 
   return (
     <div className="px-4 py-3 bg-gray-50 border-t text-sm space-y-3">
-      <div>
+      <div className="flex items-center justify-between">
         <span className="font-medium text-gray-700">Reasoning:</span>
-        <p className="mt-1 text-gray-600 whitespace-pre-wrap">{data.reasoning}</p>
+        <AnalyzeButton marketId={marketId} />
       </div>
+      <p className="text-gray-600 whitespace-pre-wrap">{data.reasoning}</p>
       {data.social_sentiment_summary && (
         <div>
           <span className="font-medium text-gray-700">Social sentiment:</span>
@@ -86,7 +88,7 @@ function SignalRow({ signal }: { signal: SignalOut }) {
       {expanded && (
         <tr>
           <td colSpan={8} className="p-0">
-            <SignalDetail id={signal.id} />
+            <SignalDetail id={signal.id} marketId={signal.market_id} />
           </td>
         </tr>
       )}

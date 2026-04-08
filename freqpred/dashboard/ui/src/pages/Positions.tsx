@@ -18,6 +18,7 @@ import type { PositionOut, PositionDetailOut, SignalOut, SignalDetailOut } from 
 import LoadingSpinner from '../components/LoadingSpinner'
 import ErrorBanner from '../components/ErrorBanner'
 import { DocLinkItem } from '../components/DocLinkItem'
+import AnalyzeButton from '../components/AnalyzeButton'
 
 type StatusFilter = 'open' | 'closed' | 'all'
 
@@ -472,6 +473,7 @@ function PositionDetail({ positionId }: { positionId: string }) {
               ← back to entry signal
             </button>
           )}
+          <AnalyzeButton marketId={d.market_id} />
         </div>
         <SelectedSignalPanel signalId={activeSignalId} entrySignal={d.entry_signal} />
       </div>
