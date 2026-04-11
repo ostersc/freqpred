@@ -46,7 +46,7 @@ class MarketRow(Base):
     )
 
     # Market state
-    status: Mapped[str] = mapped_column(VARCHAR(20), nullable=False, server_default="active")
+    status: Mapped[str] = mapped_column(VARCHAR(50), nullable=False, server_default="active")
     result: Mapped[str | None] = mapped_column(VARCHAR(10), nullable=True)
 
     # Price snapshot
