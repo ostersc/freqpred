@@ -76,6 +76,7 @@ class PositionOut(BaseModel):
     status: str
     exit_price: float | None
     exit_time: datetime | None
+    exit_reason: str | None
     resolution: int | None
     pnl: float | None
     pnl_pct: float | None
@@ -94,6 +95,45 @@ class PositionDetailOut(PositionOut):
     current_mid: float | None
     entry_signal: SignalDetailOut
     market_signals: list[SignalOut]
+
+
+# ---------------------------------------------------------------------------
+# Strategy decisions (exited-position post-mortem)
+# ---------------------------------------------------------------------------
+
+
+class StrategyDecisionOut(PositionOut):
+    """A closed position enriched with counterfactual and entry-efficiency metrics."""
+
+    market_question: str | None
+    market_result: str | None                   # "yes" | "no" | None (unresolved)
+
+    # Exit decision counterfactual (None if market unresolved).
+    # counterfactual_pnl  = (our_side_win_value - entry_price)   [per contract]
+    # exit_delta_vs_hold  = (exit_price - our_side_win_value)    [per contract]
+    counterfactual_pnl_per_contract: float | None
+    counterfactual_pnl_usd: float | None
+    exit_delta_per_contract: float | None
+    exit_delta_usd: float | None
+
+    # Entry efficiency vs best prior signal with edge > 0 for same (market, direction).
+    # best_prior_ask          = min(signals.market_ask_at_signal) prior to entry_time
+    # entry_efficiency_delta  = (best_prior_ask - entry_price)    [per contract]
+    # Negative = we paid more than the earlier opportunity.
+    best_prior_ask: float | None
+    entry_efficiency_per_contract: float | None
+    entry_efficiency_usd: float | None
+
+
+class StrategyDecisionListResponse(BaseModel):
+    items: list[StrategyDecisionOut]
+    total: int
+    limit: int
+    offset: int
+    # Populated from the full closed-position set so filter dropdowns are stable
+    # regardless of the current filter selection.
+    distinct_strategies: list[str]
+    distinct_exit_reasons: list[str]
 
 
 # ---------------------------------------------------------------------------

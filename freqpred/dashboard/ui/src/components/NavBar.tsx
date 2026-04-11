@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom'
 const links = [
   { to: '/signals', label: 'Signal Feed' },
   { to: '/positions', label: 'Positions' },
+  { to: '/decisions', label: 'Decisions' },
   { to: '/markets', label: 'Markets' },
   { to: '/calibration', label: 'Calibration' },
   { to: '/llm', label: 'LLM Cost' },
@@ -13,7 +14,7 @@ const links = [
 export default function NavBar() {
   return (
     <nav className="bg-gray-900 text-white shadow">
-      <div className="max-w-7xl mx-auto px-4 flex items-center h-12 gap-1">
+      <div className="px-3 flex items-center h-12 gap-1">
         <span className="font-bold text-sm mr-4 text-gray-300">freqpred</span>
         {links.map(({ to, label }) => (
           <NavLink

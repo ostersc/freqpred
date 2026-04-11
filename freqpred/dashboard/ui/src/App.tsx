@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import NavBar from './components/NavBar'
 import SignalFeed from './pages/SignalFeed'
 import Positions from './pages/Positions'
+import StrategyDecisions from './pages/StrategyDecisions'
 import Markets from './pages/Markets'
 import Calibration from './pages/Calibration'
 import LLMCost from './pages/LLMCost'
@@ -12,11 +13,12 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gray-50">
       <NavBar />
-      <main className="max-w-7xl mx-auto px-4 py-6">
+      <main className="px-3 py-4">
         <Routes>
           <Route path="/" element={<Navigate to="/signals" replace />} />
           <Route path="/signals" element={<SignalFeed />} />
           <Route path="/positions" element={<Positions />} />
+          <Route path="/decisions" element={<StrategyDecisions />} />
           <Route path="/markets" element={<Markets />} />
           <Route path="/calibration" element={<Calibration />} />
           <Route path="/llm" element={<LLMCost />} />

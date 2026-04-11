@@ -144,6 +144,7 @@ def _make_position_row(**kw) -> MagicMock:
     row.status = kw.get("status", "open")
     row.exit_price = kw.get("exit_price", None)
     row.exit_time = kw.get("exit_time", None)
+    row.exit_reason = kw.get("exit_reason", None)
     row.resolution = kw.get("resolution", None)
     row.pnl = kw.get("pnl", None)
     row.pnl_pct = kw.get("pnl_pct", None)
@@ -977,3 +978,336 @@ def test_analyze_market_503_when_no_pipeline() -> None:
     resp = client.post("/api/markets/M1/analyze")
 
     assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# /api/strategy-decisions
+# ---------------------------------------------------------------------------
+
+
+def _decisions_query_result(
+    rows: list[tuple],
+) -> MagicMock:
+    """Mock result for the main data query.
+
+    Returns (PositionRow, market_result, market_question, best_prior_ask) tuples.
+    """
+    r = MagicMock()
+    r.all.return_value = rows
+    return r
+
+
+def _distinct_scalars_result(values: list) -> MagicMock:
+    r = MagicMock()
+    r.scalars.return_value.all.return_value = values
+    return r
+
+
+def _decisions_mock_session(
+    rows: list[tuple],
+    *,
+    total: int | None = None,
+    distinct_strategies: list[str] | None = None,
+    distinct_exit_reasons: list[str] | None = None,
+) -> AsyncMock:
+    """Build an AsyncMock session with the 5 execute calls made by /strategy-decisions."""
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _mode_result(),                                                       # _get_mode
+        _scalar_result(total if total is not None else len(rows)),            # count
+        _decisions_query_result(rows),                                        # data query
+        _distinct_scalars_result(                                             # distinct strategies
+            distinct_strategies
+            if distinct_strategies is not None
+            else sorted({r[0].strategy_name for r in rows}),
+        ),
+        _distinct_scalars_result(                                             # distinct exit reasons
+            distinct_exit_reasons
+            if distinct_exit_reasons is not None
+            else sorted(
+                {r[0].exit_reason for r in rows if r[0].exit_reason is not None},
+            ),
+        ),
+    )
+    return session
+
+
+def _make_closed_position(**kw) -> MagicMock:
+    """Convenience wrapper for _make_position_row that defaults to a closed position."""
+    defaults = dict(
+        status="closed",
+        exit_price=0.25,
+        exit_time=datetime(2026, 2, 1, tzinfo=UTC),
+        exit_reason="stoploss",
+        pnl=-2.5,
+        pnl_pct=-0.5,
+    )
+    defaults.update(kw)
+    return _make_position_row(**defaults)
+
+
+def test_decisions_empty_when_no_closed_positions() -> None:
+    session = _decisions_mock_session([], total=0)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["items"] == []
+    assert data["total"] == 0
+    assert data["limit"] == 50
+    assert data["offset"] == 0
+    assert data["distinct_strategies"] == []
+    assert data["distinct_exit_reasons"] == []
+
+
+def test_decisions_counterfactual_yes_resolved_yes() -> None:
+    """YES entered 0.50, exited 0.25, resolved yes → counterfactual +0.50, exit Δ −0.75."""
+    row = _make_closed_position(
+        direction="YES",
+        contracts=10,
+        entry_price=0.50,
+        exit_price=0.25,
+    )
+    session = _decisions_mock_session([(row, "yes", "Will X happen?", None)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["market_result"] == "yes"
+    assert item["counterfactual_pnl_per_contract"] == pytest.approx(0.50)
+    assert item["counterfactual_pnl_usd"] == pytest.approx(5.0)
+    assert item["exit_delta_per_contract"] == pytest.approx(-0.75)
+    assert item["exit_delta_usd"] == pytest.approx(-7.5)
+
+
+def test_decisions_counterfactual_yes_resolved_no() -> None:
+    """YES entered 0.50, exited 0.25, resolved no → counterfactual −0.50, exit Δ +0.25."""
+    row = _make_closed_position(
+        direction="YES",
+        contracts=10,
+        entry_price=0.50,
+        exit_price=0.25,
+    )
+    session = _decisions_mock_session([(row, "no", "Will X happen?", None)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["counterfactual_pnl_per_contract"] == pytest.approx(-0.50)
+    assert item["counterfactual_pnl_usd"] == pytest.approx(-5.0)
+    assert item["exit_delta_per_contract"] == pytest.approx(0.25)
+    assert item["exit_delta_usd"] == pytest.approx(2.5)
+
+
+def test_decisions_counterfactual_no_resolved_no() -> None:
+    """NO entered 0.40, exited 0.60, resolved no → counterfactual +0.60, exit Δ −0.40."""
+    row = _make_closed_position(
+        direction="NO",
+        contracts=5,
+        entry_price=0.40,
+        exit_price=0.60,
+    )
+    session = _decisions_mock_session([(row, "no", "Q?", None)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["counterfactual_pnl_per_contract"] == pytest.approx(0.60)
+    assert item["counterfactual_pnl_usd"] == pytest.approx(3.0)
+    assert item["exit_delta_per_contract"] == pytest.approx(-0.40)
+    assert item["exit_delta_usd"] == pytest.approx(-2.0)
+
+
+def test_decisions_counterfactual_no_resolved_yes() -> None:
+    """NO entered 0.40, exited 0.60, resolved yes → counterfactual −0.40, exit Δ +0.60."""
+    row = _make_closed_position(
+        direction="NO",
+        contracts=5,
+        entry_price=0.40,
+        exit_price=0.60,
+    )
+    session = _decisions_mock_session([(row, "yes", "Q?", None)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["counterfactual_pnl_per_contract"] == pytest.approx(-0.40)
+    assert item["counterfactual_pnl_usd"] == pytest.approx(-2.0)
+    assert item["exit_delta_per_contract"] == pytest.approx(0.60)
+    assert item["exit_delta_usd"] == pytest.approx(3.0)
+
+
+def test_decisions_null_when_unresolved() -> None:
+    """market.result is None → all counterfactual fields are None."""
+    row = _make_closed_position(
+        direction="YES",
+        entry_price=0.50,
+        exit_price=0.25,
+    )
+    session = _decisions_mock_session([(row, None, "Q?", None)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["market_result"] is None
+    assert item["counterfactual_pnl_per_contract"] is None
+    assert item["counterfactual_pnl_usd"] is None
+    assert item["exit_delta_per_contract"] is None
+    assert item["exit_delta_usd"] is None
+
+
+def test_decisions_market_resolved_exit_has_zero_delta() -> None:
+    """If exit_price equals the resolution value, exit_delta == 0."""
+    # YES position held to resolution: exit_price = 1.0, resolved yes
+    row = _make_closed_position(
+        direction="YES",
+        contracts=10,
+        entry_price=0.50,
+        exit_price=1.0,
+        exit_reason="market_resolved",
+    )
+    session = _decisions_mock_session([(row, "yes", "Q?", None)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["exit_reason"] == "market_resolved"
+    assert item["counterfactual_pnl_per_contract"] == pytest.approx(0.50)
+    assert item["exit_delta_per_contract"] == pytest.approx(0.0)
+    assert item["exit_delta_usd"] == pytest.approx(0.0)
+
+
+def test_decisions_entry_efficiency_populated() -> None:
+    """best_prior_ask = 0.15, entry_price = 0.40 → entry_efficiency −0.25/contract."""
+    row = _make_closed_position(
+        direction="YES",
+        contracts=4,
+        entry_price=0.40,
+        exit_price=0.50,
+    )
+    session = _decisions_mock_session([(row, "yes", "Q?", 0.15)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["best_prior_ask"] == pytest.approx(0.15)
+    assert item["entry_efficiency_per_contract"] == pytest.approx(-0.25)
+    assert item["entry_efficiency_usd"] == pytest.approx(-1.0)
+
+
+def test_decisions_entry_efficiency_null_when_no_prior_signal() -> None:
+    """No qualifying prior signal → best_prior_ask/entry efficiency all None."""
+    row = _make_closed_position(direction="NO", entry_price=0.40, exit_price=0.30)
+    session = _decisions_mock_session([(row, "no", "Q?", None)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["best_prior_ask"] is None
+    assert item["entry_efficiency_per_contract"] is None
+    assert item["entry_efficiency_usd"] is None
+
+
+def test_decisions_entry_efficiency_positive_for_no_side() -> None:
+    """NO side: best_prior_ask 0.30, entry 0.40 → entry_efficiency −0.10/contract."""
+    row = _make_closed_position(
+        direction="NO",
+        contracts=2,
+        entry_price=0.40,
+        exit_price=0.50,
+    )
+    session = _decisions_mock_session([(row, "no", "Q?", 0.30)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["best_prior_ask"] == pytest.approx(0.30)
+    assert item["entry_efficiency_per_contract"] == pytest.approx(-0.10)
+    assert item["entry_efficiency_usd"] == pytest.approx(-0.20)
+
+
+def test_decisions_filter_query_params_accepted() -> None:
+    """All filter params should be accepted without 422."""
+    row = _make_closed_position(
+        strategy_name="ConservativeDefault",
+        exit_reason="force_exit:time_based",
+        market_id="KXTRUMPSAY-26APR13-COMM",
+    )
+    session = _decisions_mock_session(
+        [(row, "yes", "Q?", None)],
+        distinct_strategies=["ConservativeDefault", "TestStrategy"],
+        distinct_exit_reasons=["force_exit:time_based", "stoploss"],
+    )
+
+    client = TestClient(_make_app(session))
+    resp = client.get(
+        "/api/strategy-decisions",
+        params={
+            "strategy": "ConservativeDefault",
+            "exit_reason": "force_exit",
+            "ticker_prefix": "KXTRUMPSAY",
+            "date_from": "2026-01-01T00:00:00",
+            "date_to": "2026-12-31T23:59:59",
+            "limit": 25,
+            "offset": 0,
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["limit"] == 25
+    assert data["offset"] == 0
+    assert len(data["items"]) == 1
+    assert data["items"][0]["strategy_name"] == "ConservativeDefault"
+    # Dropdowns reflect the full closed-position set, not just the filtered slice.
+    assert "ConservativeDefault" in data["distinct_strategies"]
+    assert "TestStrategy" in data["distinct_strategies"]
+    assert "force_exit:time_based" in data["distinct_exit_reasons"]
+    assert "stoploss" in data["distinct_exit_reasons"]
+
+
+def test_decisions_pagination_limits_and_offset() -> None:
+    """Total returned independently of the current page size."""
+    rows = [
+        (_make_closed_position(direction="YES", entry_price=0.5, exit_price=0.4), "yes", "Q1", None),
+        (_make_closed_position(direction="NO", entry_price=0.3, exit_price=0.6), "no", "Q2", None),
+    ]
+    session = _decisions_mock_session(rows, total=17)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions?limit=2&offset=4")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 17
+    assert data["limit"] == 2
+    assert data["offset"] == 4
+    assert len(data["items"]) == 2
+
+
+def test_decisions_invalid_limit_rejected() -> None:
+    """limit > 200 should return 422."""
+    session = AsyncMock()
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/strategy-decisions?limit=500")
+    assert resp.status_code == 422

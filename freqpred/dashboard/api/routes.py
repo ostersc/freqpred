@@ -42,6 +42,8 @@ from .schemas import (
     SignalOut,
     StrategyConfigOut,
     StrategyConfigUpdateRequest,
+    StrategyDecisionListResponse,
+    StrategyDecisionOut,
     SystemHealthResponse,
     WebSocketStateOut,
 )
@@ -151,6 +153,7 @@ def _position_row_to_out(row: PositionRow, current_mid: float | None = None) -> 
         status=row.status,
         exit_price=row.exit_price,
         exit_time=row.exit_time,
+        exit_reason=row.exit_reason,
         resolution=row.resolution,
         pnl=row.pnl,
         pnl_pct=row.pnl_pct,
@@ -465,6 +468,177 @@ async def get_position_detail(
         current_mid=current_mid,
         entry_signal=entry_signal,
         market_signals=market_signals,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Strategy decisions (exited-position post-mortem)
+# ---------------------------------------------------------------------------
+
+
+def _our_side_win_value(direction: str, market_result: str | None) -> float | None:
+    """Return 1.0 if our side won, 0.0 if it lost, None if the market is unresolved.
+
+    Markets store ``result`` as ``"yes" | "no" | None``. A YES position wins when
+    ``result='yes'``, a NO position wins when ``result='no'``.
+    """
+    if market_result not in ("yes", "no"):
+        return None
+    if direction == "YES":
+        return 1.0 if market_result == "yes" else 0.0
+    if direction == "NO":
+        return 1.0 if market_result == "no" else 0.0
+    return None
+
+
+def _decision_row_to_out(
+    row: PositionRow,
+    market_result: str | None,
+    market_question: str | None,
+    best_prior_ask: float | None,
+) -> StrategyDecisionOut:
+    base = _position_row_to_out(row).model_dump()
+
+    # --- Exit decision counterfactual --------------------------------------
+    # If the market is unresolved we cannot compute the counterfactual — leave
+    # both counterfactual and delta fields as None.
+    win_value = _our_side_win_value(row.direction, market_result)
+    counterfactual_pc: float | None = None
+    counterfactual_usd: float | None = None
+    exit_delta_pc: float | None = None
+    exit_delta_usd: float | None = None
+    if win_value is not None and row.exit_price is not None:
+        counterfactual_pc = win_value - row.entry_price
+        counterfactual_usd = counterfactual_pc * row.contracts
+        exit_delta_pc = row.exit_price - win_value
+        exit_delta_usd = exit_delta_pc * row.contracts
+
+    # --- Entry efficiency vs best prior signal -----------------------------
+    entry_eff_pc: float | None = None
+    entry_eff_usd: float | None = None
+    if best_prior_ask is not None:
+        entry_eff_pc = best_prior_ask - row.entry_price
+        entry_eff_usd = entry_eff_pc * row.contracts
+
+    return StrategyDecisionOut(
+        **base,
+        market_question=market_question,
+        market_result=market_result,
+        counterfactual_pnl_per_contract=counterfactual_pc,
+        counterfactual_pnl_usd=counterfactual_usd,
+        exit_delta_per_contract=exit_delta_pc,
+        exit_delta_usd=exit_delta_usd,
+        best_prior_ask=best_prior_ask,
+        entry_efficiency_per_contract=entry_eff_pc,
+        entry_efficiency_usd=entry_eff_usd,
+    )
+
+
+@router.get("/strategy-decisions", response_model=StrategyDecisionListResponse)
+async def list_strategy_decisions(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    strategy: str | None = Query(default=None),
+    exit_reason: str | None = Query(default=None),
+    ticker_prefix: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> StrategyDecisionListResponse:
+    app_mode = await _get_mode(session)
+
+    # Correlated subquery: lowest market_ask_at_signal across signals prior to
+    # entry_time for the same (market, direction) with positive edge.
+    best_prior_ask_subq = (
+        select(func.min(SignalRow.market_ask_at_signal))
+        .where(SignalRow.market_id == PositionRow.market_id)
+        .where(SignalRow.direction == PositionRow.direction)
+        .where(SignalRow.edge > 0)
+        .where(SignalRow.created_at < PositionRow.entry_time)
+        .where(SignalRow.market_ask_at_signal.isnot(None))
+        .correlate(PositionRow)
+        .scalar_subquery()
+    )
+
+    base_filters = [
+        PositionRow.mode == app_mode,
+        PositionRow.status == "closed",
+    ]
+    filters = list(base_filters)
+    if strategy:
+        filters.append(PositionRow.strategy_name == strategy)
+    if exit_reason:
+        # Prefix ILIKE match so `exit_reason=force_exit` captures
+        # `force_exit:time_based`, `force_exit:risk`, etc.
+        filters.append(PositionRow.exit_reason.ilike(f"{exit_reason}%"))
+    if ticker_prefix:
+        filters.append(PositionRow.market_id.ilike(f"{ticker_prefix}%"))
+    if date_from:
+        filters.append(PositionRow.exit_time >= date_from)
+    if date_to:
+        filters.append(PositionRow.exit_time <= date_to)
+
+    stmt = (
+        select(
+            PositionRow,
+            MarketRow.result,
+            MarketRow.question,
+            best_prior_ask_subq.label("best_prior_ask"),
+        )
+        .outerjoin(MarketRow, MarketRow.id == PositionRow.market_id)
+        .where(*filters)
+        .order_by(PositionRow.exit_time.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+
+    count_stmt = (
+        select(func.count()).select_from(PositionRow).where(*filters)
+    )
+
+    # distinct_strategies / distinct_exit_reasons are computed over the full
+    # closed-position set (only `base_filters`, not the current selection) so
+    # the filter dropdowns are stable regardless of what is currently selected.
+    distinct_strategies_stmt = (
+        select(PositionRow.strategy_name)
+        .where(*base_filters)
+        .distinct()
+        .order_by(PositionRow.strategy_name)
+    )
+    distinct_exit_reasons_stmt = (
+        select(PositionRow.exit_reason)
+        .where(*base_filters)
+        .where(PositionRow.exit_reason.isnot(None))
+        .distinct()
+        .order_by(PositionRow.exit_reason)
+    )
+
+    total = int((await session.execute(count_stmt)).scalar_one())
+    rows = (await session.execute(stmt)).all()
+    distinct_strategies = [
+        s for s in (await session.execute(distinct_strategies_stmt)).scalars().all()
+    ]
+    distinct_exit_reasons = [
+        r for r in (await session.execute(distinct_exit_reasons_stmt)).scalars().all()
+    ]
+
+    items = [
+        _decision_row_to_out(
+            pos_row,
+            market_result=market_result,
+            market_question=market_question,
+            best_prior_ask=best_prior_ask,
+        )
+        for pos_row, market_result, market_question, best_prior_ask in rows
+    ]
+
+    return StrategyDecisionListResponse(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        distinct_strategies=distinct_strategies,
+        distinct_exit_reasons=distinct_exit_reasons,
     )
 
 

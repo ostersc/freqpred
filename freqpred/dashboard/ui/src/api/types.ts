@@ -58,12 +58,34 @@ export interface PositionOut {
   status: string
   exit_price: number | null
   exit_time: string | null
+  exit_reason: string | null
   resolution: number | null
   pnl: number | null
   pnl_pct: number | null
   unrealized_pnl: number | null
   unrealized_pnl_pct: number | null
   created_at: string
+}
+
+export interface StrategyDecisionOut extends PositionOut {
+  market_question: string | null
+  market_result: string | null
+  counterfactual_pnl_per_contract: number | null
+  counterfactual_pnl_usd: number | null
+  exit_delta_per_contract: number | null
+  exit_delta_usd: number | null
+  best_prior_ask: number | null
+  entry_efficiency_per_contract: number | null
+  entry_efficiency_usd: number | null
+}
+
+export interface StrategyDecisionListResponse {
+  items: StrategyDecisionOut[]
+  total: number
+  limit: number
+  offset: number
+  distinct_strategies: string[]
+  distinct_exit_reasons: string[]
 }
 
 export interface PositionDetailOut extends PositionOut {
