@@ -160,7 +160,8 @@ async def test_retrieval_returns_correct_market_only(session):
     await session.flush()
 
     embedder = _make_embedder_for_question(shared_embedding)
-    docs = await retrieve(session, embedder, "political event?", market_id="RETV-MKT-A", top_k=20)
+    docs = await retrieve(session, embedder, "political event?", market_id="RETV-MKT-A",
+                          top_k=20, now=NOW)
 
     assert len(docs) == 10
     assert all(d.category == "politics" for d, _ in docs)
@@ -179,7 +180,8 @@ async def test_retrieval_ranked_by_relevance(session):
     await session.flush()
 
     embedder = _make_embedder_for_question(emb_a)
-    docs = await retrieve(session, embedder, "question", market_id="RETV-RANK-MKT", top_k=10)
+    docs = await retrieve(session, embedder, "question", market_id="RETV-RANK-MKT",
+                          top_k=10, now=NOW)
 
     assert len(docs) == 2
     assert docs[0][0].id == str(doc_a.id)
@@ -202,8 +204,10 @@ async def test_retrieval_excludes_old_documents(session):
     await session.flush()
 
     embedder = _make_embedder_for_question(shared_embedding)
+    # Pin *now* so the max_age_days cutoff is deterministic regardless of when
+    # the test runs — otherwise wall-clock drift makes both docs age out.
     docs = await retrieve(session, embedder, "question", market_id="RETV-AGE-MKT",
-                          top_k=10, max_age_days=30)
+                          top_k=10, max_age_days=30, now=NOW)
 
     assert len(docs) == 1
     assert docs[0][0].id == str(recent_row.id)
@@ -221,7 +225,8 @@ async def test_retrieval_top_k_limits_results(session):
     await session.flush()
 
     embedder = _make_embedder_for_question(shared_embedding)
-    docs = await retrieve(session, embedder, "question", market_id="RETV-TOPK-MKT", top_k=5)
+    docs = await retrieve(session, embedder, "question", market_id="RETV-TOPK-MKT",
+                          top_k=5, now=NOW)
 
     assert len(docs) == 5
 
@@ -245,6 +250,7 @@ async def test_retrieval_unlinked_market_returns_empty(session):
     await session.flush()
 
     embedder = _make_embedder_for_question([0.1] * dim)
-    docs = await retrieve(session, embedder, "question", market_id="RETV-EMPTY-MKT", top_k=10)
+    docs = await retrieve(session, embedder, "question", market_id="RETV-EMPTY-MKT",
+                          top_k=10, now=NOW)
 
     assert docs == []

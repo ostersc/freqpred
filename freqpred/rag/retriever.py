@@ -43,17 +43,22 @@ async def retrieve(
     top_k: int = 10,
     max_age_days: int = 30,
     vector_weight: float = _VECTOR_WEIGHT,
+    now: datetime | None = None,
 ) -> list[tuple[Document, float]]:
     """Return the top-K most relevant documents for *market_id* using hybrid scoring.
 
     Scope: only documents linked to *market_id* in document_market_links
     (written at ingestion time). Documents outside that set are never considered.
 
+    *now* is the reference time used to compute the max_age_days cutoff. Defaults
+    to the real wall-clock in UTC; tests can pin it for deterministic cutoffs.
+
     Returns a list of (Document, blended_score) tuples sorted best-first.
     blended_score is in [0.0, 1.0] after normalisation.
     """
     query_vector = await embedder.embed_text(question)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    reference = now if now is not None else datetime.now(timezone.utc)
+    cutoff = reference - timedelta(days=max_age_days)
 
     # Subquery: distinct document IDs linked to this market.
     linked_ids_sq = (
