@@ -206,6 +206,8 @@ export interface CircuitBreakerStateOut {
   reason: string | null
   daily_loss_pct: number
   daily_loss_limit_pct: number
+  daily_loss_window_start: string
+  daily_loss_ack_at: string | null
   llm_budget_used_usd: number
   llm_budget_cap_usd: number
 }

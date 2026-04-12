@@ -327,6 +327,8 @@ class CircuitBreakerStateOut(BaseModel):
     reason: str | None
     daily_loss_pct: float
     daily_loss_limit_pct: float
+    daily_loss_window_start: datetime  # lower bound of the loss window the risk engine enforces
+    daily_loss_ack_at: datetime | None  # last /start acknowledgement; null if never acked
     llm_budget_used_usd: float
     llm_budget_cap_usd: float
 

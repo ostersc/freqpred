@@ -79,11 +79,22 @@ export default function SystemHealth() {
                   <StatusBadge status={data.circuit_breakers.trading_halted ? 'halted' : 'ok'} />
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-gray-600">Daily loss</span>
+                  <span className="text-gray-600">
+                    Daily loss{' '}
+                    <span className="text-xs text-gray-400">
+                      (since {new Date(data.circuit_breakers.daily_loss_window_start).toLocaleTimeString()})
+                    </span>
+                  </span>
                   <span className={data.circuit_breakers.daily_loss_pct > 0 ? 'text-red-700 font-semibold' : 'text-gray-700'}>
                     {(data.circuit_breakers.daily_loss_pct * 100).toFixed(2)}% / {(data.circuit_breakers.daily_loss_limit_pct * 100).toFixed(0)}%
                   </span>
                 </div>
+                {data.circuit_breakers.daily_loss_ack_at && (
+                  <div className="flex items-center justify-between text-xs text-gray-500">
+                    <span>CB last acknowledged</span>
+                    <span>{new Date(data.circuit_breakers.daily_loss_ack_at).toLocaleString()}</span>
+                  </div>
+                )}
                 <div className="flex items-center justify-between">
                   <span className="text-gray-600">LLM budget used</span>
                   <span className="text-gray-700">

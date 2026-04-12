@@ -1085,6 +1085,7 @@ async def get_system_health(
     run_state = "running"
     cb_halted = False
     cb_reason: str | None = None
+    daily_loss_ack_at: datetime | None = None
     daily_pnl: float = 0.0
     net_bankroll: float = initial_bankroll
     llm_budget_used: float = 0.0
@@ -1094,6 +1095,7 @@ async def get_system_health(
 
     today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     hour_ago = datetime.now(UTC) - timedelta(hours=1)
+    loss_window_start: datetime = today_start
 
     try:
         app_mode = await _get_mode(session)
@@ -1105,13 +1107,19 @@ async def get_system_health(
             run_state = rs_row.state
             cb_halted = bool(rs_row.cb_active)
             cb_reason = rs_row.cb_reason
+            daily_loss_ack_at = rs_row.daily_loss_ack_at
 
         net_bankroll = await get_net_bankroll(session, initial_bankroll, mode=app_mode)
 
+        # Mirror the risk engine's daily loss window: max(today_start, daily_loss_ack_at).
+        # Displaying the raw midnight-to-now total would diverge from what risk.py actually
+        # enforces whenever the operator has /start-ed (which stamps daily_loss_ack_at).
+        if daily_loss_ack_at is not None:
+            loss_window_start = max(today_start, daily_loss_ack_at)
         daily_pnl_result = await session.execute(
             select(func.coalesce(func.sum(PositionRow.pnl), 0.0)).where(
                 PositionRow.status == "closed",
-                PositionRow.exit_time >= today_start,
+                PositionRow.exit_time >= loss_window_start,
                 PositionRow.mode == app_mode,
             )
         )
@@ -1164,6 +1172,8 @@ async def get_system_health(
             reason=cb_reason,
             daily_loss_pct=round(daily_loss_pct, 4),
             daily_loss_limit_pct=max_daily_loss_pct,
+            daily_loss_window_start=loss_window_start,
+            daily_loss_ack_at=daily_loss_ack_at,
             llm_budget_used_usd=round(llm_budget_used, 4),
             llm_budget_cap_usd=daily_cap,
         ),

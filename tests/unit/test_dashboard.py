@@ -554,6 +554,7 @@ def _make_system_health_session(
     mode: str = "paper",
     cb_active: bool = False,
     cb_reason: str | None = None,
+    daily_loss_ack_at: datetime | None = None,
     daily_pnl: float = 0.0,
     all_time_pnl: float = 0.0,
     llm_spend: float = 1.0,
@@ -577,6 +578,7 @@ def _make_system_health_session(
     run_state_row.mode = mode
     run_state_row.cb_active = cb_active
     run_state_row.cb_reason = cb_reason
+    run_state_row.daily_loss_ack_at = daily_loss_ack_at
     run_state_row.drawdown_reset_at = None
     run_state_row.drawdown_reset_bankroll = None
 
@@ -632,6 +634,28 @@ def test_system_health_circuit_breaker_fields_no_halt() -> None:
     assert cb["daily_loss_pct"] == pytest.approx(0.0)
     assert cb["llm_budget_used_usd"] == pytest.approx(1.0)
     assert cb["llm_budget_cap_usd"] == pytest.approx(10.0)
+    # Without an ack, window starts at today's UTC midnight and ack_at is null.
+    assert cb["daily_loss_ack_at"] is None
+    assert "daily_loss_window_start" in cb
+
+
+def test_system_health_daily_loss_window_honors_ack_at() -> None:
+    """The dashboard must mirror risk.py: when daily_loss_ack_at is set, it bounds
+    the loss window and is surfaced in the response so the UI can show why the
+    percentage differs from the naive midnight-to-now total."""
+    ack_at = datetime.now(UTC).replace(microsecond=0)
+    session = _make_system_health_session(daily_loss_ack_at=ack_at)
+    client = TestClient(_make_app(session, bankroll_usd=1000.0))
+    resp = client.get("/api/system/health")
+
+    assert resp.status_code == 200
+    cb = resp.json()["circuit_breakers"]
+    # ack_at is surfaced as-is
+    assert cb["daily_loss_ack_at"] is not None
+    assert datetime.fromisoformat(cb["daily_loss_ack_at"]) == ack_at
+    # Window starts at max(today_start, ack_at) — since ack_at is "now", that's ack_at.
+    window_start = datetime.fromisoformat(cb["daily_loss_window_start"])
+    assert window_start == ack_at
 
 
 def test_system_health_circuit_breaker_daily_loss_triggers_halt() -> None:
