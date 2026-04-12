@@ -130,7 +130,7 @@ class DemoHarness(IAlgoStrategy):
     def should_trade(self, _signal: "Signal", _market: "Market") -> bool:
         return True
 
-    def position_size(self, _signal: "Signal", _bankroll: float) -> float:
+    def position_size(self, _signal: "Signal", _bankroll: float, _existing_market_exposure: float = 0.0) -> float:
         return 0.0 if self._has_open_position else 1.0
 
     async def synthesize_signal(

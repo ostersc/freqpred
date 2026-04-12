@@ -100,7 +100,7 @@ def _make_strategy(
         def should_trade(self, signal: Signal, market: Market) -> bool:
             return should_trade_result
 
-        def position_size(self, signal: Signal, bankroll: float) -> float:
+        def position_size(self, signal: Signal, bankroll: float, existing_market_exposure: float = 0.0) -> float:
             return position_size_result
 
     return _Stub()
@@ -139,6 +139,12 @@ def _make_order_manager(
     session_factory = MagicMock()
     # Make session_factory() return an async context manager
     mock_session = AsyncMock()
+    # session.execute() returns a result whose .scalar_one() gives 0.0
+    # (existing market exposure query). This is the default — tests that need
+    # non-zero existing exposure should override mock_session.execute.
+    _exposure_result = MagicMock()
+    _exposure_result.scalar_one.return_value = 0.0
+    mock_session.execute = AsyncMock(return_value=_exposure_result)
     session_ctx = MagicMock()
     session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
     session_ctx.__aexit__ = AsyncMock(return_value=False)
@@ -280,7 +286,7 @@ async def test_submit_respects_custom_max_spread() -> None:
         def should_trade(self, signal: Signal, market: Market) -> bool:
             return True
 
-        def position_size(self, signal: Signal, bankroll: float) -> float:
+        def position_size(self, signal: Signal, bankroll: float, existing_market_exposure: float = 0.0) -> float:
             return 100.0
 
     om, _ = _make_order_manager()
@@ -605,4 +611,173 @@ async def test_live_mode_risk_check_still_runs(monkeypatch: pytest.MonkeyPatch) 
 
     assert result is None
     mock_kalshi.place_order.assert_not_called()
+    mock_ledger.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Incremental sizing — existing market exposure
+# ---------------------------------------------------------------------------
+
+
+def _make_real_strategy() -> IPredictionStrategy:
+    """Return a strategy that uses the real Kelly position_size() (not a stub).
+
+    This exercises the actual incremental sizing logic in IPredictionStrategy.
+    """
+    class _RealSizing(IPredictionStrategy):
+        config = StrategyConfig(
+            name="RealSizingStrategy",
+            min_edge=0.10,
+            min_confidence=0.70,
+            max_exposure_per_market=0.10,
+            kelly_fraction=0.25,
+            categories=["politics"],
+            min_volume_24h=0.0,
+            max_days_to_close=90,
+            min_days_to_close=1,
+        )
+
+        def should_trade(self, signal: Signal, market: Market) -> bool:
+            return True
+
+    return _RealSizing()
+
+
+@pytest.mark.asyncio
+async def test_no_new_position_when_existing_exposure_covers_ideal() -> None:
+    """When existing open exposure >= Kelly ideal, position_size returns 0 → no trade."""
+    om, sf = _make_order_manager()
+    strategy = _make_real_strategy()
+    signal = _make_signal(edge=0.15, estimated_probability=0.65)
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+
+    # Compute what Kelly would want for this signal on a fresh market.
+    ideal_total = strategy.position_size(signal, BANKROLL, existing_market_exposure=0.0)
+    assert ideal_total > 0.0, "sanity: signal should want a non-zero position"
+
+    # Mock the DB to report existing exposure = ideal_total (already fully deployed).
+    mock_session = sf.return_value.__aenter__.return_value
+    exposure_result = MagicMock()
+    exposure_result.scalar_one.return_value = ideal_total
+    mock_session.execute = AsyncMock(return_value=exposure_result)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(signal, market, strategy)
+
+    assert result is None
+    mock_ledger.assert_not_called()
+    # Risk engine should not even be consulted — early exit before that.
+    om._risk.check_position.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_existing_exposure_passed_to_position_size() -> None:
+    """OrderManager queries open exposure and passes it to position_size()."""
+    om, sf = _make_order_manager()
+    signal = _make_signal(edge=0.15, estimated_probability=0.65)
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+
+    # Mock DB: report $25.00 of existing exposure.
+    mock_session = sf.return_value.__aenter__.return_value
+    exposure_result = MagicMock()
+    exposure_result.scalar_one.return_value = 25.0
+    mock_session.execute = AsyncMock(return_value=exposure_result)
+
+    # Use a spy strategy to capture the args passed to position_size.
+    captured_args: list[tuple] = []
+
+    class _SpyStrategy(IPredictionStrategy):
+        config = StrategyConfig(
+            name="SpyStrategy",
+            min_edge=0.10,
+            min_confidence=0.70,
+            max_exposure_per_market=0.10,
+            kelly_fraction=0.25,
+            categories=["politics"],
+            min_volume_24h=0.0,
+            max_days_to_close=90,
+            min_days_to_close=1,
+        )
+
+        def should_trade(self, signal: Signal, market: Market) -> bool:
+            return True
+
+        def position_size(self, signal: Signal, bankroll: float, existing_market_exposure: float = 0.0) -> float:
+            captured_args.append((bankroll, existing_market_exposure))
+            return 50.0  # arbitrary positive value so the flow continues
+
+    strategy = _SpyStrategy()
+    expected_position = _make_position()
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ):
+        await om.submit(signal, market, strategy)
+
+    assert len(captured_args) == 1
+    _, existing_exposure = captured_args[0]
+    assert existing_exposure == pytest.approx(25.0)
+
+
+@pytest.mark.asyncio
+async def test_doubledown_allowed_when_edge_increases() -> None:
+    """Higher-edge signal produces larger ideal → positive incremental → trade opens."""
+    om, sf = _make_order_manager()
+    strategy = _make_real_strategy()
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+
+    # First signal: moderate edge.
+    sig_low = _make_signal(edge=0.15, estimated_probability=0.65)
+    low_ideal = strategy.position_size(sig_low, BANKROLL, existing_market_exposure=0.0)
+    assert low_ideal > 0.0
+
+    # Second signal: higher edge — should justify more total exposure.
+    sig_high = _make_signal(edge=0.30, estimated_probability=0.80)
+    high_ideal = strategy.position_size(sig_high, BANKROLL, existing_market_exposure=0.0)
+    assert high_ideal > low_ideal, "sanity: higher edge → bigger ideal"
+
+    # DB reports existing exposure = low_ideal (one position already open).
+    mock_session = sf.return_value.__aenter__.return_value
+    exposure_result = MagicMock()
+    exposure_result.scalar_one.return_value = low_ideal
+    mock_session.execute = AsyncMock(return_value=exposure_result)
+
+    expected_position = _make_position()
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        result = await om.submit(sig_high, market, strategy)
+
+    assert result is expected_position
+    mock_ledger.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reentry_blocked_when_conviction_drops() -> None:
+    """Lower-conviction signal → smaller ideal → no incremental → no new position."""
+    om, sf = _make_order_manager()
+    strategy = _make_real_strategy()
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+
+    # First signal with high edge.
+    sig_high = _make_signal(edge=0.30, estimated_probability=0.80)
+    high_ideal = strategy.position_size(sig_high, BANKROLL, existing_market_exposure=0.0)
+
+    # Second signal with lower edge.
+    sig_low = _make_signal(edge=0.15, estimated_probability=0.65)
+
+    # DB reports existing exposure = high_ideal.
+    mock_session = sf.return_value.__aenter__.return_value
+    exposure_result = MagicMock()
+    exposure_result.scalar_one.return_value = high_ideal
+    mock_session.execute = AsyncMock(return_value=exposure_result)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(sig_low, market, strategy)
+
+    assert result is None
     mock_ledger.assert_not_called()

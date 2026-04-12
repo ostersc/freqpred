@@ -166,6 +166,57 @@ class TestConservativeDefaultPositionSize:
         result = self.strategy.position_size(sig, bankroll=1000.0)
         assert result == pytest.approx(0.0)
 
+    def test_incremental_sizing_subtracts_existing_exposure(self) -> None:
+        """position_size returns ideal_total - existing, not a fresh bet."""
+        sig = _signal(edge=0.20, estimated_probability=0.60)
+        ideal_total = self.strategy.position_size(sig, bankroll=1000.0, existing_market_exposure=0.0)
+        assert ideal_total > 0.0
+
+        # With half the ideal already deployed, should return roughly half.
+        half_deployed = ideal_total / 2.0
+        incremental = self.strategy.position_size(sig, bankroll=1000.0, existing_market_exposure=half_deployed)
+        assert incremental == pytest.approx(ideal_total - half_deployed, rel=1e-6)
+
+    def test_incremental_sizing_returns_zero_when_fully_deployed(self) -> None:
+        """Same signal repeated → no new exposure when ideal is already open."""
+        sig = _signal(edge=0.20, estimated_probability=0.60)
+        ideal_total = self.strategy.position_size(sig, bankroll=1000.0, existing_market_exposure=0.0)
+
+        result = self.strategy.position_size(sig, bankroll=1000.0, existing_market_exposure=ideal_total)
+        assert result == pytest.approx(0.0)
+
+    def test_incremental_sizing_returns_zero_when_over_deployed(self) -> None:
+        """Existing exposure exceeds what new signal justifies → 0, never negative."""
+        sig = _signal(edge=0.20, estimated_probability=0.60)
+        ideal_total = self.strategy.position_size(sig, bankroll=1000.0, existing_market_exposure=0.0)
+
+        result = self.strategy.position_size(sig, bankroll=1000.0, existing_market_exposure=ideal_total * 2)
+        assert result == 0.0
+
+    def test_incremental_sizing_allows_doubledown_on_higher_edge(self) -> None:
+        """Higher edge signal → larger ideal total → positive incremental over existing."""
+        sig_low = _signal(edge=0.15, estimated_probability=0.60)
+        sig_high = _signal(edge=0.30, estimated_probability=0.70)
+        low_ideal = self.strategy.position_size(sig_low, bankroll=1000.0, existing_market_exposure=0.0)
+        assert low_ideal > 0.0
+
+        # Deploy the low-edge ideal. High-edge signal should want more.
+        incremental = self.strategy.position_size(sig_high, bankroll=1000.0, existing_market_exposure=low_ideal)
+        high_ideal = self.strategy.position_size(sig_high, bankroll=1000.0, existing_market_exposure=0.0)
+        assert incremental == pytest.approx(high_ideal - low_ideal, rel=1e-6)
+        assert incremental > 0.0
+
+    def test_incremental_sizing_blocks_lower_conviction_reentry(self) -> None:
+        """If conviction drops, no new position even with 0 existing closed."""
+        sig_high = _signal(edge=0.30, estimated_probability=0.70)
+        sig_low = _signal(edge=0.15, estimated_probability=0.60)
+        high_ideal = self.strategy.position_size(sig_high, bankroll=1000.0, existing_market_exposure=0.0)
+        assert high_ideal > 0.0
+
+        # Already deployed the high-conviction amount; lower conviction wants less → 0.
+        result = self.strategy.position_size(sig_low, bankroll=1000.0, existing_market_exposure=high_ideal)
+        assert result == 0.0
+
 
 # ---------------------------------------------------------------------------
 # is_market_interesting — default implementation

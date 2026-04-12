@@ -6,7 +6,7 @@ import os
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.kalshi import KalshiAPIError
@@ -94,8 +94,32 @@ class OrderManager:
             # original deposit.
             net_bankroll = await ledger.get_net_bankroll(session, self._bankroll, mode=self._mode)
 
+            # Query existing open exposure for this market so position_size()
+            # computes only the *incremental* amount — doubling down only when
+            # the new signal's edge/conviction justifies more total exposure.
+            existing_exposure_result = await session.execute(
+                select(func.coalesce(
+                    func.sum(PositionRow.contracts * PositionRow.entry_price), 0.0
+                )).where(
+                    PositionRow.status == "open",
+                    PositionRow.market_id == market.id,
+                    PositionRow.mode == self._mode,
+                )
+            )
+            existing_market_exposure: float = float(existing_exposure_result.scalar_one())
+
             # Step 2: raw position size (uses net bankroll so Kelly sizing shrinks with losses)
-            raw_size = strategy.position_size(signal, net_bankroll)
+            raw_size = strategy.position_size(signal, net_bankroll, existing_market_exposure)
+            if raw_size <= 0.0 and existing_market_exposure > 0.0:
+                logger.info(
+                    "order_manager.no_incremental_edge",
+                    market_id=market.id,
+                    signal_id=signal.id,
+                    existing_exposure=existing_market_exposure,
+                    edge=signal.edge,
+                    confidence=signal.confidence,
+                )
+                return None
 
             # Circuit breakers fire before any position check.
             from freqpred.alerts.run_state import (  # noqa: PLC0415

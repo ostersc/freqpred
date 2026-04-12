@@ -34,9 +34,9 @@ class IPredictionStrategy(ABC):
             def should_trade(self, signal, market):
                 return signal.edge >= self.config.min_edge
 
-            def position_size(self, signal, bankroll):
+            def position_size(self, signal, bankroll, existing_market_exposure=0.0):
                 # Uses the default confidence-blended Kelly sizing from IPredictionStrategy.
-                return super().position_size(signal, bankroll)
+                return super().position_size(signal, bankroll, existing_market_exposure)
     """
 
     config: StrategyConfig
@@ -46,8 +46,19 @@ class IPredictionStrategy(ABC):
         """Return True if this signal warrants opening a position."""
         ...
 
-    def position_size(self, signal: Signal, bankroll: float) -> float:
-        """Confidence-blended Kelly sizing, capped at max_exposure_per_market.
+    def position_size(
+        self,
+        signal: Signal,
+        bankroll: float,
+        existing_market_exposure: float = 0.0,
+    ) -> float:
+        """Confidence-blended Kelly sizing, returning only the *incremental*
+        exposure needed beyond what is already open in this market.
+
+        Computes the ideal total exposure for the current signal, then subtracts
+        ``existing_market_exposure``.  A new position is only sized if the new
+        signal justifies *more* total exposure than what's already deployed —
+        i.e., edge or conviction must have increased to trigger a double-down.
 
         Uses the correct Kelly formula for binary prediction market contracts:
             B     = (1 - p_market) / p_market   # net payout odds
@@ -74,7 +85,10 @@ class IPredictionStrategy(ABC):
         # max_exposure_per_market is the per-market budget; Kelly scales within it.
         # Max possible position = kelly_fraction × max_exposure × bankroll.
         market_budget = bankroll * self.config.max_exposure_per_market
-        return f_star * self.config.kelly_fraction * market_budget
+        ideal_total = f_star * self.config.kelly_fraction * market_budget
+        # Only size the incremental amount beyond existing exposure.
+        incremental = ideal_total - existing_market_exposure
+        return max(incremental, 0.0)
 
     def is_market_interesting(self, market: Market) -> bool:
         """Return True if this strategy wants the ingestion pipeline to monitor this market.
