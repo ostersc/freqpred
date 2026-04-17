@@ -217,3 +217,122 @@ async def test_results_sorted_best_first():
 
     scores = [s for _, s in pairs]
     assert scores == sorted(scores, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# retrieve — catalyst query supplemental retrieval
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retrieve_catalyst_calls_embedder_per_query():
+    """embed_text is called once for the market question + once per catalyst query."""
+    rows = [_make_row() for _ in range(4)]
+    session = _make_session(rows)
+    embedder = _make_embedder()
+
+    await retrieve(
+        session, embedder, "question", market_id=MARKET_ID,
+        top_k=4, catalyst_queries=["query A", "query B"],
+    )
+
+    # 1 for market question + 2 for catalyst queries
+    assert embedder.embed_text.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retrieve_catalyst_adds_supplemental_doc():
+    """A doc not in the core set is added when a catalyst query matches it best."""
+    # 4 candidate rows. top_k=2 → core_min=1, supplemental_max=1.
+    # Rows 0–2: same embedding so cosine_distance=0 for market question (best).
+    # Row 3: distinct embedding; catalyst query vector matches row 3 specifically.
+    rows = [_make_row() for _ in range(4)]
+    # Give row 3 a distinct embedding so we can target it with a catalyst vector.
+    row3_embedding = [0.9] + [0.0] * 383
+    rows[3].embedding = row3_embedding
+
+    session = _make_session(rows, distances=[0.0, 0.5, 0.8, 0.99], bm25_scores=[0.5] * 4)
+
+    # Market question embedding (generic); catalyst query embedding matches row 3.
+    call_count = 0
+    catalyst_vec = [0.9] + [0.0] * 383  # high dot product with row3_embedding
+
+    async def multi_embed(text: str) -> list[float]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return FAKE_EMBEDDING  # market question
+        return catalyst_vec  # catalyst query
+
+    embedder = AsyncMock()
+    embedder.embed_text = AsyncMock(side_effect=multi_embed)
+
+    pairs = await retrieve(
+        session, embedder, "question", market_id=MARKET_ID,
+        top_k=2, catalyst_queries=["catalyst query"],
+    )
+
+    returned_ids = {doc.id for doc, _ in pairs}
+    # Row 3 (the catalyst-matched doc) should be in the result.
+    assert str(rows[3].id) in returned_ids
+    # Total must not exceed top_k.
+    assert len(pairs) <= 2
+
+
+@pytest.mark.asyncio
+async def test_retrieve_catalyst_no_duplicate_docs():
+    """When two catalyst queries both best-match the same doc, it appears only once."""
+    rows = [_make_row() for _ in range(4)]
+    # Rows 0–1 are core (low distance). Row 2 is the catalyst target.
+    session = _make_session(rows, distances=[0.0, 0.1, 0.9, 0.95], bm25_scores=[0.5] * 4)
+
+    call_count = 0
+
+    async def multi_embed(text: str) -> list[float]:
+        nonlocal call_count
+        call_count += 1
+        return FAKE_EMBEDDING  # same vector for everything — catalyst picks row 2 both times
+
+    embedder = AsyncMock()
+    embedder.embed_text = AsyncMock(side_effect=multi_embed)
+
+    pairs = await retrieve(
+        session, embedder, "question", market_id=MARKET_ID,
+        top_k=4, catalyst_queries=["query A", "query B"],
+    )
+
+    # Each doc appears at most once.
+    returned_ids = [doc.id for doc, _ in pairs]
+    assert len(returned_ids) == len(set(returned_ids))
+
+
+@pytest.mark.asyncio
+async def test_retrieve_catalyst_respects_top_k():
+    """Total returned docs never exceed top_k even with many catalyst queries."""
+    rows = [_make_row() for _ in range(6)]
+    session = _make_session(rows)
+    embedder = _make_embedder()
+
+    pairs = await retrieve(
+        session, embedder, "question", market_id=MARKET_ID,
+        top_k=4, catalyst_queries=["q1", "q2", "q3", "q4", "q5"],
+    )
+
+    assert len(pairs) <= 4
+
+
+@pytest.mark.asyncio
+async def test_retrieve_catalyst_backfills_unused_slots():
+    """If no catalyst docs are found (empty remaining pool), core fills all top_k slots."""
+    # Only 2 rows — core_min will consume both when top_k=4.
+    rows = [_make_row() for _ in range(2)]
+    session = _make_session(rows)
+    embedder = _make_embedder()
+
+    pairs = await retrieve(
+        session, embedder, "question", market_id=MARKET_ID,
+        top_k=4, catalyst_queries=["catalyst query"],
+    )
+
+    # All available candidates returned; no duplicates.
+    assert len(pairs) == 2

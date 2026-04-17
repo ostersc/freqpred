@@ -27,9 +27,8 @@ Exit logic (last complete candle) — two PM-native signals:
      movement beyond your thesis is where you should start worrying:
        ``safe_low  = min(entry, p_est) - min_edge``
        ``safe_high = max(entry, p_est) + min_edge``
-     At extreme prices (0.25, 0.75) the available range in one direction is
-     small, so a modest absolute move consumes a large fraction of it —
-     exactly when you should care about choppiness.
+     Prices are bounded to [0, 1] so candle range is already in dollar terms —
+     no normalization needed.
 
   3. **Trailing stop** (confirmation): handled by the framework
      (``config.trailing_stop``), not implemented here.
@@ -72,8 +71,9 @@ _PRICE_CEILING = 0.85
 # Rolling window (in candles) for choppiness measurement and range-top detection.
 _LOOKBACK = 10
 
-# Average (high - low) / close over the lookback window above this = choppy.
-# 0.05 ≈ 2.5¢ range per candle on a 50¢ contract, or 4¢ on an 80¢ contract.
+# Average absolute (high - low) in dollar terms over the lookback window above this = choppy.
+# Prediction market prices are bounded to [0, 1] so the candle range is already in dollar
+# terms — no need to normalize by close.  0.05 = 5¢ average range per 1-min candle.
 _CHOPPINESS_THRESHOLD = 0.05
 
 # Require at least this many complete candles for indicators to settle.
@@ -100,45 +100,49 @@ class AlgoExampleStrategy(IAlgoStrategy):
     )
 
     def populate_indicators(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
-        """Choppiness (normalized candle range) and rolling high for range-top timing."""
-        df["range_pct"] = (df["high"] - df["low"]) / df["close"].clip(lower=0.01)
-        df["choppiness"] = df["range_pct"].rolling(_LOOKBACK, min_periods=1).mean()
-        df["rolling_high"] = df["close"].rolling(_LOOKBACK, min_periods=1).max()
+        """Per-candle oscillation: wide range but small body (price moved but reversed).
+
+        range_ = high - low (total swing)
+        body   = |close - open| (net directional move)
+        A candle is choppy when range_ exceeds the threshold AND at least half the
+        range was reversed (body < range_ / 2).  Trending candles do not meet this.
+        """
+        df["range_"] = df["high"] - df["low"]
+        df["body"] = (df["close"] - df["open"]).abs()
         return df
 
     def populate_exit_trend(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
-        """Exit on asymmetric ceiling or thesis-displacement + choppiness.
+        """Exit on asymmetric ceiling or thesis-displacement + choppiness for 3 consecutive candles.
 
         Signal 1 — Asymmetric ceiling:
           Price above _PRICE_CEILING → limited upside, full binary downside.
+          Fires immediately (no persistence required).
 
         Signal 2 — Safe-zone displacement + choppiness:
           Safe zone = [min(entry, p_est) - min_edge, max(entry, p_est) + min_edge].
-          Outside this zone, the market has moved beyond our thesis range.
-          If it's also choppy (high candle range) AND price is near the top
-          of the recent range, exit:
-            - Below safe zone: minimize loss at best available price.
-            - Above safe zone: lock in unexplained profit before reversal.
+          Each candle must independently exceed the choppiness threshold.
+          The 3-candle persistence window (not a rolling average) provides smoothing.
         """
         entry = metadata["entry_price"]
         p_est = metadata["p_est"]
 
-        # Signal 1: structural ceiling
+        # Signal 1: structural ceiling — immediate exit, no persistence needed
         near_ceiling = df["close"] > _PRICE_CEILING
 
-        # Signal 2: thesis-aware displacement
+        # Signal 2: thesis-aware displacement for 3 consecutive candles
         safe_low = min(entry, p_est) - self.config.min_edge
         safe_high = max(entry, p_est) + self.config.min_edge
         outside_safe = (df["close"] < safe_low) | (df["close"] > safe_high)
 
-        choppy = df["choppiness"] > _CHOPPINESS_THRESHOLD
-        near_range_top = df["close"] >= df["rolling_high"] * 0.98
+        # Choppiness: wide range but small body (oscillation, not trend).
+        # Sustained for 3 consecutive candles (3 min) before firing.
+        per_candle_choppy = (df["range_"] > _CHOPPINESS_THRESHOLD) & (df["body"] < df["range_"] * 0.5)
+        sustained_choppy = per_candle_choppy.rolling(3, min_periods=3).min() == 1
 
-        displacement_exit = outside_safe & choppy & near_range_top
+        displacement_exit = outside_safe & sustained_choppy
 
         df["exit_long"] = (near_ceiling | displacement_exit).fillna(False)
 
-        # Debug: log last candle's key values for exit decision.
         last = df.iloc[-1]
         logger.debug(
             "algo_exit_eval",
@@ -150,11 +154,13 @@ class AlgoExampleStrategy(IAlgoStrategy):
             safe_high=round(safe_high, 4),
             choppiness=round(last["choppiness"], 4),
             chop_thresh=_CHOPPINESS_THRESHOLD,
-            rolling_high=round(last["rolling_high"], 4),
             near_ceiling=bool(near_ceiling.iloc[-1]),
             outside_safe=bool(outside_safe.iloc[-1]),
-            choppy=bool(choppy.iloc[-1]),
-            near_top=bool(near_range_top.iloc[-1]),
+            range_=round(last["range_"], 4),
+            body=round(last["body"], 4),
+            chop_thresh=_CHOPPINESS_THRESHOLD,
+            per_candle_choppy=bool(per_candle_choppy.iloc[-1]),
+            sustained_choppy=bool(sustained_choppy.iloc[-1]),
             exit=bool(df["exit_long"].iloc[-1]),
         )
         return df

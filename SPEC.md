@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-04-11
+**Last updated:** 2026-04-13
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -409,6 +409,22 @@ class Document:
 
 **Full-text search index:** A GIN index on `to_tsvector('english', title || ' ' || body)` supports BM25 keyword scoring via `ts_rank`. Used in hybrid retrieval alongside cosine similarity.
 
+**Retrieval approach — slot-budgeted hybrid:**
+
+The retriever (`freqpred/rag/retriever.py`) combines two complementary selection strategies to maximise both relevance and thesis coverage.
+
+**When no active catalyst queries exist** (e.g. first analysis before catalyst generation has run): embed the market question, score all linked candidates with `0.7 × norm(cosine_sim) + 0.3 × norm(BM25)`, return the top `top_k` by blended score. No slot budget applies.
+
+**When catalyst queries exist:** start from the full market-question ranked list and apply a slot budget:
+
+1. **Market-question core (≥ `top_k // 2` slots guaranteed):** Take the top `top_k // 2` by blended score. These slots cannot be displaced by catalyst docs.
+
+2. **Catalyst-query supplemental (up to `top_k // 2` slots):** For each active `CatalystQuery` text, embed it in parallel via `asyncio.gather` and find the highest-cosine-similarity candidate not already in the core set. De-duplicate across queries (a doc that matches multiple catalyst queries is kept once at the highest similarity). Rank-select the top `top_k // 2` supplemental candidates by cosine similarity.
+
+3. **Back-fill:** Any unused supplemental slots (fewer catalyst docs than slots) are filled from the next-best market-question-ranked docs, so the total always reaches `top_k` when enough candidates exist.
+
+This design prevents a single marginal document swap from collapsing an otherwise good signal: the core set anchors the LLM to the market question, while catalyst supplements guarantee that evidence surfaced by hypothesis-driven queries is always represented without crowding out core context.
+
 ### CatalystRun + CatalystQuery
 
 Each time the Catalyst Generator runs for a market it creates one `CatalystRun` (the generation event) and N `CatalystQuery` rows (the actual search strings). The ingestion scheduler always reads from the latest active run per market.
@@ -764,8 +780,10 @@ Runs when a signal refresh trigger fires (scheduled, price moved, new evidence, 
 ```mermaid
 flowchart TD
     T([Signal trigger fires for a market])
-    T --> HS[Hybrid Search - RAG retrieval]
-    HS --> RH{Retrieval Hash Check}
+    T --> CQ[Load active catalyst queries for market]
+    CQ --> HS[Hybrid Search - market question core set]
+    HS --> CS[Catalyst supplemental - top-1 per query not in core]
+    CS --> RH{Retrieval Hash Check}
     RH -->|no new evidence| SKIP([Skip - no LLM call])
     RH -->|hash changed| LLM[LLM Analysis - Claude Sonnet]
     LLM --> SC[Signal Creation]
@@ -1130,6 +1148,7 @@ telegram:
 
 **RAG improvements:**
 - [x] `document_market_links.relevance_score` — swapped to actual cosine similarity scores from pgvector (T16).
+- [x] Per-catalyst-query supplemental retrieval — signal pipeline embeds each active `CatalystQuery` text in parallel and adds top-1 per query not in the market-question core set; slot-budgeted so core always holds ≥ half of `top_k` slots, supplemental slots rank-selected by cosine similarity.
 
 - [x] Order Manager (paper mode) (T19)
 - [x] Ledger (positions, resolutions, P&L) (T18)

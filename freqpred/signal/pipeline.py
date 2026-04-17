@@ -8,6 +8,7 @@ import structlog
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.llm.client import LLMClient, LLMError
 from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.models import Document, DocumentMarketLinkRow
@@ -77,6 +78,18 @@ class SignalPipeline:
             fails, or the response is malformed.
         """
         async with self._session_factory() as session:
+            # Load active catalyst queries for this market so the retriever can
+            # supplement the market-question core set with catalyst-driven docs.
+            cat_result = await session.execute(
+                select(CatalystQueryRow)
+                .join(CatalystRunRow, CatalystQueryRow.run_id == CatalystRunRow.id)
+                .where(
+                    CatalystRunRow.market_id == market.id,
+                    CatalystRunRow.is_active.is_(True),
+                )
+            )
+            catalyst_query_texts = [row.query_text for row in cat_result.scalars().all()]
+
             # Step 1: retrieve relevant documents with cosine similarity scores
             doc_pairs = await retrieve(
                 session,
@@ -84,6 +97,7 @@ class SignalPipeline:
                 market.question,
                 market.id,
                 top_k=self._top_k,
+                catalyst_queries=catalyst_query_texts or None,
             )
 
             # Step 2: skip if no documents were retrieved (unless forced)

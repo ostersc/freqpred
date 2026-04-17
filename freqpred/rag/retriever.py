@@ -16,6 +16,7 @@ neither dominates purely due to scale differences.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
@@ -31,6 +32,11 @@ log = structlog.get_logger()
 _VECTOR_WEIGHT = 0.7  # weight for cosine similarity; (1 - this) goes to BM25
 
 
+def _dot(a: list[float], b: list[float]) -> float:
+    """Dot product ≈ cosine similarity for unit-norm embeddings."""
+    return sum(x * y for x, y in zip(a, b))
+
+
 class Embedder(Protocol):
     async def embed_text(self, text: str) -> list[float]: ...
 
@@ -44,6 +50,7 @@ async def retrieve(
     max_age_days: int = 30,
     vector_weight: float = _VECTOR_WEIGHT,
     now: datetime | None = None,
+    catalyst_queries: list[str] | None = None,
 ) -> list[tuple[Document, float]]:
     """Return the top-K most relevant documents for *market_id* using hybrid scoring.
 
@@ -52,6 +59,13 @@ async def retrieve(
 
     *now* is the reference time used to compute the max_age_days cutoff. Defaults
     to the real wall-clock in UTC; tests can pin it for deterministic cutoffs.
+
+    When *catalyst_queries* is provided, at least ``top_k // 2`` slots are
+    guaranteed to market-question-ranked docs. The remaining slots are filled by
+    taking the top-1 doc per catalyst query (not already in the core set), ranked
+    by cosine similarity, up to ``top_k - top_k // 2`` docs. Any unused
+    catalyst slots are back-filled with the next-best market-question docs so the
+    returned list always reaches ``top_k`` when enough candidates exist.
 
     Returns a list of (Document, blended_score) tuples sorted best-first.
     blended_score is in [0.0, 1.0] after normalisation.
@@ -120,7 +134,55 @@ async def retrieve(
         for (row, _, _), nc, nb in zip(candidates, norm_cosine, norm_bm25)
     ]
     scored.sort(key=lambda x: x[1], reverse=True)
-    top = scored[:top_k]
+
+    # Slot budget: at least half reserved for market-question-ranked docs.
+    core_min = top_k // 2
+    supplemental_max = top_k - core_min
+
+    if catalyst_queries and rows:
+        # Guaranteed core: top core_min by market-question blended score.
+        core = scored[:core_min]
+        core_ids: set[str] = {str(row.id) for row, _ in core}
+        remaining = [row for row, _, _ in candidates if str(row.id) not in core_ids]
+
+        # Embed all catalyst query texts in parallel.
+        cat_vecs = await asyncio.gather(
+            *[embedder.embed_text(q) for q in catalyst_queries]
+        )
+
+        # Top-1 per catalyst query, deduped (keep highest sim when multiple queries match same doc).
+        supplemental: dict[str, tuple[DocumentRow, float]] = {}
+        for cat_vec in cat_vecs:
+            best_row: DocumentRow | None = None
+            best_sim = -1.0
+            for row in remaining:
+                sim = _dot(list(row.embedding), cat_vec)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_row = row
+            if best_row is not None:
+                rid = str(best_row.id)
+                if rid not in supplemental or best_sim > supplemental[rid][1]:
+                    supplemental[rid] = (best_row, best_sim)
+
+        # Rank-select: take at most supplemental_max catalyst docs by cosine sim.
+        extra: list[tuple[DocumentRow, float]] = sorted(
+            supplemental.values(), key=lambda x: x[1], reverse=True
+        )[:supplemental_max]
+
+        # Back-fill unused catalyst slots with next-best market-question docs.
+        leftover_slots = supplemental_max - len(extra)
+        if leftover_slots > 0:
+            extra_ids = {str(r.id) for r, _ in extra}
+            extra_core = [
+                (row, sc) for row, sc in scored[core_min:]
+                if str(row.id) not in extra_ids
+            ][:leftover_slots]
+            extra = extra + extra_core
+
+        top = core + extra
+    else:
+        top = scored[:top_k]
 
     log.debug(
         "rag.retrieve",
@@ -128,6 +190,7 @@ async def retrieve(
         candidates=len(rows),
         returned=len(top),
         max_age_days=max_age_days,
+        catalyst_count=len(catalyst_queries) if catalyst_queries else 0,
     )
     return [(_row_to_document(row), score) for row, score in top]
 

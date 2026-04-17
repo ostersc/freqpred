@@ -254,6 +254,15 @@ class PositionMonitor:
         peak_price = self._peak_prices.get(position.id, position.entry_price)
         now = datetime.now(tz=timezone.utc)
 
+        # 0. If the market result is already known, settle at the correct payout immediately.
+        # Stoploss and trailing stop use live market prices which become invalid once a market
+        # stops trading (the order book empties, causing yes_ask to default to 1.0 in the
+        # Kalshi orderbook fetch, which makes no_bid appear as 0.0 — a phantom stoploss).
+        # Checking result first prevents spurious stoploss exits on resolved markets.
+        if market.result is not None:
+            wins = position.direction.upper() == market.result.upper()
+            return ("market_resolved", 1.0 if wins else 0.0)
+
         # 1. Hard stoploss (framework-enforced)
         result = _check_stoploss(position, effective_price, config.stoploss)
         if result:
@@ -289,15 +298,9 @@ class PositionMonitor:
                 return ("signal", effective_price)
 
         # 6. Market resolution — Kalshi status is "finalized"/"resolved"/"settled" OR close_time has passed
+        # Note: market.result is not None is already handled at step 0 above.
+        # This branch catches markets that have expired but whose result is not yet published.
         if market.status in ("finalized", "resolved", "settled") or market.close_time <= now:
-            # If Kalshi has published a result, settle at the correct payout.
-            # The contract settles at $1 for the winning side and $0 for the losing side —
-            # not at the current mid_price (which would misstate P&L for paper positions).
-            # If result is not yet published (market expired but still determining),
-            # fall back to effective_price as the best available estimate.
-            if market.result is not None:
-                wins = position.direction.upper() == market.result.upper()
-                return ("market_resolved", 1.0 if wins else 0.0)
             return ("market_resolved", effective_price)
 
         return _NO_EXIT

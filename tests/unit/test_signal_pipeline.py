@@ -485,13 +485,17 @@ class TestSignalPipelineAnalyze:
         session.commit = AsyncMock()
         session.add = MagicMock()
 
+        # Catalyst query load (first execute call in analyze()).
+        catalyst_result = MagicMock()
+        catalyst_result.scalars.return_value.all.return_value = []
+
         hash_result = MagicMock()
         hash_result.scalar_one_or_none.return_value = current_signal_hash
         hash_result.one_or_none.return_value = None  # no prior scheduled signal → no cooldown
         fallback = MagicMock()
         fallback.scalar_one_or_none.return_value = None
         fallback.one_or_none.return_value = None  # no prior scheduled signal → no cooldown
-        session.execute = AsyncMock(side_effect=[hash_result, fallback, fallback, fallback])
+        session.execute = AsyncMock(side_effect=[catalyst_result, hash_result, fallback, fallback, fallback])
 
         session_factory = _make_session_factory(session)
 

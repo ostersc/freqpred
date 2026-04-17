@@ -474,6 +474,34 @@ class TestEvaluateExit:
         # exit_price is the no_bid (what you'd actually receive)
         assert result[1] == pytest.approx(no_bid)
 
+    def test_no_phantom_stoploss_on_resolved_market_no_position(self) -> None:
+        """Regression: NO position on a resolved-NO market must NOT trigger stoploss.
+
+        When a market stops trading, the Kalshi orderbook returns no_bid=0.0 (yes_ask=1.0
+        by default when the book is empty). Without this guard, the stoploss fires first
+        (0.0 - entry < stoploss) and closes the winning NO position at exit_price=0.0
+        instead of letting market_resolved settle it at 1.0.
+        """
+        strategy = _make_strategy(stoploss=-0.30)
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.78, direction="NO")
+        # Market has resolved NO — order book is empty so yes_ask defaults to 1.0 → no_bid=0.0
+        market = _make_market(mid_price=0.01)
+        market.result = "no"
+        market.status = "finalized"
+        current_price = 0.0  # 1.0 - yes_ask(1.0) — phantom stale price after book clears
+
+        result = monitor.evaluate_exit(
+            position=pos, market=market, current_price=current_price, strategy=strategy
+        )
+        assert result is not None
+        assert result[0] == "market_resolved", (
+            "Resolved market should settle via market_resolved, not stoploss"
+        )
+        assert result[1] == pytest.approx(1.0), (
+            "NO position winning (market resolved NO) should exit at 1.0, not 0.0"
+        )
+
     def test_no_exit_when_conditions_not_met(self) -> None:
         strategy = _make_strategy(stoploss=-0.20)
         monitor = self._monitor(strategy)
