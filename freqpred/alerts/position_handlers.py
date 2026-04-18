@@ -33,8 +33,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import delete as sa_delete, select
 
-from freqpred.markets.models import MarketRow, PositionRow
-from freqpred.trading import ledger
+from freqpred.markets.models import PositionRow
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -43,6 +42,7 @@ if TYPE_CHECKING:
 
     from freqpred.alerts.telegram_commands import TelegramCommandHandler
     from freqpred.config import Settings
+    from freqpred.trading.order_manager import OrderManager
 
 log = structlog.get_logger(__name__)
 
@@ -67,6 +67,7 @@ def register_position_commands(
     session_factory: "async_sessionmaker[AsyncSession]",
     config: "Settings",
     mode: str,
+    order_manager: "OrderManager | None" = None,
 ) -> None:
     """Register all T30 position management commands onto *cmd_handler*."""
 
@@ -74,117 +75,57 @@ def register_position_commands(
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _close_position_paper(position_id: str) -> str:
-        """Close a single position in paper mode at current market mid price."""
+    async def _force_exit_one(position_id: str) -> str:
+        """Close a single position via OrderManager.force_exit()."""
+        if order_manager is None:
+            return "Force exit not available (signal-only mode)."
         try:
-            pos_uuid = _uuid.UUID(position_id)
-        except ValueError:
-            return f"Invalid position ID: {position_id!r}"
-
-        async with session_factory() as session:
-            result = await session.execute(
-                select(PositionRow, MarketRow.mid_price)
-                .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                .where(PositionRow.id == pos_uuid, PositionRow.mode == mode)
-            )
-            row = result.one_or_none()
-
-            if row is None:
-                return f"Position {position_id} not found (or belongs to a different mode)."
-
-            pos, mid_price = row
-            if pos.status != "open":
-                return f"Position {position_id} is already {pos.status}."
-
-            exit_price = 1.0 - mid_price if pos.direction == "NO" else mid_price
-            closed = await ledger.close_position(
-                session,
-                position_id,
-                exit_price=exit_price,
-                exit_reason="manual_telegram",
-            )
-
+            closed = await order_manager.force_exit(position_id, exit_reason="force_exit:manual")
+        except ValueError as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"Force exit failed: {exc}"
         pnl_str = f"{closed.pnl:+.4f}" if closed.pnl is not None else "N/A"
         log.info("telegram.forceexit", position_id=position_id, pnl=closed.pnl)
         return (
             f"Position {position_id} closed.\n"
-            f"  exit_price={exit_price:.4f}  pnl={pnl_str}  reason=manual_telegram"
-        )
-
-    async def _close_position_live(position_id: str) -> str:
-        """Close a single position in live mode.
-
-        Closes the ledger record and logs that a corresponding Kalshi order
-        would need to be submitted (full live order submission is handled by
-        the Order Manager which currently only opens positions).
-        """
-        try:
-            pos_uuid = _uuid.UUID(position_id)
-        except ValueError:
-            return f"Invalid position ID: {position_id!r}"
-
-        async with session_factory() as session:
-            result = await session.execute(
-                select(PositionRow, MarketRow.mid_price)
-                .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                .where(PositionRow.id == pos_uuid, PositionRow.mode == mode)
-            )
-            row = result.one_or_none()
-
-            if row is None:
-                return f"Position {position_id} not found (or belongs to a different mode)."
-
-            pos, mid_price = row
-            if pos.status != "open":
-                return f"Position {position_id} is already {pos.status}."
-
-            exit_price = 1.0 - mid_price if pos.direction == "NO" else mid_price
-            closed = await ledger.close_position(
-                session,
-                position_id,
-                exit_price=exit_price,
-                exit_reason="manual_telegram",
-            )
-
-        pnl_str = f"{closed.pnl:+.4f}" if closed.pnl is not None else "N/A"
-        log.info("telegram.forceexit_live", position_id=position_id, pnl=closed.pnl)
-        return (
-            f"Position {position_id} force-closed (LIVE).\n"
-            f"  exit_price={exit_price:.4f}  pnl={pnl_str}  reason=manual_telegram\n"
-            "Note: submit a corresponding close order on Kalshi manually if not already done."
+            f"  exit_price={closed.exit_price:.4f}  pnl={pnl_str}  reason={closed.exit_reason}"
         )
 
     async def _close_all_positions() -> str:
-        """Close all open positions (matching current mode) at current market mid price."""
+        """Close all open positions (matching current mode) via OrderManager.force_exit()."""
+        if order_manager is None:
+            return "Force exit not available (signal-only mode)."
+
         async with session_factory() as session:
             result = await session.execute(
-                select(PositionRow, MarketRow.mid_price)
-                .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                .where(
+                select(PositionRow.id).where(
                     PositionRow.status == "open",
                     PositionRow.mode == mode,
                 )
             )
-            rows = result.all()
+            pos_ids = [str(r) for r in result.scalars().all()]
 
-            if not rows:
-                return "No open positions to close."
+        if not pos_ids:
+            return "No open positions to close."
 
-            closed_summaries: list[str] = []
-            for pos, mid_price in rows:
-                exit_price = 1.0 - mid_price if pos.direction == "NO" else mid_price
-                closed = await ledger.close_position(
-                    session,
-                    str(pos.id),
-                    exit_price=exit_price,
-                    exit_reason="manual_telegram",
-                )
+        closed_summaries: list[str] = []
+        errors: list[str] = []
+        for pos_id in pos_ids:
+            try:
+                closed = await order_manager.force_exit(pos_id, exit_reason="force_exit:manual")
                 pnl_str = f"{closed.pnl:+.4f}" if closed.pnl is not None else "N/A"
-                closed_summaries.append(f"  {pos.id}  pnl={pnl_str}")
+                closed_summaries.append(f"  {pos_id}  pnl={pnl_str}")
+            except Exception as exc:
+                errors.append(f"  {pos_id}: {exc}")
 
-            log.info("telegram.forceexit_all", count=len(closed_summaries))
-            header = f"Closed {len(closed_summaries)} position(s):"
-            return _clip(header + "\n" + "\n".join(closed_summaries))
+        log.info("telegram.forceexit_all", count=len(closed_summaries))
+        parts: list[str] = []
+        if closed_summaries:
+            parts.append(f"Closed {len(closed_summaries)} position(s):\n" + "\n".join(closed_summaries))
+        if errors:
+            parts.append(f"{len(errors)} error(s):\n" + "\n".join(errors))
+        return _clip("\n".join(parts))
 
     async def _delete_position(position_id: str) -> str:
         """Hard-delete a paper position from the DB."""
@@ -317,13 +258,13 @@ def register_position_commands(
 
         # Single position.
         if mode == "paper":
-            return await _close_position_paper(position_id)
+            return await _force_exit_one(position_id)
 
         # Live mode — require confirmation.
         await _require_confirmation(
             chat_id,
             f"Force-close position {target} in LIVE mode?",
-            lambda: _close_position_live(position_id),
+            lambda: _force_exit_one(position_id),
         )
         return None
 

@@ -14,6 +14,7 @@ from .routes import router
 
 if TYPE_CHECKING:
     from freqpred.config import RiskConfig
+    from freqpred.trading.order_manager import OrderManager
 
 
 def create_app(
@@ -22,6 +23,7 @@ def create_app(
     risk_config: "RiskConfig | None" = None,
     bankroll_usd: float = 0.0,
     signal_pipeline: object | None = None,
+    order_manager: "OrderManager | None" = None,
 ) -> FastAPI:
     """Create and configure the dashboard FastAPI application.
 
@@ -33,6 +35,8 @@ def create_app(
         bankroll_usd:     Trading bankroll; used by /api/system/health to compute loss %.
         signal_pipeline:  Optional ``SignalPipeline`` instance; when provided, the
                           ``POST /api/markets/{id}/analyze`` endpoint is enabled.
+        order_manager:    Optional ``OrderManager`` instance; when provided, the
+                          ``POST /api/positions/{id}/force-exit`` endpoint is enabled.
 
     Trading mode and active strategy are both discovered at request time from the
     ``run_state`` DB table written by ``freqpred run`` — no mode or strategy
@@ -49,6 +53,7 @@ def create_app(
     app.state.bankroll_usd = bankroll_usd
     app.state.started_at = datetime.now(UTC)
     app.state.signal_pipeline = signal_pipeline
+    app.state.order_manager = order_manager
 
     app.include_router(router, prefix="/api")
 

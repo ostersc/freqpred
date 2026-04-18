@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.kalshi import KalshiAPIError
-from freqpred.markets.models import Market, Order, Position, PositionRow
+from freqpred.markets.models import Market, MarketRow, Order, Position, PositionRow
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.trading import ledger
@@ -20,6 +20,14 @@ if TYPE_CHECKING:
     from freqpred.markets.kalshi import KalshiClient
 
 logger = structlog.get_logger(__name__)
+
+
+class PositionNotFoundError(ValueError):
+    """Raised by force_exit when the position does not exist in the current mode."""
+
+
+class PositionNotOpenError(ValueError):
+    """Raised by force_exit when the position is not open (already closed/cancelled)."""
 
 
 class OrderManager:
@@ -339,3 +347,124 @@ class OrderManager:
                 )
 
         await session.commit()
+
+    async def force_exit(self, position_id: str, *, exit_reason: str = "force_exit:manual") -> Position:
+        """Close an open position manually.
+
+        Scopes the lookup to self._mode so paper positions are not accessible
+        from a live-mode manager and vice versa.
+
+        Paper mode: closes the ledger at current market mid.
+        Live mode with kalshi_client:
+          - Requires LIVE_TRADING_ENABLED=true; raises ValueError otherwise
+            (operator/config guard, not a server crash).
+          - Raises ValueError if kalshi_client is None (wiring regression guard).
+          - If the market is already resolved (result known), closes at settlement
+            payout without submitting an exchange order.
+          - Otherwise submits an IOC sell at the executable side bid. Uses the
+            reconciled/net Kalshi position size (get_positions()) rather than
+            PositionRow.contracts to avoid partial-fill drift. If no matching
+            live position exists on the exchange, raises ValueError and leaves
+            the DB row open (reconciliation required).
+          - If limit_price <= 0 (market closed to trading), raises ValueError —
+            settlement reconciliation will handle the payout.
+          - Propagates KalshiAPIError; position is left open on exchange failure.
+        Raises PositionNotFoundError if position is not found for this mode.
+        Raises PositionNotOpenError if position status != 'open'.
+        Raises ValueError for other precondition failures.
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        if self._mode == "live" and os.environ.get("LIVE_TRADING_ENABLED") != "true":
+            raise ValueError("LIVE_TRADING_ENABLED must be 'true' for live force exits")
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(PositionRow, MarketRow)
+                .join(MarketRow, PositionRow.market_id == MarketRow.id)
+                .where(
+                    PositionRow.id == _uuid.UUID(position_id),
+                    PositionRow.mode == self._mode,
+                )
+            )
+            row = result.one_or_none()
+            if row is None:
+                raise PositionNotFoundError(
+                    f"Position {position_id!r} not found for mode={self._mode!r}"
+                )
+
+            pos_row, mkt_row = row
+            if pos_row.status != "open":
+                raise PositionNotOpenError(
+                    f"Position {position_id!r} is not open (status={pos_row.status!r})"
+                )
+
+            mid = mkt_row.mid_price if mkt_row.mid_price is not None else 0.5
+            exit_price = 1.0 - mid if pos_row.direction == "NO" else mid
+
+            if self._mode == "live":
+                if self._kalshi_client is None:
+                    raise ValueError(
+                        f"Live force exit for {position_id!r} requires a KalshiClient; "
+                        "none was wired into this OrderManager"
+                    )
+
+                # Reconcile against the exchange before any live close path so resolved
+                # manual exits use the actual net size held on Kalshi.
+                kalshi_positions = await self._kalshi_client.get_positions()
+                exchange_pos = next(
+                    (
+                        p for p in kalshi_positions
+                        if p.market_id == pos_row.market_id and p.direction == pos_row.direction
+                    ),
+                    None,
+                )
+                if exchange_pos is None or exchange_pos.contracts <= 0:
+                    raise ValueError(
+                        f"No live exchange position found for {position_id!r}; "
+                        "reconciliation required before force exit"
+                    )
+                if exchange_pos.contracts != pos_row.contracts:
+                    pos_row.contracts = exchange_pos.contracts
+
+                # If settlement result is already known, close at payout price
+                if mkt_row.result is not None:
+                    result_str = (mkt_row.result or "").lower()
+                    settlement_price = 1.0 if (
+                        (result_str == "yes" and pos_row.direction == "YES") or
+                        (result_str == "no" and pos_row.direction == "NO")
+                    ) else 0.0
+                    return await ledger.close_position(
+                        session,
+                        position_id,
+                        exit_price=settlement_price,
+                        exit_reason=exit_reason,
+                    )
+
+                bid = mkt_row.yes_bid or 0.0
+                ask = mkt_row.yes_ask or 1.0
+                limit_price = round(bid if pos_row.direction == "YES" else 1.0 - ask, 4)
+                if limit_price <= 0:
+                    raise ValueError(
+                        f"No executable exit price for {position_id!r} "
+                        "(market closed to trading; awaiting settlement reconciliation)"
+                    )
+
+                exit_order = Order(
+                    market_id=pos_row.market_id,
+                    direction=pos_row.direction,
+                    contracts=pos_row.contracts,
+                    price=limit_price,
+                    mode="live",
+                    time_in_force="fill_or_kill",
+                    action="sell",
+                )
+                filled = await self._kalshi_client.place_order(exit_order)
+                exit_price = filled.price
+
+            return await ledger.close_position(
+                session,
+                position_id,
+                exit_price=exit_price,
+                exit_reason=exit_reason,
+            )

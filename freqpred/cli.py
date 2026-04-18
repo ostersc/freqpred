@@ -258,13 +258,6 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         mode=mode,
         llm_client=llm_client,
     )
-    register_position_commands(
-        cmd_handler=telegram_cmd_handler,
-        session_factory=session_factory,
-        config=config,
-        mode=mode,
-    )
-
     from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
     from freqpred.trading.order_manager import OrderManager
 
@@ -529,6 +522,50 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             polling_interval=config.kalshi.polling_interval_seconds,
             alert_dispatcher=alert_dispatcher,
         )
+        # Register position commands here so order_manager is available for both modes.
+        register_position_commands(
+            cmd_handler=telegram_cmd_handler,
+            session_factory=session_factory,
+            config=config,
+            mode=mode,
+            order_manager=order_manager,
+        )
+
+        # Embed the API server inside run so it shares the live OrderManager.
+        if config.dashboard.api_enabled:
+            import freqpred.alerts.models     # noqa: F401
+            import freqpred.ingestion.models  # noqa: F401
+            import freqpred.llm.models        # noqa: F401
+            import freqpred.rag.models        # noqa: F401
+            import freqpred.signal.models     # noqa: F401
+            import freqpred.strategy.models   # noqa: F401
+            from freqpred.dashboard.api.app import create_app as _create_app  # noqa: PLC0415
+            import uvicorn as _uvicorn  # noqa: PLC0415
+
+            _dash_app = _create_app(
+                session_factory=session_factory,
+                daily_cap_usd=config.risk.max_daily_llm_spend_usd,
+                risk_config=config.risk,
+                bankroll_usd=config.trading.bankroll_usd,
+                signal_pipeline=pipeline,
+                order_manager=order_manager,
+            )
+            _dash_server = _uvicorn.Server(
+                _uvicorn.Config(
+                    _dash_app,
+                    host=config.dashboard.host,
+                    port=config.dashboard.port,
+                    log_level="warning",
+                )
+            )
+            tasks.append(asyncio.create_task(_dash_server.serve(), name="dashboard_api"))
+            import structlog as _sl
+            _sl.get_logger("freqpred.cli").info(
+                "dashboard.api_started",
+                host=config.dashboard.host,
+                port=config.dashboard.port,
+            )
+
         tasks.append(asyncio.create_task(watcher.run(), name="market_watcher"))
         tasks.append(
             asyncio.create_task(
@@ -1584,90 +1621,38 @@ async def _alerts_test(config: object, channel: str) -> None:
 
 
 @main.command()
-@click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind.")
-@click.option("--port", default=8000, show_default=True, help="Port to listen on.")
-@click.option("--dev", is_flag=True, default=False, help="Also start the Vite dev server (hot-reload UI on localhost:5173).")
 @click.pass_context
-def dashboard(ctx: click.Context, host: str, port: int, dev: bool) -> None:
-    """Start the dashboard API server (read-only JSON API)."""
+def dashboard(ctx: click.Context) -> None:
+    """Start the Vite dev server for dashboard UI development.
+
+    The API server runs inside `freqpred run`. Start that first, then run this
+    command in a separate terminal for hot-reload UI at http://localhost:5173.
+    """
     config = ctx.obj["config"]
-    asyncio.run(_dashboard(config, host, port, dev=dev))
+    asyncio.run(_dashboard(config.dashboard.port))
 
 
-async def _dashboard(config: object, host: str, port: int, dev: bool = False) -> None:
-    import uvicorn
+async def _dashboard(api_port: int) -> None:
+    import os
 
-    import freqpred.alerts.models     # noqa: F401
-    import freqpred.ingestion.models  # noqa: F401
-    import freqpred.llm.models        # noqa: F401
-    import freqpred.rag.models        # noqa: F401
-    import freqpred.signal.models     # noqa: F401
-    import freqpred.strategy.models   # noqa: F401
-
-    from freqpred.dashboard.api.app import create_app
-    from freqpred.db import make_engine, make_session_factory
-
-    if not config.database.url:
-        click.echo("ERROR: DATABASE_URL not configured.", err=True)
-        return
-
-    engine = make_engine(config.database.url)
-    session_factory = make_session_factory(engine)
-
-    # Construct a signal pipeline when LLM credentials are available so the
-    # "Analyze now" button on the Markets page works in standalone dashboard mode.
-    signal_pipeline = None
-    if config.anthropic.api_key:
-        import anthropic as _anthropic  # noqa: PLC0415
-        from freqpred.llm.client import LLMClient  # noqa: PLC0415
-        from freqpred.rag.embedder import LocalEmbedder  # noqa: PLC0415
-        from freqpred.signal.pipeline import SignalPipeline  # noqa: PLC0415
-
-        _llm_client = LLMClient(
-            _anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
-            session_factory,
-            prompt_version="signal-v1",
-            daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
-            max_consecutive_errors=config.risk.max_consecutive_llm_errors,
-        )
-        signal_pipeline = SignalPipeline(
-            session_factory=session_factory,
-            embedder=LocalEmbedder(),
-            llm_client=_llm_client,
-            top_k=config.signal.top_k_documents,
-        )
-
-    app = create_app(
-        session_factory=session_factory,
-        daily_cap_usd=config.risk.max_daily_llm_spend_usd,
-        risk_config=config.risk,
-        bankroll_usd=config.trading.bankroll_usd,
-        signal_pipeline=signal_pipeline,
+    ui_dir = Path(__file__).parent / "dashboard" / "ui"
+    click.echo("Starting Vite dev server on http://localhost:5173")
+    click.echo(f"Requires: freqpred run (serves the API on port {api_port})")
+    vite_env = os.environ.copy()
+    vite_env["FREQPRED_API_PORT"] = str(api_port)
+    vite_proc = await asyncio.create_subprocess_exec(
+        "npm",
+        "run",
+        "dev",
+        cwd=str(ui_dir),
+        env=vite_env,
     )
-
-    click.echo(f"Starting dashboard on http://{host}:{port}")
-    server_config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(server_config)
-
-    if dev:
-        ui_dir = Path(__file__).parent / "dashboard" / "ui"
-        click.echo("Starting Vite dev server on http://localhost:5173")
-        vite_proc = await asyncio.create_subprocess_exec(
-            "npm", "run", "dev",
-            cwd=str(ui_dir),
-        )
-        try:
-            await asyncio.gather(server.serve(), vite_proc.wait())
-        finally:
-            if vite_proc.returncode is None:
-                vite_proc.terminate()
-                await vite_proc.wait()
-            await engine.dispose()
-    else:
-        try:
-            await server.serve()
-        finally:
-            await engine.dispose()
+    try:
+        await vite_proc.wait()
+    finally:
+        if vite_proc.returncode is None:
+            vite_proc.terminate()
+            await vite_proc.wait()
 
 
 @main.group()

@@ -15,6 +15,7 @@ import pytest
 from freqpred.alerts.position_handlers import register_position_commands
 from freqpred.alerts.telegram_commands import TelegramCommandHandler
 from freqpred.markets.models import Position
+from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
 
 
 # ---------------------------------------------------------------------------
@@ -78,68 +79,63 @@ def _make_position(pos_id: str | None = None, status: str = "open") -> Position:
 
 @pytest.mark.asyncio
 async def test_forceexit_paper_single_position():
-    """Paper mode: /forceexit <id> closes the position immediately without confirmation."""
+    """Paper mode: /forceexit <id> delegates to order_manager.force_exit() immediately."""
     pos_id = str(uuid.uuid4())
     closed = _make_position(pos_id, status="closed")
     closed.exit_price = 0.55
+    closed.exit_reason = "force_exit:manual"
 
-    session_factory, session = _async_session_ctx()
+    mock_om = AsyncMock()
+    mock_om.force_exit = AsyncMock(return_value=closed)
 
-    # Mock the DB result: select returns (PositionRow, mid_price)
-    mock_pos_row = MagicMock()
-    mock_pos_row.id = uuid.UUID(pos_id)
-    mock_pos_row.status = "open"
+    cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
+    register_position_commands(cmd_handler, MagicMock(), MagicMock(), "paper", order_manager=mock_om)
 
-    execute_result = MagicMock()
-    execute_result.one_or_none.return_value = (mock_pos_row, 0.55)
-    session.execute = AsyncMock(return_value=execute_result)
-
-    with patch("freqpred.alerts.position_handlers.ledger.close_position", new_callable=AsyncMock) as mock_close:
-        mock_close.return_value = closed
-        cmd_handler, _ = _make_handler(mode="paper")
-        # Replace the session factory with our mock
-        register_position_commands(cmd_handler, session_factory, MagicMock(), "paper")
-
-        handler = cmd_handler._handlers["forceexit"]
-        reply = await handler(chat_id=1, args=[pos_id])
+    handler = cmd_handler._handlers["forceexit"]
+    reply = await handler(chat_id=1, args=[pos_id])
 
     assert reply is not None
     assert "closed" in reply.lower()
     assert pos_id in reply
-    mock_close.assert_awaited_once()
-    call_kwargs = mock_close.call_args
-    assert call_kwargs.kwargs["exit_reason"] == "manual_telegram"
-    assert call_kwargs.kwargs["exit_price"] == 0.55
+    mock_om.force_exit.assert_awaited_once_with(pos_id, exit_reason="force_exit:manual")
 
 
 @pytest.mark.asyncio
 async def test_forceexit_paper_invalid_id():
-    """Invalid UUID returns an error message immediately."""
-    cmd_handler, session_factory = _make_handler(mode="paper")
+    """Non-UUID string treated as market ID; if no open position found, returns informative message."""
+    session_factory, session = _async_session_ctx()
+    # DB query for market_id "not-a-uuid" returns no open position
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=result)
+
+    mock_om = AsyncMock()
+    cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
+    register_position_commands(cmd_handler, session_factory, MagicMock(), "paper", order_manager=mock_om)
 
     handler = cmd_handler._handlers["forceexit"]
     reply = await handler(chat_id=1, args=["not-a-uuid"])
 
     assert reply is not None
-    assert "invalid" in reply.lower() or "Invalid" in reply
+    assert "no open position" in reply.lower()
+    mock_om.force_exit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_forceexit_paper_position_not_found():
-    """Position ID not found in DB returns an informative message."""
+    """PositionNotFoundError from order_manager returns an informative message."""
     pos_id = str(uuid.uuid4())
 
-    session_factory, session = _async_session_ctx()
-    execute_result = MagicMock()
-    execute_result.one_or_none.return_value = None
-    session.execute = AsyncMock(return_value=execute_result)
+    mock_om = AsyncMock()
+    mock_om.force_exit = AsyncMock(
+        side_effect=PositionNotFoundError(f"Position {pos_id!r} not found for mode='paper'")
+    )
 
-    with patch("freqpred.alerts.position_handlers.ledger.close_position", new_callable=AsyncMock):
-        cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
-        register_position_commands(cmd_handler, session_factory, MagicMock(), "paper")
+    cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
+    register_position_commands(cmd_handler, MagicMock(), MagicMock(), "paper", order_manager=mock_om)
 
-        handler = cmd_handler._handlers["forceexit"]
-        reply = await handler(chat_id=1, args=[pos_id])
+    handler = cmd_handler._handlers["forceexit"]
+    reply = await handler(chat_id=1, args=[pos_id])
 
     assert reply is not None
     assert "not found" in reply.lower()
@@ -147,28 +143,22 @@ async def test_forceexit_paper_position_not_found():
 
 @pytest.mark.asyncio
 async def test_forceexit_paper_already_closed():
-    """Position already closed returns an informative message, no action taken."""
+    """PositionNotOpenError from order_manager returns an informative message, no further action."""
     pos_id = str(uuid.uuid4())
 
-    session_factory, session = _async_session_ctx()
-    mock_pos_row = MagicMock()
-    mock_pos_row.id = uuid.UUID(pos_id)
-    mock_pos_row.status = "closed"
+    mock_om = AsyncMock()
+    mock_om.force_exit = AsyncMock(
+        side_effect=PositionNotOpenError(f"Position {pos_id!r} is not open (status='closed')")
+    )
 
-    execute_result = MagicMock()
-    execute_result.one_or_none.return_value = (mock_pos_row, 0.50)
-    session.execute = AsyncMock(return_value=execute_result)
+    cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
+    register_position_commands(cmd_handler, MagicMock(), MagicMock(), "paper", order_manager=mock_om)
 
-    with patch("freqpred.alerts.position_handlers.ledger.close_position", new_callable=AsyncMock) as mock_close:
-        cmd_handler = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
-        register_position_commands(cmd_handler, session_factory, MagicMock(), "paper")
-
-        handler = cmd_handler._handlers["forceexit"]
-        reply = await handler(chat_id=1, args=[pos_id])
+    handler = cmd_handler._handlers["forceexit"]
+    reply = await handler(chat_id=1, args=[pos_id])
 
     assert reply is not None
-    assert "already" in reply.lower() or "closed" in reply.lower()
-    mock_close.assert_not_awaited()
+    assert "closed" in reply.lower() or "not open" in reply.lower()
 
 
 # ---------------------------------------------------------------------------

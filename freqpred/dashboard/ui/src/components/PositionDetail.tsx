@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { getPositionDetail } from '../api/positions'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { getPositionDetail, forceExitPosition } from '../api/positions'
 import type { PositionDetailOut } from '../api/types'
 import AnalyzeButton from './AnalyzeButton'
 import PriceTimeline, { triggerLabel } from './PriceTimeline'
@@ -25,11 +25,20 @@ function pnlColor(v: number | null) {
 export default function PositionDetail({ positionId }: { positionId: string }) {
   // null = show entry signal (default)
   const [selectedSignalId, setSelectedSignalId] = useState<string | null>(null)
+  const queryClient = useQueryClient()
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['position-detail', positionId],
     queryFn: () => getPositionDetail(positionId),
     staleTime: 30_000,
+  })
+
+  const forceExit = useMutation({
+    mutationFn: () => forceExitPosition(positionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['positions'] })
+      queryClient.invalidateQueries({ queryKey: ['position-detail', positionId] })
+    },
   })
 
   if (isLoading) return <div className="p-4 text-sm text-gray-500">Loading…</div>
@@ -122,6 +131,26 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
         </div>
         <SelectedSignalPanel signalId={activeSignalId} entrySignal={d.entry_signal} />
       </div>
+
+      {/* Force Exit — only visible for open positions */}
+      {d.status === 'open' && (
+        <div className="pt-2 border-t">
+          {forceExit.error && (
+            <div className="mb-2 text-xs text-red-600">{String(forceExit.error)}</div>
+          )}
+          <button
+            onClick={() => {
+              if (window.confirm(`Force-exit position ${positionId}? This cannot be undone.`)) {
+                forceExit.mutate()
+              }
+            }}
+            disabled={forceExit.isPending}
+            className="px-3 py-1.5 text-xs font-medium rounded border border-red-300 text-red-700 bg-white hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {forceExit.isPending ? 'Closing…' : 'Force Exit'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

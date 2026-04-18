@@ -371,7 +371,7 @@ class Position:
     # Filled after resolution
     exit_price: float | None = None
     exit_time: datetime | None = None
-    exit_reason: str | None = None  # "stoploss" | "trailing_stop" | "roi" | "signal" | "custom_exit:<tag>" | "market_resolved"
+    exit_reason: str | None = None  # "stoploss" | "trailing_stop" | "roi" | "signal" | "custom_exit:<tag>" | "market_resolved" | "force_exit:<tag>" (e.g. "force_exit:manual")
     resolution: int | None = None   # 1 = YES won, 0 = NO won
     pnl: float | None = None
     pnl_pct: float | None = None

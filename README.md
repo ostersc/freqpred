@@ -202,7 +202,7 @@ uv run freqpred metrics calibration
 uv run freqpred report digest
 uv run freqpred alerts test --channel all
 uv run freqpred db migrate
-uv run freqpred dashboard
+uv run freqpred dashboard  # dev-only Vite launcher (requires freqpred run for API)
 ```
 
 **Alerts** — Telegram and Discord are independently optional. Missing credentials silently disable that channel. Set `telegram_authorized_users` in `config.yaml` to enable inbound bot commands (status queries, position management, circuit breaker control). See [COMMANDS.md — Telegram bot commands](COMMANDS.md#telegram-bot-commands).
@@ -224,7 +224,10 @@ uv run alembic revision --autogenerate -m "description"
 # Apply migrations
 uv run freqpred db migrate
 
-# Dashboard dev server (frontend hot-reload, proxies /api to localhost:8000)
+# Dashboard dev server (frontend hot-reload, proxies /api to freqpred run on 8000)
+# Start freqpred run first, then:
+uv run freqpred dashboard
+# OR manually:
 cd freqpred/dashboard/ui && npm install && npm run dev
 ```
 

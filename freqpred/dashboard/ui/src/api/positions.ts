@@ -12,3 +12,10 @@ export function getPosition(id: string) {
 export function getPositionDetail(id: string) {
   return apiFetch<PositionDetailOut>(`/api/positions/${id}/detail`)
 }
+
+export function forceExitPosition(id: string): Promise<PositionOut> {
+  return apiFetch<PositionOut>(
+    `/api/positions/${encodeURIComponent(id)}/force-exit`,
+    { method: 'POST' },
+  )
+}

@@ -17,7 +17,9 @@ uv run freqpred run --strategy <name|path> --mode <signal-only|paper|live>
 | `--strategy` | required | Strategy class name (`ConservativeDefault`) or path to a `.py` file |
 | `--mode` | `paper` | `signal-only` — no orders; `paper` — simulated orders; `live` — real orders (requires `LIVE_TRADING_ENABLED=true`) |
 
-Starts four concurrent async tasks: market watcher, ingestion scheduler, signal pipeline, and Telegram command handler. Press **Ctrl+C** to stop all tasks cleanly.
+Starts the trading loop plus the embedded API server (port 8000 by default, controlled by `dashboard.port` in `config.yaml`). The API server runs inside this process so it shares the live `OrderManager` — required for force-exit from the dashboard or Telegram. Press **Ctrl+C** to stop all tasks cleanly.
+
+To disable the embedded API, set `dashboard.api_enabled: false` in `config.yaml`.
 
 ---
 
@@ -164,23 +166,17 @@ Equivalent to `alembic upgrade head`. Safe to run repeatedly.
 
 ---
 
-### `dashboard` — start the read-only API server
+### `dashboard` — start the Vite dev server (UI development only)
 
 ```bash
 uv run freqpred dashboard
-uv run freqpred dashboard --dev
-uv run freqpred dashboard --host 127.0.0.1 --port 9000
 ```
 
-| Option | Default | Description |
-|---|---|---|
-| `--host` | `0.0.0.0` | Host to bind |
-| `--port` | `8000` | Port to listen on |
-| `--dev` | off | Also start the Vite dev server (hot-reload UI on `localhost:5173`) |
+Starts the Vite dev server at `http://localhost:5173` for hot-reload UI development. API calls are proxied to `http://localhost:8000` (the API embedded inside `freqpred run`).
 
-Starts the FastAPI dashboard server. Exposes a JSON API for signals, positions, calibration data, strategy config, and system health.
+**Requires `freqpred run` to be running** — the dashboard command has no database or business logic of its own. If `freqpred run` is not running, the UI will show API connection errors.
 
-Trading mode and active strategy are both auto-discovered per-request from the `run_state` DB table written by `freqpred run` on startup. Strategy config endpoints (`GET/PUT /api/strategy/config`) return 503 if `freqpred run` is not running. Config changes via PUT are persisted to `runtime_config_overrides` and picked up by the running signal loop on its next cycle. Overrides are cleared when a different strategy is started.
+In production, `freqpred run` also serves the built React SPA (from `freqpred/dashboard/ui/dist/`) at port 8000. No separate `dashboard` command is needed; build the UI once with `npm run build` inside `freqpred/dashboard/ui/`.
 
 ---
 
@@ -253,12 +249,14 @@ Tabular responses use monospace code blocks. Rows are truncated at 4096 chars wi
 
 | Command | Description |
 |---|---|
-| `/forceexit <position_id>` | Force-close a specific open position immediately. Paper mode: closes at current mid price with `exit_reason=manual_telegram`. Live mode: requires inline keyboard confirmation, then closes the ledger record at current mid price. |
+| `/forceexit <position_id_or_market_id>` | Force-close a specific open position via `OrderManager.force_exit()`. Paper mode: closes immediately at current mid price with `exit_reason=force_exit:manual`. Live mode: requires inline keyboard confirmation, then submits an IOC sell to the exchange. |
 | `/forceexit all` | Force-close all open positions. Always requires inline keyboard confirmation regardless of mode. |
-| `/fx <position_id>` | Alias for `/forceexit <position_id>`. |
+| `/fx <position_id_or_market_id>` | Alias for `/forceexit`. |
 | `/delete <position_id>` | Hard-delete a paper position record from the database without placing an order. Requires inline keyboard confirmation. Rejected with an error message in live mode. |
 
 **Confirmation flow** — `/forceexit all`, `/forceexit <id>` in live mode, and `/delete <id>` in paper mode send an inline keyboard with **Confirm** and **Cancel** buttons before executing. If no button is pressed within 30 seconds the action is automatically cancelled and the bot sends a timeout notice. Pending confirmation state is stored in memory and is lost on process restart.
+
+The argument to `/forceexit` accepts either a UUID position ID or a market ticker (e.g. `KXTRUMPSAY-26APR06-AUTO`) — if a market ticker is supplied and an open position exists for it, the position is looked up automatically.
 
 ---
 

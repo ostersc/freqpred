@@ -120,6 +120,7 @@ class TradingConfig(BaseModel):
 class DashboardConfig(BaseModel):
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
+    api_enabled: bool = Field(default=True)
 
 
 class AlertsConfig(BaseModel):

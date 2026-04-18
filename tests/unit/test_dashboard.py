@@ -23,7 +23,9 @@ import freqpred.strategy.models   # noqa: F401
 
 from freqpred.dashboard.api.app import create_app
 from freqpred.dashboard.api.routes import get_db
+from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.strategy.config import StrategyConfig
+from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,7 @@ def _make_app(
     risk_config: object | None = None,
     bankroll_usd: float = 1000.0,
     signal_pipeline: object | None = None,
+    order_manager: object | None = None,
 ) -> object:
     """Create app with the real session factory replaced by a mock."""
     sf = MagicMock()
@@ -62,6 +65,7 @@ def _make_app(
         risk_config=risk_config,
         bankroll_usd=bankroll_usd,
         signal_pipeline=signal_pipeline,
+        order_manager=order_manager,
     )
 
     async def _override_get_db():
@@ -1335,3 +1339,93 @@ def test_decisions_invalid_limit_rejected() -> None:
     client = TestClient(_make_app(session))
     resp = client.get("/api/strategy-decisions?limit=500")
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# POST /api/positions/{id}/force-exit
+# ---------------------------------------------------------------------------
+
+
+def test_force_exit_endpoint_closes_open_position() -> None:
+    """Success: order manager closes position; response reflects closed state."""
+    pos_id = uuid.uuid4()
+    mock_om = AsyncMock()
+    mock_om.force_exit = AsyncMock(return_value=None)
+
+    # The route does a fresh SELECT after force_exit() commits.
+    closed_row = _make_position_row(id=pos_id, status="closed", exit_reason="force_exit:manual")
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar_result(closed_row))
+
+    client = TestClient(_make_app(session, order_manager=mock_om))
+    resp = client.post(f"/api/positions/{pos_id}/force-exit")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "closed"
+    assert data["exit_reason"] == "force_exit:manual"
+    mock_om.force_exit.assert_awaited_once_with(str(pos_id))
+
+
+def test_force_exit_endpoint_404_position_not_found() -> None:
+    """PositionNotFoundError from OM → 404."""
+    pos_id = uuid.uuid4()
+    mock_om = AsyncMock()
+    mock_om.force_exit = AsyncMock(side_effect=PositionNotFoundError("not found"))
+
+    session = AsyncMock()
+    client = TestClient(_make_app(session, order_manager=mock_om))
+    resp = client.post(f"/api/positions/{pos_id}/force-exit")
+
+    assert resp.status_code == 404
+
+
+def test_force_exit_endpoint_409_already_closed() -> None:
+    """PositionNotOpenError from OM → 409."""
+    pos_id = uuid.uuid4()
+    mock_om = AsyncMock()
+    mock_om.force_exit = AsyncMock(side_effect=PositionNotOpenError("already closed"))
+
+    session = AsyncMock()
+    client = TestClient(_make_app(session, order_manager=mock_om))
+    resp = client.post(f"/api/positions/{pos_id}/force-exit")
+
+    assert resp.status_code == 409
+
+
+def test_force_exit_endpoint_409_other_precondition_failure() -> None:
+    """ValueError (e.g. LIVE_TRADING_ENABLED guard) from OM → 409."""
+    pos_id = uuid.uuid4()
+    mock_om = AsyncMock()
+    mock_om.force_exit = AsyncMock(
+        side_effect=ValueError("LIVE_TRADING_ENABLED must be 'true' for live force exits")
+    )
+
+    session = AsyncMock()
+    client = TestClient(_make_app(session, order_manager=mock_om))
+    resp = client.post(f"/api/positions/{pos_id}/force-exit")
+
+    assert resp.status_code == 409
+
+
+def test_force_exit_endpoint_503_no_order_manager() -> None:
+    """No order_manager wired → 503."""
+    pos_id = uuid.uuid4()
+    session = AsyncMock()
+    client = TestClient(_make_app(session, order_manager=None))
+    resp = client.post(f"/api/positions/{pos_id}/force-exit")
+
+    assert resp.status_code == 503
+
+
+def test_force_exit_endpoint_502_exchange_error() -> None:
+    """KalshiAPIError from OM → 502."""
+    pos_id = uuid.uuid4()
+    mock_om = AsyncMock()
+    mock_om.force_exit = AsyncMock(side_effect=KalshiAPIError(500, "exchange down"))
+
+    session = AsyncMock()
+    client = TestClient(_make_app(session, order_manager=mock_om))
+    resp = client.post(f"/api/positions/{pos_id}/force-exit")
+
+    assert resp.status_code == 502

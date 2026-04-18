@@ -11,11 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import Market, Order, Position
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
-from freqpred.trading.order_manager import OrderManager
+from freqpred.trading.order_manager import OrderManager, PositionNotFoundError, PositionNotOpenError
 from freqpred.trading.risk import RiskDecision, RiskEngine, TradingCircuitBreakerError
 
 # Ensure ORM relationships resolve
@@ -781,3 +782,474 @@ async def test_reentry_blocked_when_conviction_drops() -> None:
 
     assert result is None
     mock_ledger.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# force_exit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_force_exit_session(pos_row: MagicMock | None = None, mkt_row: MagicMock | None = None) -> AsyncMock:
+    """Return a mock AsyncSession for force_exit() that yields (pos_row, mkt_row)."""
+    session = AsyncMock()
+    result = MagicMock()
+    result.one_or_none.return_value = (pos_row, mkt_row) if pos_row is not None else None
+    session.execute = AsyncMock(return_value=result)
+    return session
+
+
+def _make_force_exit_sf(session: AsyncMock) -> MagicMock:
+    sf = MagicMock()
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    sf.return_value = ctx
+    return sf
+
+
+def _mock_pos_row(
+    *,
+    pos_id: uuid.UUID | None = None,
+    status: str = "open",
+    direction: str = "YES",
+    market_id: str = MARKET_ID,
+    mode: str = "paper",
+    contracts: int = 10,
+) -> MagicMock:
+    row = MagicMock()
+    row.id = pos_id or uuid.uuid4()
+    row.status = status
+    row.direction = direction
+    row.market_id = market_id
+    row.mode = mode
+    row.contracts = contracts
+    return row
+
+
+def _mock_mkt_row(
+    *,
+    mid_price: float = 0.60,
+    yes_bid: float = 0.55,
+    yes_ask: float = 0.65,
+    result: str | None = None,
+) -> MagicMock:
+    row = MagicMock()
+    row.mid_price = mid_price
+    row.yes_bid = yes_bid
+    row.yes_ask = yes_ask
+    row.result = result
+    return row
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_orders_commits_status_updates() -> None:
+    """Pending live orders that flip status are committed."""
+    pending_open = MagicMock()
+    pending_open.id = uuid.uuid4()
+    pending_open.market_id = "MKT-OPEN"
+    pending_open.status = "pending"
+
+    pending_cancelled = MagicMock()
+    pending_cancelled.id = uuid.uuid4()
+    pending_cancelled.market_id = "MKT-CANCELLED"
+    pending_cancelled.status = "pending"
+
+    session = AsyncMock()
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [pending_open, pending_cancelled]
+    session.execute = AsyncMock(return_value=result)
+
+    mock_kalshi = AsyncMock()
+    exchange_pos = MagicMock()
+    exchange_pos.market_id = "MKT-OPEN"
+    exchange_pos.contracts = 3
+    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    await om.reconcile_pending_orders(session)
+
+    assert pending_open.status == "open"
+    assert pending_cancelled.status == "cancelled"
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_force_exit_paper_success() -> None:
+    """Paper force_exit: closes position at current mid price for YES direction."""
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="paper")
+    mkt = _mock_mkt_row(mid_price=0.60)
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    closed_pos = _make_position()
+    closed_pos.status = "closed"
+    closed_pos.exit_price = 0.60
+    closed_pos.exit_reason = "force_exit:manual"
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="paper",
+    )
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.close_position",
+        new_callable=AsyncMock,
+        return_value=closed_pos,
+    ) as mock_close:
+        result = await om.force_exit(str(pos_id))
+
+    assert result is closed_pos
+    mock_close.assert_called_once()
+    assert mock_close.call_args.args[1] == str(pos_id)
+    assert mock_close.call_args.kwargs["exit_price"] == pytest.approx(0.60)
+    assert mock_close.call_args.kwargs["exit_reason"] == "force_exit:manual"
+
+
+@pytest.mark.asyncio
+async def test_force_exit_wrong_mode_not_found() -> None:
+    """Position not found for this mode → PositionNotFoundError."""
+    session = _make_force_exit_session()  # one_or_none returns None
+    sf = _make_force_exit_sf(session)
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="paper",
+    )
+
+    with pytest.raises(PositionNotFoundError):
+        await om.force_exit(str(uuid.uuid4()))
+
+
+@pytest.mark.asyncio
+async def test_force_exit_already_closed_raises() -> None:
+    """Position status != 'open' → PositionNotOpenError."""
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="closed", direction="YES", mode="paper")
+    mkt = _mock_mkt_row()
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="paper",
+    )
+
+    with pytest.raises(PositionNotOpenError):
+        await om.force_exit(str(pos_id))
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_blocked_without_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live force_exit raises ValueError when LIVE_TRADING_ENABLED is not set."""
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+
+    sf = MagicMock()
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+    )
+
+    with pytest.raises(ValueError, match="LIVE_TRADING_ENABLED"):
+        await om.force_exit(str(uuid.uuid4()))
+
+    sf.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_no_kalshi_client_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live force_exit with kalshi_client=None raises ValueError (wiring guard)."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live")
+    mkt = _mock_mkt_row(result=None)
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=None,
+    )
+
+    with pytest.raises(ValueError, match="KalshiClient"):
+        await om.force_exit(str(pos_id))
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_non_executable_price_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """YES direction with yes_bid=0.0 → limit_price=0.0 → ValueError (market closed to trading)."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live")
+    mkt = _mock_mkt_row(yes_bid=0.0, yes_ask=1.0, result=None)
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    exchange_pos = MagicMock()
+    exchange_pos.market_id = MARKET_ID
+    exchange_pos.direction = "YES"
+    exchange_pos.contracts = 5
+
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    with pytest.raises(ValueError, match="No executable exit price"):
+        await om.force_exit(str(pos_id))
+
+    mock_kalshi.get_positions.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_no_exchange_position_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No matching live position on exchange → ValueError, ledger not written."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live")
+    mkt = _mock_mkt_row(yes_bid=0.55, yes_ask=0.65, result=None)
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[])
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    with patch("freqpred.trading.order_manager.ledger.close_position") as mock_close:
+        with pytest.raises(ValueError, match="reconciliation required"):
+            await om.force_exit(str(pos_id))
+
+    mock_close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_exchange_failure_leaves_position_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """KalshiAPIError from place_order propagates; ledger.close_position not called."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live")
+    mkt = _mock_mkt_row(yes_bid=0.55, yes_ask=0.65, result=None)
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    exchange_pos = MagicMock()
+    exchange_pos.market_id = MARKET_ID
+    exchange_pos.direction = "YES"
+    exchange_pos.contracts = 5
+
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+    mock_kalshi.place_order = AsyncMock(side_effect=KalshiAPIError(500, "internal error"))
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    with patch("freqpred.trading.order_manager.ledger.close_position") as mock_close:
+        with pytest.raises(KalshiAPIError):
+            await om.force_exit(str(pos_id))
+
+    mock_close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_uses_reconciled_net_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit order uses exchange net contracts (5), not PositionRow.contracts (10)."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live", contracts=10)
+    mkt = _mock_mkt_row(yes_bid=0.55, yes_ask=0.65, result=None)
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    exchange_pos = MagicMock()
+    exchange_pos.market_id = MARKET_ID
+    exchange_pos.direction = "YES"
+    exchange_pos.contracts = 5
+
+    filled = Order(
+        market_id=MARKET_ID, direction="YES", contracts=5, price=0.55, mode="live", status="executed",
+    )
+
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+    mock_kalshi.place_order = AsyncMock(return_value=filled)
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    closed_pos = _make_position()
+    with patch(
+        "freqpred.trading.order_manager.ledger.close_position",
+        new_callable=AsyncMock,
+        return_value=closed_pos,
+    ):
+        await om.force_exit(str(pos_id))
+
+    placed: Order = mock_kalshi.place_order.call_args.args[0]
+    assert placed.contracts == 5
+    assert placed.action == "sell"
+    assert placed.time_in_force == "fill_or_kill"
+    assert pos.contracts == 5
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_resolved_market_closes_at_settlement(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolved live exits use reconciled size and settlement payout without ordering."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(
+        pos_id=pos_id,
+        status="open",
+        direction="YES",
+        mode="live",
+        contracts=10,
+    )
+    mkt = _mock_mkt_row(result="yes")
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    exchange_pos = MagicMock()
+    exchange_pos.market_id = MARKET_ID
+    exchange_pos.direction = "YES"
+    exchange_pos.contracts = 5
+
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    closed_pos = _make_position()
+    with patch(
+        "freqpred.trading.order_manager.ledger.close_position",
+        new_callable=AsyncMock,
+        return_value=closed_pos,
+        ) as mock_close:
+        await om.force_exit(str(pos_id))
+
+    mock_kalshi.get_positions.assert_awaited_once()
+    mock_kalshi.place_order.assert_not_called()
+    assert pos.contracts == 5
+    assert mock_close.call_args.kwargs["exit_price"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_resolved_market_without_exchange_position_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolved live exits still require a matching exchange position for reconciliation."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live")
+    mkt = _mock_mkt_row(result="yes")
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[])
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    with patch("freqpred.trading.order_manager.ledger.close_position") as mock_close:
+        with pytest.raises(ValueError, match="reconciliation required"):
+            await om.force_exit(str(pos_id))
+
+    mock_close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_resolved_market_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settlement check is case-insensitive: 'YES', 'No', 'yes' all work correctly."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    cases = [
+        ("YES", "YES", 1.0),   # uppercase YES result, YES position → wins
+        ("No",  "NO",  1.0),   # mixed-case No result, NO position → wins
+        ("yes", "NO",  0.0),   # YES wins, NO position → loses
+    ]
+
+    for result_str, direction, expected_price in cases:
+        pos_id = uuid.uuid4()
+        pos = _mock_pos_row(pos_id=pos_id, status="open", direction=direction, mode="live")
+        mkt = _mock_mkt_row(result=result_str)
+        session = _make_force_exit_session(pos, mkt)
+        sf = _make_force_exit_sf(session)
+
+        exchange_pos = MagicMock()
+        exchange_pos.market_id = MARKET_ID
+        exchange_pos.direction = direction
+        exchange_pos.contracts = 4
+
+        mock_kalshi = AsyncMock()
+        mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+
+        om = OrderManager(
+            risk=MagicMock(spec=RiskEngine),
+            session_factory=sf,
+            bankroll=BANKROLL,
+            mode="live",
+            kalshi_client=mock_kalshi,
+        )
+
+        closed_pos = _make_position()
+        with patch(
+            "freqpred.trading.order_manager.ledger.close_position",
+            new_callable=AsyncMock,
+            return_value=closed_pos,
+        ) as mock_close:
+            await om.force_exit(str(pos_id))
+
+        assert mock_close.call_args.kwargs["exit_price"] == pytest.approx(expected_price), \
+            f"result={result_str!r}, direction={direction}: expected {expected_price}"
+        mock_kalshi.get_positions.assert_awaited_once()
+        mock_kalshi.place_order.assert_not_called()

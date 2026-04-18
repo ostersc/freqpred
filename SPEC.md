@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-04-13
+**Last updated:** 2026-04-18
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
 
 ---
@@ -740,6 +740,7 @@ Every closed position records an `exit_reason` string for analysis:
 | `"custom_exit:<tag>"` | `custom_exit()` returned a tag |
 | `"signal"` | `should_exit()` returned True |
 | `"market_resolved"` | Market paid out at resolution |
+| `"force_exit:<tag>"` | Operator-initiated manual close (e.g. `"force_exit:manual"` via dashboard or Telegram) |
 
 ### Bundled Strategies
 
@@ -1013,6 +1014,10 @@ Built with **FastAPI** (backend) + **React 18 + TypeScript** (frontend), served 
 
 **Frontend stack:** React 18, TypeScript, Vite, TanStack Query v5 (data fetching + polling), React Router v6, Recharts (calibration + cost charts), Tailwind CSS v3.
 
+**API server:** Embedded inside `freqpred run` so the dashboard shares the live `OrderManager` instance — required for force-exit and any other write operations. Controlled by `dashboard.api_enabled` in `config.yaml` (default: `true`). The embedded server listens on `dashboard.host`:`dashboard.port` (default `0.0.0.0:8000`).
+
+**`freqpred dashboard` command:** Dev-only Vite launcher — starts the Vite dev server at `http://localhost:5173` for hot-reload UI development. Has no DB or business logic of its own; API calls are proxied to `freqpred run` on port 8000. In production, `freqpred run` serves both the API and the built React SPA (from `freqpred/dashboard/ui/dist/`) — no separate `dashboard` command needed.
+
 **Serve path:** `freqpred/dashboard/ui/` contains the React app. `npm run build` produces `freqpred/dashboard/ui/dist/`. FastAPI mounts this directory at `/` via `StaticFiles(html=True)` if it exists; otherwise falls back to Swagger UI redirect. In dev, Vite proxies `/api` to `localhost:8000`.
 
 **Pages:**
@@ -1189,7 +1194,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [ ] **T57** [#57](https://github.com/ostersc/freqpred/issues/57) — Source quality trust assessment: `source_quality_scores` table (daily rolling snapshot per source name × market category); `signal_assessments` table (one row per assessed signal); `assess_signal_sources()` in `freqpred/metrics/assessment.py` called between `should_trade` and `position_size` in `order_manager.submit()` — only fires when the strategy intends to trade; Claude Haiku assesses evidence quality from source Brier deltas vs overall baseline and returns a `SignalAssessment` with `size_multiplier`; default `position_size()` on `IPredictionStrategy` applies multiplier (share-weighted delta mapped linearly to `[source_quality_scale_min, source_quality_scale_max]`); neutral (`multiplier=1.0`) when no quality data exists; LLM call skipped in that case; `StrategyConfig` gains `source_quality_scale_min/max/delta_threshold` fields. Depends on: T56.
 - [ ] **T50** [#50](https://github.com/ostersc/freqpred/issues/50) — LLM-assisted exit analysis: `should_request_llm_exit()` predicate + `llm_exit_check()` async hook on `IAlgoStrategy`; PositionMonitor calls LLM when predicate fires; prompt includes candle metrics + P&L; response logged to `llm_queries`. Depends on: T49.
 - [x] **T51** [#51](https://github.com/ostersc/freqpred/issues/51) — TV chyron ingestion via Internet Archive Third Eye API + realtime scheduler: `tv_chyron.py` fetcher (`fetch_all`, `parse_and_groups`, `filter_chyrons`); new `realtime_scheduler.py` runs chyrons and Truth Social account feeds every 5 min (moved from main scheduler); `backoff.py` `tick_and_load` gains `services` filter so each scheduler manages its own counters independently; `ingestion.tv_chyron_enabled` and `ingestion.realtime_interval_seconds` config keys added.
-- [ ] **T61** [#61](https://github.com/ostersc/freqpred/issues/61) — Dashboard: force-exit positions from Positions page; `POST /api/positions/{id}/force-exit` endpoint; "Force Exit" button in expanded detail panel (open positions only) with confirmation dialog; invalidates TanStack Query cache on success.
+- [x] **T61** [#61](https://github.com/ostersc/freqpred/issues/61) — Dashboard: force-exit positions from Positions page; `POST /api/positions/{id}/force-exit` endpoint; "Force Exit" button in expanded detail panel (open positions only) with confirmation dialog; invalidates TanStack Query cache on success. `OrderManager.force_exit()` centralizes paper/live exit logic; API server embedded in `freqpred run`; `freqpred dashboard` is dev-only Vite launcher.
 - [x] **T62** [#62](https://github.com/ostersc/freqpred/issues/62) — Dashboard: market browser page; `GET /api/markets`, `GET /api/markets/{id}`, `POST /api/markets/{id}/analyze`; new Markets page with search, expandable rows showing full market detail + current signal, "Analyze now" button triggers signal pipeline and refreshes panel; 429 cooldown if analyzed within 60 s.
 - [x] **T64** [#64](https://github.com/ostersc/freqpred/issues/64) — Dashboard: strategy decision analysis page; `GET /api/strategy-decisions` with filters (strategy, exit_reason prefix, ticker_prefix ILIKE, date_from/to) and pagination; per-row exit counterfactual P&L (`our_side_win_value − entry_price`) and exit Δ vs hold (`exit_price − our_side_win_value`); entry efficiency loss vs best prior signal with `edge > 0` (`best_prior_ask − entry_price`); symmetric for YES/NO via side-specific `signals.market_ask_at_signal`. Extracts `PriceTimeline` + `SignalDetail` + `SelectedSignalPanel` into shared components and adds exit-event reference lines (vertical at `exit_time`, horizontal at exit price, NO-flipped) — benefit flows back to Positions page closed rows. Adds `exit_reason` to `PositionOut`.
 

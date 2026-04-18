@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.llm.audit import get_daily_spend_usd
 from freqpred.llm.models import LLMQueryRow
+from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import MarketRow, PositionRow
+from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
 from freqpred.metrics.calibration import compute_calibration
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
@@ -93,6 +95,10 @@ def _bankroll_usd(request: Request) -> float:
 
 def _signal_pipeline(request: Request) -> object | None:
     return getattr(request.app.state, "signal_pipeline", None)
+
+
+def _get_order_manager(request: Request) -> object | None:
+    return getattr(request.app.state, "order_manager", None)
 
 
 def _started_at(request: Request) -> datetime:
@@ -491,6 +497,41 @@ async def get_position_detail(
         entry_signal=entry_signal,
         market_signals=market_signals,
     )
+
+
+@router.post("/positions/{position_id}/force-exit", response_model=PositionOut)
+async def force_exit_position(
+    position_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    order_manager: Annotated[object | None, Depends(_get_order_manager)],
+) -> PositionOut:
+    if order_manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Force exit requires freqpred run (order manager not available)",
+        )
+    try:
+        uid = _uuid.UUID(position_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Position not found")
+
+    # Delegate all checks to the order manager — no preflight query here.
+    try:
+        await order_manager.force_exit(position_id)  # type: ignore[union-attr]
+    except PositionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PositionNotOpenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KalshiAPIError as exc:
+        raise HTTPException(status_code=502, detail=f"Exchange error: {exc}") from exc
+
+    # Fresh SELECT — order_manager.force_exit() commits in its own session.
+    updated = (
+        await session.execute(select(PositionRow).where(PositionRow.id == uid))
+    ).scalar_one()
+    return _position_row_to_out(updated)
 
 
 # ---------------------------------------------------------------------------
