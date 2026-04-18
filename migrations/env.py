@@ -15,6 +15,7 @@ import freqpred.signal.models  # noqa: F401 — registers SignalRow
 import freqpred.rag.models  # noqa: F401 — registers DocumentRow, DocumentMarketLinkRow
 import freqpred.llm.models  # noqa: F401 — registers LLMQueryRow
 import freqpred.ingestion.models  # noqa: F401 — registers CatalystRunRow, CatalystQueryRow
+import freqpred.metrics.models  # noqa: F401 — registers SourceQualityScoreRow, SignalAssessmentRow
 
 config = context.config
 

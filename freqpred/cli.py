@@ -170,6 +170,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     import anthropic
 
     import freqpred.ingestion.models  # noqa: F401
+    import freqpred.metrics.models  # noqa: F401
     import freqpred.signal.models  # noqa: F401
     import freqpred.rag.models  # noqa: F401
 
@@ -213,6 +214,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         session_factory=session_factory,
         embedder=embedder,
         llm_client=llm_client,
+        model=config.anthropic.primary_model,
         top_k=config.signal.top_k_documents,
     )
 
@@ -270,6 +272,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             session_factory=session_factory,
             bankroll=config.trading.bankroll_usd,
             mode="paper",
+            llm_client=llm_client,
+            judgment_model=config.anthropic.judgment_model,
         )
 
     from freqpred.strategy.loader import _BUILTIN_STRATEGIES
@@ -495,6 +499,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 bankroll=config.trading.bankroll_usd,
                 mode="live",
                 kalshi_client=kalshi_client,
+                llm_client=llm_client,
+                judgment_model=config.anthropic.judgment_model,
             )
 
         position_monitor._kalshi_client = kalshi_client
@@ -575,6 +581,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     interval_seconds=config.ingestion.schedule_interval_seconds,
                     strategy=strategy,
                     llm_client=llm_client,
+                    cheap_model=config.anthropic.cheap_model,
                     tavily_api_key=config.tavily.api_key,
                     tavily_daily_cap=config.tavily.daily_cap,
                     tavily_min_fetch_interval_hours=config.tavily.min_fetch_interval_hours,
@@ -627,8 +634,20 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     digest_timezone=config.alerts.digest_timezone,
                     trading_mode=mode,
                     bankroll=config.trading.bankroll_usd,
+                    model=config.anthropic.cheap_model,
                 ),
                 name="digest_scheduler",
+            )
+        )
+        from freqpred.metrics.scheduler import run_source_quality_scheduler
+        tasks.append(
+            asyncio.create_task(
+                run_source_quality_scheduler(
+                    session_factory=session_factory,
+                    refresh_time=config.alerts.digest_time,
+                    refresh_timezone=config.alerts.digest_timezone,
+                ),
+                name="source_quality_scheduler",
             )
         )
 
@@ -854,6 +873,7 @@ async def _ingestion_run(
     dry_run: bool,
 ) -> None:
     import freqpred.ingestion.models  # noqa: F401
+    import freqpred.metrics.models  # noqa: F401
     import freqpred.signal.models     # noqa: F401
     import freqpred.rag.models        # noqa: F401
 
@@ -946,7 +966,13 @@ async def _ingestion_run(
         # Generate catalysts.
         async with session_factory() as session:
             try:
-                run = await generate_catalysts(market, session, llm_client, embedder)
+                run = await generate_catalysts(
+                    market,
+                    session,
+                    llm_client,
+                    embedder,
+                    model=config.anthropic.cheap_model,
+                )
                 await session.commit()
 
                 # Fetch the query texts we just wrote.
@@ -1020,7 +1046,15 @@ async def _ingestion_run(
             for raw_doc in raw_docs:
                 raw_doc.category = market.category
                 try:
-                    doc, _status = await upsert_document(session, embedder, raw_doc)
+                    doc, _status = await upsert_document(
+                        session,
+                        embedder,
+                        raw_doc,
+                        llm_client=llm_client,
+                        query_text=query,
+                        market_question=market.question,
+                        summary_model=config.anthropic.cheap_model,
+                    )
                     stored += 1
                 except Exception as exc:
                     click.echo(f"  ✗ Store error: {exc}", err=True)
@@ -1134,6 +1168,7 @@ async def _signal_analyze(config: object, market_id: str, *, force: bool = False
             session_factory=session_factory,
             embedder=embedder,
             llm_client=llm_client,
+            model=config.anthropic.primary_model,
             top_k=config.signal.top_k_documents,
         )
 
@@ -1538,6 +1573,7 @@ async def _report_digest(config: object, *, send: bool, trading_mode: str = "pap
     import anthropic
 
     import freqpred.ingestion.models  # noqa: F401
+    import freqpred.metrics.models  # noqa: F401
     import freqpred.signal.models     # noqa: F401
     import freqpred.rag.models        # noqa: F401
 
@@ -1564,7 +1600,12 @@ async def _report_digest(config: object, *, send: bool, trading_mode: str = "pap
 
     try:
         async with session_factory() as session:
-            digest = await generate_daily_digest(session, llm_client, trading_mode=trading_mode)
+            digest = await generate_daily_digest(
+                session,
+                llm_client,
+                trading_mode=trading_mode,
+                model=config.anthropic.cheap_model,
+            )
     finally:
         await engine.dispose()
 

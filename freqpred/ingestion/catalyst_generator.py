@@ -53,6 +53,7 @@ async def generate_catalysts(
     session: AsyncSession,
     llm_client: LLMClient,
     embedder: _Embedder | None = None,
+    model: str = _CATALYST_MODEL,
 ) -> CatalystRun:
     """Generate (or re-generate) catalyst queries for *market*.
 
@@ -86,7 +87,7 @@ async def generate_catalysts(
     try:
         llm_resp = await llm_client.complete(
             prompt,
-            _CATALYST_MODEL,
+            model,
             "catalyst_generation",
             market_id=market.id,
             strategy="system",

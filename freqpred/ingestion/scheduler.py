@@ -85,6 +85,7 @@ async def run_cycle(
     embedder: LocalEmbedder,
     strategy: "StrategyProtocol | None" = None,
     llm_client: "LLMClient | None" = None,
+    cheap_model: str = "claude-haiku-4-5-20251001",
     tavily_api_key: str = "",
     tavily_daily_cap: int = 33,
     tavily_min_fetch_interval_hours: float = 1.0,
@@ -155,7 +156,7 @@ async def run_cycle(
     async with session_factory() as session:
         if strategy is not None and llm_client is not None:
             catalysts_generated = await _ensure_catalysts(
-                session, strategy, llm_client, embedder
+                session, strategy, llm_client, embedder, model=cheap_model
             )
 
         market_queries = await _load_active_market_queries(session)
@@ -436,6 +437,7 @@ async def run_cycle(
                                 llm_client=llm_client,
                                 query_text=query_text,
                                 market_question=market_question,
+                                summary_model=cheap_model,
                             )
                             await link_document_to_market(market_session, doc.id, market_id)
                         if status == UpsertStatus.DEDUPED:
@@ -496,6 +498,7 @@ async def run_scheduler(
     interval_seconds: int = 1800,
     strategy: "StrategyProtocol | None" = None,
     llm_client: "LLMClient | None" = None,
+    cheap_model: str = "claude-haiku-4-5-20251001",
     tavily_api_key: str = "",
     tavily_daily_cap: int = 33,
     tavily_min_fetch_interval_hours: float = 1.0,
@@ -554,6 +557,7 @@ async def run_scheduler(
                 embedder=embedder,
                 strategy=strategy,
                 llm_client=llm_client,
+                cheap_model=cheap_model,
                 tavily_api_key=tavily_api_key,
                 tavily_daily_cap=tavily_daily_cap,
                 tavily_min_fetch_interval_hours=tavily_min_fetch_interval_hours,
@@ -588,6 +592,8 @@ async def _ensure_catalysts(
     strategy: "StrategyProtocol",
     llm_client: "LLMClient",
     embedder: LocalEmbedder,
+    *,
+    model: str = "claude-haiku-4-5-20251001",
 ) -> int:
     """Generate or refresh catalyst queries for selected markets.
 
@@ -656,7 +662,7 @@ async def _ensure_catalysts(
     for market in needs_generation:
         is_refresh = market.id in latest_run_by_market
         try:
-            await generate_catalysts(market, session, llm_client, embedder)
+            await generate_catalysts(market, session, llm_client, embedder, model=model)
             # Commit per-market so catalysts are durable immediately; if the
             # process dies mid-loop the already-generated rows are preserved.
             await session.commit()

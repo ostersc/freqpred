@@ -4,7 +4,7 @@ All DB interactions are mocked — no external dependencies.
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -13,12 +13,14 @@ from freqpred.metrics.calibration import (
     SourceBrierScore,
     compute_calibration,
     compute_source_brier_scores,
+    refresh_source_quality_scores,
 )
 
 # Ensure ORM relationships resolve
 import freqpred.ingestion.models   # noqa: F401
 import freqpred.llm.models         # noqa: F401
 import freqpred.markets.models     # noqa: F401
+import freqpred.metrics.models     # noqa: F401
 import freqpred.rag.models         # noqa: F401
 import freqpred.signal.models      # noqa: F401
 
@@ -234,6 +236,33 @@ async def test_demo_harness_signals_excluded_from_query() -> None:
     assert "'demo'" in sql
 
 
+@pytest.mark.asyncio
+async def test_compute_calibration_market_category_filter_in_query() -> None:
+    captured_stmt = None
+
+    async def _capture(stmt: object, *args: object, **kwargs: object) -> MagicMock:
+        nonlocal captured_stmt
+        captured_stmt = stmt
+        result = MagicMock()
+        result.all.return_value = []
+        return result
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_capture)
+    await compute_calibration(session, market_category="politics")
+
+    assert captured_stmt is not None
+    from sqlalchemy.dialects import postgresql
+
+    sql = str(
+        captured_stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "markets.category = 'politics'" in sql
+
+
 # ---------------------------------------------------------------------------
 # compute_source_brier_scores tests
 # ---------------------------------------------------------------------------
@@ -317,6 +346,47 @@ async def test_source_brier_two_sources_sorted_ascending() -> None:
     assert scores[0].source_name == "r/politics"
     assert scores[1].source_name == "Tavily"
     assert scores[0].weighted_brier_score < scores[1].weighted_brier_score
+
+
+@pytest.mark.asyncio
+async def test_refresh_source_quality_scores_writes_global_and_category_rows() -> None:
+    distinct_categories_result = MagicMock()
+    distinct_categories_result.all.return_value = [("politics",), ("sports",)]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=distinct_categories_result)
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    calibration_reports = [
+        CalibrationReport(brier_score=0.21, market_brier_score=0.24, n_samples=20),
+        CalibrationReport(brier_score=0.18, market_brier_score=0.22, n_samples=12),
+        CalibrationReport(brier_score=0.19, market_brier_score=0.23, n_samples=8),
+    ]
+    source_scores = [
+        [SourceBrierScore("Reuters", 0.16, 12, 40, 10.0)],
+        [SourceBrierScore("AP", 0.14, 7, 21, 6.0)],
+        [SourceBrierScore("ESPN", 0.13, 5, 11, 3.0)],
+    ]
+
+    with patch(
+        "freqpred.metrics.calibration.compute_calibration",
+        new_callable=AsyncMock,
+        side_effect=calibration_reports,
+    ) as mock_calibration, patch(
+        "freqpred.metrics.calibration.compute_source_brier_scores",
+        new_callable=AsyncMock,
+        side_effect=source_scores,
+    ) as mock_source_scores:
+        rows_written = await refresh_source_quality_scores(session, lookback_days=90)
+
+    assert rows_written == 3
+    assert session.add.call_count == 3
+    written_rows = [call.args[0] for call in session.add.call_args_list]
+    assert [row.market_category for row in written_rows] == [None, "politics", "sports"]
+    assert [row.source_name for row in written_rows] == ["Reuters", "AP", "ESPN"]
+    assert mock_calibration.await_count == 3
+    assert mock_source_scores.await_count == 3
 
 
 @pytest.mark.asyncio

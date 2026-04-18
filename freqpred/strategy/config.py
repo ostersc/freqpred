@@ -41,3 +41,10 @@ class StrategyConfig:
     # hours after the most recent stoploss/trailing_stop exit on this market.
     block_reentry_after_stoploss: bool = False
     stoploss_cooldown_hours: float = 4.0  # set to 0.0 to disable cooldown
+
+    # Assessment-based sizing controls. The Opus judgment model outputs a
+    # trust_score, which the framework maps to this multiplier range.
+    assessment_scale_min: float = 0.80
+    assessment_scale_max: float = 1.20
+    similar_market_min_signals: int = 10
+    similar_market_min_trades: int = 5

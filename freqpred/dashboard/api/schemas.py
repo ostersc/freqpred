@@ -248,6 +248,10 @@ class StrategyConfigOut(BaseModel):
     max_spread: float | None
     block_reentry_after_stoploss: bool
     stoploss_cooldown_hours: float
+    assessment_scale_min: float
+    assessment_scale_max: float
+    similar_market_min_signals: int
+    similar_market_min_trades: int
 
 
 class StrategyConfigUpdateRequest(BaseModel):
@@ -281,6 +285,10 @@ class StrategyConfigUpdateRequest(BaseModel):
     max_spread: float | None = None
     block_reentry_after_stoploss: bool | None = None
     stoploss_cooldown_hours: float | None = None
+    assessment_scale_min: float | None = None
+    assessment_scale_max: float | None = None
+    similar_market_min_signals: int | None = None
+    similar_market_min_trades: int | None = None
 
 
 # ---------------------------------------------------------------------------

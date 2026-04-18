@@ -37,6 +37,7 @@ class AnthropicConfig(BaseModel):
     api_key: str = Field(default="")
     primary_model: str = Field(default="claude-sonnet-4-6")
     cheap_model: str = Field(default="claude-haiku-4-5-20251001")
+    judgment_model: str = Field(default="claude-opus-4-6")
 
 
 class TavilyConfig(BaseModel):
@@ -184,6 +185,9 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "KALSHI_WS_DEMO_URL": ("kalshi", "ws_demo_url"),
     "SIGNAL_INTERVAL_SECONDS": ("signal", "interval_seconds"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
+    "ANTHROPIC_PRIMARY_MODEL": ("anthropic", "primary_model"),
+    "ANTHROPIC_CHEAP_MODEL": ("anthropic", "cheap_model"),
+    "ANTHROPIC_JUDGMENT_MODEL": ("anthropic", "judgment_model"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
     "NEWSAPI_KEY": ("newsapi", "api_key"),
     "GUARDIAN_API_KEY": ("guardian", "api_key"),

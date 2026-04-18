@@ -13,6 +13,7 @@ import pytest
 
 from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import Market, Order, Position
+from freqpred.metrics.models import SignalAssessment
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
@@ -135,6 +136,8 @@ def _make_order_manager(
     bankroll: float = BANKROLL,
     mode: str = "paper",
     kalshi_client: object = None,
+    llm_client: object | None = None,
+    judgment_model: str | None = None,
 ) -> tuple[OrderManager, MagicMock]:
     """Return (OrderManager, session_factory_mock)."""
     session_factory = MagicMock()
@@ -165,6 +168,8 @@ def _make_order_manager(
         mode=mode,
         strategy_version="1.0",
         kalshi_client=kalshi_client,
+        llm_client=llm_client,
+        judgment_model=judgment_model,
     )
     return om, session_factory
 
@@ -720,6 +725,170 @@ async def test_existing_exposure_passed_to_position_size() -> None:
     assert len(captured_args) == 1
     _, existing_exposure = captured_args[0]
     assert existing_exposure == pytest.approx(25.0)
+
+
+@pytest.mark.asyncio
+async def test_legacy_two_arg_position_size_override_still_works() -> None:
+    om, _ = _make_order_manager()
+    signal = _make_signal()
+    market = _make_market()
+
+    class _LegacyTwoArg(IPredictionStrategy):
+        config = StrategyConfig(
+            name="LegacyTwoArg",
+            min_edge=0.10,
+            min_confidence=0.70,
+            max_exposure_per_market=0.10,
+            kelly_fraction=0.25,
+            categories=["politics"],
+            min_volume_24h=0.0,
+            max_days_to_close=90,
+            min_days_to_close=1,
+        )
+
+        def should_trade(self, signal: Signal, market: Market) -> bool:
+            return True
+
+        def position_size(self, signal: Signal, bankroll: float) -> float:
+            return 50.0
+
+    expected_position = _make_position()
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ):
+        result = await om.submit(signal, market, _LegacyTwoArg())
+
+    assert result is expected_position
+
+
+@pytest.mark.asyncio
+async def test_assessment_enabled_keeps_legacy_three_arg_override_working() -> None:
+    llm_client = MagicMock()
+    om, sf = _make_order_manager(
+        llm_client=llm_client,
+        judgment_model="claude-opus-4-6",
+    )
+    signal = _make_signal()
+    market = _make_market()
+    mock_session = sf.return_value.__aenter__.return_value
+    exposure_result = MagicMock()
+    exposure_result.scalar_one.return_value = 25.0
+    mock_session.execute = AsyncMock(return_value=exposure_result)
+    assessment = SignalAssessment(
+        signal_id=signal.id,
+        trust_score=0.65,
+        size_multiplier=1.06,
+        verdict="size_up",
+        reasoning="test",
+    )
+    captured_existing: list[float] = []
+
+    class _LegacyThreeArg(IPredictionStrategy):
+        config = StrategyConfig(
+            name="LegacyThreeArg",
+            min_edge=0.10,
+            min_confidence=0.70,
+            max_exposure_per_market=0.10,
+            kelly_fraction=0.25,
+            categories=["politics"],
+            min_volume_24h=0.0,
+            max_days_to_close=90,
+            min_days_to_close=1,
+        )
+
+        def should_trade(self, signal: Signal, market: Market) -> bool:
+            return True
+
+        def position_size(
+            self,
+            signal: Signal,
+            bankroll: float,
+            existing_market_exposure: float = 0.0,
+        ) -> float:
+            captured_existing.append(existing_market_exposure)
+            return 50.0
+
+    expected_position = _make_position()
+    with patch(
+        "freqpred.metrics.assessment.assess_signal_context",
+        new_callable=AsyncMock,
+        return_value=assessment,
+    ) as mock_assess, patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ):
+        result = await om.submit(signal, market, _LegacyThreeArg())
+
+    assert result is expected_position
+    assert captured_existing == [25.0]
+    mock_assess.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_assessment_enabled_passes_assessment_to_supported_strategy() -> None:
+    llm_client = MagicMock()
+    om, sf = _make_order_manager(
+        llm_client=llm_client,
+        judgment_model="claude-opus-4-6",
+    )
+    signal = _make_signal()
+    market = _make_market()
+    mock_session = sf.return_value.__aenter__.return_value
+    exposure_result = MagicMock()
+    exposure_result.scalar_one.return_value = 10.0
+    mock_session.execute = AsyncMock(return_value=exposure_result)
+    assessment = SignalAssessment(
+        signal_id=signal.id,
+        trust_score=0.70,
+        size_multiplier=1.08,
+        verdict="size_up",
+        reasoning="test",
+    )
+    captured_assessments: list[SignalAssessment | None] = []
+
+    class _AssessmentAware(IPredictionStrategy):
+        config = StrategyConfig(
+            name="AssessmentAware",
+            min_edge=0.10,
+            min_confidence=0.70,
+            max_exposure_per_market=0.10,
+            kelly_fraction=0.25,
+            categories=["politics"],
+            min_volume_24h=0.0,
+            max_days_to_close=90,
+            min_days_to_close=1,
+        )
+
+        def should_trade(self, signal: Signal, market: Market) -> bool:
+            return True
+
+        def position_size(
+            self,
+            signal: Signal,
+            bankroll: float,
+            existing_market_exposure: float = 0.0,
+            assessment: SignalAssessment | None = None,
+        ) -> float:
+            captured_assessments.append(assessment)
+            return 50.0
+
+    expected_position = _make_position()
+    with patch(
+        "freqpred.metrics.assessment.assess_signal_context",
+        new_callable=AsyncMock,
+        return_value=assessment,
+    ), patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ):
+        result = await om.submit(signal, market, _AssessmentAware())
+
+    assert result is expected_position
+    assert captured_assessments == [assessment]
 
 
 @pytest.mark.asyncio

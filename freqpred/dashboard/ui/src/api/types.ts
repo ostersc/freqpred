@@ -199,6 +199,10 @@ export interface StrategyConfigOut {
   max_spread: number | null
   block_reentry_after_stoploss: boolean
   stoploss_cooldown_hours: number
+  assessment_scale_min: number
+  assessment_scale_max: number
+  similar_market_min_signals: number
+  similar_market_min_trades: number
 }
 
 export interface CircuitBreakerStateOut {

@@ -21,6 +21,7 @@ from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.ingestion.models import ApiDailyCounterRow  # registers the table
 from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow, PositionRow
+from freqpred.metrics.models import SignalAssessmentRow, SourceQualityScoreRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
 from freqpred.strategy.models import RuntimeConfigOverrideRow  # registers the table
@@ -58,6 +59,8 @@ def test_all_tables_registered():
         "fetcher_rate_limits",
         "run_state",
         "runtime_config_overrides",
+        "source_quality_scores",
+        "signal_assessments",
     }
     registered = set(Base.metadata.tables.keys())
     assert expected == registered
@@ -218,6 +221,45 @@ def test_document_row_instantiation():
     assert row.source_type == "news"
     assert row.summary is None
     assert len(row.embedding) == 384
+
+
+def test_source_quality_score_row_table_name():
+    assert SourceQualityScoreRow.__tablename__ == "source_quality_scores"
+
+
+def test_source_quality_score_row_instantiation():
+    row = SourceQualityScoreRow(
+        source_name="Reuters",
+        market_category="politics",
+        lookback_days=90,
+        weighted_brier=0.143,
+        overall_brier=0.171,
+        n_signals=25,
+        total_doc_uses=81,
+    )
+    assert row.source_name == "Reuters"
+    assert row.market_category == "politics"
+
+
+def test_signal_assessment_row_table_name():
+    assert SignalAssessmentRow.__tablename__ == "signal_assessments"
+
+
+def test_signal_assessment_row_instantiation():
+    row = SignalAssessmentRow(
+        signal_id=SIGNAL_ID,
+        trust_score=0.62,
+        size_multiplier=1.048,
+        verdict="size_up",
+        reasoning="Family history is stronger than baseline.",
+        key_factors=["Strong family match"],
+        warnings=[],
+        source_breakdown=[],
+        similar_market_summary={"available": True},
+        llm_query_id=None,
+    )
+    assert row.signal_id == SIGNAL_ID
+    assert row.verdict == "size_up"
 
 
 def test_document_row_source_url_unique():

@@ -237,6 +237,10 @@ def _strategy_config_to_out(cfg: object) -> StrategyConfigOut:
         max_spread=cfg.max_spread,
         block_reentry_after_stoploss=cfg.block_reentry_after_stoploss,
         stoploss_cooldown_hours=cfg.stoploss_cooldown_hours,
+        assessment_scale_min=cfg.assessment_scale_min,
+        assessment_scale_max=cfg.assessment_scale_max,
+        similar_market_min_signals=cfg.similar_market_min_signals,
+        similar_market_min_trades=cfg.similar_market_min_trades,
     )
 
 

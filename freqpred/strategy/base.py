@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from freqpred.markets.models import Market, Position
+    from freqpred.metrics.models import SignalAssessment
     from freqpred.signal.models import Signal
     from freqpred.strategy.config import StrategyConfig
 
@@ -51,14 +52,17 @@ class IPredictionStrategy(ABC):
         signal: Signal,
         bankroll: float,
         existing_market_exposure: float = 0.0,
+        assessment: "SignalAssessment | None" = None,
     ) -> float:
         """Confidence-blended Kelly sizing, returning only the *incremental*
         exposure needed beyond what is already open in this market.
 
-        Computes the ideal total exposure for the current signal, then subtracts
+        Computes the ideal total exposure for the current signal, applies the
+        optional assessment multiplier to that total target, then subtracts
         ``existing_market_exposure``.  A new position is only sized if the new
-        signal justifies *more* total exposure than what's already deployed —
-        i.e., edge or conviction must have increased to trigger a double-down.
+        assessed target justifies *more* total exposure than what's already
+        deployed — i.e., edge, conviction, or trust has increased enough to
+        trigger a double-down.
 
         Uses the correct Kelly formula for binary prediction market contracts:
             B     = (1 - p_market) / p_market   # net payout odds
@@ -71,6 +75,18 @@ class IPredictionStrategy(ABC):
 
         Override for custom sizing logic.
         """
+        base_ideal_total = self._ideal_total_exposure(signal, bankroll)
+        multiplier = assessment.size_multiplier if assessment is not None else 1.0
+        adjusted_ideal_total = base_ideal_total * multiplier
+        incremental = adjusted_ideal_total - existing_market_exposure
+        return max(incremental, 0.0)
+
+    def _ideal_total_exposure(
+        self,
+        signal: Signal,
+        bankroll: float,
+    ) -> float:
+        """Return the unadjusted Kelly target exposure for the signal."""
         if signal.direction == "NO":
             p_market = 1.0 - (signal.estimated_probability + signal.edge)
             p_est = 1.0 - signal.estimated_probability
@@ -85,10 +101,7 @@ class IPredictionStrategy(ABC):
         # max_exposure_per_market is the per-market budget; Kelly scales within it.
         # Max possible position = kelly_fraction × max_exposure × bankroll.
         market_budget = bankroll * self.config.max_exposure_per_market
-        ideal_total = f_star * self.config.kelly_fraction * market_budget
-        # Only size the incremental amount beyond existing exposure.
-        incremental = ideal_total - existing_market_exposure
-        return max(incremental, 0.0)
+        return f_star * self.config.kelly_fraction * market_budget
 
     def is_market_interesting(self, market: Market) -> bool:
         """Return True if this strategy wants the ingestion pipeline to monitor this market.

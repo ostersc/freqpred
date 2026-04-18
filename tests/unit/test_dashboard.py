@@ -17,6 +17,7 @@ import freqpred.alerts.models     # noqa: F401
 import freqpred.ingestion.models  # noqa: F401
 import freqpred.llm.models        # noqa: F401
 import freqpred.markets.models    # noqa: F401
+import freqpred.metrics.models    # noqa: F401
 import freqpred.rag.models        # noqa: F401
 import freqpred.signal.models     # noqa: F401
 import freqpred.strategy.models   # noqa: F401
@@ -463,6 +464,10 @@ def test_get_strategy_config_returns_all_fields() -> None:
     assert "trailing_stop" in data
     assert "max_exposure_per_market" in data
     assert "block_reentry_after_stoploss" in data
+    assert data["assessment_scale_min"] == pytest.approx(0.80)
+    assert data["assessment_scale_max"] == pytest.approx(1.20)
+    assert data["similar_market_min_signals"] == 10
+    assert data["similar_market_min_trades"] == 5
 
 
 def test_get_strategy_config_no_active_run_returns_503() -> None:
@@ -499,6 +504,44 @@ def test_put_strategy_config_updates_mutable_fields() -> None:
 
     assert resp.status_code == 200
     assert resp.json()["min_edge"] == pytest.approx(0.22)
+
+
+def test_put_strategy_config_updates_assessment_fields() -> None:
+    cfg = _make_strategy_config()
+    mock_strategy = MagicMock()
+    mock_strategy.config = cfg
+
+    no_override_row = MagicMock()
+    no_override_row.scalar_one_or_none.return_value = None
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _run_state_result("TestStrategy"),
+        _overrides_result({}),
+        _overrides_result({}),
+        no_override_row,
+    )
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    with patch("freqpred.strategy.loader.load_strategy", return_value=mock_strategy):
+        client = TestClient(_make_app(session))
+        resp = client.put(
+            "/api/strategy/config",
+            json={
+                "assessment_scale_min": 0.75,
+                "assessment_scale_max": 1.30,
+                "similar_market_min_signals": 12,
+                "similar_market_min_trades": 6,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["assessment_scale_min"] == pytest.approx(0.75)
+    assert data["assessment_scale_max"] == pytest.approx(1.30)
+    assert data["similar_market_min_signals"] == 12
+    assert data["similar_market_min_trades"] == 6
 
 
 def test_put_strategy_config_rejects_immutable_fields() -> None:

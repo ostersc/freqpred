@@ -8,6 +8,7 @@ from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.markets.models import MarketRow
+from freqpred.metrics.models import SourceQualityScoreRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
 
@@ -35,6 +36,7 @@ async def compute_calibration(
     session: AsyncSession,
     mode: str = "paper",  # kept for API compat; signals are mode-agnostic
     lookback_days: int | None = None,
+    market_category: str | None = None,
 ) -> CalibrationReport:
     """Compute Brier score over all signals for finalized markets.
 
@@ -47,6 +49,7 @@ async def compute_calibration(
         mode: Unused; kept for API compatibility with callers that pass mode.
         lookback_days: Only include signals created within the last N days.
                        None means all-time.
+        market_category: Optional MarketRow.category filter. None means all categories.
     """
     resolution_expr = case((MarketRow.result == "yes", 1), else_=0).label("resolution")
 
@@ -59,6 +62,8 @@ async def compute_calibration(
     if lookback_days is not None:
         cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
         where_clauses.append(SignalRow.created_at >= cutoff)
+    if market_category is not None:
+        where_clauses.append(MarketRow.category == market_category)
 
     stmt = (
         select(
@@ -169,6 +174,7 @@ async def compute_source_brier_scores(
     session: AsyncSession,
     lookback_days: int | None = None,
     min_docs: int = 0,
+    market_category: str | None = None,
 ) -> list[SourceBrierScore]:
     """Compute a weighted Brier score for each document source name.
 
@@ -187,6 +193,7 @@ async def compute_source_brier_scores(
                   qualifying signals is below this threshold.  Use to filter
                   out the long tail of low-volume sources whose scores are
                   statistically unreliable.
+        market_category: Optional MarketRow.category filter. None means all categories.
 
     Returns:
         List of SourceBrierScore, sorted ascending by weighted_brier_score
@@ -202,6 +209,8 @@ async def compute_source_brier_scores(
     if lookback_days is not None:
         cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
         where_clauses.append(SignalRow.created_at >= cutoff)
+    if market_category is not None:
+        where_clauses.append(MarketRow.category == market_category)
 
     resolution_expr = case((MarketRow.result == "yes", 1), else_=0)
 
@@ -284,6 +293,61 @@ async def compute_source_brier_scores(
 
     scores.sort(key=lambda s: s.weighted_brier_score)
     return scores
+
+
+async def refresh_source_quality_scores(
+    session: AsyncSession,
+    lookback_days: int = 90,
+) -> int:
+    """Write one rolling snapshot row per source/category pair plus the global row.
+
+    Caller owns commit/rollback.
+    """
+    distinct_categories_result = await session.execute(
+        select(MarketRow.category)
+        .join(SignalRow, SignalRow.market_id == MarketRow.id)
+        .where(
+            MarketRow.status == "finalized",
+            MarketRow.result.is_not(None),
+            SignalRow.model_used != "demo_harness",
+            SignalRow.prompt_version != "demo",
+        )
+        .distinct()
+        .order_by(MarketRow.category)
+    )
+    categories = [row[0] for row in distinct_categories_result.all()]
+
+    rows_written = 0
+    for market_category in [None, *categories]:
+        calibration = await compute_calibration(
+            session,
+            lookback_days=lookback_days,
+            market_category=market_category,
+        )
+        if calibration.n_samples == 0:
+            continue
+
+        scores = await compute_source_brier_scores(
+            session,
+            lookback_days=lookback_days,
+            market_category=market_category,
+        )
+        for score in scores:
+            session.add(
+                SourceQualityScoreRow(
+                    source_name=score.source_name,
+                    market_category=market_category,
+                    lookback_days=lookback_days,
+                    weighted_brier=score.weighted_brier_score,
+                    overall_brier=calibration.brier_score,
+                    n_signals=score.n_signals,
+                    total_doc_uses=score.total_doc_appearances,
+                )
+            )
+            rows_written += 1
+
+    await session.flush()
+    return rows_written
 
 
 def _empty_buckets() -> list[CalibrationBucket]:

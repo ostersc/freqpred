@@ -155,6 +155,7 @@ async def upsert_document(
     llm_client: LLMClient | None = None,
     query_text: str = "",
     market_question: str = "",
+    summary_model: str | None = None,
 ) -> tuple[Document, UpsertStatus]:
     """Embed and upsert a document, skipping re-embedding if content unchanged.
 
@@ -169,6 +170,7 @@ async def upsert_document(
         llm_client:       Optional LLM client for body summarization.
         query_text:       Catalyst query that retrieved this document (for prompt context).
         market_question:  Full market question (for BM25 gate + summarizer prompt).
+        summary_model:    Optional model override for the body summarizer.
 
     Returns:
         A (Document, UpsertStatus) tuple. Status is INSERTED for new docs,
@@ -241,7 +243,13 @@ async def upsert_document(
 
         if bm25_score >= _MIN_BM25_SCORE:
             from freqpred.ingestion.body_summarizer import summarize_body
-            summary = await summarize_body(raw_doc, query_text, market_question, llm_client)
+            summary = await summarize_body(
+                raw_doc,
+                query_text,
+                market_question,
+                llm_client,
+                model=summary_model or "claude-haiku-4-5-20251001",
+            )
             if summary is not None:
                 raw_doc.summary = summary
                 log.debug(

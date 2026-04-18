@@ -367,6 +367,15 @@ class StrategyConfig:
     # Block re-entry into a market for this many hours after a stoploss or
     # trailing_stop exit. Set to 0.0 to disable. Ignored if
     # block_reentry_after_stoploss is True.
+
+    # --- Assessment-driven sizing controls ---
+    assessment_scale_min: float = 0.80
+    assessment_scale_max: float = 1.20
+    similar_market_min_signals: int = 10
+    similar_market_min_trades: int = 5
+    # T57 maps a trust_score from the judgment model into this multiplier range.
+    # Similar-market history is only considered available once at least one of
+    # these minimums is met for the matched market family.
 ```
 
 ### Document (RAG Store)
@@ -459,7 +468,7 @@ class CatalystQuery:
 - **Generation 1:** market question + market metadata (close_time, category, description from Kalshi)
 - **Generation 2+:** same as above, plus the top-K documents most recently retrieved for this market's existing catalyst queries (RAG pull). This lets the LLM refine or add catalysts based on what has actually been appearing in the news.
 
-**Catalyst generation model:** Claude Haiku (cheap) — this is a reasoning task, not primary signal analysis. Logged to `llm_queries` with `query_type="catalyst_generation"`.
+**Catalyst generation model:** use the configured `cheap_model` lane (default: Claude Haiku). This is a reasoning task, not primary signal analysis. Logged to `llm_queries` with `query_type="catalyst_generation"`.
 
 **Dual-format query generation:** The catalyst generator prompt asks Haiku to produce both a `query_text` (natural-language web search string for Tavily/NewsAPI/GDELT/Reddit) and a `tv_query` (Solr/Lucene boolean syntax for the Internet Archive TV search). The LLM response is a JSON array of objects with both fields. `tv_query` may be `null` for catalysts where TV transcripts are not a useful signal. The TV query uses AND/OR/phrase syntax to precisely target what needs to be *said* on air, not just discussed in text — particularly valuable for word-mention markets and markets about public statements by named individuals.
 
@@ -613,14 +622,21 @@ class IPredictionStrategy(ABC):
         """Return True if this signal warrants opening a new position."""
         ...
 
-    def position_size(self, signal: Signal, bankroll: float, assessment: SignalAssessment | None = None) -> float:
-        """Return dollar amount to risk on this position (before risk capping).
+    def position_size(
+        self,
+        signal: Signal,
+        bankroll: float,
+        existing_market_exposure: float = 0.0,
+        assessment: SignalAssessment | None = None,
+    ) -> float:
+        """Return the incremental dollar exposure to add (before risk capping).
 
-        assessment is provided by order_manager after assess_signal_sources()
-        runs between should_trade and position_size.  The default implementation
-        applies assessment.size_multiplier to the Kelly result.  assessment is
-        None when no source quality data is available (neutral: multiplier=1.0).
-        Existing overrides that omit the assessment parameter continue to work.
+        order_manager passes current open exposure for the market and, when
+        available, a T57 SignalAssessment produced after should_trade().
+        The default implementation computes the ideal total Kelly exposure,
+        applies assessment.size_multiplier to that target, then subtracts
+        existing_market_exposure and floors at 0.0. Legacy overrides that only
+        accept 2 or 3 arguments continue to work unchanged.
         """
         ...
 
@@ -893,7 +909,9 @@ This two-pass approach keeps social signal cost-efficient: a cheap summarization
 
 ### LLM Configuration
 
-- **Primary model:** `claude-sonnet-4-6`; cheap model: `claude-haiku-4-5` — best reasoning/cost tradeoff
+- **primary_model:** market probability analysis (default `claude-sonnet-4-6`)
+- **cheap_model:** catalyst generation, body/social summarization, and daily digests (default `claude-haiku-4-5-20251001`)
+- **judgment_model:** trade sizing and future trade-override judgment tasks (default `claude-opus-4-6`)
 - **Output format:** Structured JSON via tool use (not free-form text parsing)
 - **Prompt versioning:** Prompts are versioned and stored; every signal logs the prompt version used
 - **Caching:** Signal results cached by `(market_id, prompt_version, retrieval_hash)` — same market won't be re-analyzed unless new evidence is retrieved
@@ -956,15 +974,19 @@ Key design properties:
 - `kelly_fraction` controls overall aggression (quarter-Kelly = 0.25 is default). Lowering it shrinks all positions proportionally.
 - If `f* ≤ 0` (no edge after confidence blending), `position_size` returns 0.
 
-**Source quality multiplier** (T57): after `should_trade` passes, `order_manager.submit()` calls `assess_signal_sources()` which looks up the latest `source_quality_scores` snapshot for each source name used in the signal's evidence documents. A Claude Haiku call produces a `SignalAssessment` with a `size_multiplier` derived from the share-weighted average Brier delta vs the overall baseline:
+**Trade sizing judgment** (T57): after `should_trade` passes, `order_manager.submit()` calls `assess_signal_context()` before sizing. The assessment combines two inputs:
+
+- latest `source_quality_scores` snapshot rows for the sources used in the signal's evidence documents
+- similar-market history for the market family (`series_ticker` match, with exact first-line question matches tracked as a stricter subset)
+
+The structured summary is sent to the configured **judgment model** (default: Claude Opus). The model returns a `SignalAssessment` containing `trust_score`, `verdict`, and reasoning; framework code maps `trust_score` linearly into `[assessment_scale_min, assessment_scale_max]` and clamps it:
 
 ```
-weighted_delta = Σ (share_i × (source_brier_i - overall_brier))
-multiplier     = 1.0 - (weighted_delta / source_quality_delta_threshold) × (scale_range / 2)
-               clamped to [source_quality_scale_min, source_quality_scale_max]
+adjusted_ideal_total = base_ideal_total × assessment.size_multiplier
+incremental_size     = max(adjusted_ideal_total - existing_market_exposure, 0)
 ```
 
-Defaults: `scale_min=0.80`, `scale_max=1.20`, `delta_threshold=0.05`. Sources well below the baseline (negative delta) increase position size up to 20%; sources above the baseline reduce it down to 20%. The LLM call is skipped and `multiplier=1.0` when no quality snapshot data exists for the signal's sources. The probability estimate is **never modified** — the multiplier only affects sizing.
+This is sizing-only. The probability estimate and trade direction are never modified. When neither source-quality nor similar-market history is available, the LLM call is skipped and a neutral assessment is persisted with `trust_score=0.5` and `size_multiplier=1.0`. `source_quality_scores` is refreshed on its own daily scheduler; similar-market history is computed on demand at assessment time.
 
 ### Circuit Breakers
 
@@ -1191,12 +1213,13 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [ ] **T47** [#47](https://github.com/ostersc/freqpred/issues/47) — `OrderTypes` config + limit order entry: `OrderTypes` dataclass on `StrategyConfig`; `custom_entry_price()` hook; entry at `estimated_prob - min_edge`; pending position fill-check + timeout cancellation; paper mode only.
 - [ ] **T48** [#48](https://github.com/ostersc/freqpred/issues/48) — Limit order exits + exchange-hosted stoploss: `exit=limit` posts resting ROI/trailing targets; `custom_exit_price()` hook; `stoploss_on_exchange` with interval refresh; emergency/circuit-breaker always market. Depends on: T47.
 - [x] **T49** [#49](https://github.com/ostersc/freqpred/issues/49) — `IAlgoStrategy`: DataFrame-driven exits via WebSocket tick data; freqtrade-style `populate_indicators()` + `populate_exit_trend()` hooks; OHLC candle buffer per market; `force_exit()` reads `exit_long` column; `PositionMonitor.on_tick()` feeds ticks to algo strategy buffers. OHLC is direction-corrected before being passed to `populate_indicators`/`populate_exit_trend`: NO positions receive inverted candles (`no_high = 1 - yes_low`, `no_low = 1 - yes_high`) so that indicator logic (RSI, EMA crossovers, etc.) operates on contract value from the holder's perspective. Candle cache is keyed by `(market_id, direction)` so YES and NO positions maintain independent OHLC series. Depends on: T39.
-- [ ] **T57** [#57](https://github.com/ostersc/freqpred/issues/57) — Source quality trust assessment: `source_quality_scores` table (daily rolling snapshot per source name × market category); `signal_assessments` table (one row per assessed signal); `assess_signal_sources()` in `freqpred/metrics/assessment.py` called between `should_trade` and `position_size` in `order_manager.submit()` — only fires when the strategy intends to trade; Claude Haiku assesses evidence quality from source Brier deltas vs overall baseline and returns a `SignalAssessment` with `size_multiplier`; default `position_size()` on `IPredictionStrategy` applies multiplier (share-weighted delta mapped linearly to `[source_quality_scale_min, source_quality_scale_max]`); neutral (`multiplier=1.0`) when no quality data exists; LLM call skipped in that case; `StrategyConfig` gains `source_quality_scale_min/max/delta_threshold` fields. Depends on: T56.
+- [ ] **T57** [#57](https://github.com/ostersc/freqpred/issues/57) — Trade sizing judgment: `source_quality_scores` table (daily rolling snapshot per source name × market category) plus `signal_assessments` table (append-only, one row per assessed signal); `assess_signal_context()` in `freqpred/metrics/assessment.py` runs between `should_trade` and `position_size` in `order_manager.submit()`; assessment combines source-quality history and similar-market family history (`series_ticker`, plus exact-question subset stats), then uses the configured `judgment_model` (default Opus) to return `trust_score`, `verdict`, and reasoning; framework maps trust score into `[assessment_scale_min, assessment_scale_max]`; default `position_size()` applies the multiplier to ideal total exposure before subtracting `existing_market_exposure`; neutral assessment when no usable history exists and the LLM call is skipped. `StrategyConfig` gains `assessment_scale_min/max` and `similar_market_min_signals/trades`. Depends on: T56.
 - [ ] **T50** [#50](https://github.com/ostersc/freqpred/issues/50) — LLM-assisted exit analysis: `should_request_llm_exit()` predicate + `llm_exit_check()` async hook on `IAlgoStrategy`; PositionMonitor calls LLM when predicate fires; prompt includes candle metrics + P&L; response logged to `llm_queries`. Depends on: T49.
 - [x] **T51** [#51](https://github.com/ostersc/freqpred/issues/51) — TV chyron ingestion via Internet Archive Third Eye API + realtime scheduler: `tv_chyron.py` fetcher (`fetch_all`, `parse_and_groups`, `filter_chyrons`); new `realtime_scheduler.py` runs chyrons and Truth Social account feeds every 5 min (moved from main scheduler); `backoff.py` `tick_and_load` gains `services` filter so each scheduler manages its own counters independently; `ingestion.tv_chyron_enabled` and `ingestion.realtime_interval_seconds` config keys added.
 - [x] **T61** [#61](https://github.com/ostersc/freqpred/issues/61) — Dashboard: force-exit positions from Positions page; `POST /api/positions/{id}/force-exit` endpoint; "Force Exit" button in expanded detail panel (open positions only) with confirmation dialog; invalidates TanStack Query cache on success. `OrderManager.force_exit()` centralizes paper/live exit logic; API server embedded in `freqpred run`; `freqpred dashboard` is dev-only Vite launcher.
 - [x] **T62** [#62](https://github.com/ostersc/freqpred/issues/62) — Dashboard: market browser page; `GET /api/markets`, `GET /api/markets/{id}`, `POST /api/markets/{id}/analyze`; new Markets page with search, expandable rows showing full market detail + current signal, "Analyze now" button triggers signal pipeline and refreshes panel; 429 cooldown if analyzed within 60 s.
 - [x] **T64** [#64](https://github.com/ostersc/freqpred/issues/64) — Dashboard: strategy decision analysis page; `GET /api/strategy-decisions` with filters (strategy, exit_reason prefix, ticker_prefix ILIKE, date_from/to) and pagination; per-row exit counterfactual P&L (`our_side_win_value − entry_price`) and exit Δ vs hold (`exit_price − our_side_win_value`); entry efficiency loss vs best prior signal with `edge > 0` (`best_prior_ask − entry_price`); symmetric for YES/NO via side-specific `signals.market_ask_at_signal`. Extracts `PriceTimeline` + `SignalDetail` + `SelectedSignalPanel` into shared components and adds exit-event reference lines (vertical at `exit_time`, horizontal at exit price, NO-flipped) — benefit flows back to Positions page closed rows. Adds `exit_reason` to `PositionOut`.
+- [ ] **T65** [#65](https://github.com/ostersc/freqpred/issues/65) — Dashboard: signal assessment visibility for source quality + similar-market trust; expose persisted assessment summary and `llm_query_id` on signal/position detail APIs; add dashboard card showing trust score, implied size effect, source-quality summary, similar-market summary, warnings, and a link to the existing LLM audit detail. Depends on: T57.
 
 **`OrderTypes` interface** (strategy-level, all fields have defaults — existing strategies unchanged):
 ```python

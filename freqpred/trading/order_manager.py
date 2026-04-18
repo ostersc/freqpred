@@ -1,6 +1,7 @@
 """Order manager: paper and live trade execution with risk enforcement."""
 from __future__ import annotations
 
+import inspect
 import math
 import os
 from typing import TYPE_CHECKING
@@ -18,6 +19,8 @@ from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
 
 if TYPE_CHECKING:
     from freqpred.markets.kalshi import KalshiClient
+    from freqpred.llm.client import LLMClient
+    from freqpred.metrics.models import SignalAssessment
 
 logger = structlog.get_logger(__name__)
 
@@ -39,6 +42,8 @@ class OrderManager:
         mode: str,
         strategy_version: str = "1.0",
         kalshi_client: KalshiClient | None = None,
+        llm_client: LLMClient | None = None,
+        judgment_model: str | None = None,
     ) -> None:
         self._risk = risk
         self._session_factory = session_factory
@@ -46,6 +51,41 @@ class OrderManager:
         self._mode = mode
         self._strategy_version = strategy_version
         self._kalshi_client = kalshi_client
+        self._llm_client = llm_client
+        self._judgment_model = judgment_model
+
+    @staticmethod
+    def _call_position_size(
+        strategy: IPredictionStrategy,
+        signal: Signal,
+        bankroll: float,
+        existing_market_exposure: float,
+        assessment: "SignalAssessment | None",
+    ) -> float:
+        """Call strategy.position_size() without breaking legacy overrides."""
+        method = strategy.position_size
+        signature = inspect.signature(method)
+        params = signature.parameters
+        has_var_args = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values())
+        has_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        positional_params = [
+            p
+            for p in params.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+
+        call_kwargs: dict[str, SignalAssessment | float | None] = {}
+        if "assessment" in params or has_var_kwargs:
+            call_kwargs["assessment"] = assessment
+
+        if "existing_market_exposure" in params:
+            call_kwargs["existing_market_exposure"] = existing_market_exposure
+            return method(signal, bankroll, **call_kwargs)
+
+        if len(positional_params) >= 3 or has_var_args:
+            return method(signal, bankroll, existing_market_exposure, **call_kwargs)
+
+        return method(signal, bankroll, **call_kwargs)
 
     async def submit(
         self,
@@ -57,7 +97,7 @@ class OrderManager:
 
         0. Liquidity gate: spread > max_spread → return None
         1. strategy.should_trade(signal, market) → if False, return None
-        2. strategy.position_size(signal, bankroll) → raw_size
+        2. Optional signal assessment → assessment-aware position_size(...) → raw_size
         3. risk.check_position(session, signal, raw_size, bankroll)
            → if not allowed, log reason and return None
            → use decision.capped_size as final size
@@ -116,8 +156,27 @@ class OrderManager:
             )
             existing_market_exposure: float = float(existing_exposure_result.scalar_one())
 
+            assessment = None
+            if self._llm_client is not None and self._judgment_model:
+                from freqpred.metrics.assessment import assess_signal_context  # noqa: PLC0415
+
+                assessment = await assess_signal_context(
+                    session,
+                    signal,
+                    market,
+                    strategy,
+                    self._llm_client,
+                    self._judgment_model,
+                )
+
             # Step 2: raw position size (uses net bankroll so Kelly sizing shrinks with losses)
-            raw_size = strategy.position_size(signal, net_bankroll, existing_market_exposure)
+            raw_size = self._call_position_size(
+                strategy,
+                signal,
+                net_bankroll,
+                existing_market_exposure,
+                assessment,
+            )
             if raw_size <= 0.0 and existing_market_exposure > 0.0:
                 logger.info(
                     "order_manager.no_incremental_edge",

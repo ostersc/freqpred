@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from freqpred.markets.models import Market
+from freqpred.metrics.models import SignalAssessment
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
@@ -216,6 +217,28 @@ class TestConservativeDefaultPositionSize:
         # Already deployed the high-conviction amount; lower conviction wants less → 0.
         result = self.strategy.position_size(sig_low, bankroll=1000.0, existing_market_exposure=high_ideal)
         assert result == 0.0
+
+    def test_assessment_multiplier_applies_before_existing_exposure_subtraction(self) -> None:
+        sig = _signal(edge=0.20, estimated_probability=0.60)
+        base_total = self.strategy.position_size(sig, bankroll=1000.0, existing_market_exposure=0.0)
+        assert base_total > 0.0
+
+        assessment = SignalAssessment(
+            signal_id=sig.id,
+            trust_score=0.75,
+            size_multiplier=1.10,
+            verdict="size_up",
+            reasoning="test",
+        )
+        existing = base_total / 2.0
+        adjusted_incremental = self.strategy.position_size(
+            sig,
+            bankroll=1000.0,
+            existing_market_exposure=existing,
+            assessment=assessment,
+        )
+        expected = (base_total * 1.10) - existing
+        assert adjusted_incremental == pytest.approx(expected, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

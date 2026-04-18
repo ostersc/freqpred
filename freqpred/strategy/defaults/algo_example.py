@@ -158,7 +158,6 @@ class AlgoExampleStrategy(IAlgoStrategy):
             outside_safe=bool(outside_safe.iloc[-1]),
             range_=round(last["range_"], 4),
             body=round(last["body"], 4),
-            chop_thresh=_CHOPPINESS_THRESHOLD,
             per_candle_choppy=bool(per_candle_choppy.iloc[-1]),
             sustained_choppy=bool(sustained_choppy.iloc[-1]),
             exit=bool(df["exit_long"].iloc[-1]),

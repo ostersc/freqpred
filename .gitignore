@@ -60,3 +60,4 @@ strategies/*
 # Node / frontend
 freqpred/dashboard/ui/node_modules/
 freqpred/dashboard/ui/dist/
+AGENTS.md

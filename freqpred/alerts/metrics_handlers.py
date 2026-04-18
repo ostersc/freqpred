@@ -652,7 +652,13 @@ def register_metrics_commands(
             return "Digest unavailable: LLM client not configured."
 
         async with session_factory() as session:
-            return await generate_daily_digest(session, llm_client, trading_mode=mode, bankroll=config.trading.bankroll_usd)
+            return await generate_daily_digest(
+                session,
+                llm_client,
+                trading_mode=mode,
+                bankroll=config.trading.bankroll_usd,
+                model=config.anthropic.cheap_model,
+            )
 
     # ------------------------------------------------------------------ #
     # Register all handlers

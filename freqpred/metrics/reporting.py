@@ -32,6 +32,7 @@ async def generate_daily_digest(
     llm_client: LLMClient,
     trading_mode: str = "paper",
     bankroll: float = 0.0,
+    model: str = _HAIKU_MODEL,
 ) -> str:
     """
     Assembles a structured data snapshot (open positions, yesterday P&L,
@@ -242,7 +243,7 @@ async def generate_daily_digest(
 
     response = await llm_client.complete(
         prompt=prompt,
-        model=_HAIKU_MODEL,
+        model=model,
         query_type="daily_digest",
         system=_DIGEST_SYSTEM,
         max_tokens=300,
@@ -281,6 +282,7 @@ async def run_digest_scheduler(
     digest_timezone: str = "America/New_York",
     trading_mode: str = "paper",
     bankroll: float = 0.0,
+    model: str = _HAIKU_MODEL,
 ) -> None:
     """Background task: generate and send the daily digest at the configured time.
 
@@ -301,7 +303,13 @@ async def run_digest_scheduler(
 
         try:
             async with session_factory() as session:
-                digest = await generate_daily_digest(session, llm_client, trading_mode=trading_mode, bankroll=bankroll)
+                digest = await generate_daily_digest(
+                    session,
+                    llm_client,
+                    trading_mode=trading_mode,
+                    bankroll=bankroll,
+                    model=model,
+                )
             await alert_dispatcher.digest_alert(digest)
             log.info("digest_scheduler.sent")
         except asyncio.CancelledError:

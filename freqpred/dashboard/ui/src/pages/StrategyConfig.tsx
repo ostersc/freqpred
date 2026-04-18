@@ -124,6 +124,10 @@ export default function StrategyConfig() {
               ['max_mid_price', 'Max mid price'],
               ['max_spread', 'Max spread'],
               ['stoploss_cooldown_hours', 'Stoploss cooldown (hours)'],
+              ['assessment_scale_min', 'Assessment scale min'],
+              ['assessment_scale_max', 'Assessment scale max'],
+              ['similar_market_min_signals', 'Similar-market min signals'],
+              ['similar_market_min_trades', 'Similar-market min trades'],
             ] as [NumericKey, string][]
           ).map(([key, label]) => (
             <Field key={key} label={label}>
