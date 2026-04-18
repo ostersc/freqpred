@@ -125,6 +125,18 @@ def _signal_row_to_out(row: SignalRow, market_question: str | None = None) -> Si
     )
 
 
+def _effective_mid(mid_price: float, yes_bid: float, yes_ask: float, last_price: float) -> float:
+    """Return the best available mid price for unrealized P&L calculation.
+
+    When a market stops trading, Kalshi clears the order book (yes_bid→0, yes_ask→1.0)
+    before writing the result field.  mid_price computed from (0+1)/2=0.5 is misleading;
+    last_price (the last actual trade) is a far better proxy for the true settlement value.
+    """
+    if yes_bid == 0.0 and yes_ask >= 0.95 and last_price > 0.0:
+        return last_price
+    return mid_price
+
+
 def _position_row_to_out(row: PositionRow, current_mid: float | None = None) -> PositionOut:
     unrealized_pnl: float | None = None
     unrealized_pnl_pct: float | None = None
@@ -336,7 +348,7 @@ async def list_positions(
 ) -> PositionListResponse:
     app_mode = await _get_mode(session)
     stmt = (
-        select(PositionRow, MarketRow.mid_price)
+        select(PositionRow, MarketRow.mid_price, MarketRow.yes_bid, MarketRow.yes_ask, MarketRow.last_price)
         .outerjoin(MarketRow, MarketRow.id == PositionRow.market_id)
         .where(PositionRow.mode == app_mode)
         .order_by(PositionRow.entry_time.desc())
@@ -351,7 +363,14 @@ async def list_positions(
     rows = (await session.execute(stmt)).all()
 
     return PositionListResponse(
-        items=[_position_row_to_out(r, current_mid=mid) for r, mid in rows],
+        items=[
+            _position_row_to_out(
+                r,
+                current_mid=_effective_mid(mid, yes_bid or 0.0, yes_ask or 0.0, last_price or 0.0)
+                if mid is not None else None,
+            )
+            for r, mid, yes_bid, yes_ask, last_price in rows
+        ],
         total=total,
     )
 
@@ -396,7 +415,10 @@ async def get_position_detail(
         await session.execute(select(MarketRow).where(MarketRow.id == pos_row.market_id))
     ).scalar_one_or_none()
     market_question = market_row.question if market_row else None
-    current_mid = market_row.mid_price if market_row else None
+    current_mid = (
+        _effective_mid(market_row.mid_price, market_row.yes_bid, market_row.yes_ask, market_row.last_price)
+        if market_row else None
+    )
 
     # Fetch entry signal + document links
     entry_signal_uid = pos_row.signal_id

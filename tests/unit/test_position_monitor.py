@@ -502,6 +502,67 @@ class TestEvaluateExit:
             "NO position winning (market resolved NO) should exit at 1.0, not 0.0"
         )
 
+    def test_phantom_zero_suppressed_yes_position_last_price_high(self) -> None:
+        """YES position: yes_bid=0 but last_price=0.99 → phantom zero, stoploss suppressed.
+
+        Kalshi clears the order book before writing result.  The last actual trade at 0.99
+        proves the market resolved YES; the bid of 0 is an artifact of an empty book, not
+        a genuine price.  We must hold until market.result is populated.
+        """
+        strategy = _make_strategy(stoploss=-0.10)
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.53, direction="YES")
+        market = _make_market(mid_price=0.5)
+        market.yes_bid = 0.0
+        market.yes_ask = 1.0
+        market.last_price = 0.99
+        market.result = None
+        market.status = "closed"
+
+        result = monitor.evaluate_exit(
+            position=pos, market=market, current_price=0.0, strategy=strategy
+        )
+        assert result is None, "Phantom zero (last_price=0.99, yes_bid=0) must not fire stoploss"
+
+    def test_real_zero_yes_position_stoploss_fires(self) -> None:
+        """YES position: yes_bid=0 and last_price=0.01 → genuine collapse, stoploss fires."""
+        strategy = _make_strategy(stoploss=-0.10)
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.53, direction="YES")
+        market = _make_market(mid_price=0.01)
+        market.yes_bid = 0.0
+        market.yes_ask = 0.02
+        market.last_price = 0.01
+        market.result = None
+
+        result = monitor.evaluate_exit(
+            position=pos, market=market, current_price=0.0, strategy=strategy
+        )
+        assert result is not None
+        assert result[0] == "stoploss"
+
+    def test_phantom_zero_suppressed_no_position_last_price_low(self) -> None:
+        """NO position: yes_ask=1.0 (empty book) + last_price=0.01 → phantom zero, suppressed.
+
+        If Kalshi defaults yes_ask to 1.0 on an empty book even after NO resolution, the
+        no_bid computes to 0.  last_price=0.01 proves the last YES trade was near zero
+        (YES lost, NO won) — the NO position is a winner, stoploss must be suppressed.
+        """
+        strategy = _make_strategy(stoploss=-0.10)
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.47, direction="NO")
+        market = _make_market(mid_price=0.5)
+        market.yes_bid = 0.0
+        market.yes_ask = 1.0
+        market.last_price = 0.01
+        market.result = None
+        market.status = "closed"
+
+        result = monitor.evaluate_exit(
+            position=pos, market=market, current_price=0.0, strategy=strategy
+        )
+        assert result is None, "Phantom zero (last_price=0.01, no_bid=0) must not fire stoploss"
+
     def test_no_exit_when_conditions_not_met(self) -> None:
         strategy = _make_strategy(stoploss=-0.20)
         monitor = self._monitor(strategy)

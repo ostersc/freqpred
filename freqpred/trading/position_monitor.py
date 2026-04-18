@@ -263,6 +263,42 @@ class PositionMonitor:
             wins = position.direction.upper() == market.result.upper()
             return ("market_resolved", 1.0 if wins else 0.0)
 
+        # 0.5. Phantom zero guard: after a market stops trading, Kalshi clears the order book
+        # before the result field is committed. This creates a window where bid → 0 even though
+        # the last actual trade was nowhere near zero. Use last_price (last traded price) as the
+        # "was this a real trade at zero?" sentinel — a genuine collapse to zero requires actual
+        # trades near zero, which would show up in last_price.
+        #
+        # YES position: yes_bid → 0 when the order book empties. If the last trade was near 1.0,
+        # the market resolved YES — suppress stoploss and wait for market.result.
+        #
+        # NO position: yes_ask → 1.0 (Kalshi default for empty book) makes no_bid = 1 - 1.0 = 0.
+        # If the last YES trade was near 0, the market resolved NO (NO wins) — also suppress.
+        #
+        # The inverse cases are correct exits and are not suppressed:
+        # YES position + last_price near 0 → YES genuinely lost → stoploss is valid.
+        # NO position + last_price near 1 → YES won → NO genuinely lost → stoploss is valid.
+        if position.direction == "YES" and effective_price == 0.0 and market.last_price >= 0.95:
+            logger.debug(
+                "position_monitor.phantom_zero_suppressed",
+                position_id=position.id,
+                market_id=position.market_id,
+                direction="YES",
+                last_price=market.last_price,
+                yes_bid=market.yes_bid,
+            )
+            return _NO_EXIT
+        if position.direction == "NO" and effective_price == 0.0 and market.last_price <= 0.05:
+            logger.debug(
+                "position_monitor.phantom_zero_suppressed",
+                position_id=position.id,
+                market_id=position.market_id,
+                direction="NO",
+                last_price=market.last_price,
+                yes_ask=market.yes_ask,
+            )
+            return _NO_EXIT
+
         # 1. Hard stoploss (framework-enforced)
         result = _check_stoploss(position, effective_price, config.stoploss)
         if result:
