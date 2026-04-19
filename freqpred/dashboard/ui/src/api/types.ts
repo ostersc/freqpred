@@ -283,3 +283,10 @@ export interface SystemHealthResponse {
   db_ok: boolean
   uptime_seconds: number
 }
+
+export interface LedgerResponse {
+  open_count: number
+  total_exposure_usd: number
+  daily_pnl_usd: number
+  all_time_pnl_usd: number
+}

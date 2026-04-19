@@ -128,6 +128,7 @@ export default function StrategyDecisions() {
                   <th className="c">Exit Reason</th>
                   <th className="r">Actual P&amp;L</th>
                   <th className="r">Counterfactual</th>
+                  <th className="r">Exit Δ</th>
                   <th className="r">Best Prior Ask</th>
                   <th className="r">Entry Eff.</th>
                   <th style={{ width: 36 }}></th>
@@ -168,8 +169,16 @@ export default function StrategyDecisions() {
                         <td className={`r ${row.pnl !== null && row.pnl >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 500 }}>
                           {row.pnl !== null ? fmtSignedMoney(row.pnl) : '—'}
                         </td>
-                        <td className="r dim">
+                        <td className={`r ${
+                          row.counterfactual_pnl_usd === null || row.pnl === null ? 'dim'
+                          : Math.abs(row.counterfactual_pnl_usd - row.pnl) < 0.005 ? 'dim'
+                          : row.counterfactual_pnl_usd > row.pnl ? 'pos'
+                          : 'neg'
+                        }`}>
                           {row.counterfactual_pnl_usd !== null ? fmtSignedMoney(row.counterfactual_pnl_usd) : '—'}
+                        </td>
+                        <td className={`r ${row.exit_delta_usd !== null && row.exit_delta_usd < 0 ? 'neg' : row.exit_delta_usd !== null && row.exit_delta_usd > 0 ? 'pos' : 'dim'}`}>
+                          {row.exit_delta_usd !== null ? fmtSignedMoney(row.exit_delta_usd) : <span className="muted">—</span>}
                         </td>
                         <td className="r">{row.best_prior_ask !== null ? `$${fmt(row.best_prior_ask)}` : <span className="muted">—</span>}</td>
                         <td className={`r ${row.entry_efficiency_usd !== null && row.entry_efficiency_usd < 0 ? 'neg' : 'pos'}`}>
@@ -179,7 +188,7 @@ export default function StrategyDecisions() {
                       </tr>
                       {isExp && (
                         <tr key={`${row.id}-d`} className="detail-row">
-                          <td colSpan={13}>
+                          <td colSpan={14}>
                             <PositionDetailPanel positionId={row.id} />
                           </td>
                         </tr>
@@ -189,7 +198,7 @@ export default function StrategyDecisions() {
                 })}
                 {data.items.length === 0 && (
                   <tr>
-                    <td colSpan={13} style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-3)' }}>
+                    <td colSpan={14} style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-3)' }}>
                       No closed positions match the current filters
                     </td>
                   </tr>

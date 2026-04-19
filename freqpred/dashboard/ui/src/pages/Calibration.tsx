@@ -1,4 +1,10 @@
 import { useState } from 'react'
+
+type TooltipState = {
+  x: number; y: number
+  series: 'Model' | 'Market'
+  meanProb: number; actualRate: number; count: number
+} | null
 import { useQuery } from '@tanstack/react-query'
 import { getCalibration } from '../api/calibration'
 import { Stat, Panel, Segmented, LoadingSpinner, ErrorBanner, LabeledSelect } from '../components/ui'
@@ -24,6 +30,8 @@ export default function Calibration() {
     queryKey: ['calibration', preset, category],
     queryFn: () => getCalibration(presetDays(preset), category === 'all' ? undefined : category),
   })
+
+  const [tooltip, setTooltip] = useState<TooltipState>(null)
 
   const W = 1200, H = 480, pad = 60
   const toX = (v: number) => pad + v * (W - pad * 2)
@@ -78,12 +86,30 @@ export default function Calibration() {
                 <line x1={toX(0)} y1={toY(0)} x2={toX(1)} y2={toY(1)} stroke="var(--fg-3)" strokeDasharray="4 4" strokeWidth="1" />
                 {data.market_buckets.filter((b) => b.count > 0).map((b, i) => (
                   <circle key={'m' + i} cx={toX(b.mean_estimated_prob)} cy={toY(b.actual_resolution_rate)}
-                    r={4 + Math.sqrt(b.count) * 0.8} fill="var(--warn)" opacity="0.55" />
+                    r={4 + Math.sqrt(b.count) * 0.8} fill="var(--warn)" opacity="0.55"
+                    style={{ cursor: 'pointer' }}
+                    onMouseEnter={() => setTooltip({ x: toX(b.mean_estimated_prob), y: toY(b.actual_resolution_rate), series: 'Market', meanProb: b.mean_estimated_prob, actualRate: b.actual_resolution_rate, count: b.count })}
+                    onMouseLeave={() => setTooltip(null)} />
                 ))}
                 {data.buckets.filter((b) => b.count > 0).map((b, i) => (
                   <circle key={'o' + i} cx={toX(b.mean_estimated_prob)} cy={toY(b.actual_resolution_rate)}
-                    r={4 + Math.sqrt(b.count) * 0.8} fill="var(--accent)" opacity="0.8" />
+                    r={4 + Math.sqrt(b.count) * 0.8} fill="var(--accent)" opacity="0.8"
+                    style={{ cursor: 'pointer' }}
+                    onMouseEnter={() => setTooltip({ x: toX(b.mean_estimated_prob), y: toY(b.actual_resolution_rate), series: 'Model', meanProb: b.mean_estimated_prob, actualRate: b.actual_resolution_rate, count: b.count })}
+                    onMouseLeave={() => setTooltip(null)} />
                 ))}
+                {tooltip && (() => {
+                  const tw = 210, th = 72, tx = Math.min(tooltip.x + 12, W - tw - 8), ty = Math.max(tooltip.y - th - 8, pad)
+                  return (
+                    <g pointerEvents="none">
+                      <rect x={tx} y={ty} width={tw} height={th} rx={6} fill="var(--bg-1)" stroke="var(--line)" strokeWidth={1} />
+                      <text x={tx + 10} y={ty + 18} fontSize="11" fontWeight="600" fill={tooltip.series === 'Model' ? 'var(--accent)' : 'var(--warn)'} fontFamily="var(--f-sans)">{tooltip.series}</text>
+                      <text x={tx + 10} y={ty + 34} fontSize="11" fill="var(--fg-2)" fontFamily="var(--f-mono)">Est. prob: <tspan fill="var(--fg-0)">{(tooltip.meanProb * 100).toFixed(1)}%</tspan></text>
+                      <text x={tx + 10} y={ty + 50} fontSize="11" fill="var(--fg-2)" fontFamily="var(--f-mono)">Actual rate: <tspan fill="var(--fg-0)">{(tooltip.actualRate * 100).toFixed(1)}%</tspan></text>
+                      <text x={tx + 10} y={ty + 66} fontSize="11" fill="var(--fg-2)" fontFamily="var(--f-mono)">Samples: <tspan fill="var(--fg-0)">{tooltip.count}</tspan></text>
+                    </g>
+                  )
+                })()}
                 <text x={W / 2} y={H - 16} fontSize="12" fill="var(--fg-2)" textAnchor="middle">Estimated probability</text>
                 <text x={18} y={H / 2} fontSize="12" fill="var(--fg-2)" textAnchor="middle" transform={`rotate(-90 18 ${H / 2})`}>Actual resolution rate</text>
                 <g transform={`translate(${W - pad - 220},${H - pad - 20})`}>

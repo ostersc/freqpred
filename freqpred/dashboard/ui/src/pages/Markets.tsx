@@ -2,8 +2,23 @@ import { useState, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getMarkets, getMarket } from '../api/markets'
 import type { MarketOut, MarketDetailOut } from '../api/types'
-import { Badge, Panel, MiniStat, Segmented, ProbBar, Icon, LoadingSpinner, ErrorBanner, Sparkline, walk } from '../components/ui'
+import { Badge, Panel, MiniStat, Segmented, ProbBar, Icon, LoadingSpinner, ErrorBanner } from '../components/ui'
 import AnalyzeButton from '../components/AnalyzeButton'
+
+function MarketEdgeCell({ marketId }: { marketId: string }) {
+  const { data } = useQuery({
+    queryKey: ['market-detail', marketId],
+    queryFn: () => getMarket(marketId),
+    staleTime: 30_000,
+  })
+  const sig = data?.current_signal
+  if (!sig) return <span className="muted">—</span>
+  return (
+    <Badge kind={sig.edge >= 0 ? 'pos' : 'neg'}>
+      {sig.edge >= 0 ? '+' : ''}{(sig.edge * 100).toFixed(1)}%
+    </Badge>
+  )
+}
 
 type StatusFilter = 'open' | 'closed' | 'all'
 
@@ -66,7 +81,6 @@ function MarketDetail({ market }: { market: MarketOut }) {
           <MiniStat label="Volume 24h" value={d.volume_24h.toLocaleString(undefined, { maximumFractionDigits: 0 })} />
           <MiniStat label="Closes" value={new Date(d.close_time).toLocaleDateString()} />
         </div>
-        <Sparkline data={walk(d.id.charCodeAt(3) || 7, 32, d.mid_price * 100, 8)} w={280} h={60} color="var(--accent)" />
         <div className="ticker-id" style={{ marginTop: 4 }}>{d.id}</div>
       </div>
     </div>
@@ -139,7 +153,7 @@ export default function Markets() {
                 <th className="r">Mid</th>
                 <th className="r">Vol 24h</th>
                 <th className="r">Closes</th>
-                <th className="c">Signal</th>
+                <th className="c">Edge</th>
                 <th className="c" style={{ width: 80 }}>Status</th>
                 <th style={{ width: 36 }}></th>
               </tr>
@@ -164,7 +178,7 @@ export default function Markets() {
                       <td className="r dim">{closeTimeLabel(m.close_time)}</td>
                       <td className="c">
                         {m.current_signal_id
-                          ? <Badge kind="accent">signal</Badge>
+                          ? <MarketEdgeCell marketId={m.id} />
                           : <span className="muted">—</span>}
                       </td>
                       <td className="c">

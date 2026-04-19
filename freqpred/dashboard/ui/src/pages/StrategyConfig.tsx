@@ -95,17 +95,15 @@ export default function StrategyConfig() {
         </div>
         <div className="row">
           {hasChanges && (
-            <>
-              <button className="btn" onClick={() => setEdits({})}>Revert</button>
-              <button
-                className="btn primary"
-                disabled={mutation.isPending}
-                onClick={() => mutation.mutate(edits)}
-              >
-                {mutation.isPending ? 'Saving…' : 'Apply changes'}
-              </button>
-            </>
+            <button className="btn" onClick={() => setEdits({})}>Revert</button>
           )}
+          <button
+            className="btn primary"
+            disabled={!hasChanges || mutation.isPending}
+            onClick={() => mutation.mutate(edits)}
+          >
+            {mutation.isPending ? 'Saving…' : 'Apply changes'}
+          </button>
         </div>
       </div>
 

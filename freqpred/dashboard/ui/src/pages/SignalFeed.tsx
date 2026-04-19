@@ -1,10 +1,26 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getSignals, getSignal } from '../api/signals'
+import { getStrategyConfig } from '../api/strategy'
 import { Badge, Panel, LoadingSpinner, ErrorBanner, ProbBar, fmtAge } from '../components/ui'
 import AnalyzeButton from '../components/AnalyzeButton'
 import { SignalDetail as SharedSignalDetail } from '../components/SignalDetail'
 import type { SignalOut } from '../api/types'
+
+function confColor(conf: number, minConf: number): string {
+  if (conf >= minConf) {
+    const t = minConf < 1 ? (conf - minConf) / (1 - minConf) : 1
+    const L = (0.88 - t * 0.26).toFixed(2)
+    const C = (0.06 + t * 0.14).toFixed(2)
+    return `oklch(${L} ${C} 160)`
+  } else {
+    const t = minConf > 0 ? (minConf - conf) / minConf : 1
+    const L = (0.92 - t * 0.37).toFixed(2)
+    const C = (0.06 + t * 0.14).toFixed(2)
+    const H = (80 - t * 55).toFixed(0)
+    return `oklch(${L} ${C} ${H})`
+  }
+}
 
 const PAGE_SIZE = 20
 
@@ -40,7 +56,7 @@ function SignalDetailRow({ id, marketId }: { id: string; marketId: string }) {
   )
 }
 
-function SignalRow({ signal }: { signal: SignalOut }) {
+function SignalRow({ signal, minConf }: { signal: SignalOut; minConf: number }) {
   const [expanded, setExpanded] = useState(false)
   return (
     <>
@@ -68,7 +84,7 @@ function SignalRow({ signal }: { signal: SignalOut }) {
         </td>
         <td className="r">
           <div style={{ fontSize: 10, color: 'var(--fg-2)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Conf</div>
-          <div className="mono" style={{ fontSize: 14, fontWeight: 500 }}>{(signal.confidence * 100).toFixed(0)}%</div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 500, color: confColor(signal.confidence, minConf) }}>{(signal.confidence * 100).toFixed(0)}%</div>
         </td>
         <td className="c">
           <Badge kind={signal.direction === 'YES' ? 'pos' : signal.direction === 'NO' ? 'neg' : 'muted'}>
@@ -91,6 +107,13 @@ function SignalRow({ signal }: { signal: SignalOut }) {
 
 export default function SignalFeed() {
   const [offset, setOffset] = useState(0)
+
+  const { data: config } = useQuery({
+    queryKey: ['strategyConfig'],
+    queryFn: getStrategyConfig,
+    staleTime: 60_000,
+  })
+  const minConf = config?.min_confidence ?? 0.5
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['signals', offset],
@@ -133,7 +156,7 @@ export default function SignalFeed() {
                 </tr>
               </thead>
               <tbody>
-                {data.items.map((s) => <SignalRow key={s.id} signal={s} />)}
+                {data.items.map((s) => <SignalRow key={s.id} signal={s} minConf={minConf} />)}
               </tbody>
             </table>
           </Panel>

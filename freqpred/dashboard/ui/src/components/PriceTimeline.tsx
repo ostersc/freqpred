@@ -244,7 +244,7 @@ export default function PriceTimeline({
             }}
           />
           <Legend
-            verticalAlign="top"
+            verticalAlign="bottom"
             align="right"
             iconSize={10}
             wrapperStyle={{ fontSize: 11 }}

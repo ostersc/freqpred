@@ -425,3 +425,27 @@ body {
 /* =========== Labeled form helpers =========== */
 .labeled-field { display: flex; flex-direction: column; gap: 4px; }
 .field-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-2); }
+
+/* =========== Dense mode =========== */
+body.dense .tbl tbody td { padding: 7px 12px; }
+body.dense .panel-body { padding: 12px; }
+
+/* =========== Light mode =========== */
+body.light {
+  --bg-0: oklch(0.98 0.002 255);
+  --bg-1: oklch(1 0 0);
+  --bg-2: oklch(0.96 0.003 255);
+  --bg-3: oklch(0.93 0.003 255);
+  --line: oklch(0.88 0.004 255);
+  --line-strong: oklch(0.78 0.005 255);
+  --line-soft: oklch(0.92 0.003 255);
+  --fg-0: oklch(0.22 0.008 255);
+  --fg-1: oklch(0.38 0.008 255);
+  --fg-2: oklch(0.52 0.008 255);
+  --fg-3: oklch(0.62 0.008 255);
+  --shadow-panel: 0 0 0 1px var(--line) inset, 0 1px 2px oklch(0 0 0 / 0.03);
+}
+body.light .expo-bar { background: oklch(0.92 0.005 255); }
+body.light .tbl thead th { background: var(--bg-2); }
+body.light .tbl tbody tr.detail-row td { background: var(--bg-2); }
+body.light .topnav { background: oklch(1 0 0 / 0.88); }

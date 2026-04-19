@@ -1,9 +1,26 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getPositions } from '../api/positions'
+import { getPositions, getPositionDetail } from '../api/positions'
 import type { PositionOut } from '../api/types'
-import { Badge, Panel, Segmented, LoadingSpinner, ErrorBanner, Sparkline, walk, fmtSignedMoney } from '../components/ui'
+import { Badge, Panel, Segmented, LoadingSpinner, ErrorBanner, Sparkline, fmtSignedMoney } from '../components/ui'
 import PositionDetailPanel from '../components/PositionDetail'
+
+function PositionSparkline({ positionId, color }: { positionId: string; color: string }) {
+  const { data } = useQuery({
+    queryKey: ['position-detail', positionId],
+    queryFn: () => getPositionDetail(positionId),
+    staleTime: 30_000,
+  })
+
+  if (!data || data.market_signals.length < 2) {
+    return <span style={{ display: 'inline-block', width: 80, height: 20, opacity: 0.2, background: 'var(--line-soft)', borderRadius: 2 }} />
+  }
+
+  const sorted = [...data.market_signals].sort(
+    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+  )
+  return <Sparkline data={sorted.map((s) => s.market_mid_at_signal * 100)} w={80} h={20} color={color} />
+}
 
 type StatusFilter = 'open' | 'closed' | 'all'
 
@@ -125,9 +142,8 @@ export default function Positions() {
                         </div>
                       </td>
                       <td className="r">
-                        <Sparkline
-                          data={walk(p.market_id.charCodeAt(8) + i, 28, (p.entry_price || 0.5) * 100, 10)}
-                          w={80} h={20}
+                        <PositionSparkline
+                          positionId={p.id}
                           color={pnl !== null && pnl >= 0 ? 'var(--pos)' : 'var(--neg)'}
                         />
                       </td>

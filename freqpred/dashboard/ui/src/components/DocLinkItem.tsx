@@ -17,14 +17,6 @@ export function DocLinkItem({ doc }: { doc: DocumentLinkOut }) {
     <li style={{ listStyle: 'none' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
         <span className="mono dim" style={{ fontSize: 10.5, flexShrink: 0 }}>{doc.relevance_score.toFixed(3)}</span>
-        <a
-          href={doc.source_url}
-          target="_blank"
-          rel="noreferrer"
-          style={{ color: 'var(--accent)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}
-        >
-          {doc.title || doc.source_url}
-        </a>
         <button
           onClick={() => setOpen((v) => !v)}
           style={{
@@ -38,6 +30,14 @@ export function DocLinkItem({ doc }: { doc: DocumentLinkOut }) {
         >
           i
         </button>
+        <a
+          href={doc.source_url}
+          target="_blank"
+          rel="noreferrer"
+          style={{ color: 'var(--accent)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}
+        >
+          {doc.title || doc.source_url}
+        </a>
       </div>
       {open && (
         <div style={{ marginTop: 6, marginLeft: 56, background: 'var(--bg-1)', border: '1px solid var(--line-soft)', borderRadius: 6, padding: '10px 12px', fontSize: 11.5 }}>
