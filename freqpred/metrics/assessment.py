@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_PROMPT_VERSION = "assessment-v1"
+_PROMPT_VERSION = "assessment-v2"
 _QUERY_TYPE = "signal_assessment"
 _LOOKBACK_DAYS = 90
 _MAX_FACTORS = 5
@@ -375,6 +376,9 @@ def _build_prompt_payload(
     if source_breakdown and similar_market_summary.get("available"):
         notes.append("Weight family-level history more than the exact-question subset unless the exact sample is substantial.")
 
+    now = datetime.now(tz=timezone.utc)
+    days_to_close = (market.close_time - now).total_seconds() / 86400
+
     return {
         "task": "Assess whether the trade should be sized down, left neutral, or sized up relative to the base Kelly target.",
         "market": {
@@ -383,6 +387,7 @@ def _build_prompt_payload(
             "category": market.category,
             "question_first_line": _question_first_line(market.question),
             "close_time": market.close_time.isoformat(),
+            "days_to_close": round(days_to_close, 1),
         },
         "trade_context": {
             "strategy_name": strategy_name,
