@@ -1,48 +1,49 @@
+import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getSignal } from '../api/signals'
 import type { SignalDetailOut } from '../api/types'
 import AssessmentCard from './AssessmentCard'
 import { DocLinkItem } from './DocLinkItem'
 
-// ---- Formatting helpers -------------------------------------------------
-
-function fmtPct(v: number | null) {
-  if (v === null) return '—'
-  const s = (v * 100).toFixed(1)
-  return v >= 0 ? `+${s}%` : `${s}%`
+const sectionLabel: React.CSSProperties = {
+  fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.08em',
+  color: 'var(--fg-2)', marginBottom: 6, fontWeight: 600,
 }
-
-function relTime(iso: string) {
-  return new Date(iso).toLocaleString()
-}
-
-// ---- SignalDetail --------------------------------------------------------
 
 export function SignalDetail({ signal }: { signal: SignalDetailOut }) {
   return (
-    <div className="bg-white rounded border p-3 space-y-3">
-      <div className="flex flex-wrap gap-4 text-xs text-gray-500">
-        <span>Our prob: <span className="font-semibold text-gray-800">{(signal.estimated_probability * 100).toFixed(1)}%</span></span>
-        <span>Market mid: <span className="font-semibold text-gray-800">{(signal.market_mid_at_signal * 100).toFixed(1)}%</span></span>
-        <span>Edge: <span className={`font-semibold ${signal.edge >= 0 ? 'text-green-700' : 'text-red-700'}`}>{fmtPct(signal.edge)}</span></span>
-        <span>Confidence: <span className="font-semibold text-gray-800">{(signal.confidence * 100).toFixed(1)}%</span></span>
-        <span className="text-gray-400">{relTime(signal.created_at)}</span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: '12px 0' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 12 }}>
+        <div><span className="dim">Our prob:</span> <b className="mono">{(signal.estimated_probability * 100).toFixed(1)}%</b></div>
+        <div><span className="dim">Market mid:</span> <b className="mono">{(signal.market_mid_at_signal * 100).toFixed(1)}%</b></div>
+        <div>
+          <span className="dim">Edge:</span>{' '}
+          <b className={`mono ${signal.edge >= 0 ? 'pos' : 'neg'}`}>
+            {signal.edge >= 0 ? '+' : ''}{(signal.edge * 100).toFixed(1)}%
+          </b>
+        </div>
+        <div><span className="dim">Confidence:</span> <b className="mono">{(signal.confidence * 100).toFixed(1)}%</b></div>
+        <div className="dim" style={{ fontSize: 11 }}>{new Date(signal.created_at).toLocaleString()}</div>
       </div>
+
       <div>
-        <div className="font-medium text-gray-700 mb-1">Reasoning:</div>
-        <p className="text-gray-600 whitespace-pre-wrap">{signal.reasoning}</p>
+        <div style={sectionLabel}>Reasoning</div>
+        <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-1)', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{signal.reasoning}</p>
       </div>
+
       {signal.social_sentiment_summary && (
         <div>
-          <div className="font-medium text-gray-700 mb-1">Social sentiment:</div>
-          <p className="text-gray-600">{signal.social_sentiment_summary}</p>
+          <div style={sectionLabel}>Social sentiment</div>
+          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-1)', lineHeight: 1.6 }}>{signal.social_sentiment_summary}</p>
         </div>
       )}
+
       <AssessmentCard assessment={signal.assessment} />
+
       {signal.document_links.length > 0 && (
         <div>
-          <div className="font-medium text-gray-700 mb-1">Evidence documents:</div>
-          <ul className="space-y-1.5">
+          <div style={sectionLabel}>Evidence documents</div>
+          <ul style={{ margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
             {signal.document_links.map((doc) => (
               <DocLinkItem key={doc.document_id} doc={doc} />
             ))}
@@ -52,9 +53,6 @@ export function SignalDetail({ signal }: { signal: SignalDetailOut }) {
     </div>
   )
 }
-
-// ---- SelectedSignalPanel -------------------------------------------------
-// Fetches signal detail on demand (for non-entry signals clicked in chart)
 
 export function SelectedSignalPanel({
   signalId,
@@ -73,7 +71,7 @@ export function SelectedSignalPanel({
   })
 
   if (isEntry) return <SignalDetail signal={entrySignal} />
-  if (isLoading) return <div className="p-3 text-sm text-gray-400">Loading signal…</div>
+  if (isLoading) return <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 12.5 }}>Loading signal…</div>
   if (!data) return null
   return <SignalDetail signal={data} />
 }

@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getStrategyConfig, updateStrategyConfig } from '../api/strategy'
-import LoadingSpinner from '../components/LoadingSpinner'
-import ErrorBanner from '../components/ErrorBanner'
+import { Panel, LoadingSpinner, ErrorBanner } from '../components/ui'
 import type { StrategyConfigOut } from '../api/types'
 
 type NumericKey = keyof {
@@ -12,17 +11,31 @@ type BoolKey = keyof {
   [K in keyof StrategyConfigOut as StrategyConfigOut[K] extends boolean ? K : never]: true
 }
 
-function Field({ label, children, immutable }: { label: string; children: React.ReactNode; immutable?: boolean }) {
-  return (
-    <div className="flex items-center border-b last:border-0 py-2 gap-4">
-      <div className="w-56 text-sm text-gray-600 flex-shrink-0">
-        {label}
-        {immutable && <span className="ml-1 text-xs text-gray-400">(requires restart)</span>}
-      </div>
-      <div className="flex-1">{children}</div>
-    </div>
-  )
-}
+const NUM_FIELDS: [NumericKey, string, string?][] = [
+  ['min_edge', 'Min edge', 'Minimum edge vs market mid to enter.'],
+  ['min_confidence', 'Min confidence', 'Minimum confidence score from signal assessment.'],
+  ['kelly_fraction', 'Kelly fraction', 'Fraction of full-Kelly sizing.'],
+  ['max_exposure_per_market', 'Max exposure per market'],
+  ['min_volume_24h', 'Min 24h volume ($)'],
+  ['max_days_to_close', 'Max days to close'],
+  ['min_days_to_close', 'Min days to close'],
+  ['stoploss', 'Stoploss'],
+  ['trailing_stop_positive', 'Trailing stop positive'],
+  ['trailing_stop_positive_offset', 'Trailing stop positive offset'],
+  ['min_mid_price', 'Min mid price'],
+  ['max_mid_price', 'Max mid price'],
+  ['max_spread', 'Max spread'],
+  ['stoploss_cooldown_hours', 'Stoploss cooldown (hours)', 'Prevents re-entry for N hours after stoploss.'],
+  ['assessment_scale_min', 'Assessment scale min'],
+  ['assessment_scale_max', 'Assessment scale max'],
+  ['similar_market_min_signals', 'Similar-market min signals'],
+  ['similar_market_min_trades', 'Similar-market min trades'],
+]
+
+const BOOL_FIELDS: [BoolKey, string][] = [
+  ['trailing_stop', 'Trailing stop'],
+  ['block_reentry_after_stoploss', 'Block re-entry after stoploss'],
+]
 
 export default function StrategyConfig() {
   const queryClient = useQueryClient()
@@ -34,9 +47,7 @@ export default function StrategyConfig() {
   const [edits, setEdits] = useState<Partial<StrategyConfigOut>>({})
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
 
-  useEffect(() => {
-    if (data) setEdits({})
-  }, [data])
+  useEffect(() => { if (data) setEdits({}) }, [data])
 
   const mutation = useMutation({
     mutationFn: updateStrategyConfig,
@@ -68,95 +79,122 @@ export default function StrategyConfig() {
   }
 
   const hasChanges = Object.keys(edits).length > 0
+  const rowStyle = (i: number): React.CSSProperties => ({
+    padding: '12px 16px',
+    borderTop: i > 0 ? '1px solid var(--line-soft)' : 'none',
+  })
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-bold text-gray-900">Strategy Config</h1>
-        {hasChanges && (
-          <button
-            className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 disabled:opacity-50"
-            disabled={mutation.isPending}
-            onClick={() => mutation.mutate(edits)}
-          >
-            {mutation.isPending ? 'Saving…' : 'Save changes'}
-          </button>
-        )}
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Strategy Config</h1>
+          <div className="page-subtitle">
+            Parameters for <b className="mono">{data?.name ?? '…'}</b> — changes marked <em>requires restart</em> take effect on reboot.
+          </div>
+        </div>
+        <div className="row">
+          {hasChanges && (
+            <>
+              <button className="btn" onClick={() => setEdits({})}>Revert</button>
+              <button
+                className="btn primary"
+                disabled={mutation.isPending}
+                onClick={() => mutation.mutate(edits)}
+              >
+                {mutation.isPending ? 'Saving…' : 'Apply changes'}
+              </button>
+            </>
+          )}
+        </div>
       </div>
+
       {saveStatus === 'saved' && (
-        <div className="mb-3 px-3 py-2 bg-green-50 border border-green-200 text-green-800 text-sm rounded">
+        <div className="panel" style={{ padding: '10px 16px', marginBottom: 12, background: 'var(--pos-soft)', border: '1px solid var(--pos)', borderRadius: 'var(--r-sm)', color: 'var(--pos)', fontSize: 12.5 }}>
           Configuration saved successfully.
         </div>
       )}
       {saveStatus === 'error' && (
-        <div className="mb-3 px-3 py-2 bg-red-50 border border-red-200 text-red-800 text-sm rounded">
-          Save failed. Check that the run loop is active and fields are valid.
-        </div>
+        <div className="error-banner">Save failed. Check that the run loop is active and fields are valid.</div>
       )}
+
       {isLoading && <LoadingSpinner />}
       {error && (
-        <ErrorBanner message={(error as Error).message.includes('503')
-          ? 'No active strategy — start freqpred run first.'
-          : String(error)} />
+        <ErrorBanner message={
+          (error as Error).message.includes('503')
+            ? 'No active strategy — start freqpred run first.'
+            : String(error)
+        } />
       )}
+
       {data && (
-        <div className="bg-white rounded shadow divide-y px-4">
-          <Field label="Strategy name" immutable>
-            <span className="text-sm font-mono text-gray-800">{data.name}</span>
-          </Field>
-          <Field label="Categories" immutable>
-            <span className="text-sm text-gray-800">{data.categories.join(', ')}</span>
-          </Field>
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, alignItems: 'flex-start' }}>
+          <Panel>
+            <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr' }}>
+              <div style={rowStyle(0)}>
+                <span>Strategy name</span>
+                <div style={{ fontSize: 10, color: 'var(--fg-3)' }}>(requires restart)</div>
+              </div>
+              <div style={rowStyle(0)}>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-1)' }}>{data.name}</span>
+              </div>
 
-          {(
-            [
-              ['min_edge', 'Min edge'],
-              ['min_confidence', 'Min confidence'],
-              ['kelly_fraction', 'Kelly fraction'],
-              ['max_exposure_per_market', 'Max exposure per market'],
-              ['min_volume_24h', 'Min 24h volume ($)'],
-              ['max_days_to_close', 'Max days to close'],
-              ['min_days_to_close', 'Min days to close'],
-              ['stoploss', 'Stoploss'],
-              ['trailing_stop_positive', 'Trailing stop positive'],
-              ['trailing_stop_positive_offset', 'Trailing stop positive offset'],
-              ['min_mid_price', 'Min mid price'],
-              ['max_mid_price', 'Max mid price'],
-              ['max_spread', 'Max spread'],
-              ['stoploss_cooldown_hours', 'Stoploss cooldown (hours)'],
-              ['assessment_scale_min', 'Assessment scale min'],
-              ['assessment_scale_max', 'Assessment scale max'],
-              ['similar_market_min_signals', 'Similar-market min signals'],
-              ['similar_market_min_trades', 'Similar-market min trades'],
-            ] as [NumericKey, string][]
-          ).map(([key, label]) => (
-            <Field key={key} label={label}>
-              <input
-                type="number"
-                step="any"
-                value={numVal(key)}
-                onChange={(e) => numEdit(key, e.target.value)}
-                className="border rounded px-2 py-1 text-sm w-36 focus:outline-none focus:ring-2 focus:ring-blue-300"
-              />
-            </Field>
-          ))}
+              <div style={rowStyle(1)}>
+                <span>Categories</span>
+                <div style={{ fontSize: 10, color: 'var(--fg-3)' }}>(requires restart)</div>
+              </div>
+              <div style={rowStyle(1)}>
+                <span style={{ fontSize: 12, color: 'var(--fg-1)' }}>{data.categories.join(', ')}</span>
+              </div>
 
-          {([
-            ['trailing_stop', 'Trailing stop'],
-            ['block_reentry_after_stoploss', 'Block re-entry after stoploss'],
-          ] as [BoolKey, string][]).map(([key, label]) => (
-            <Field key={key} label={label}>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={boolVal(key)}
-                  onChange={(e) => boolEdit(key, e.target.checked)}
-                  className="h-4 w-4 rounded"
-                />
-                <span className="text-sm text-gray-700">{boolVal(key) ? 'Enabled' : 'Disabled'}</span>
-              </label>
-            </Field>
-          ))}
+              {NUM_FIELDS.map(([key, label], i) => (
+                <>
+                  <div key={`l-${key}`} style={rowStyle(i + 2)}>
+                    <span>{label}</span>
+                  </div>
+                  <div key={`v-${key}`} style={rowStyle(i + 2)}>
+                    <input
+                      className="input mono"
+                      style={{ maxWidth: 180 }}
+                      type="number"
+                      step="any"
+                      value={numVal(key)}
+                      onChange={(e) => numEdit(key, e.target.value)}
+                    />
+                  </div>
+                </>
+              ))}
+
+              {BOOL_FIELDS.map(([key, label], i) => (
+                <>
+                  <div key={`l-${key}`} style={rowStyle(NUM_FIELDS.length + i + 2)}>
+                    <span>{label}</span>
+                  </div>
+                  <div key={`v-${key}`} style={rowStyle(NUM_FIELDS.length + i + 2)}>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={boolVal(key)}
+                        onChange={(e) => boolEdit(key, e.target.checked)}
+                      />
+                      {boolVal(key) ? 'Enabled' : 'Disabled'}
+                    </label>
+                  </div>
+                </>
+              ))}
+            </div>
+          </Panel>
+
+          <div className="col">
+            <Panel title="Help">
+              <div style={{ fontSize: 12, color: 'var(--fg-1)', lineHeight: 1.7 }}>
+                <p style={{ margin: '0 0 10px 0' }}>Parameters here drive the live strategy loop.</p>
+                <p style={{ margin: '0 0 10px 0' }}><b>Min edge</b> and <b>Min confidence</b> gate entries.</p>
+                <p style={{ margin: '0 0 10px 0' }}><b>Kelly fraction</b> scales sizing (0.25 = quarter-Kelly).</p>
+                <p style={{ margin: 0 }}><b>Stoploss cooldown</b> prevents re-entry for N hours after stoploss.</p>
+              </div>
+            </Panel>
+          </div>
         </div>
       )}
     </div>

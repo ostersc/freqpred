@@ -1,39 +1,38 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getSignals, getSignal } from '../api/signals'
-import LoadingSpinner from '../components/LoadingSpinner'
-import ErrorBanner from '../components/ErrorBanner'
+import { Badge, Panel, LoadingSpinner, ErrorBanner, ProbBar, fmtAge } from '../components/ui'
 import AnalyzeButton from '../components/AnalyzeButton'
 import { SignalDetail as SharedSignalDetail } from '../components/SignalDetail'
 import type { SignalOut } from '../api/types'
 
 const PAGE_SIZE = 20
 
-function pct(v: number) {
-  return `${(v * 100).toFixed(1)}%`
+type TriggerKind = 'scheduled' | 'price_moved' | 'entry_manual' | 'market_update' | string
+
+function triggerBadge(trigger: TriggerKind) {
+  const map: Record<string, 'accent' | 'info' | 'pos' | 'muted'> = {
+    price_moved: 'accent',
+    scheduled: 'info',
+    entry_manual: 'pos',
+    market_update: 'muted',
+  }
+  return map[trigger] ?? 'muted'
 }
 
-function age(iso: string) {
-  const secs = (Date.now() - new Date(iso).getTime()) / 1000
-  if (secs < 60) return `${Math.round(secs)}s`
-  if (secs < 3600) return `${Math.round(secs / 60)}m`
-  if (secs < 86400) return `${Math.round(secs / 3600)}h`
-  return `${Math.round(secs / 86400)}d`
-}
-
-function SignalDetail({ id, marketId }: { id: string; marketId: string }) {
+function SignalDetailRow({ id, marketId }: { id: string; marketId: string }) {
   const { data, isLoading } = useQuery({
     queryKey: ['signal', id],
     queryFn: () => getSignal(id),
   })
 
-  if (isLoading) return <div className="px-4 py-2 text-gray-500 text-sm">Loading…</div>
+  if (isLoading) return <div style={{ padding: '14px 20px', color: 'var(--fg-2)', fontSize: 12 }}>Loading…</div>
   if (!data) return null
 
   return (
-    <div className="px-4 py-3 bg-gray-50 border-t text-sm space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="font-medium text-gray-700">Signal detail</span>
+    <div style={{ padding: '14px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <span style={{ fontWeight: 500, fontSize: 13 }}>Signal detail</span>
         <AnalyzeButton marketId={marketId} />
       </div>
       <SharedSignalDetail signal={data} />
@@ -43,36 +42,46 @@ function SignalDetail({ id, marketId }: { id: string; marketId: string }) {
 
 function SignalRow({ signal }: { signal: SignalOut }) {
   const [expanded, setExpanded] = useState(false)
-  const edgeColor = signal.edge >= 0.15 ? 'text-green-700' : signal.edge >= 0.08 ? 'text-yellow-700' : 'text-gray-500'
-  const confColor = signal.confidence >= 0.7 ? 'text-green-700 font-semibold' : signal.confidence >= 0.5 ? 'text-yellow-700' : 'text-red-600'
-  const dirColor = signal.direction === 'YES' ? 'text-green-700 font-semibold' : signal.direction === 'NO' ? 'text-red-700 font-semibold' : 'text-gray-500'
-
   return (
     <>
       <tr
-        className="border-t cursor-pointer hover:bg-blue-50 transition-colors"
+        className={expanded ? 'expanded' : ''}
         onClick={() => setExpanded((e) => !e)}
+        style={{ cursor: 'pointer' }}
       >
-        <td className="px-3 py-2 max-w-xs">
-          <div className="truncate text-sm text-gray-800">
-            {signal.market_question ?? signal.market_id}
+        <td>
+          <div style={{ fontWeight: 500, marginBottom: 3 }}>{signal.market_question ?? signal.market_id}</div>
+          <div className="row" style={{ gap: 8 }}>
+            <span className="ticker-id">{signal.market_id}</span>
+            <Badge kind={triggerBadge(signal.trigger)} dot>{signal.trigger.replace('_', ' ')}</Badge>
           </div>
-          <div className="text-xs text-gray-400">{signal.market_id}</div>
         </td>
-        <td className="px-3 py-2 text-sm text-center">{pct(signal.estimated_probability)}</td>
-        <td className="px-3 py-2 text-sm text-center">{pct(signal.market_mid_at_signal)}</td>
-        <td className={`px-3 py-2 text-sm text-center ${edgeColor}`}>+{pct(signal.edge)}</td>
-        <td className={`px-3 py-2 text-sm text-center ${confColor}`}>{pct(signal.confidence)}</td>
-        <td className={`px-3 py-2 text-sm text-center ${dirColor}`}>{signal.direction}</td>
-        <td className="px-3 py-2 text-sm text-center text-gray-500">{age(signal.created_at)}</td>
-        <td className="px-3 py-2 text-sm text-center">
-          <span className="text-gray-400">{expanded ? '▲' : '▼'}</span>
+        <td style={{ width: 200 }}>
+          <div style={{ fontSize: 10.5, color: 'var(--fg-2)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Our · Market</div>
+          <ProbBar ours={signal.estimated_probability} market={signal.market_mid_at_signal} />
         </td>
+        <td className="r">
+          <div style={{ fontSize: 10, color: 'var(--fg-2)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Edge</div>
+          <div className={`mono ${signal.edge >= 0 ? 'pos' : 'neg'}`} style={{ fontSize: 14, fontWeight: 500 }}>
+            {signal.edge >= 0 ? '+' : ''}{(signal.edge * 100).toFixed(1)}%
+          </div>
+        </td>
+        <td className="r">
+          <div style={{ fontSize: 10, color: 'var(--fg-2)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Conf</div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 500 }}>{(signal.confidence * 100).toFixed(0)}%</div>
+        </td>
+        <td className="c">
+          <Badge kind={signal.direction === 'YES' ? 'pos' : signal.direction === 'NO' ? 'neg' : 'muted'}>
+            {signal.direction}
+          </Badge>
+        </td>
+        <td className="r dim" style={{ fontSize: 11 }}>{fmtAge(signal.created_at)}</td>
+        <td className="c"><span className={`caret${expanded ? ' open' : ''}`}>›</span></td>
       </tr>
       {expanded && (
-        <tr>
-          <td colSpan={8} className="p-0">
-            <SignalDetail id={signal.id} marketId={signal.market_id} />
+        <tr className="detail-row">
+          <td colSpan={7}>
+            <SignalDetailRow id={signal.id} marketId={signal.market_id} />
           </td>
         </tr>
       )}
@@ -90,48 +99,48 @@ export default function SignalFeed() {
   })
 
   return (
-    <div>
-      <h1 className="text-xl font-bold text-gray-900 mb-4">Signal Feed</h1>
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Signal Feed</h1>
+          <div className="page-subtitle">Live stream of every probability estimate from the signal loop</div>
+        </div>
+        <div className="row">
+          <div className="chip">
+            <span className="d" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--pos)', display: 'inline-block', boxShadow: '0 0 8px var(--pos)' }} />
+            Live · refreshes 30s
+          </div>
+          {data && <div className="chip mono">{data.total} signals total</div>}
+        </div>
+      </div>
+
       {isLoading && <LoadingSpinner />}
       {error && <ErrorBanner message={String(error)} />}
+
       {data && (
         <>
-          <div className="text-sm text-gray-500 mb-2">{data.total} signals total — refreshes every 30s</div>
-          <div className="bg-white rounded shadow overflow-x-auto">
-            <table className="w-full text-left">
-              <thead className="bg-gray-100 text-xs text-gray-600 uppercase tracking-wide">
+          <Panel flush>
+            <table className="tbl">
+              <thead>
                 <tr>
-                  <th className="px-3 py-2">Market</th>
-                  <th className="px-3 py-2 text-center">Our Prob</th>
-                  <th className="px-3 py-2 text-center">Market Mid</th>
-                  <th className="px-3 py-2 text-center">Edge</th>
-                  <th className="px-3 py-2 text-center">Confidence</th>
-                  <th className="px-3 py-2 text-center">Dir</th>
-                  <th className="px-3 py-2 text-center">Age</th>
-                  <th className="px-3 py-2" />
+                  <th>Market</th>
+                  <th style={{ width: 200 }}>Our · Market</th>
+                  <th className="r">Edge</th>
+                  <th className="r">Confidence</th>
+                  <th className="c">Dir</th>
+                  <th className="r">Age</th>
+                  <th style={{ width: 36 }}></th>
                 </tr>
               </thead>
               <tbody>
                 {data.items.map((s) => <SignalRow key={s.id} signal={s} />)}
               </tbody>
             </table>
-          </div>
-          <div className="flex items-center gap-3 mt-3 text-sm">
-            <button
-              className="px-3 py-1 rounded border disabled:opacity-40"
-              disabled={offset === 0}
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            >
-              Previous
-            </button>
-            <span className="text-gray-500">{offset + 1}–{Math.min(offset + PAGE_SIZE, data.total)} of {data.total}</span>
-            <button
-              className="px-3 py-1 rounded border disabled:opacity-40"
-              disabled={offset + PAGE_SIZE >= data.total}
-              onClick={() => setOffset(offset + PAGE_SIZE)}
-            >
-              Next
-            </button>
+          </Panel>
+          <div className="pagination">
+            <button className="btn sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
+            <span>{offset + 1}–{Math.min(offset + PAGE_SIZE, data.total)} of {data.total}</span>
+            <button className="btn sm" disabled={offset + PAGE_SIZE >= data.total} onClick={() => setOffset(offset + PAGE_SIZE)}>Next</button>
           </div>
         </>
       )}

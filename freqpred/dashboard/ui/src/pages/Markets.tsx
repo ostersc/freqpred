@@ -2,117 +2,76 @@ import { useState, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getMarkets, getMarket } from '../api/markets'
 import type { MarketOut, MarketDetailOut } from '../api/types'
-import LoadingSpinner from '../components/LoadingSpinner'
-import ErrorBanner from '../components/ErrorBanner'
+import { Badge, Panel, MiniStat, Segmented, ProbBar, Icon, LoadingSpinner, ErrorBanner, Sparkline, walk } from '../components/ui'
 import AnalyzeButton from '../components/AnalyzeButton'
 
 type StatusFilter = 'open' | 'closed' | 'all'
 
-function fmt2(v: number) {
-  return (v * 100).toFixed(1)
-}
-
-function relTime(iso: string) {
-  return new Date(iso).toLocaleString()
-}
-
 function closeTimeLabel(iso: string) {
   const d = new Date(iso)
-  const now = new Date()
-  const diffMs = d.getTime() - now.getTime()
-  const diffDays = Math.round(diffMs / 86_400_000)
-  if (diffDays < 0) return `Closed ${Math.abs(diffDays)}d ago`
-  if (diffDays === 0) return 'Closes today'
+  const diffDays = Math.round((d.getTime() - Date.now()) / 86_400_000)
+  if (diffDays < 0) return `${Math.abs(diffDays)}d ago`
+  if (diffDays === 0) return 'today'
   return `${diffDays}d`
 }
 
-// ---- Market detail panel ------------------------------------------------
-
-function MarketDetail({ marketId }: { marketId: string }) {
+function MarketDetail({ market }: { market: MarketOut }) {
   const { data, isLoading, error } = useQuery({
-    queryKey: ['market-detail', marketId],
-    queryFn: () => getMarket(marketId),
+    queryKey: ['market-detail', market.id],
+    queryFn: () => getMarket(market.id),
     staleTime: 30_000,
   })
 
-  if (isLoading) return <div className="p-4 text-sm text-gray-500">Loading…</div>
-  if (error) return <div className="p-4 text-sm text-red-600">{String(error)}</div>
+  if (isLoading) return <div style={{ padding: '14px 20px', color: 'var(--fg-2)', fontSize: 12 }}>Loading…</div>
+  if (error) return <div style={{ padding: '14px 20px', color: 'var(--neg)', fontSize: 12 }}>{String(error)}</div>
   if (!data) return null
 
   const d: MarketDetailOut = data
   const sig = d.current_signal
 
   return (
-    <div className="bg-gray-50 border-t px-4 py-4 space-y-4 text-sm">
-      {/* Market question */}
-      <div className="font-semibold text-gray-800 text-base leading-snug">{d.question}</div>
-
-      {/* Stat grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-white rounded border p-3">
-          <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">Mid price</div>
-          <div className="font-semibold">{fmt2(d.mid_price)}¢</div>
-        </div>
-        <div className="bg-white rounded border p-3">
-          <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">Bid / Ask</div>
-          <div className="font-semibold">{fmt2(d.yes_bid)}¢ / {fmt2(d.yes_ask)}¢</div>
-        </div>
-        <div className="bg-white rounded border p-3">
-          <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">Volume 24h</div>
-          <div className="font-semibold">{d.volume_24h.toLocaleString()}</div>
-        </div>
-        <div className="bg-white rounded border p-3">
-          <div className="text-xs text-gray-400 uppercase tracking-wide mb-1">Closes</div>
-          <div className="font-semibold">{relTime(d.close_time)}</div>
-        </div>
-      </div>
-
-      {/* Current signal */}
+    <div style={{ padding: '16px 20px', display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20 }}>
       <div>
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-            Current signal
-          </div>
-          <AnalyzeButton marketId={marketId} />
-        </div>
+        <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--fg-2)', marginBottom: 8 }}>Market Question</div>
+        <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--fg-1)', marginBottom: 16 }}>{d.question}</div>
 
         {sig ? (
-          <div className="bg-white rounded border p-3 space-y-2">
-            <div className="flex flex-wrap gap-4 text-xs text-gray-500">
-              <span>Our prob: <span className="font-semibold text-gray-800">{fmt2(sig.estimated_probability)}%</span></span>
-              <span>Market mid: <span className="font-semibold text-gray-800">{fmt2(sig.market_mid_at_signal)}%</span></span>
-              <span>Edge: <span className={`font-semibold ${sig.edge >= 0 ? 'text-green-700' : 'text-red-700'}`}>
-                {sig.edge >= 0 ? '+' : ''}{(sig.edge * 100).toFixed(1)}%
-              </span></span>
-              <span>Confidence: <span className="font-semibold text-gray-800">{fmt2(sig.confidence)}%</span></span>
-              <span className="text-gray-400">{relTime(sig.created_at)}</span>
+          <div style={{ padding: 14, background: 'var(--bg-0)', borderRadius: 8, border: '1px solid var(--line-soft)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--fg-2)' }}>Current Signal</div>
+              <AnalyzeButton marketId={market.id} />
             </div>
-            <div>
-              <div className="font-medium text-gray-700 mb-0.5">Reasoning:</div>
-              <p className="text-gray-600 whitespace-pre-wrap">{sig.reasoning}</p>
+            <div style={{ display: 'flex', gap: 20, marginBottom: 10 }}>
+              <div><span className="dim">Our prob:</span> <b className="mono">{(sig.estimated_probability * 100).toFixed(1)}%</b></div>
+              <div><span className="dim">Market:</span> <b className="mono">{(sig.market_mid_at_signal * 100).toFixed(1)}%</b></div>
+              <div><span className="dim">Edge:</span> <b className={`mono ${sig.edge >= 0 ? 'pos' : 'neg'}`}>{sig.edge >= 0 ? '+' : ''}{(sig.edge * 100).toFixed(1)}%</b></div>
+              <div><span className="dim">Confidence:</span> <b className="mono">{(sig.confidence * 100).toFixed(1)}%</b></div>
             </div>
-            {sig.social_sentiment_summary && (
-              <div>
-                <div className="font-medium text-gray-700 mb-0.5">Social sentiment:</div>
-                <p className="text-gray-600">{sig.social_sentiment_summary}</p>
-              </div>
+            <ProbBar ours={sig.estimated_probability} market={sig.market_mid_at_signal} />
+            {sig.reasoning && (
+              <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.6, color: 'var(--fg-1)' }}>{sig.reasoning}</div>
             )}
           </div>
         ) : (
-          <div className="text-gray-400 text-xs">No signal yet — click "Analyze now" to run the signal pipeline.</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ color: 'var(--fg-3)', fontSize: 12 }}>No signal yet</div>
+            <AnalyzeButton marketId={market.id} />
+          </div>
         )}
       </div>
-
-      {/* Full market ID + last fetched */}
-      <div className="text-xs text-gray-400 pt-1">
-        <span className="font-medium">Market ID:</span> {d.id} &nbsp;·&nbsp;
-        <span className="font-medium">Last fetched:</span> {relTime(d.last_fetched_at)}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div className="grid grid-2">
+          <MiniStat label="Mid" value={`${(d.mid_price * 100).toFixed(1)}¢`} />
+          <MiniStat label="Bid / Ask" value={`${(d.yes_bid * 100).toFixed(1)}¢ / ${(d.yes_ask * 100).toFixed(1)}¢`} />
+          <MiniStat label="Volume 24h" value={d.volume_24h.toLocaleString(undefined, { maximumFractionDigits: 0 })} />
+          <MiniStat label="Closes" value={new Date(d.close_time).toLocaleDateString()} />
+        </div>
+        <Sparkline data={walk(d.id.charCodeAt(3) || 7, 32, d.mid_price * 100, 8)} w={280} h={60} color="var(--accent)" />
+        <div className="ticker-id" style={{ marginTop: 4 }}>{d.id}</div>
       </div>
     </div>
   )
 }
-
-// ---- Main page -----------------------------------------------------------
 
 export default function Markets() {
   const [status, setStatus] = useState<StatusFilter>('open')
@@ -139,105 +98,100 @@ export default function Markets() {
   }
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-        <h1 className="text-xl font-bold text-gray-900">Markets</h1>
-        <div className="flex gap-2 items-center flex-1 max-w-lg">
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => handleSearchChange(e.target.value)}
-            placeholder="Search by question or market ID…"
-            className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Markets</h1>
+          <div className="page-subtitle">
+            <span className="num">{data?.total ?? '—'}</span> markets total
+          </div>
         </div>
-        <div className="flex gap-1 text-sm">
-          {(['open', 'closed', 'all'] as StatusFilter[]).map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatus(s)}
-              className={`px-3 py-1 rounded border capitalize ${status === s ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
-            >
-              {s}
-            </button>
-          ))}
+        <div className="row">
+          <div style={{ position: 'relative', width: 360 }}>
+            <div style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--fg-2)' }}>
+              <Icon name="search" />
+            </div>
+            <input
+              className="input"
+              style={{ paddingLeft: 30 }}
+              placeholder="Search by question or market ID…"
+              value={search}
+              onChange={(e) => handleSearchChange(e.target.value)}
+            />
+          </div>
+          <Segmented<StatusFilter>
+            items={['open', 'closed', 'all']}
+            value={status}
+            onChange={setStatus}
+          />
         </div>
       </div>
 
       {isLoading && <LoadingSpinner />}
       {error && <ErrorBanner message={String(error)} />}
+
       {data && (
-        <>
-          <div className="text-sm text-gray-500 mb-2">{data.total} markets</div>
-          <div className="bg-white rounded shadow overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-gray-100 text-xs text-gray-600 uppercase tracking-wide">
-                <tr>
-                  <th className="px-3 py-2">Question</th>
-                  <th className="px-3 py-2 text-center">Mid</th>
-                  <th className="px-3 py-2 text-center">Vol 24h</th>
-                  <th className="px-3 py-2 text-center">Closes</th>
-                  <th className="px-3 py-2 text-center">Signal edge</th>
-                  <th className="px-3 py-2 text-center">Status</th>
-                  <th className="px-3 py-2" />
-                </tr>
-              </thead>
-              <tbody>
-                {data.items.map((m: MarketOut) => (
+        <Panel flush>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th style={{ width: '50%' }}>Question</th>
+                <th className="r">Mid</th>
+                <th className="r">Vol 24h</th>
+                <th className="r">Closes</th>
+                <th className="c">Signal</th>
+                <th className="c" style={{ width: 80 }}>Status</th>
+                <th style={{ width: 36 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.map((m: MarketOut) => {
+                const isExp = expandedId === m.id
+                return (
                   <>
                     <tr
                       key={m.id}
-                      className="border-t cursor-pointer hover:bg-blue-50 transition-colors"
+                      className={isExp ? 'expanded' : ''}
                       onClick={() => toggleExpand(m.id)}
+                      style={{ cursor: 'pointer' }}
                     >
-                      <td className="px-3 py-2 max-w-md">
-                        <div className="truncate text-gray-800">{m.question}</div>
-                        <div className="text-xs text-gray-400 truncate">{m.id}</div>
+                      <td>
+                        <div style={{ fontWeight: 500, marginBottom: 2 }}>{m.question}</div>
+                        <div className="ticker-id">{m.id}</div>
                       </td>
-                      <td className="px-3 py-2 text-center font-mono text-gray-700">
-                        {fmt2(m.mid_price)}¢
+                      <td className="r">{(m.mid_price * 100).toFixed(1)}¢</td>
+                      <td className="r">{m.volume_24h.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                      <td className="r dim">{closeTimeLabel(m.close_time)}</td>
+                      <td className="c">
+                        {m.current_signal_id
+                          ? <Badge kind="accent">signal</Badge>
+                          : <span className="muted">—</span>}
                       </td>
-                      <td className="px-3 py-2 text-center text-gray-600">
-                        {m.volume_24h.toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-center text-gray-600 text-xs whitespace-nowrap">
-                        {closeTimeLabel(m.close_time)}
-                      </td>
-                      <td className="px-3 py-2 text-center text-gray-400 text-xs">
-                        {m.current_signal_id ? '—' : <span className="text-gray-300">none</span>}
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                          m.status === 'active' ? 'bg-green-100 text-green-800' :
-                          'bg-gray-100 text-gray-600'
-                        }`}>
+                      <td className="c">
+                        <Badge kind={m.status === 'active' ? 'pos' : 'muted'} dot>
                           {m.status === 'active' ? 'open' : m.status}
-                        </span>
+                        </Badge>
                       </td>
-                      <td className="px-3 py-2 text-center text-gray-400 text-xs">
-                        {expandedId === m.id ? '▲' : '▼'}
-                      </td>
+                      <td className="c"><span className={`caret${isExp ? ' open' : ''}`}>›</span></td>
                     </tr>
-                    {expandedId === m.id && (
-                      <tr key={`${m.id}-detail`}>
-                        <td colSpan={7} className="p-0">
-                          <MarketDetail marketId={m.id} />
+                    {isExp && (
+                      <tr key={`${m.id}-d`} className="detail-row">
+                        <td colSpan={7}>
+                          <MarketDetail market={m} />
                         </td>
                       </tr>
                     )}
                   </>
-                ))}
-                {data.items.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="px-3 py-6 text-center text-gray-400">
-                      No markets found
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </>
+                )
+              })}
+              {data.items.length === 0 && (
+                <tr>
+                  <td colSpan={7} style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-3)' }}>No markets found</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </Panel>
       )}
     </div>
   )

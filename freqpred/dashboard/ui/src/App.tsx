@@ -12,22 +12,20 @@ import SystemHealth from './pages/SystemHealth'
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div style={{ minHeight: '100vh' }}>
       <NavBar />
-      <main className="px-3 py-4">
-        <Routes>
-          <Route path="/" element={<Navigate to="/positions" replace />} />
-          <Route path="/signals" element={<SignalFeed />} />
-          <Route path="/positions" element={<Positions />} />
-          <Route path="/decisions" element={<StrategyDecisions />} />
-          <Route path="/markets" element={<Markets />} />
-          <Route path="/calibration" element={<Calibration />} />
-          <Route path="/source-quality" element={<SourceQuality />} />
-          <Route path="/llm" element={<LLMCost />} />
-          <Route path="/strategy" element={<StrategyConfig />} />
-          <Route path="/health" element={<SystemHealth />} />
-        </Routes>
-      </main>
+      <Routes>
+        <Route path="/" element={<Navigate to="/markets" replace />} />
+        <Route path="/markets" element={<Markets />} />
+        <Route path="/signals" element={<SignalFeed />} />
+        <Route path="/positions" element={<Positions />} />
+        <Route path="/decisions" element={<StrategyDecisions />} />
+        <Route path="/calibration" element={<Calibration />} />
+        <Route path="/source-quality" element={<SourceQuality />} />
+        <Route path="/llm" element={<LLMCost />} />
+        <Route path="/strategy" element={<StrategyConfig />} />
+        <Route path="/health" element={<SystemHealth />} />
+      </Routes>
     </div>
   )
 }

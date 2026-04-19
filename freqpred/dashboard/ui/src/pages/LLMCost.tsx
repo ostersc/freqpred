@@ -1,59 +1,69 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import { getLLMCost, getLLMQueries, getLLMQuery } from '../api/llm'
-import LoadingSpinner from '../components/LoadingSpinner'
-import ErrorBanner from '../components/ErrorBanner'
+import { Badge, Panel, Stat, Donut, LoadingSpinner, ErrorBanner, Icon } from '../components/ui'
 import type { LLMQueryOut } from '../api/types'
 
-const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+const PAGE = 50
 
-function QueryModal({ id, onClose }: { id: number; onClose: () => void }) {
+const DONUT_COLORS = [
+  'oklch(0.68 0.16 265)',
+  'oklch(0.82 0.14 80)',
+  'oklch(0.72 0.17 25)',
+  'oklch(0.80 0.15 160)',
+  'oklch(0.78 0.10 230)',
+  'oklch(0.75 0.14 310)',
+]
+
+function queryTypeKind(type: string): 'accent' | 'warn' | 'info' | 'muted' {
+  if (type === 'catalyst_generation') return 'accent'
+  if (type === 'signal_assessment') return 'warn'
+  if (type === 'market_analysis') return 'info'
+  return 'muted'
+}
+
+function QueryDetailModal({ id, onClose }: { id: number; onClose: () => void }) {
   const { data, isLoading } = useQuery({
     queryKey: ['llmQuery', id],
     queryFn: () => getLLMQuery(id),
   })
 
   return (
-    <div
-      className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="bg-white rounded shadow-lg max-w-3xl w-full max-h-[80vh] overflow-y-auto p-6 text-sm"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold text-gray-900">LLM Query #{id}</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-700 text-lg leading-none">✕</button>
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <span>LLM Query #{id}</span>
+          <button className="btn ghost sm" onClick={onClose}><Icon name="x" /></button>
         </div>
-        {isLoading && <LoadingSpinner />}
-        {data && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-3 text-xs text-gray-600">
-              <div><span className="font-medium">Model:</span> {data.model_used}</div>
-              <div><span className="font-medium">Type:</span> {data.query_type}</div>
-              <div><span className="font-medium">Cost:</span> ${data.cost_usd.toFixed(5)}</div>
-              <div><span className="font-medium">Tokens:</span> {data.tokens_total}</div>
-              <div><span className="font-medium">Latency:</span> {data.latency_ms}ms</div>
-              <div><span className="font-medium">Success:</span> {data.success ? 'Yes' : 'No'}</div>
-            </div>
-            {data.error_message && (
-              <div className="bg-red-50 border border-red-200 rounded p-2 text-red-700 text-xs">
-                {data.error_message}
+        <div style={{ padding: 18 }}>
+          {isLoading && <LoadingSpinner />}
+          {data && (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 16, fontSize: 12 }}>
+                <div><span className="dim">Model:</span> <span className="mono">{data.model_used}</span></div>
+                <div><span className="dim">Type:</span> <span>{data.query_type}</span></div>
+                <div><span className="dim">Cost:</span> <span className="mono">${data.cost_usd.toFixed(5)}</span></div>
+                <div><span className="dim">Tokens:</span> <span className="mono">{data.tokens_total.toLocaleString()}</span></div>
+                <div><span className="dim">Latency:</span> <span className="mono">{data.latency_ms}ms</span></div>
+                <div><span className="dim">Success:</span> <Badge kind={data.success ? 'pos' : 'neg'}>{data.success ? 'yes' : 'no'}</Badge></div>
               </div>
-            )}
-            <div>
-              <div className="font-medium text-gray-700 mb-1">Prompt</div>
-              <pre className="bg-gray-50 rounded p-3 text-xs overflow-x-auto whitespace-pre-wrap">{data.prompt}</pre>
-            </div>
-            <div>
-              <div className="font-medium text-gray-700 mb-1">Response</div>
-              <pre className="bg-gray-50 rounded p-3 text-xs overflow-x-auto whitespace-pre-wrap">{data.response}</pre>
-            </div>
-          </div>
-        )}
+              {data.error_message && (
+                <div className="error-banner" style={{ marginBottom: 12 }}>{data.error_message}</div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+                <div>
+                  <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--fg-2)', marginBottom: 6 }}>Prompt</div>
+                  <pre className="mono" style={{ fontSize: 11, background: 'var(--bg-0)', padding: 12, borderRadius: 6, border: '1px solid var(--line-soft)', lineHeight: 1.55, maxHeight: 240, overflow: 'auto', whiteSpace: 'pre-wrap', margin: 0 }}>{data.prompt}</pre>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--fg-2)', marginBottom: 6 }}>Response</div>
+                  <pre className="mono" style={{ fontSize: 11, background: 'var(--bg-0)', padding: 12, borderRadius: 6, border: '1px solid var(--line-soft)', lineHeight: 1.55, maxHeight: 240, overflow: 'auto', whiteSpace: 'pre-wrap', margin: 0 }}>{data.response}</pre>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -62,10 +72,8 @@ function QueryModal({ id, onClose }: { id: number; onClose: () => void }) {
 export default function LLMCost() {
   const [offset, setOffset] = useState(0)
   const [searchParams, setSearchParams] = useSearchParams()
-  const PAGE = 50
   const selectedIdParam = searchParams.get('queryId')
-  const selectedId = selectedIdParam !== null ? Number(selectedIdParam) : null
-  const activeQueryId = selectedId !== null && Number.isFinite(selectedId) ? selectedId : null
+  const activeQueryId = selectedIdParam !== null && Number.isFinite(Number(selectedIdParam)) ? Number(selectedIdParam) : null
 
   const { data: cost, isLoading: costLoading, error: costError } = useQuery({
     queryKey: ['llmCost'],
@@ -77,18 +85,24 @@ export default function LLMCost() {
     queryFn: () => getLLMQueries({ limit: PAGE, offset }),
   })
 
-  const pieData = useMemo(() => {
+  const donutData = useMemo(() => {
     if (!cost) return []
-    return Object.entries(cost.by_query_type).map(([name, value]) => ({ name, value }))
+    const total = Object.values(cost.by_query_type).reduce((a, b) => a + b, 0)
+    if (total === 0) return []
+    return Object.entries(cost.by_query_type).map(([label, value], i) => ({
+      label,
+      pct: (value / total) * 100,
+      color: DONUT_COLORS[i % DONUT_COLORS.length],
+    }))
   }, [cost])
 
   const isLoading = costLoading || queriesLoading
   const error = costError || queriesError
 
   return (
-    <div>
+    <div className="page">
       {activeQueryId !== null && (
-        <QueryModal
+        <QueryDetailModal
           id={activeQueryId}
           onClose={() => {
             const next = new URLSearchParams(searchParams)
@@ -97,124 +111,106 @@ export default function LLMCost() {
           }}
         />
       )}
-      <h1 className="text-xl font-bold text-gray-900 mb-4">LLM Cost & Audit</h1>
+
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">LLM Cost & Audit</h1>
+          <div className="page-subtitle">Budget tracking, query volume, and per-call audit trail</div>
+        </div>
+      </div>
+
       {isLoading && !cost && <LoadingSpinner />}
       {error && <ErrorBanner message={String(error)} />}
+
       {cost && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-          <div className="bg-white rounded shadow p-4">
-            <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">Today</div>
-            <div className="text-2xl font-bold text-gray-900">${cost.today_usd.toFixed(4)}</div>
-            <div className="mt-2">
-              <div className="flex justify-between text-xs text-gray-500 mb-1">
-                <span>Cap: ${cost.daily_cap_usd.toFixed(2)}</span>
-                <span>{cost.pct_used.toFixed(1)}% used</span>
-              </div>
-              <div className="bg-gray-100 rounded-full h-2">
-                <div
-                  className={`h-2 rounded-full ${cost.pct_used >= 90 ? 'bg-red-500' : cost.pct_used >= 70 ? 'bg-yellow-500' : 'bg-blue-500'}`}
-                  style={{ width: `${Math.min(100, cost.pct_used)}%` }}
-                />
-              </div>
+        <div className="grid grid-3" style={{ marginBottom: 12 }}>
+          <div className="stat">
+            <div className="stat-label">Today</div>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+              <div className="stat-value">${cost.today_usd.toFixed(4)}</div>
+              <div style={{ fontSize: 11, color: 'var(--fg-2)' }}>{cost.pct_used.toFixed(1)}% used</div>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--fg-2)', marginTop: 6, marginBottom: 8 }}>Cap: ${cost.daily_cap_usd.toFixed(2)}</div>
+            <div className="progress">
+              <span style={{ width: `${Math.min(100, cost.pct_used)}%`, background: cost.pct_used >= 90 ? 'var(--neg)' : cost.pct_used >= 70 ? 'var(--warn)' : 'var(--accent)' }} />
             </div>
           </div>
-          <div className="bg-white rounded shadow p-4">
-            <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">This week</div>
-            <div className="text-2xl font-bold text-gray-900">${cost.weekly_usd.toFixed(4)}</div>
-          </div>
-          {pieData.length > 0 && (
-            <div className="bg-white rounded shadow p-4">
-              <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">By query type (today)</div>
-              <div className="flex items-center gap-3">
-                <ResponsiveContainer width={100} height={100}>
-                  <PieChart>
-                    <Pie data={pieData} dataKey="value" cx="50%" cy="50%" outerRadius={45} innerRadius={25}>
-                      {pieData.map((_, i) => (
-                        <Cell key={i} fill={COLORS[i % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip formatter={(v: number) => `$${v.toFixed(5)}`} />
-                  </PieChart>
-                </ResponsiveContainer>
-                <ul className="text-xs text-gray-600 space-y-1">
-                  {pieData.map((d, i) => (
-                    <li key={d.name} className="flex items-center gap-1">
-                      <span className="inline-block w-2 h-2 rounded-full" style={{ background: COLORS[i % COLORS.length] }} />
-                      {d.name}
-                    </li>
+          <Stat label="This week" value={`$${cost.weekly_usd.toFixed(4)}`} sub={`${queries?.total ?? 0} queries total`} />
+          {donutData.length > 0 && (
+            <div className="stat">
+              <div className="stat-label">By query type (today)</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 4 }}>
+                <Donut data={donutData} size={76} />
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {donutData.map((b) => (
+                    <div key={b.label} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: b.color, flexShrink: 0 }} />
+                      <span style={{ flex: 1, color: 'var(--fg-1)' }}>{b.label}</span>
+                      <span className="mono dim">{b.pct.toFixed(0)}%</span>
+                    </div>
                   ))}
-                </ul>
+                </div>
               </div>
             </div>
           )}
         </div>
       )}
+
       {queries && (
-        <>
-          <h2 className="text-sm font-semibold text-gray-700 mb-2">Recent queries — click for full prompt &amp; response</h2>
-          <div className="bg-white rounded shadow overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-gray-100 text-xs text-gray-600 uppercase tracking-wide">
-                <tr>
-                  <th className="px-3 py-2">Time</th>
-                  <th className="px-3 py-2">Type</th>
-                  <th className="px-3 py-2">Model</th>
-                  <th className="px-3 py-2 text-right">Tokens</th>
-                  <th className="px-3 py-2 text-right">Cost</th>
-                  <th className="px-3 py-2 text-right">Latency</th>
-                  <th className="px-3 py-2 text-center">OK</th>
+        <Panel title="Recent queries — click for full prompt & response" flush>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Type</th>
+                <th>Model</th>
+                <th className="r">Tokens</th>
+                <th className="r">Cost</th>
+                <th className="r">Latency</th>
+                <th className="c">OK</th>
+              </tr>
+            </thead>
+            <tbody>
+              {queries.items.map((q: LLMQueryOut) => (
+                <tr
+                  key={q.id}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => {
+                    const next = new URLSearchParams(searchParams)
+                    next.set('queryId', String(q.id))
+                    setSearchParams(next)
+                  }}
+                >
+                  <td className="dim" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>{new Date(q.timestamp).toLocaleString()}</td>
+                  <td><Badge kind={queryTypeKind(q.query_type)}>{q.query_type}</Badge></td>
+                  <td className="mono" style={{ fontSize: 11.5, color: 'var(--fg-1)' }}>{q.model_used}</td>
+                  <td className="r">{q.tokens_total.toLocaleString()}</td>
+                  <td className="r">${q.cost_usd.toFixed(5)}</td>
+                  <td className="r">
+                    <span className={q.latency_ms > 5000 ? 'warn' : ''}>{q.latency_ms}ms</span>
+                  </td>
+                  <td className="c">
+                    <span className={q.success ? 'pos' : 'neg'} style={{ display: 'inline-flex', width: 16, height: 16, alignItems: 'center', justifyContent: 'center' }}>
+                      <Icon name={q.success ? 'check' : 'x'} size={12} />
+                    </span>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {queries.items.map((q: LLMQueryOut) => (
-                  <tr
-                    key={q.id}
-                    className="border-t hover:bg-blue-50 cursor-pointer transition-colors"
-                    onClick={() => {
-                      const next = new URLSearchParams(searchParams)
-                      next.set('queryId', String(q.id))
-                      setSearchParams(next)
-                    }}
-                  >
-                    <td className="px-3 py-2 text-xs text-gray-500">{new Date(q.timestamp).toLocaleString()}</td>
-                    <td className="px-3 py-2">{q.query_type}</td>
-                    <td className="px-3 py-2 text-xs text-gray-500">{q.model_used}</td>
-                    <td className="px-3 py-2 text-right">{q.tokens_total.toLocaleString()}</td>
-                    <td className="px-3 py-2 text-right">${q.cost_usd.toFixed(5)}</td>
-                    <td className="px-3 py-2 text-right">{q.latency_ms}ms</td>
-                    <td className="px-3 py-2 text-center">
-                      {q.success
-                        ? <span className="text-green-600">✓</span>
-                        : <span className="text-red-600">✗</span>}
-                    </td>
-                  </tr>
-                ))}
-                {queries.items.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="px-3 py-6 text-center text-gray-400">No LLM queries recorded</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          <div className="flex items-center gap-3 mt-3 text-sm">
-            <button
-              className="px-3 py-1 rounded border disabled:opacity-40"
-              disabled={offset === 0}
-              onClick={() => setOffset(Math.max(0, offset - PAGE))}
-            >
-              Previous
-            </button>
-            <span className="text-gray-500">{offset + 1}–{Math.min(offset + PAGE, queries.total)} of {queries.total}</span>
-            <button
-              className="px-3 py-1 rounded border disabled:opacity-40"
-              disabled={offset + PAGE >= queries.total}
-              onClick={() => setOffset(offset + PAGE)}
-            >
-              Next
-            </button>
-          </div>
-        </>
+              ))}
+              {queries.items.length === 0 && (
+                <tr>
+                  <td colSpan={7} style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-3)' }}>No LLM queries recorded</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </Panel>
+      )}
+      {queries && queries.total > PAGE && (
+        <div className="pagination">
+          <button className="btn sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Previous</button>
+          <span>{offset + 1}–{Math.min(offset + PAGE, queries.total)} of {queries.total}</span>
+          <button className="btn sm" disabled={offset + PAGE >= queries.total} onClick={() => setOffset(offset + PAGE)}>Next</button>
+        </div>
       )}
     </div>
   )

@@ -14,46 +14,45 @@ export function DocLinkItem({ doc }: { doc: DocumentLinkOut }) {
   const excerpt = doc.summary || (doc.body_excerpt ? doc.body_excerpt + (doc.body_excerpt.length >= 400 ? '…' : '') : null)
 
   return (
-    <li>
-      <div className="flex items-center gap-2 min-w-0">
-        <span className="text-xs text-gray-400 shrink-0 tabular-nums">{doc.relevance_score.toFixed(3)}</span>
+    <li style={{ listStyle: 'none' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <span className="mono dim" style={{ fontSize: 10.5, flexShrink: 0 }}>{doc.relevance_score.toFixed(3)}</span>
         <a
           href={doc.source_url}
           target="_blank"
           rel="noreferrer"
-          className="text-blue-600 hover:underline truncate min-w-0"
+          style={{ color: 'var(--accent)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}
         >
           {doc.title || doc.source_url}
         </a>
         <button
           onClick={() => setOpen((v) => !v)}
-          className={`shrink-0 w-4 h-4 rounded-full text-xs font-bold leading-none border transition-colors ${
-            open
-              ? 'bg-blue-600 text-white border-blue-600'
-              : 'text-gray-400 border-gray-300 hover:text-blue-600 hover:border-blue-400'
-          }`}
+          style={{
+            flexShrink: 0, width: 16, height: 16, borderRadius: '50%', fontSize: 10, fontWeight: 700,
+            border: `1px solid ${open ? 'var(--accent)' : 'var(--line)'}`,
+            background: open ? 'var(--accent)' : 'transparent',
+            color: open ? 'var(--bg-0)' : 'var(--fg-3)',
+            cursor: 'pointer', lineHeight: 1,
+          }}
           title="Show document details"
-          aria-label="Show document details"
         >
           i
         </button>
       </div>
       {open && (
-        <div className="mt-1.5 ml-14 bg-white border rounded p-2.5 text-xs space-y-1.5 shadow-sm">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-medium capitalize">
-              {doc.source_type}
-            </span>
-            <span className="text-gray-700 font-medium">{doc.source_name}</span>
+        <div style={{ marginTop: 6, marginLeft: 56, background: 'var(--bg-1)', border: '1px solid var(--line-soft)', borderRadius: 6, padding: '10px 12px', fontSize: 11.5 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+            <span style={{ padding: '2px 6px', background: 'var(--bg-2)', border: '1px solid var(--line-soft)', borderRadius: 4, color: 'var(--fg-1)', textTransform: 'capitalize' }}>{doc.source_type}</span>
+            <span style={{ color: 'var(--fg-1)', fontWeight: 500 }}>{doc.source_name}</span>
           </div>
-          <div className="flex gap-4 text-gray-400">
+          <div style={{ display: 'flex', gap: 16, color: 'var(--fg-3)', marginBottom: excerpt ? 6 : 0 }}>
             {doc.published_at && (
-              <span>Published: <span className="text-gray-600">{fmtDate(doc.published_at)}</span></span>
+              <span>Published: <span style={{ color: 'var(--fg-2)' }}>{fmtDate(doc.published_at)}</span></span>
             )}
-            <span>Fetched: <span className="text-gray-600">{fmtDate(doc.fetched_at)}</span></span>
+            <span>Fetched: <span style={{ color: 'var(--fg-2)' }}>{fmtDate(doc.fetched_at)}</span></span>
           </div>
           {excerpt && (
-            <p className="text-gray-600 whitespace-pre-wrap leading-relaxed border-t pt-1.5 mt-1">{excerpt}</p>
+            <p style={{ margin: 0, color: 'var(--fg-1)', lineHeight: 1.6, borderTop: '1px solid var(--line-soft)', paddingTop: 6, whiteSpace: 'pre-wrap' }}>{excerpt}</p>
           )}
         </div>
       )}

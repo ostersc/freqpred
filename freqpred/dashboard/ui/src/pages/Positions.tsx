@@ -2,31 +2,10 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getPositions } from '../api/positions'
 import type { PositionOut } from '../api/types'
-import LoadingSpinner from '../components/LoadingSpinner'
-import ErrorBanner from '../components/ErrorBanner'
-import PositionDetail from '../components/PositionDetail'
+import { Badge, Panel, Segmented, LoadingSpinner, ErrorBanner, Sparkline, walk, fmtSignedMoney } from '../components/ui'
+import PositionDetailPanel from '../components/PositionDetail'
 
 type StatusFilter = 'open' | 'closed' | 'all'
-
-function fmt(v: number | null, decimals = 2) {
-  if (v === null) return '—'
-  return v.toFixed(decimals)
-}
-
-function fmtPct(v: number | null) {
-  if (v === null) return '—'
-  const s = (v * 100).toFixed(1)
-  return v >= 0 ? `+${s}%` : `${s}%`
-}
-
-function pnlColor(v: number | null) {
-  if (v === null) return 'text-gray-500'
-  return v > 0 ? 'text-green-700 font-semibold' : v < 0 ? 'text-red-700 font-semibold' : 'text-gray-600'
-}
-
-function relTime(iso: string) {
-  return new Date(iso).toLocaleString()
-}
 
 export default function Positions() {
   const [status, setStatus] = useState<StatusFilter>('open')
@@ -42,125 +21,163 @@ export default function Positions() {
     setExpandedId((prev) => (prev === id ? null : id))
   }
 
+  const totals = data?.items.reduce(
+    (acc, p) => {
+      const pnl = p.status === 'open' ? (p.unrealized_pnl ?? 0) : (p.pnl ?? 0)
+      const exposure = p.entry_price * p.contracts
+      return { contracts: acc.contracts + p.contracts, exposure: acc.exposure + exposure, pnl: acc.pnl + pnl }
+    },
+    { contracts: 0, exposure: 0, pnl: 0 },
+  )
+
+  const totalExposure = totals?.exposure ?? 1
+
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-bold text-gray-900">Positions</h1>
-        <div className="flex gap-1 text-sm">
-          {(['open', 'closed', 'all'] as StatusFilter[]).map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatus(s)}
-              className={`px-3 py-1 rounded border capitalize ${status === s ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
-            >
-              {s}
-            </button>
-          ))}
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">Positions</h1>
+          <div className="page-subtitle">
+            <span className="num">{data?.total ?? '—'}</span> positions
+            {status === 'open' && ' · refreshes every 60s'}
+          </div>
+        </div>
+        <div className="row">
+          {totals && (
+            <>
+              <div className="chip">
+                Unrealized{' '}
+                <b className={`mono ${totals.pnl >= 0 ? 'pos' : 'neg'}`} style={{ marginLeft: 6 }}>
+                  {fmtSignedMoney(totals.pnl)}
+                </b>
+              </div>
+              <div className="chip">
+                Exposure <b className="mono" style={{ marginLeft: 6 }}>${totals.exposure.toFixed(2)}</b>
+              </div>
+            </>
+          )}
+          <Segmented<StatusFilter>
+            items={['open', 'closed', 'all']}
+            value={status}
+            onChange={setStatus}
+          />
         </div>
       </div>
+
       {isLoading && <LoadingSpinner />}
       {error && <ErrorBanner message={String(error)} />}
+
       {data && (
-        <>
-          <div className="text-sm text-gray-500 mb-2">{data.total} positions{status === 'open' ? ' — refreshes every 60s' : ''}</div>
-          <div className="bg-white rounded shadow overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-gray-100 text-xs text-gray-600 uppercase tracking-wide">
-                <tr>
-                  <th className="px-3 py-2">Market</th>
-                  <th className="px-3 py-2 text-center">Dir</th>
-                  <th className="px-3 py-2 text-center">Contracts</th>
-                  <th className="px-3 py-2 text-center">Entry</th>
-                  <th className="px-3 py-2 text-center">Exposure</th>
-                  <th className="px-3 py-2 text-center">Exit</th>
-                  <th className="px-3 py-2 text-center">P&L (unreal.)</th>
-                  <th className="px-3 py-2 text-center">P&L %</th>
-                  <th className="px-3 py-2 text-center">Status</th>
-                  <th className="px-3 py-2 text-center">Strategy</th>
-                  <th className="px-3 py-2 text-center">Entered</th>
-                  <th className="px-3 py-2" />
-                </tr>
-              </thead>
-              <tbody>
-                {data.items.map((p: PositionOut) => (
+        <Panel flush>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th className="c">Dir</th>
+                <th className="r">Contracts</th>
+                <th className="r">Entry</th>
+                <th className="r">Current</th>
+                <th className="r" style={{ minWidth: 140 }}>Exposure</th>
+                <th className="r">Signal history</th>
+                <th className="r">P&amp;L</th>
+                <th className="r">%</th>
+                <th className="c">Status</th>
+                <th className="c">Strategy</th>
+                <th className="r">Entered</th>
+                <th style={{ width: 36 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.items.map((p: PositionOut, i) => {
+                const isExp = expandedId === p.id
+                const pnl = p.status === 'open' ? p.unrealized_pnl : p.pnl
+                const pnlPct = p.status === 'open' ? p.unrealized_pnl_pct : p.pnl_pct
+                const exposure = p.entry_price * p.contracts
+                const expoPct = totalExposure > 0 ? (exposure / totalExposure) * 100 : 0
+                return (
                   <>
                     <tr
                       key={p.id}
-                      className="border-t cursor-pointer hover:bg-blue-50 transition-colors"
+                      className={isExp ? 'expanded' : ''}
                       onClick={() => toggleExpand(p.id)}
+                      style={{ cursor: 'pointer' }}
                     >
-                      <td className="px-3 py-2 max-w-xs">
-                        <div className="truncate text-gray-800">{p.market_id}</div>
+                      <td>
+                        <span className="ticker-id" style={{ color: 'var(--fg-0)', fontSize: 12 }}>{p.market_id}</span>
                       </td>
-                      <td className={`px-3 py-2 text-center font-semibold ${p.direction === 'YES' ? 'text-green-700' : 'text-red-700'}`}>
-                        {p.direction}
+                      <td className="c">
+                        <Badge kind={p.direction === 'YES' ? 'pos' : 'neg'}>{p.direction}</Badge>
                       </td>
-                      <td className="px-3 py-2 text-center">{p.contracts}</td>
-                      <td className="px-3 py-2 text-center">${fmt(p.entry_price)}</td>
-                      <td className="px-3 py-2 text-center text-gray-700">${fmt(p.entry_price * p.contracts)}</td>
-                      <td className="px-3 py-2 text-center">{p.exit_price !== null ? `$${fmt(p.exit_price)}` : '—'}</td>
-                      <td className={`px-3 py-2 text-center ${pnlColor(p.status === 'open' ? p.unrealized_pnl : p.pnl)}`}>
-                        {p.status === 'open'
-                          ? p.unrealized_pnl !== null ? `$${fmt(p.unrealized_pnl)}` : '—'
-                          : p.pnl !== null ? `$${fmt(p.pnl)}` : '—'}
+                      <td className="r">{p.contracts}</td>
+                      <td className="r">${p.entry_price.toFixed(2)}</td>
+                      <td className="r dim">
+                        {p.exit_price !== null ? `$${p.exit_price.toFixed(2)}` : '—'}
                       </td>
-                      <td className={`px-3 py-2 text-center ${pnlColor(p.status === 'open' ? p.unrealized_pnl_pct : p.pnl_pct)}`}>
-                        {p.status === 'open' ? fmtPct(p.unrealized_pnl_pct) : fmtPct(p.pnl_pct)}
+                      <td className="r">
+                        <div className="expo-cell">
+                          <div className="expo-bar">
+                            <div className="expo-fill" style={{ width: `${expoPct}%` }} />
+                          </div>
+                          <div className="expo-vals">
+                            <span>${exposure.toFixed(2)}</span>
+                            <span className="dim" style={{ fontSize: 10.5 }}>{expoPct.toFixed(1)}%</span>
+                          </div>
+                        </div>
                       </td>
-                      <td className="px-3 py-2 text-center">
-                        <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                          p.status === 'open' ? 'bg-green-100 text-green-800' :
-                          p.status === 'closed' ? 'bg-gray-100 text-gray-700' :
-                          'bg-yellow-100 text-yellow-800'
-                        }`}>{p.status}</span>
+                      <td className="r">
+                        <Sparkline
+                          data={walk(p.market_id.charCodeAt(8) + i, 28, (p.entry_price || 0.5) * 100, 10)}
+                          w={80} h={20}
+                          color={pnl !== null && pnl >= 0 ? 'var(--pos)' : 'var(--neg)'}
+                        />
                       </td>
-                      <td className="px-3 py-2 text-center text-gray-500 text-xs">{p.strategy_name}</td>
-                      <td className="px-3 py-2 text-center text-gray-500 text-xs">{relTime(p.entry_time)}</td>
-                      <td className="px-3 py-2 text-center text-gray-400 text-xs">
-                        {expandedId === p.id ? '▲' : '▼'}
+                      <td className={`r ${pnl !== null && pnl >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 500 }}>
+                        {pnl !== null ? fmtSignedMoney(pnl) : '—'}
                       </td>
+                      <td className={`r ${pnlPct !== null && pnlPct >= 0 ? 'pos' : 'neg'}`}>
+                        {pnlPct !== null ? `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%` : '—'}
+                      </td>
+                      <td className="c">
+                        <Badge kind={p.status === 'open' ? 'pos' : p.status === 'closed' ? 'muted' : 'warn'} dot>
+                          {p.status}
+                        </Badge>
+                      </td>
+                      <td className="c"><span style={{ fontSize: 11, color: 'var(--fg-2)' }}>{p.strategy_name}</span></td>
+                      <td className="r dim" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                        {new Date(p.entry_time).toLocaleString()}
+                      </td>
+                      <td className="c"><span className={`caret${isExp ? ' open' : ''}`}>›</span></td>
                     </tr>
-                    {expandedId === p.id && (
-                      <tr key={`${p.id}-detail`}>
-                        <td colSpan={12} className="p-0">
-                          <PositionDetail positionId={p.id} />
+                    {isExp && (
+                      <tr key={`${p.id}-d`} className="detail-row">
+                        <td colSpan={13}>
+                          <PositionDetailPanel positionId={p.id} />
                         </td>
                       </tr>
                     )}
                   </>
-                ))}
-                {data.items.length === 0 && (
-                  <tr>
-                    <td colSpan={12} className="px-3 py-6 text-center text-gray-400">No positions</td>
-                  </tr>
-                )}
-                {data.items.length > 0 && (() => {
-                  const totalContracts = data.items.reduce((s, p) => s + p.contracts, 0)
-                  const totalPnl = data.items.reduce((s, p) => {
-                    const v = p.status === 'open' ? p.unrealized_pnl : p.pnl
-                    return s + (v ?? 0)
-                  }, 0)
-                  const totalCostBasis = data.items.reduce((s, p) => s + p.entry_price * p.contracts, 0)
-                  const weightedPct = totalCostBasis > 0 ? totalPnl / totalCostBasis : null
-                  const weightedAvgEntry = totalContracts > 0 ? totalCostBasis / totalContracts : null
-                  return (
-                    <tr className="border-t-2 border-gray-300 bg-gray-50 font-semibold text-xs">
-                      <td className="px-3 py-2 text-gray-500 uppercase tracking-wide">Total</td>
-                      <td />
-                      <td className="px-3 py-2 text-center">{totalContracts}</td>
-                      <td className="px-3 py-2 text-center text-gray-600">{weightedAvgEntry !== null ? `$${fmt(weightedAvgEntry)}` : '—'}</td>
-                      <td className="px-3 py-2 text-center text-gray-700">${fmt(totalCostBasis)}</td>
-                      <td />
-                      <td className={`px-3 py-2 text-center ${pnlColor(totalPnl)}`}>${fmt(totalPnl)}</td>
-                      <td className={`px-3 py-2 text-center ${pnlColor(weightedPct)}`}>{fmtPct(weightedPct)}</td>
-                      <td /><td /><td /><td />
-                    </tr>
-                  )
-                })()}
-              </tbody>
-            </table>
-          </div>
-        </>
+                )
+              })}
+              {data.items.length === 0 && (
+                <tr>
+                  <td colSpan={13} style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-3)' }}>No positions</td>
+                </tr>
+              )}
+              {totals && data.items.length > 0 && (
+                <tr style={{ background: 'var(--bg-2)', fontWeight: 500 }}>
+                  <td><b>TOTAL</b></td>
+                  <td></td>
+                  <td className="r">{totals.contracts}</td>
+                  <td></td><td></td>
+                  <td className="r"><b>${totals.exposure.toFixed(2)}</b></td>
+                  <td></td>
+                  <td className={`r ${totals.pnl >= 0 ? 'pos' : 'neg'}`}><b>{fmtSignedMoney(totals.pnl)}</b></td>
+                  <td></td><td></td><td></td><td></td><td></td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </Panel>
       )}
     </div>
   )

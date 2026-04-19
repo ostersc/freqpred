@@ -1,30 +1,18 @@
 import { useQuery } from '@tanstack/react-query'
 import { getSystemHealth } from '../api/health'
-import LoadingSpinner from '../components/LoadingSpinner'
-import ErrorBanner from '../components/ErrorBanner'
-import StatusBadge from '../components/StatusBadge'
+import { Badge, Panel, Stat, LoadingSpinner, ErrorBanner, fmtUptime } from '../components/ui'
 
-function Card({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="bg-white rounded shadow p-4">
-      <div className="text-xs text-gray-500 uppercase tracking-wide mb-2">{label}</div>
-      {children}
-    </div>
-  )
+function statusKind(s: string): 'pos' | 'neg' | 'warn' | 'info' | 'muted' {
+  if (s === 'running' || s === 'connected' || s === 'ok') return 'pos'
+  if (s === 'error' || s === 'halted' || s === 'stale') return 'neg'
+  if (s === 'warn' || s === 'degraded') return 'warn'
+  if (s === 'paper' || s === 'signal-only') return 'info'
+  return 'muted'
 }
 
-function formatUptime(secs: number) {
-  const h = Math.floor(secs / 3600)
-  const m = Math.floor((secs % 3600) / 60)
-  const s = secs % 60
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
-}
-
-function formatAge(secs: number | null) {
-  if (secs === null) return '—'
-  return formatUptime(secs)
+function fmtAgeSecs(s: number | null): string {
+  if (s === null) return '—'
+  return fmtUptime(s)
 }
 
 export default function SystemHealth() {
@@ -35,163 +23,181 @@ export default function SystemHealth() {
   })
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-bold text-gray-900">System Health</h1>
-        <span className="text-xs text-gray-400">refreshes every 15s</span>
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">System Health</h1>
+          <div className="page-subtitle">Heartbeat across every subsystem of the trading bot.</div>
+        </div>
+        <div className="chip">
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--pos)', boxShadow: '0 0 8px var(--pos)', display: 'inline-block' }} />
+          {' '}refreshes every 15s
+        </div>
       </div>
+
       {isLoading && <LoadingSpinner />}
       {error && <ErrorBanner message={String(error)} />}
+
       {data && (
         <>
           {data.circuit_breakers.trading_halted && (
-            <div className="mb-4 px-4 py-3 bg-red-50 border border-red-300 rounded text-red-800 text-sm font-medium">
+            <div className="error-banner" style={{ marginBottom: 12 }}>
               Circuit breaker active — trading halted. Reason: {data.circuit_breakers.reason ?? 'unknown'}
             </div>
           )}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-            <Card label="Run state">
-              <StatusBadge status={data.run_state} />
-            </Card>
-            <Card label="Mode">
-              <StatusBadge status={data.mode} />
-            </Card>
-            <Card label="Database">
-              <StatusBadge status={data.db_ok ? 'connected' : 'error'} />
-            </Card>
-            <Card label="Uptime">
-              <span className="text-lg font-bold text-gray-900">{formatUptime(data.uptime_seconds)}</span>
-            </Card>
+
+          <div className="grid grid-4" style={{ marginBottom: 12 }}>
+            <Stat label="Run state" value={<Badge kind={statusKind(data.run_state)} dot>{data.run_state}</Badge>} sub="strategy loop" />
+            <Stat label="Mode" value={<Badge kind={statusKind(data.mode)}>{data.mode}</Badge>} sub={data.mode === 'paper' ? 'no real orders sent' : 'live trading'} />
+            <Stat label="Database" value={<Badge kind={data.db_ok ? 'pos' : 'neg'} dot>{data.db_ok ? 'connected' : 'error'}</Badge>} sub="primary" />
+            <Stat label="Uptime" value={fmtUptime(data.uptime_seconds)} />
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
-            <Card label="Open positions">
-              <span className="text-2xl font-bold text-gray-900">{data.open_positions}</span>
-            </Card>
-            <Card label="Pending orders">
-              <div>
-                <div className="text-2xl font-bold text-gray-900">{data.pending_orders}</div>
-                <div className="text-xs text-gray-500 mt-1">
-                  Oldest age: {formatAge(data.oldest_pending_order_age_seconds)}
+
+          <div className="grid grid-3" style={{ marginBottom: 12 }}>
+            <Stat label="Open positions" value={String(data.open_positions)} />
+            <Stat label="Pending orders" value={String(data.pending_orders)} sub={`Oldest age: ${fmtAgeSecs(data.oldest_pending_order_age_seconds)}`} />
+            <div className="stat">
+              <div className="stat-label">API errors (last hour)</div>
+              <div style={{ display: 'flex', gap: 24, marginTop: 6 }}>
+                <div>
+                  <div className="dim" style={{ fontSize: 11 }}>Kalshi</div>
+                  <div className={`mono ${data.api_errors.kalshi_errors_last_hour > 0 ? 'neg' : 'pos'}`} style={{ fontSize: 20, fontWeight: 600 }}>{data.api_errors.kalshi_errors_last_hour}</div>
+                </div>
+                <div>
+                  <div className="dim" style={{ fontSize: 11 }}>LLM</div>
+                  <div className={`mono ${data.api_errors.llm_errors_last_hour > 0 ? 'neg' : 'pos'}`} style={{ fontSize: 20, fontWeight: 600 }}>{data.api_errors.llm_errors_last_hour}</div>
                 </div>
               </div>
-            </Card>
-            <Card label="API errors (last hour)">
-              <div className="space-y-1">
-                <div className={`text-lg font-bold ${data.api_errors.kalshi_errors_last_hour > 0 ? 'text-red-700' : 'text-gray-900'}`}>
-                  Kalshi: {data.api_errors.kalshi_errors_last_hour}
-                </div>
-                <div className={`text-lg font-bold ${data.api_errors.llm_errors_last_hour > 0 ? 'text-red-700' : 'text-gray-900'}`}>
-                  LLM: {data.api_errors.llm_errors_last_hour}
-                </div>
-              </div>
-            </Card>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-            <Card label="Circuit breaker">
-              <div className="space-y-1 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">Trading halted</span>
-                  <StatusBadge status={data.circuit_breakers.trading_halted ? 'halted' : 'ok'} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">
-                    Daily loss{' '}
-                    <span className="text-xs text-gray-400">
-                      (since {new Date(data.circuit_breakers.daily_loss_window_start).toLocaleTimeString()})
-                    </span>
-                  </span>
-                  <span className={data.circuit_breakers.daily_loss_pct > 0 ? 'text-red-700 font-semibold' : 'text-gray-700'}>
-                    {(data.circuit_breakers.daily_loss_pct * 100).toFixed(2)}% / {(data.circuit_breakers.daily_loss_limit_pct * 100).toFixed(0)}%
-                  </span>
-                </div>
-                {data.circuit_breakers.daily_loss_ack_at && (
-                  <div className="flex items-center justify-between text-xs text-gray-500">
-                    <span>CB last acknowledged</span>
-                    <span>{new Date(data.circuit_breakers.daily_loss_ack_at).toLocaleString()}</span>
-                  </div>
-                )}
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">LLM budget used</span>
-                  <span className="text-gray-700">
-                    ${data.circuit_breakers.llm_budget_used_usd.toFixed(4)} / ${data.circuit_breakers.llm_budget_cap_usd.toFixed(2)}
-                  </span>
-                </div>
-                {data.circuit_breakers.reason && (
-                  <div className="mt-1 text-xs text-red-600 bg-red-50 rounded px-2 py-1">
-                    {data.circuit_breakers.reason}
-                  </div>
-                )}
-              </div>
-            </Card>
-            <Card label="WebSocket">
-              <div className="space-y-1 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">Feed status</span>
-                  <StatusBadge status={data.websocket.status} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">Connected</span>
-                  <StatusBadge status={
-                    data.websocket.connected === null ? 'n/a'
-                    : data.websocket.connected ? 'connected' : 'error'
-                  } />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">Subscribed markets</span>
-                  <span className="text-gray-700">{data.websocket.subscribed_markets ?? '—'}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">Last message</span>
-                  <span className="text-gray-700 text-xs">
-                    {data.websocket.last_message_at
-                      ? new Date(data.websocket.last_message_at).toLocaleString()
-                      : '—'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600">Last reconcile</span>
-                  <span className="text-gray-700 text-xs">
-                    {data.websocket.last_reconcile_at
-                      ? new Date(data.websocket.last_reconcile_at).toLocaleString()
-                      : '—'}
-                  </span>
-                </div>
-              </div>
-            </Card>
-          </div>
-          <Card label="Service Freshness">
-            <div className="space-y-2">
-              {data.services.map((service) => (
-                <div key={service.service_name} className="border border-gray-200 rounded px-3 py-2">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="font-medium text-gray-900">{service.label}</div>
-                      <div className="text-xs text-gray-500">
-                        stale after {formatUptime(service.stale_after_seconds)}
-                      </div>
-                    </div>
-                    <StatusBadge status={service.status} />
-                  </div>
-                  <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-gray-600">
-                    <div>
-                      Last success: {service.last_success_at ? new Date(service.last_success_at).toLocaleString() : '—'}
-                    </div>
-                    <div>
-                      Age: {formatAge(service.age_seconds)}
-                    </div>
-                    <div>
-                      Last error: {service.last_error_at ? new Date(service.last_error_at).toLocaleString() : '—'}
-                    </div>
-                  </div>
-                  {service.last_error_message && (
-                    <div className="mt-2 text-xs text-red-700 bg-red-50 rounded px-2 py-1">
-                      {service.last_error_message}
-                    </div>
-                  )}
-                </div>
-              ))}
             </div>
-          </Card>
+          </div>
+
+          <div className="grid grid-2" style={{ marginBottom: 12 }}>
+            <Panel title="Circuit breaker" action={<Badge kind={data.circuit_breakers.trading_halted ? 'neg' : 'pos'} dot>{data.circuit_breakers.trading_halted ? 'halted' : 'ok'}</Badge>}>
+              <table className="tbl" style={{ fontSize: 12.5 }}>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: '8px 0', border: 'none' }}>Trading halted</td>
+                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }} className="mono">{String(data.circuit_breakers.trading_halted)}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '8px 0', border: 'none' }}>Daily loss <span className="dim">(since {new Date(data.circuit_breakers.daily_loss_window_start).toLocaleTimeString()})</span></td>
+                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }} className={`mono ${data.circuit_breakers.daily_loss_pct > 0 ? 'neg' : ''}`}>
+                      {(data.circuit_breakers.daily_loss_pct * 100).toFixed(2)}% / {(data.circuit_breakers.daily_loss_limit_pct * 100).toFixed(0)}%
+                    </td>
+                  </tr>
+                  {data.circuit_breakers.daily_loss_ack_at && (
+                    <tr>
+                      <td style={{ padding: '8px 0', border: 'none' }}>CB last acknowledged</td>
+                      <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }} className="mono dim">{new Date(data.circuit_breakers.daily_loss_ack_at).toLocaleString()}</td>
+                    </tr>
+                  )}
+                  <tr>
+                    <td style={{ padding: '8px 0', border: 'none' }}>LLM budget used</td>
+                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }} className="mono">
+                      ${data.circuit_breakers.llm_budget_used_usd.toFixed(4)} / ${data.circuit_breakers.llm_budget_cap_usd.toFixed(2)}
+                    </td>
+                  </tr>
+                  {data.circuit_breakers.reason && (
+                    <tr>
+                      <td colSpan={2} style={{ padding: '8px 0', border: 'none' }}>
+                        <span className="neg" style={{ fontSize: 11.5 }}>{data.circuit_breakers.reason}</span>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </Panel>
+
+            <Panel title="Websocket" action={<Badge kind={data.websocket.connected ? 'pos' : 'neg'} dot>{data.websocket.connected ? 'connected' : data.websocket.status}</Badge>}>
+              <table className="tbl" style={{ fontSize: 12.5 }}>
+                <tbody>
+                  <tr>
+                    <td style={{ padding: '8px 0', border: 'none' }}>Feed status</td>
+                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }}>
+                      <Badge kind={statusKind(data.websocket.status)} dot>{data.websocket.status}</Badge>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '8px 0', border: 'none' }}>Connected</td>
+                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }}>
+                      {data.websocket.connected === null
+                        ? <span className="muted">n/a</span>
+                        : <Badge kind={data.websocket.connected ? 'pos' : 'neg'} dot>{data.websocket.connected ? 'connected' : 'disconnected'}</Badge>}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '8px 0', border: 'none' }}>Subscribed markets</td>
+                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }} className="mono">{data.websocket.subscribed_markets ?? '—'}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '8px 0', border: 'none' }}>Last message</td>
+                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right', fontSize: 11 }} className="mono dim">
+                      {data.websocket.last_message_at ? new Date(data.websocket.last_message_at).toLocaleString() : '—'}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding: '8px 0', border: 'none' }}>Last reconcile</td>
+                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right', fontSize: 11 }} className="mono dim">
+                      {data.websocket.last_reconcile_at ? new Date(data.websocket.last_reconcile_at).toLocaleString() : '—'}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </Panel>
+          </div>
+
+          <Panel title="Service heartbeats" flush action={<span className="dim" style={{ fontSize: 11 }}>one row per service · from service_heartbeats</span>}>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Service</th>
+                  <th>Last success</th>
+                  <th className="r">Age</th>
+                  <th style={{ width: 200 }}>Freshness</th>
+                  <th>Last error</th>
+                  <th className="c">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.services.map((s) => {
+                  const ageSec = s.age_seconds ?? 0
+                  const pct = Math.min(100, (ageSec / s.stale_after_seconds) * 100)
+                  const ok = s.status === 'ok'
+                  const barColor = pct > 90 ? 'var(--neg)' : pct > 60 ? 'var(--warn)' : 'var(--pos)'
+                  return (
+                    <>
+                      <tr key={s.service_name}>
+                        <td>
+                          <div className="mono" style={{ fontWeight: 500, fontSize: 12 }}>{s.service_name}</div>
+                          <div style={{ fontSize: 10.5, color: 'var(--fg-3)', marginTop: 2 }}>stale after {fmtUptime(s.stale_after_seconds)}</div>
+                        </td>
+                        <td className="dim mono" style={{ fontSize: 11.5 }}>
+                          {s.last_success_at ? new Date(s.last_success_at).toLocaleString() : <span className="muted">—</span>}
+                        </td>
+                        <td className="r mono">{fmtAgeSecs(s.age_seconds)}</td>
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div style={{ flex: 1, height: 4, background: 'var(--bg-3)', borderRadius: 2, overflow: 'hidden' }}>
+                              <div style={{ width: `${pct}%`, height: '100%', background: barColor, transition: 'width 0.3s' }} />
+                            </div>
+                            <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-2)', minWidth: 32, textAlign: 'right' }}>{pct.toFixed(0)}%</span>
+                          </div>
+                        </td>
+                        <td>
+                          {s.last_error_message
+                            ? <span className="neg mono" style={{ fontSize: 11.5 }}>{s.last_error_message}</span>
+                            : <span className="muted">—</span>}
+                        </td>
+                        <td className="c">
+                          <Badge kind={ok ? 'pos' : 'neg'} dot>{ok ? 'ok' : s.status}</Badge>
+                        </td>
+                      </tr>
+                    </>
+                  )
+                })}
+              </tbody>
+            </table>
+          </Panel>
         </>
       )}
     </div>

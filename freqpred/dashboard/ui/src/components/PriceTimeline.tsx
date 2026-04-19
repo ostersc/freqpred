@@ -196,19 +196,19 @@ export default function PriceTimeline({
 
   return (
     <div>
-      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+      <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--fg-2)', marginBottom: 4 }}>
         Signal history — estimated probability vs. market mid
       </div>
-      <div className="text-xs text-gray-400 mb-2">
+      <div style={{ fontSize: 11, color: 'var(--fg-3)', marginBottom: 8 }}>
         Click any point to view that signal's detail below.
-        Shapes: <span className="font-medium">●</span> entry/manual &nbsp;
-        <span className="font-medium">◆</span> scheduled &nbsp;
-        <span className="font-medium">▲</span> price moved &nbsp;
-        <span className="font-medium">■</span> market update
+        Shapes: <b>●</b> entry/manual &nbsp;
+        <b>◆</b> scheduled &nbsp;
+        <b>▲</b> price moved &nbsp;
+        <b>■</b> market update
       </div>
       <ResponsiveContainer width="100%" height={220}>
         <ComposedChart data={data} margin={{ top: 8, right: 16, bottom: 5, left: 0 }} onClick={handleChartClick} style={{ cursor: 'pointer' }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--line-soft)" />
           <XAxis
             dataKey="ts"
             type="number"
@@ -229,14 +229,14 @@ export default function PriceTimeline({
               const d = payload[0]?.payload as ChartPoint
               const edge = direction === 'NO' ? d.market_mid - d.our_prob : d.our_prob - d.market_mid
               return (
-                <div className="bg-white border rounded p-2 text-xs shadow space-y-0.5">
-                  <div className="text-gray-400">{fmtTs(d.ts)}</div>
-                  <div>Our prob: <span className="font-semibold text-blue-600">{(d.our_prob * 100).toFixed(1)}%</span></div>
-                  <div>Market mid: <span className="font-semibold text-orange-500">{(d.market_mid * 100).toFixed(1)}%</span></div>
-                  <div className={edge >= 0 ? 'text-green-700 font-semibold' : 'text-red-600 font-semibold'}>
+                <div style={{ background: 'var(--bg-1)', border: '1px solid var(--line)', borderRadius: 6, padding: '8px 10px', fontSize: 11.5, display: 'flex', flexDirection: 'column', gap: 3, boxShadow: 'var(--shadow-panel)' }}>
+                  <div style={{ color: 'var(--fg-3)' }}>{fmtTs(d.ts)}</div>
+                  <div>Our prob: <b className="mono" style={{ color: 'var(--accent)' }}>{(d.our_prob * 100).toFixed(1)}%</b></div>
+                  <div>Market mid: <b className="mono" style={{ color: 'var(--warn)' }}>{(d.market_mid * 100).toFixed(1)}%</b></div>
+                  <div style={{ fontWeight: 600, color: edge >= 0 ? 'var(--pos)' : 'var(--neg)' }}>
                     Edge: {edge >= 0 ? '+' : ''}{(edge * 100).toFixed(1)}%
                   </div>
-                  <div className="text-gray-400 capitalize pt-0.5">
+                  <div style={{ color: 'var(--fg-3)', textTransform: 'capitalize', paddingTop: 2 }}>
                     {d.trigger.replace(/_/g, ' ')}{d.isEntry ? ' · entry' : ''}
                   </div>
                 </div>

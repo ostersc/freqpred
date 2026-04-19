@@ -12,7 +12,6 @@ export default function AnalyzeButton({ marketId }: { marketId: string }) {
     onSuccess: (data) => {
       setError(null)
       setMessage(data.cached ? 'Cached — analyzed within the last 60 s.' : 'New signal generated.')
-      // Invalidate any queries that might show this market's signals
       queryClient.invalidateQueries({ queryKey: ['signals'] })
       queryClient.invalidateQueries({ queryKey: ['signal'] })
       queryClient.invalidateQueries({ queryKey: ['positions'] })
@@ -27,8 +26,9 @@ export default function AnalyzeButton({ marketId }: { marketId: string }) {
   })
 
   return (
-    <div className="inline-flex items-center gap-2">
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
       <button
+        className="btn primary sm"
         onClick={(e) => {
           e.stopPropagation()
           setError(null)
@@ -36,20 +36,11 @@ export default function AnalyzeButton({ marketId }: { marketId: string }) {
           mutation.mutate()
         }}
         disabled={mutation.isPending}
-        className="px-3 py-1 text-xs rounded border bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
       >
-        {mutation.isPending ? (
-          <>
-            <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-            </svg>
-            Analyzing…
-          </>
-        ) : 'Analyze now'}
+        {mutation.isPending ? 'Analyzing…' : '⚡ Analyze now'}
       </button>
-      {message && <span className="text-xs text-green-700">{message}</span>}
-      {error && <span className="text-xs text-red-600">{error}</span>}
+      {message && <span style={{ fontSize: 11.5, color: 'var(--pos)' }}>{message}</span>}
+      {error && <span style={{ fontSize: 11.5, color: 'var(--neg)' }}>{error}</span>}
     </div>
   )
 }
