@@ -22,6 +22,11 @@ function formatUptime(secs: number) {
   return `${s}s`
 }
 
+function formatAge(secs: number | null) {
+  if (secs === null) return '—'
+  return formatUptime(secs)
+}
+
 export default function SystemHealth() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['systemHealth'],
@@ -63,15 +68,25 @@ export default function SystemHealth() {
               <span className="text-2xl font-bold text-gray-900">{data.open_positions}</span>
             </Card>
             <Card label="Pending orders">
-              <span className="text-2xl font-bold text-gray-900">{data.pending_orders}</span>
+              <div>
+                <div className="text-2xl font-bold text-gray-900">{data.pending_orders}</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Oldest age: {formatAge(data.oldest_pending_order_age_seconds)}
+                </div>
+              </div>
             </Card>
-            <Card label="LLM errors (last hour)">
-              <span className={`text-2xl font-bold ${data.api_errors.llm_errors_last_hour > 0 ? 'text-red-700' : 'text-gray-900'}`}>
-                {data.api_errors.llm_errors_last_hour}
-              </span>
+            <Card label="API errors (last hour)">
+              <div className="space-y-1">
+                <div className={`text-lg font-bold ${data.api_errors.kalshi_errors_last_hour > 0 ? 'text-red-700' : 'text-gray-900'}`}>
+                  Kalshi: {data.api_errors.kalshi_errors_last_hour}
+                </div>
+                <div className={`text-lg font-bold ${data.api_errors.llm_errors_last_hour > 0 ? 'text-red-700' : 'text-gray-900'}`}>
+                  LLM: {data.api_errors.llm_errors_last_hour}
+                </div>
+              </div>
             </Card>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <Card label="Circuit breaker">
               <div className="space-y-1 text-sm">
                 <div className="flex items-center justify-between">
@@ -111,6 +126,10 @@ export default function SystemHealth() {
             <Card label="WebSocket">
               <div className="space-y-1 text-sm">
                 <div className="flex items-center justify-between">
+                  <span className="text-gray-600">Feed status</span>
+                  <StatusBadge status={data.websocket.status} />
+                </div>
+                <div className="flex items-center justify-between">
                   <span className="text-gray-600">Connected</span>
                   <StatusBadge status={
                     data.websocket.connected === null ? 'n/a'
@@ -125,13 +144,54 @@ export default function SystemHealth() {
                   <span className="text-gray-600">Last message</span>
                   <span className="text-gray-700 text-xs">
                     {data.websocket.last_message_at
-                      ? new Date(data.websocket.last_message_at).toLocaleTimeString()
+                      ? new Date(data.websocket.last_message_at).toLocaleString()
+                      : '—'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-600">Last reconcile</span>
+                  <span className="text-gray-700 text-xs">
+                    {data.websocket.last_reconcile_at
+                      ? new Date(data.websocket.last_reconcile_at).toLocaleString()
                       : '—'}
                   </span>
                 </div>
               </div>
             </Card>
           </div>
+          <Card label="Service Freshness">
+            <div className="space-y-2">
+              {data.services.map((service) => (
+                <div key={service.service_name} className="border border-gray-200 rounded px-3 py-2">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <div className="font-medium text-gray-900">{service.label}</div>
+                      <div className="text-xs text-gray-500">
+                        stale after {formatUptime(service.stale_after_seconds)}
+                      </div>
+                    </div>
+                    <StatusBadge status={service.status} />
+                  </div>
+                  <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-gray-600">
+                    <div>
+                      Last success: {service.last_success_at ? new Date(service.last_success_at).toLocaleString() : '—'}
+                    </div>
+                    <div>
+                      Age: {formatAge(service.age_seconds)}
+                    </div>
+                    <div>
+                      Last error: {service.last_error_at ? new Date(service.last_error_at).toLocaleString() : '—'}
+                    </div>
+                  </div>
+                  {service.last_error_message && (
+                    <div className="mt-2 text-xs text-red-700 bg-red-50 rounded px-2 py-1">
+                      {service.last_error_message}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Card>
         </>
       )}
     </div>

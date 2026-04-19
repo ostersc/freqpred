@@ -47,6 +47,7 @@ async def run_source_quality_scheduler(
     refresh_time: str = "07:00",
     refresh_timezone: str = "America/New_York",
     lookback_days: int = 90,
+    telemetry: object | None = None,
 ) -> None:
     """Refresh source-quality snapshots once per day on their own scheduler."""
     tz = ZoneInfo(refresh_timezone)
@@ -70,6 +71,13 @@ async def run_source_quality_scheduler(
                     reason=reason,
                     rows_written=rows_written,
                 )
+                if telemetry is not None:
+                    from freqpred.runtime.telemetry import SERVICE_SOURCE_QUALITY_SCHEDULER  # noqa: PLC0415
+
+                    await telemetry.mark_success(
+                        SERVICE_SOURCE_QUALITY_SCHEDULER,
+                        details={"reason": reason, "rows_written": rows_written},
+                    )
             except Exception:
                 await session.rollback()
                 raise
@@ -88,5 +96,12 @@ async def run_source_quality_scheduler(
             await _run_refresh("scheduled")
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("source_quality_scheduler.error")
+            if telemetry is not None:
+                from freqpred.runtime.telemetry import SERVICE_SOURCE_QUALITY_SCHEDULER  # noqa: PLC0415
+
+                await telemetry.mark_error(
+                    SERVICE_SOURCE_QUALITY_SCHEDULER,
+                    str(exc),
+                )

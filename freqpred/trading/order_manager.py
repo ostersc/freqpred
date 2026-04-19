@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.llm.client import LLMClient
     from freqpred.metrics.models import SignalAssessment
+    from freqpred.runtime.telemetry import RuntimeTelemetry
 
 logger = structlog.get_logger(__name__)
 
@@ -44,6 +45,7 @@ class OrderManager:
         kalshi_client: KalshiClient | None = None,
         llm_client: LLMClient | None = None,
         judgment_model: str | None = None,
+        runtime_telemetry: "RuntimeTelemetry | None" = None,
     ) -> None:
         self._risk = risk
         self._session_factory = session_factory
@@ -53,6 +55,7 @@ class OrderManager:
         self._kalshi_client = kalshi_client
         self._llm_client = llm_client
         self._judgment_model = judgment_model
+        self._runtime_telemetry = runtime_telemetry
 
     @staticmethod
     def _call_position_size(
@@ -330,6 +333,12 @@ class OrderManager:
                 status_code=exc.status_code,
                 body=exc.body,
             )
+            if self._runtime_telemetry is not None:
+                await self._runtime_telemetry.record_kalshi_error(
+                    "order_manager",
+                    f"submit live order failed for {order.market_id}: {exc}",
+                    details={"market_id": order.market_id, "status_code": exc.status_code},
+                )
             return None
         # "executed" means immediately filled; "resting" means GTC order sitting on the book.
         position_status = "open" if filled_order.status == "executed" else "pending"

@@ -243,6 +243,12 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     from freqpred.alerts.metrics_handlers import register_metrics_commands
     from freqpred.alerts.position_handlers import register_position_commands
     from freqpred.alerts.run_state import get_run_state, set_cb_state, set_mode, set_strategy_name
+    from freqpred.runtime.telemetry import (
+        SERVICE_SIGNAL_LOOP,
+        RuntimeTelemetry,
+        build_freshness_specs,
+        run_stale_service_watchdog,
+    )
 
     log_buffer = _get_or_create_log_buffer()
     register_system_commands(
@@ -262,6 +268,14 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     )
     from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
     from freqpred.trading.order_manager import OrderManager
+    runtime_telemetry = RuntimeTelemetry(
+        session_factory=session_factory,
+        freshness_specs=build_freshness_specs(
+            ingestion_interval_seconds=config.ingestion.schedule_interval_seconds,
+            realtime_interval_seconds=config.ingestion.realtime_interval_seconds,
+            signal_interval_seconds=config.signal.interval_seconds,
+        ),
+    )
 
     order_manager = None
     position_watcher = None
@@ -274,6 +288,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             mode="paper",
             llm_client=llm_client,
             judgment_model=config.anthropic.judgment_model,
+            runtime_telemetry=runtime_telemetry,
         )
 
     from freqpred.strategy.loader import _BUILTIN_STRATEGIES
@@ -295,6 +310,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         alert_dispatcher=alert_dispatcher,
         mode=mode,
         kalshi_client=None,  # set to kalshi_client below once the client is open
+        runtime_telemetry=runtime_telemetry,
     )
 
     async def signal_loop() -> None:
@@ -302,6 +318,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         log = structlog.get_logger("freqpred.cli.signal_loop")
         log.info("signal_loop.started")
         while True:
+            _signal_loop_error: str | None = None
             try:
                 # Check run-loop state; apply any runtime config overrides; skip if paused/stopped.
                 async with session_factory() as rs_session:
@@ -445,17 +462,34 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                     await position_watcher.subscribe(position.market_id)
                             else:
                                 strategy.on_order_failed(market)
+                await runtime_telemetry.mark_success(
+                    SERVICE_SIGNAL_LOOP,
+                    details={
+                        "total_markets": len(markets),
+                        "selected_markets": len(interesting),
+                        "run_state": run_state,
+                    },
+                )
             except asyncio.CancelledError:
                 raise
             except LLMBudgetExceededError as exc:
                 log.warning("signal_loop.llm_budget_exceeded", reason=str(exc))
                 await alert_dispatcher.circuit_breaker_alert("llm_budget", str(exc))
+                _signal_loop_error = str(exc)
             except LLMConsecutiveErrorsError as exc:
                 log.warning("signal_loop.llm_consecutive_errors", reason=str(exc))
                 await alert_dispatcher.circuit_breaker_alert("llm_errors", str(exc))
-            except Exception:
+                _signal_loop_error = str(exc)
+            except Exception as exc:
                 import structlog
                 structlog.get_logger("freqpred.cli.signal_loop").exception("signal_loop.error")
+                _signal_loop_error = str(exc)
+
+            if _signal_loop_error is not None:
+                await runtime_telemetry.mark_error(
+                    SERVICE_SIGNAL_LOOP,
+                    _signal_loop_error,
+                )
 
             await asyncio.sleep(config.signal.interval_seconds)
 
@@ -501,6 +535,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 kalshi_client=kalshi_client,
                 llm_client=llm_client,
                 judgment_model=config.anthropic.judgment_model,
+                runtime_telemetry=runtime_telemetry,
             )
 
         position_monitor._kalshi_client = kalshi_client
@@ -520,6 +555,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             session_factory=session_factory,
             position_monitor=position_monitor,
             order_manager=order_manager,
+            runtime_telemetry=runtime_telemetry,
         )
 
         watcher = MarketWatcher(
@@ -527,6 +563,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             session_factory=session_factory,
             polling_interval=config.kalshi.polling_interval_seconds,
             alert_dispatcher=alert_dispatcher,
+            runtime_telemetry=runtime_telemetry,
         )
         # Register position commands here so order_manager is available for both modes.
         register_position_commands(
@@ -555,6 +592,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 bankroll_usd=config.trading.bankroll_usd,
                 signal_pipeline=pipeline,
                 order_manager=order_manager,
+                runtime_telemetry=runtime_telemetry,
             )
             _dash_server = _uvicorn.Server(
                 _uvicorn.Config(
@@ -593,6 +631,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     guardian_enabled=config.guardian.enabled,
                     guardian_daily_cap=config.guardian.daily_cap,
                     guardian_min_fetch_interval_hours=config.guardian.min_fetch_interval_hours,
+                    telemetry=runtime_telemetry,
                 ),
                 name="ingestion_scheduler",
             )
@@ -608,6 +647,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     truthsocial_username=config.truthsocial.username,
                     truthsocial_password=config.truthsocial.password,
                     truthsocial_accounts=config.ingestion.truthsocial.accounts,
+                    telemetry=runtime_telemetry,
                 ),
                 name="realtime_scheduler",
             )
@@ -646,8 +686,19 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     session_factory=session_factory,
                     refresh_time=config.alerts.digest_time,
                     refresh_timezone=config.alerts.digest_timezone,
+                    telemetry=runtime_telemetry,
                 ),
                 name="source_quality_scheduler",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                run_stale_service_watchdog(
+                    session_factory=session_factory,
+                    telemetry=runtime_telemetry,
+                    alert_dispatcher=alert_dispatcher,
+                ),
+                name="stale_service_watchdog",
             )
         )
 

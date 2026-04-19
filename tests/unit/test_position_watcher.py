@@ -216,6 +216,24 @@ async def test_handle_message_ticker_parses_dollar_strings() -> None:
 
 
 @pytest.mark.asyncio
+async def test_position_watcher_updates_last_message_heartbeat() -> None:
+    watcher, _, _, _, _ = _make_watcher(open_market_ids={"MKT-1"})
+    telemetry = AsyncMock()
+    watcher._runtime_telemetry = telemetry
+
+    await watcher._handle_message({
+        "type": "ticker",
+        "msg": {
+            "market_ticker": "MKT-1",
+            "yes_bid_dollars": "0.6200",
+            "yes_ask_dollars": "0.6600",
+        },
+    })
+
+    telemetry.note_websocket_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_handle_message_ticker_ignores_old_cents_field() -> None:
     """Messages using the old yes_bid/yes_ask integer-cents field names are silently ignored."""
     watcher, _, _, _, _ = _make_watcher(open_market_ids={"MKT-1"})

@@ -48,6 +48,7 @@ from freqpred.rag.embedder import LocalEmbedder
 if TYPE_CHECKING:
     from freqpred.llm.client import LLMClient
     from freqpred.ingestion.selector import StrategyProtocol
+    from freqpred.runtime.telemetry import RuntimeTelemetry
 
 # Backoff services owned by this scheduler — passed to tick_and_load so the
 # realtime scheduler's counters (truthsocial) are not affected.
@@ -99,6 +100,7 @@ async def run_cycle(
     guardian_min_fetch_interval_hours: float = 1.0,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
+    telemetry: "RuntimeTelemetry | None" = None,
 ) -> dict[str, int]:
     """Run one full ingestion cycle.
 
@@ -164,13 +166,18 @@ async def run_cycle(
         if not market_queries:
             log.debug("scheduler.run_cycle.no_active_markets")
             await session.commit()
-            return {
+            stats = {
                 "markets_processed": 0,
                 "catalysts_generated": catalysts_generated,
                 "docs_fetched": 0,
                 "docs_stored": 0,
                 "docs_error": 0,
             }
+            if telemetry is not None:
+                from freqpred.runtime.telemetry import SERVICE_INGESTION_SCHEDULER  # noqa: PLC0415
+
+                await telemetry.mark_success(SERVICE_INGESTION_SCHEDULER, details=stats)
+            return stats
 
         newsapi_from = now - timedelta(days=_NEWSAPI_LOOKBACK_DAYS)
         guardian_from = now - timedelta(days=_GUARDIAN_LOOKBACK_DAYS)
@@ -489,6 +496,10 @@ async def run_cycle(
     }
 
     log.info("scheduler.cycle_complete", **stats)
+    if telemetry is not None:
+        from freqpred.runtime.telemetry import SERVICE_INGESTION_SCHEDULER  # noqa: PLC0415
+
+        await telemetry.mark_success(SERVICE_INGESTION_SCHEDULER, details=stats)
     return stats
 
 
@@ -512,6 +523,7 @@ async def run_scheduler(
     guardian_min_fetch_interval_hours: float = 1.0,
     reddit_user_agent: str = "freqpred/0.1",
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
+    telemetry: "RuntimeTelemetry | None" = None,
 ) -> None:
     """Async loop: runs run_cycle every *interval_seconds*.
 
@@ -571,9 +583,17 @@ async def run_scheduler(
                 guardian_min_fetch_interval_hours=guardian_min_fetch_interval_hours,
                 reddit_user_agent=reddit_user_agent,
                 domain_blacklist=domain_blacklist,
+                telemetry=telemetry,
             )
-        except Exception:
+        except Exception as exc:
             log.error("scheduler.cycle_error", exc_info=True)
+            if telemetry is not None:
+                from freqpred.runtime.telemetry import SERVICE_INGESTION_SCHEDULER  # noqa: PLC0415
+
+                await telemetry.mark_error(
+                    SERVICE_INGESTION_SCHEDULER,
+                    str(exc),
+                )
 
         await asyncio.sleep(interval_seconds)
 

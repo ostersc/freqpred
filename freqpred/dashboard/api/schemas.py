@@ -372,9 +372,22 @@ class CircuitBreakerStateOut(BaseModel):
 
 
 class WebSocketStateOut(BaseModel):
+    status: str
     connected: bool | None          # null = not applicable (paper/standalone)
     subscribed_markets: int | None
     last_message_at: datetime | None
+    last_reconcile_at: datetime | None
+
+
+class ServiceFreshnessOut(BaseModel):
+    service_name: str
+    label: str
+    status: str
+    last_success_at: datetime | None
+    last_error_at: datetime | None
+    last_error_message: str | None
+    stale_after_seconds: int
+    age_seconds: int | None
 
 
 class ApiErrorStateOut(BaseModel):
@@ -389,7 +402,9 @@ class SystemHealthResponse(BaseModel):
     circuit_breakers: CircuitBreakerStateOut
     websocket: WebSocketStateOut
     api_errors: ApiErrorStateOut
+    services: list[ServiceFreshnessOut]
     pending_orders: int
+    oldest_pending_order_age_seconds: int | None
     open_positions: int
     db_ok: bool
     uptime_seconds: int

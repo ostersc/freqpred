@@ -246,9 +246,22 @@ export interface CircuitBreakerStateOut {
 }
 
 export interface WebSocketStateOut {
+  status: string
   connected: boolean | null
   subscribed_markets: number | null
   last_message_at: string | null
+  last_reconcile_at: string | null
+}
+
+export interface ServiceFreshnessOut {
+  service_name: string
+  label: string
+  status: string
+  last_success_at: string | null
+  last_error_at: string | null
+  last_error_message: string | null
+  stale_after_seconds: number
+  age_seconds: number | null
 }
 
 export interface ApiErrorStateOut {
@@ -263,7 +276,9 @@ export interface SystemHealthResponse {
   circuit_breakers: CircuitBreakerStateOut
   websocket: WebSocketStateOut
   api_errors: ApiErrorStateOut
+  services: ServiceFreshnessOut[]
   pending_orders: number
+  oldest_pending_order_age_seconds: number | null
   open_positions: number
   db_ok: boolean
   uptime_seconds: number

@@ -25,6 +25,7 @@ from freqpred.trading import ledger
 if TYPE_CHECKING:
     from freqpred.alerts.dispatcher import AlertDispatcher
     from freqpred.markets.kalshi import KalshiClient
+    from freqpred.runtime.telemetry import RuntimeTelemetry
     from freqpred.signal.models import Signal
     from freqpred.strategy.base import IPredictionStrategy
     from freqpred.strategy.config import StrategyConfig
@@ -54,6 +55,7 @@ class PositionMonitor:
         alert_dispatcher: "AlertDispatcher | None" = None,
         mode: str = "paper",
         kalshi_client: "KalshiClient | None" = None,
+        runtime_telemetry: "RuntimeTelemetry | None" = None,
     ) -> None:
         self._session_factory = session_factory
         self._strategies = strategies
@@ -61,6 +63,7 @@ class PositionMonitor:
         self._alert_dispatcher = alert_dispatcher
         self._mode = mode
         self._kalshi_client = kalshi_client
+        self._runtime_telemetry = runtime_telemetry
         # position_id → best mid_price seen since entry (used by trailing stop)
         self._peak_prices: dict[str, float] = {}
         # position_id → best/worst effective P&L delta seen (for MAE/MFE)
@@ -449,6 +452,12 @@ class PositionMonitor:
                 status_code=exc.status_code,
                 body=exc.body,
             )
+            if self._runtime_telemetry is not None:
+                await self._runtime_telemetry.record_kalshi_error(
+                    "position_monitor",
+                    f"exit order failed for {position.market_id}: {exc}",
+                    details={"market_id": position.market_id, "status_code": exc.status_code},
+                )
             if self._alert_dispatcher is not None:
                 try:
                     await self._alert_dispatcher.send(

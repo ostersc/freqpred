@@ -6,7 +6,7 @@ no real DB or Redis required.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,12 +19,14 @@ import freqpred.llm.models        # noqa: F401
 import freqpred.markets.models    # noqa: F401
 import freqpred.metrics.models    # noqa: F401
 import freqpred.rag.models        # noqa: F401
+import freqpred.runtime.models    # noqa: F401
 import freqpred.signal.models     # noqa: F401
 import freqpred.strategy.models   # noqa: F401
 
 from freqpred.dashboard.api.app import create_app
 from freqpred.dashboard.api.routes import get_db
 from freqpred.markets.kalshi import KalshiAPIError
+from freqpred.runtime.telemetry import RuntimeTelemetry, build_freshness_specs
 from freqpred.strategy.config import StrategyConfig
 from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
 
@@ -57,6 +59,7 @@ def _make_app(
     bankroll_usd: float = 1000.0,
     signal_pipeline: object | None = None,
     order_manager: object | None = None,
+    runtime_telemetry: object | None = None,
 ) -> object:
     """Create app with the real session factory replaced by a mock."""
     sf = MagicMock()
@@ -67,6 +70,7 @@ def _make_app(
         bankroll_usd=bankroll_usd,
         signal_pipeline=signal_pipeline,
         order_manager=order_manager,
+        runtime_telemetry=runtime_telemetry,
     )
 
     async def _override_get_db():
@@ -878,8 +882,11 @@ def _make_system_health_session(
     all_time_pnl: float = 0.0,
     llm_spend: float = 1.0,
     pending_count: int = 0,
+    oldest_pending_entry_time: datetime | None = None,
     open_count: int = 3,
     llm_errors: int = 0,
+    kalshi_errors: int = 0,
+    heartbeat_rows: list | None = None,
 ) -> AsyncMock:
     """Return a mock session that services all queries made by GET /api/system/health."""
     # Query order in the route:
@@ -889,8 +896,11 @@ def _make_system_health_session(
     # 3. daily_pnl SUM
     # 4. get_daily_spend_usd → scalar_one
     # 5. pending positions COUNT
-    # 6. open positions COUNT
-    # 7. LLM errors COUNT
+    # 6. oldest pending entry_time MIN
+    # 7. open positions COUNT
+    # 8. LLM errors COUNT
+    # 9. Kalshi runtime errors COUNT
+    # 10. service_heartbeats list (only when runtime telemetry is provided)
 
     run_state_row = MagicMock()
     run_state_row.state = run_state
@@ -908,8 +918,11 @@ def _make_system_health_session(
     daily_pnl_result = _scalar_result(daily_pnl)
     llm_spend_result = _scalar_result(llm_spend)
     pending_result = _scalar_result(pending_count)
+    pending_min_result = _scalar_result(oldest_pending_entry_time)
     open_result = _scalar_result(open_count)
     llm_errors_result = _scalar_result(llm_errors)
+    kalshi_errors_result = _scalar_result(kalshi_errors)
+    heartbeats_result = _scalars_result(heartbeat_rows or [])
 
     session = AsyncMock()
     session.execute = _execute_side_effects(
@@ -919,8 +932,11 @@ def _make_system_health_session(
         daily_pnl_result,
         llm_spend_result,
         pending_result,
+        pending_min_result,
         open_result,
         llm_errors_result,
+        kalshi_errors_result,
+        heartbeats_result,
     )
     return session
 
@@ -994,15 +1010,17 @@ def test_system_health_circuit_breaker_daily_loss_triggers_halt() -> None:
     assert "daily loss" in cb["reason"].lower()
 
 
-def test_system_health_websocket_stubbed_null() -> None:
+def test_system_health_websocket_stubbed_unknown() -> None:
     session = _make_system_health_session()
     client = TestClient(_make_app(session))
     resp = client.get("/api/system/health")
 
     ws = resp.json()["websocket"]
+    assert ws["status"] == "unknown"
     assert ws["connected"] is None
     assert ws["subscribed_markets"] is None
     assert ws["last_message_at"] is None
+    assert ws["last_reconcile_at"] is None
 
 
 def test_system_health_llm_errors_returned() -> None:
@@ -1011,7 +1029,66 @@ def test_system_health_llm_errors_returned() -> None:
     resp = client.get("/api/system/health")
 
     assert resp.json()["api_errors"]["llm_errors_last_hour"] == 3
+    assert resp.json()["api_errors"]["kalshi_errors_last_hour"] == 0
     assert resp.json()["api_errors"]["consecutive_llm_errors"] is None
+
+
+def test_system_health_returns_real_websocket_fields() -> None:
+    telemetry = RuntimeTelemetry(
+        session_factory=MagicMock(),
+        freshness_specs=build_freshness_specs(
+            ingestion_interval_seconds=1800,
+            realtime_interval_seconds=300,
+            signal_interval_seconds=1800,
+        ),
+    )
+    telemetry._websocket_connected = True
+    telemetry._websocket_subscribed_markets = 2
+    telemetry._websocket_last_message_at = datetime.now(UTC) - timedelta(minutes=5)
+    telemetry._websocket_last_reconcile_at = datetime.now(UTC) - timedelta(minutes=10)
+
+    ws_row = MagicMock()
+    ws_row.service_name = "position_watcher_last_message"
+    ws_row.last_success_at = telemetry._websocket_last_message_at
+    ws_row.last_error_at = None
+    ws_row.last_error_message = None
+
+    session = _make_system_health_session(heartbeat_rows=[ws_row])
+    client = TestClient(_make_app(session, runtime_telemetry=telemetry))
+    resp = client.get("/api/system/health")
+
+    assert resp.status_code == 200
+    ws = resp.json()["websocket"]
+    assert ws["status"] == "ok"
+    assert ws["connected"] is True
+    assert ws["subscribed_markets"] == 2
+    assert ws["last_message_at"] is not None
+    assert ws["last_reconcile_at"] is not None
+
+
+def test_system_health_marks_stale_services() -> None:
+    telemetry = RuntimeTelemetry(
+        session_factory=MagicMock(),
+        freshness_specs=build_freshness_specs(
+            ingestion_interval_seconds=1800,
+            realtime_interval_seconds=300,
+            signal_interval_seconds=1800,
+        ),
+    )
+    old = datetime.now(UTC) - timedelta(hours=2)
+    row = MagicMock()
+    row.service_name = "ingestion_scheduler"
+    row.last_success_at = old
+    row.last_error_at = None
+    row.last_error_message = None
+
+    session = _make_system_health_session(heartbeat_rows=[row])
+    client = TestClient(_make_app(session, runtime_telemetry=telemetry))
+    resp = client.get("/api/system/health")
+
+    assert resp.status_code == 200
+    services = {svc["service_name"]: svc for svc in resp.json()["services"]}
+    assert services["ingestion_scheduler"]["status"] == "stale"
 
 
 def test_system_health_db_error_returns_degraded_db_ok_false() -> None:

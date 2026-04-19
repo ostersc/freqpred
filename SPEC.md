@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-04-18
+**Last updated:** 2026-04-19
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -1269,6 +1269,10 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T62** [#62](https://github.com/ostersc/freqpred/issues/62) — Dashboard: market browser page; `GET /api/markets`, `GET /api/markets/{id}`, `POST /api/markets/{id}/analyze`; new Markets page with search, expandable rows showing full market detail + current signal, "Analyze now" button triggers signal pipeline and refreshes panel; 429 cooldown if analyzed within 60 s.
 - [x] **T64** [#64](https://github.com/ostersc/freqpred/issues/64) — Dashboard: strategy decision analysis page; `GET /api/strategy-decisions` with filters (strategy, exit_reason prefix, ticker_prefix ILIKE, date_from/to) and pagination; per-row exit counterfactual P&L (`our_side_win_value − entry_price`) and exit Δ vs hold (`exit_price − our_side_win_value`); entry efficiency loss vs best prior signal with `edge > 0` (`best_prior_ask − entry_price`); symmetric for YES/NO via side-specific `signals.market_ask_at_signal`. Extracts `PriceTimeline` + `SignalDetail` + `SelectedSignalPanel` into shared components and adds exit-event reference lines (vertical at `exit_time`, horizontal at exit price, NO-flipped) — benefit flows back to Positions page closed rows. Adds `exit_reason` to `PositionOut`.
 - [x] **T65** [#65](https://github.com/ostersc/freqpred/issues/65) — Dashboard: signal assessment visibility for source quality + similar-market trust; expose persisted assessment summary and `llm_query_id` on signal/position detail APIs; add dashboard card showing trust score, implied size effect, source-quality summary, similar-market summary, warnings, and a link to the existing LLM audit detail. Depends on: T57.
+- [ ] **T66** [#66](https://github.com/ostersc/freqpred/issues/66) — Deterministic replay/regression harness: record time-locked market/document fixtures and replay signal-generation decisions offline to catch prompt/model/config regressions without introducing a historical backtesting engine. Depends on: T11.
+- [ ] **T67** [#67](https://github.com/ostersc/freqpred/issues/67) — Live order-state hardening: explicit exchange order status/cancel support in `KalshiClient`; partial-fill and average-fill reconciliation for live entries/exits; pending-order timeout/cancel workflow; ledger updates from confirmed exchange state instead of binary pending/open assumptions. Depends on: T36, T37, T39.
+- [x] **T68** [#68](https://github.com/ostersc/freqpred/issues/68) — Ops freshness telemetry: persist heartbeat/freshness timestamps for ingestion, signal, source-quality, and WebSocket loops; expose real websocket connectivity + last-message telemetry and stale-loop indicators in System Health; optional alerts when critical loops stop making progress. Depends on: T41.
+- [ ] **T69** [#69](https://github.com/ostersc/freqpred/issues/69) — Correlated exposure caps: enforce series/category/event-family risk limits so multiple related markets cannot collectively exceed configured exposure even when per-market limits pass. Depends on: T17.
 
 **`OrderTypes` interface** (strategy-level, all fields have defaults — existing strategies unchanged):
 ```python

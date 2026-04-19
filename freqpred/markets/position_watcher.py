@@ -31,6 +31,7 @@ from freqpred.trading import ledger
 if TYPE_CHECKING:
     from freqpred.alerts.dispatcher import AlertDispatcher
     from freqpred.markets.kalshi import KalshiClient
+    from freqpred.runtime.telemetry import RuntimeTelemetry
     from freqpred.trading.order_manager import OrderManager
     from freqpred.trading.position_monitor import PositionMonitor
 
@@ -57,6 +58,7 @@ class PositionWatcher:
         order_manager: "OrderManager",
         price_move_threshold: float = 0.05,
         alert_dispatcher: "AlertDispatcher | None" = None,
+        runtime_telemetry: "RuntimeTelemetry | None" = None,
     ) -> None:
         self._kalshi_client = kalshi_client
         self._ws_url = ws_url
@@ -65,6 +67,7 @@ class PositionWatcher:
         self._order_manager = order_manager
         self._price_move_threshold = price_move_threshold
         self._alert_dispatcher = alert_dispatcher
+        self._runtime_telemetry = runtime_telemetry
 
         # Set of market_ids currently in the ticker subscription.
         self._subscribed: set[str] = set()
@@ -81,10 +84,25 @@ class PositionWatcher:
         self._msg_id: int = 0
         # In-memory tracking of last known mid_price per market for Δ logging.
         self._last_mid: dict[str, float] = {}
+        # Live telemetry exposed to the system health endpoint.
+        self._connected: bool = False
+        self._last_message_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    @property
+    def last_message_at(self) -> datetime | None:
+        return self._last_message_at
+
+    @property
+    def subscribed_count(self) -> int:
+        return len(self._subscribed)
 
     async def run(self) -> None:
         """Async background loop. Reconnects with exponential backoff on error."""
@@ -112,6 +130,8 @@ class PositionWatcher:
         if market_id in self._subscribed:
             return
         self._subscribed.add(market_id)
+        if self._runtime_telemetry is not None:
+            await self._runtime_telemetry.set_websocket_subscribed_markets(len(self._subscribed))
         if self._ws is not None:
             if self._ticker_sid is not None:
                 await self._send_add_markets(self._ws, [market_id])
@@ -125,6 +145,8 @@ class PositionWatcher:
         Safe to call when disconnected.
         """
         self._subscribed.discard(market_id)
+        if self._runtime_telemetry is not None:
+            await self._runtime_telemetry.set_websocket_subscribed_markets(len(self._subscribed))
         if self._ws is not None and self._ticker_sid is not None:
             await self._send_remove_markets(self._ws, [market_id])
 
@@ -142,14 +164,22 @@ class PositionWatcher:
             self._ws_url, additional_headers=auth_headers
         ) as ws:
             self._ws = ws
+            self._connected = True
             self._subscription_sids = []
             self._ticker_sid = None
             log.info("position_watcher.connected", ws_url=self._ws_url)
+            if self._runtime_telemetry is not None:
+                await self._runtime_telemetry.set_websocket_connected(
+                    True,
+                    subscribed_markets=len(self._subscribed),
+                )
 
             try:
                 # Reconcile DB positions vs Kalshi on every connect.
                 async with self._session_factory() as session:
                     await self._reconcile_positions(session)
+                if self._runtime_telemetry is not None:
+                    await self._runtime_telemetry.note_websocket_reconcile()
 
                 # Flip any pending positions that filled while disconnected.
                 async with self._session_factory() as session:
@@ -158,6 +188,8 @@ class PositionWatcher:
                 # Re-build subscription set from DB (no stale in-memory state).
                 async with self._session_factory() as session:
                     self._subscribed = await self._get_open_market_ids(session)
+                if self._runtime_telemetry is not None:
+                    await self._runtime_telemetry.set_websocket_subscribed_markets(len(self._subscribed))
 
                 if self._subscribed:
                     await self._send_subscribe(ws, list(self._subscribed))
@@ -168,8 +200,14 @@ class PositionWatcher:
                     await self._handle_message(json.loads(raw))
             finally:
                 self._ws = None
+                self._connected = False
                 self._subscription_sids = []
                 self._ticker_sid = None
+                if self._runtime_telemetry is not None:
+                    await self._runtime_telemetry.set_websocket_connected(
+                        False,
+                        subscribed_markets=len(self._subscribed),
+                    )
 
     # ------------------------------------------------------------------
     # Message handling
@@ -177,6 +215,12 @@ class PositionWatcher:
 
     async def _handle_message(self, msg: dict) -> None:
         """Dispatch incoming WebSocket message by type."""
+        self._last_message_at = datetime.now(UTC)
+        if self._runtime_telemetry is not None:
+            await self._runtime_telemetry.note_websocket_message(
+                now=self._last_message_at,
+                subscribed_markets=len(self._subscribed)
+            )
         msg_type = msg.get("type")
 
         if msg_type == "subscribed":
@@ -245,6 +289,13 @@ class PositionWatcher:
             code = msg.get("msg", {}).get("code")
             error_msg = msg.get("msg", {}).get("msg")
             log.warning("position_watcher.ws_error", code=code, error=error_msg)
+            if self._runtime_telemetry is not None:
+                await self._runtime_telemetry.record_event(
+                    service_name="position_watcher",
+                    category="websocket",
+                    level="warning",
+                    message=f"code={code}: {error_msg}",
+                )
 
         else:
             log.debug("position_watcher.unhandled_message", type=msg_type)

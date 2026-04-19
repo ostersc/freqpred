@@ -17,6 +17,7 @@ from freqpred.trading import ledger
 
 if TYPE_CHECKING:
     from freqpred.alerts.dispatcher import AlertDispatcher
+    from freqpred.runtime.telemetry import RuntimeTelemetry
 
 # Max markets to re-fetch per sweep cycle (rate-limit safety).
 _RESOLVED_SWEEP_BATCH = 200
@@ -72,12 +73,14 @@ class MarketWatcher:
         polling_interval: int = 300,
         price_move_threshold: float = PRICE_MOVE_THRESHOLD,
         alert_dispatcher: "AlertDispatcher | None" = None,
+        runtime_telemetry: "RuntimeTelemetry | None" = None,
     ) -> None:
         self._client = client
         self._session_factory = session_factory
         self._polling_interval = polling_interval
         self._price_move_threshold = price_move_threshold
         self._alert_dispatcher = alert_dispatcher
+        self._runtime_telemetry = runtime_telemetry
 
     async def run(self) -> None:
         """Run the polling loop indefinitely until the task is cancelled."""
@@ -85,6 +88,14 @@ class MarketWatcher:
         while True:
             try:
                 await self._poll_cycle()
+            except KalshiAPIError as exc:
+                if self._runtime_telemetry is not None:
+                    await self._runtime_telemetry.record_kalshi_error(
+                        "market_watcher",
+                        f"market watcher poll failed: {exc}",
+                        details={"status_code": exc.status_code},
+                    )
+                log.exception("market_watcher_poll_error")
             except asyncio.CancelledError:
                 log.info("market_watcher_stopped")
                 raise
@@ -204,6 +215,12 @@ class MarketWatcher:
                         status_code=exc.status_code,
                         body=exc.body,
                     )
+                    if self._runtime_telemetry is not None:
+                        await self._runtime_telemetry.record_kalshi_error(
+                            "market_watcher",
+                            f"resolved sweep failed for {market_id}: {exc}",
+                            details={"market_id": market_id, "status_code": exc.status_code},
+                        )
             except Exception:
                 log.exception("market_watcher.resolved_sweep_error", market_id=market_id)
 

@@ -17,6 +17,12 @@ from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
 from freqpred.metrics.models import SignalAssessmentRow, SourceQualityScoreRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
+from freqpred.runtime.models import RuntimeEventRow
+from freqpred.runtime.telemetry import (
+    EVENT_CATEGORY_KALSHI_API,
+    RuntimeTelemetry,
+    list_service_heartbeats,
+)
 from freqpred.signal.models import SignalRow
 from freqpred.trading.ledger import get_portfolio_summary
 from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
@@ -50,6 +56,7 @@ from .schemas import (
     StrategyConfigUpdateRequest,
     StrategyDecisionListResponse,
     StrategyDecisionOut,
+    ServiceFreshnessOut,
     SystemHealthResponse,
     WebSocketStateOut,
 )
@@ -107,6 +114,11 @@ def _get_order_manager(request: Request) -> object | None:
 
 def _started_at(request: Request) -> datetime:
     return request.app.state.started_at
+
+
+def _runtime_telemetry(request: Request) -> RuntimeTelemetry | None:
+    telemetry = getattr(request.app.state, "runtime_telemetry", None)
+    return telemetry if isinstance(telemetry, RuntimeTelemetry) else None
 
 
 # ---------------------------------------------------------------------------
@@ -1293,6 +1305,7 @@ async def get_system_health(
     initial_bankroll: Annotated[float, Depends(_bankroll_usd)],
     risk_cfg: Annotated[object | None, Depends(_risk_config)],
     started_at: Annotated[datetime, Depends(_started_at)],
+    runtime_telemetry: Annotated[RuntimeTelemetry | None, Depends(_runtime_telemetry)],
 ) -> SystemHealthResponse:
     import freqpred.alerts.models  # noqa: F401 — ensure RunStateRow is registered  # noqa: PLC0415
     from freqpred.alerts.models import RunStateRow as _RunStateRow  # noqa: PLC0415
@@ -1308,8 +1321,14 @@ async def get_system_health(
     net_bankroll: float = initial_bankroll
     llm_budget_used: float = 0.0
     pending_orders: int = 0
+    oldest_pending_order_age_seconds: int | None = None
     open_positions: int = 0
     llm_errors_last_hour: int = 0
+    kalshi_errors_last_hour: int = 0
+    service_rows: list[ServiceFreshnessOut] = []
+    websocket_state = (
+        runtime_telemetry.websocket_state() if runtime_telemetry is not None else {}
+    )
 
     today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     hour_ago = datetime.now(UTC) - timedelta(hours=1)
@@ -1353,6 +1372,18 @@ async def get_system_health(
         )
         pending_orders = int(pending_result.scalar_one())
 
+        pending_min_result = await session.execute(
+            select(func.min(PositionRow.entry_time)).where(
+                PositionRow.status == "pending",
+                PositionRow.mode == app_mode,
+            )
+        )
+        oldest_pending_entry_time = pending_min_result.scalar_one()
+        if isinstance(oldest_pending_entry_time, datetime):
+            oldest_pending_order_age_seconds = int(
+                (datetime.now(UTC) - oldest_pending_entry_time).total_seconds()
+            )
+
         open_result = await session.execute(
             select(func.count(PositionRow.id)).where(
                 PositionRow.status == "open",
@@ -1368,6 +1399,35 @@ async def get_system_health(
             )
         )
         llm_errors_last_hour = int(llm_errors_result.scalar_one())
+
+        kalshi_errors_result = await session.execute(
+            select(func.count(RuntimeEventRow.id)).where(
+                RuntimeEventRow.category == EVENT_CATEGORY_KALSHI_API,
+                RuntimeEventRow.created_at >= hour_ago,
+            )
+        )
+        kalshi_errors_last_hour = int(kalshi_errors_result.scalar_one())
+
+        if runtime_telemetry is not None:
+            heartbeats = await list_service_heartbeats(session)
+            service_states = runtime_telemetry.evaluate_service_states(
+                heartbeats,
+                run_state=run_state,
+                now=datetime.now(UTC),
+            )
+            service_rows = [
+                ServiceFreshnessOut(
+                    service_name=state.service_name,
+                    label=state.label,
+                    status=state.status,
+                    last_success_at=state.last_success_at,
+                    last_error_at=state.last_error_at,
+                    last_error_message=state.last_error_message,
+                    stale_after_seconds=state.stale_after_seconds,
+                    age_seconds=state.age_seconds,
+                )
+                for state in service_states
+            ]
 
     except Exception:
         log.exception("system_health.db_query_failed")
@@ -1396,16 +1456,27 @@ async def get_system_health(
             llm_budget_cap_usd=daily_cap,
         ),
         websocket=WebSocketStateOut(
-            connected=None,
-            subscribed_markets=None,
-            last_message_at=None,
+            status=(
+                next(
+                    (state.status for state in service_rows if state.service_name == "position_watcher_last_message"),
+                    "unknown",
+                )
+                if runtime_telemetry is not None
+                else "unknown"
+            ),
+            connected=websocket_state.get("connected"),
+            subscribed_markets=websocket_state.get("subscribed_markets"),
+            last_message_at=websocket_state.get("last_message_at"),
+            last_reconcile_at=websocket_state.get("last_reconcile_at"),
         ),
         api_errors=ApiErrorStateOut(
-            kalshi_errors_last_hour=0,
+            kalshi_errors_last_hour=kalshi_errors_last_hour,
             llm_errors_last_hour=llm_errors_last_hour,
             consecutive_llm_errors=None,
         ),
+        services=service_rows,
         pending_orders=pending_orders,
+        oldest_pending_order_age_seconds=oldest_pending_order_age_seconds,
         open_positions=open_positions,
         db_ok=db_ok,
         uptime_seconds=uptime_seconds,

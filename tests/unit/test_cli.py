@@ -34,6 +34,7 @@ def _make_config(
     cfg.kalshi.private_key_path = ""
     cfg.kalshi.polling_interval_seconds = 300
     cfg.ingestion.schedule_interval_seconds = 1800
+    cfg.ingestion.realtime_interval_seconds = 300
     cfg.tavily.api_key = ""
     cfg.newsapi.api_key = ""
     cfg.signal.top_k_documents = 10

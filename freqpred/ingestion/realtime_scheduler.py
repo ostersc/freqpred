@@ -40,6 +40,7 @@ from freqpred.rag.embedder import LocalEmbedder
 
 if TYPE_CHECKING:
     from freqpred.config import TruthSocialAccountConfig
+    from freqpred.runtime.telemetry import RuntimeTelemetry
 
 log = structlog.get_logger(__name__)
 
@@ -59,6 +60,7 @@ async def run_realtime_cycle(
     truthsocial_password: str = "",
     truthsocial_accounts: "list[TruthSocialAccountConfig] | None" = None,
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
+    telemetry: "RuntimeTelemetry | None" = None,
 ) -> dict[str, int]:
     """Run one real-time ingestion cycle (chyrons + Truth Social account feeds).
 
@@ -237,6 +239,10 @@ async def run_realtime_cycle(
         "docs_error": total_error,
     }
     log.info("realtime_scheduler.cycle_complete", **stats)
+    if telemetry is not None:
+        from freqpred.runtime.telemetry import SERVICE_REALTIME_SCHEDULER  # noqa: PLC0415
+
+        await telemetry.mark_success(SERVICE_REALTIME_SCHEDULER, details=stats)
     return stats
 
 
@@ -250,6 +256,7 @@ async def run_realtime_scheduler(
     truthsocial_password: str = "",
     truthsocial_accounts: "list[TruthSocialAccountConfig] | None" = None,
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
+    telemetry: "RuntimeTelemetry | None" = None,
 ) -> None:
     """Async loop: runs run_realtime_cycle every *interval_seconds*.
 
@@ -291,9 +298,17 @@ async def run_realtime_scheduler(
                     truthsocial_password=truthsocial_password,
                     truthsocial_accounts=truthsocial_accounts,
                     domain_blacklist=domain_blacklist,
+                    telemetry=telemetry,
                 )
                 await session.commit()
-        except Exception:
+        except Exception as exc:
             log.error("realtime_scheduler.cycle_error", exc_info=True)
+            if telemetry is not None:
+                from freqpred.runtime.telemetry import SERVICE_REALTIME_SCHEDULER  # noqa: PLC0415
+
+                await telemetry.mark_error(
+                    SERVICE_REALTIME_SCHEDULER,
+                    str(exc),
+                )
 
         await asyncio.sleep(interval_seconds)

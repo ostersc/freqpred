@@ -14,6 +14,7 @@ from .routes import router
 
 if TYPE_CHECKING:
     from freqpred.config import RiskConfig
+    from freqpred.runtime.telemetry import RuntimeTelemetry
     from freqpred.trading.order_manager import OrderManager
 
 
@@ -24,19 +25,22 @@ def create_app(
     bankroll_usd: float = 0.0,
     signal_pipeline: object | None = None,
     order_manager: "OrderManager | None" = None,
+    runtime_telemetry: "RuntimeTelemetry | None" = None,
 ) -> FastAPI:
     """Create and configure the dashboard FastAPI application.
 
     Args:
-        session_factory:  Async SQLAlchemy session factory.
-        daily_cap_usd:    LLM daily spend cap from config, used in /api/llm/cost.
-        risk_config:      Risk engine config; used by /api/system/health circuit-breaker
-                          fields.  Pass ``None`` to use default thresholds.
-        bankroll_usd:     Trading bankroll; used by /api/system/health to compute loss %.
-        signal_pipeline:  Optional ``SignalPipeline`` instance; when provided, the
-                          ``POST /api/markets/{id}/analyze`` endpoint is enabled.
-        order_manager:    Optional ``OrderManager`` instance; when provided, the
-                          ``POST /api/positions/{id}/force-exit`` endpoint is enabled.
+        session_factory:    Async SQLAlchemy session factory.
+        daily_cap_usd:      LLM daily spend cap from config, used in /api/llm/cost.
+        risk_config:        Risk engine config; used by /api/system/health circuit-breaker
+                            fields.  Pass ``None`` to use default thresholds.
+        bankroll_usd:       Trading bankroll; used by /api/system/health to compute loss %.
+        signal_pipeline:    Optional ``SignalPipeline`` instance; when provided, the
+                            ``POST /api/markets/{id}/analyze`` endpoint is enabled.
+        order_manager:      Optional ``OrderManager`` instance; when provided, the
+                            ``POST /api/positions/{id}/force-exit`` endpoint is enabled.
+        runtime_telemetry:  Optional ``RuntimeTelemetry`` instance; when provided, the
+                            system health endpoint returns real freshness/WebSocket telemetry.
 
     Trading mode and active strategy are both discovered at request time from the
     ``run_state`` DB table written by ``freqpred run`` — no mode or strategy
@@ -54,6 +58,7 @@ def create_app(
     app.state.started_at = datetime.now(UTC)
     app.state.signal_pipeline = signal_pipeline
     app.state.order_manager = order_manager
+    app.state.runtime_telemetry = runtime_telemetry
 
     app.include_router(router, prefix="/api")
 

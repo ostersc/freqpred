@@ -61,6 +61,8 @@ def test_all_tables_registered():
         "runtime_config_overrides",
         "source_quality_scores",
         "signal_assessments",
+        "service_heartbeats",
+        "runtime_events",
     }
     registered = set(Base.metadata.tables.keys())
     assert expected == registered

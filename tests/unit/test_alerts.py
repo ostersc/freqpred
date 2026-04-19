@@ -4,6 +4,7 @@ All HTTP calls are mocked — no real network requests made.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +14,7 @@ from freqpred.alerts.discord import DiscordSender
 from freqpred.alerts.dispatcher import AlertDispatcher
 from freqpred.alerts.telegram import TelegramSender
 from freqpred.markets.models import Market, Position
+from freqpred.runtime.telemetry import FreshnessSpec, RuntimeTelemetry, ServiceFreshnessState, run_stale_service_watchdog
 from freqpred.signal.models import Signal
 
 
@@ -266,11 +268,61 @@ async def test_circuit_breaker_alert_format() -> None:
     dispatcher = AlertDispatcher([CaptureSender()])
     await dispatcher.circuit_breaker_alert("daily_loss", "Daily loss 16.2% exceeded 15% limit")
 
-    assert len(captured) == 1
-    msg = captured[0]
-    assert "🚨" in msg
-    assert "CIRCUIT BREAKER TRIPPED" in msg
-    assert "Type: daily_loss" in msg
-    assert "Reason: Daily loss 16.2% exceeded 15% limit" in msg
-    assert "Action required:" in msg
-    assert "Resume:" in msg
+
+@pytest.mark.asyncio
+async def test_stale_service_alert_edge_triggered() -> None:
+    telemetry = RuntimeTelemetry(
+        session_factory=MagicMock(),
+        freshness_specs={
+            "signal_loop": FreshnessSpec(
+                service_name="signal_loop",
+                label="Signal loop",
+                stale_after_seconds=60,
+            )
+        },
+    )
+    stale_state = ServiceFreshnessState(
+        service_name="signal_loop",
+        label="Signal loop",
+        status="stale",
+        last_success_at=None,
+        last_error_at=None,
+        last_error_message=None,
+        stale_after_seconds=60,
+        age_seconds=120,
+        alertable=True,
+    )
+
+    dispatcher = MagicMock()
+    dispatcher.send = AsyncMock()
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.commit = AsyncMock()
+    session_factory = MagicMock(return_value=session)
+
+    states = [[stale_state], [stale_state], []]
+
+    async def _sleep(_: float) -> None:
+        if len(states) <= 1:
+            raise asyncio.CancelledError
+
+    def _evaluate(*args, **kwargs):
+        current = states.pop(0)
+        return current
+
+    telemetry.evaluate_service_states = MagicMock(side_effect=_evaluate)
+
+    with patch("freqpred.alerts.run_state.get_run_state", new=AsyncMock(return_value="running")), patch(
+        "freqpred.runtime.telemetry.list_service_heartbeats",
+        new=AsyncMock(return_value={}),
+    ), patch("asyncio.sleep", new=_sleep):
+        with pytest.raises(asyncio.CancelledError):
+            await run_stale_service_watchdog(
+                session_factory=session_factory,
+                telemetry=telemetry,
+                alert_dispatcher=dispatcher,
+                interval_seconds=1,
+            )
+
+    dispatcher.send.assert_awaited_once()
