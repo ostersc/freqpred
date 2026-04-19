@@ -1,10 +1,10 @@
 import { NavLink } from 'react-router-dom'
 
 const links = [
+  { to: '/markets', label: 'Markets' },
   { to: '/signals', label: 'Signal Feed' },
   { to: '/positions', label: 'Positions' },
   { to: '/decisions', label: 'Decisions' },
-  { to: '/markets', label: 'Markets' },
   { to: '/calibration', label: 'Calibration' },
   { to: '/source-quality', label: 'Source Quality' },
   { to: '/llm', label: 'LLM Cost' },

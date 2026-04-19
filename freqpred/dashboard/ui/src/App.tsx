@@ -16,7 +16,7 @@ export default function App() {
       <NavBar />
       <main className="px-3 py-4">
         <Routes>
-          <Route path="/" element={<Navigate to="/signals" replace />} />
+          <Route path="/" element={<Navigate to="/positions" replace />} />
           <Route path="/signals" element={<SignalFeed />} />
           <Route path="/positions" element={<Positions />} />
           <Route path="/decisions" element={<StrategyDecisions />} />
