@@ -79,7 +79,7 @@ def build_freshness_specs(
         SERVICE_POSITION_WATCHER_LAST_MESSAGE: FreshnessSpec(
             service_name=SERVICE_POSITION_WATCHER_LAST_MESSAGE,
             label="Position watcher feed",
-            stale_after_seconds=30 * 60,
+            stale_after_seconds=10 * 60,
         ),
     }
 
@@ -387,7 +387,12 @@ async def run_stale_service_watchdog(
                 active_alerts.clear()
             else:
                 for state in stale_states:
-                    if state.status == "stale" and state.alertable:
+                    truly_stale = (
+                        state.status == "stale"
+                        and state.age_seconds is not None
+                        and state.age_seconds > state.stale_after_seconds
+                    )
+                    if truly_stale and state.alertable:
                         if state.service_name not in active_alerts:
                             reason = (
                                 f"{state.label} stale: no successful progress for "
@@ -402,7 +407,7 @@ async def run_stale_service_watchdog(
                                 message=reason,
                             )
                             active_alerts.add(state.service_name)
-                    else:
+                    if not truly_stale:
                         active_alerts.discard(state.service_name)
         except asyncio.CancelledError:
             raise

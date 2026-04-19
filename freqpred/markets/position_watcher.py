@@ -115,7 +115,13 @@ class PositionWatcher:
             except asyncio.CancelledError:
                 log.info("position_watcher.stopped")
                 raise
-            except Exception:
+            except Exception as exc:
+                if self._runtime_telemetry is not None:
+                    from freqpred.runtime.telemetry import SERVICE_POSITION_WATCHER_LAST_MESSAGE  # noqa: PLC0415
+                    await self._runtime_telemetry.record_kalshi_error(
+                        SERVICE_POSITION_WATCHER_LAST_MESSAGE,
+                        f"websocket disconnected: {exc}",
+                    )
                 log.exception("position_watcher.disconnected", backoff=backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)

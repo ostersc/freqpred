@@ -243,6 +243,8 @@ async def run_cycle(
     total_fetched = 0
     total_stored = 0
     total_error = 0
+    total_fetcher_errors = 0
+    last_fetcher_error = ""
 
     # Track which services had a successful call this cycle so we only write
     # record_success once per service (it's idempotent but avoids extra DB hits).
@@ -367,6 +369,8 @@ async def run_cycle(
                             skip_cycles = await record_rate_limit(market_session, "guardian")
                             log.warning("scheduler.guardian_rate_limited", reason=str(result), skip_cycles=skip_cycles)
                         else:
+                            total_fetcher_errors += 1
+                            last_fetcher_error = f"{name}: {result}"
                             log.warning(
                                 "scheduler.fetcher_error",
                                 market_id=market_id,
@@ -493,13 +497,21 @@ async def run_cycle(
         "docs_fetched": total_fetched,
         "docs_stored": total_stored,
         "docs_error": total_error,
+        "fetcher_errors": total_fetcher_errors,
     }
 
     log.info("scheduler.cycle_complete", **stats)
     if telemetry is not None:
         from freqpred.runtime.telemetry import SERVICE_INGESTION_SCHEDULER  # noqa: PLC0415
 
-        await telemetry.mark_success(SERVICE_INGESTION_SCHEDULER, details=stats)
+        if total_fetcher_errors > 0:
+            await telemetry.mark_error(
+                SERVICE_INGESTION_SCHEDULER,
+                f"{total_fetcher_errors} fetcher error(s): {last_fetcher_error}",
+                details=stats,
+            )
+        else:
+            await telemetry.mark_success(SERVICE_INGESTION_SCHEDULER, details=stats)
     return stats
 
 

@@ -99,7 +99,12 @@ class MarketWatcher:
             except asyncio.CancelledError:
                 log.info("market_watcher_stopped")
                 raise
-            except Exception:
+            except Exception as exc:
+                if self._runtime_telemetry is not None:
+                    await self._runtime_telemetry.record_kalshi_error(
+                        "market_watcher",
+                        f"market watcher poll failed: {exc}",
+                    )
                 log.exception("market_watcher_poll_error")
             await asyncio.sleep(self._polling_interval)
 
@@ -221,7 +226,13 @@ class MarketWatcher:
                             f"resolved sweep failed for {market_id}: {exc}",
                             details={"market_id": market_id, "status_code": exc.status_code},
                         )
-            except Exception:
+            except Exception as exc:
+                if self._runtime_telemetry is not None:
+                    await self._runtime_telemetry.record_kalshi_error(
+                        "market_watcher",
+                        f"resolved sweep failed for {market_id}: {exc}",
+                        details={"market_id": market_id},
+                    )
                 log.exception("market_watcher.resolved_sweep_error", market_id=market_id)
 
         if markets_to_upsert:
