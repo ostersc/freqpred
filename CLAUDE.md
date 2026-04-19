@@ -2,7 +2,7 @@
 
 ## What this project is
 
-freqpred is a prediction market trading framework for Kalshi. It uses RAG + LLM sentiment analysis (Claude) to estimate event probabilities, compares them to market-implied prices, and trades the edge. Think freqtrade but for prediction markets.
+freqpred is a prediction market trading framework for Kalshi. It uses RAG + LLM sentiment analysis (Claude) to estimate event probabilities, compares them to market-implied prices, and trades the edge with assessment-aware sizing. Think freqtrade but for prediction markets.
 
 Full architecture in [SPEC.md](SPEC.md). Read it before making structural decisions.
 
@@ -10,7 +10,7 @@ Full architecture in [SPEC.md](SPEC.md). Read it before making structural decisi
 
 ## Architecture in one paragraph
 
-The system has two async pipelines. The **ingestion pipeline** runs continuously and is catalyst-driven: the **Market Selector** reads active markets from the DB and asks each registered strategy `is_market_interesting(market)` to filter down to markets worth monitoring; the **Catalyst Generator** calls Claude Haiku per selected market to derive 3–5 targeted search queries (catalysts) representing events that could shift the probability — these are stored as `CatalystRun`/`CatalystQuery` DB rows and refreshed daily using RAG context; the **Ingestion Scheduler** reads the latest catalyst queries and runs Tavily, NewsAPI, and Reddit fetchers against them, deduplicates by URL, generates local embeddings (sentence-transformers), and stores results in the `documents` table. The **signal pipeline** is triggered: it embeds a market question, does semantic search against the document store (RAG), checks if the retrieval result is new (hash check), then calls Claude Sonnet for a probability estimate. Signals are written to Postgres and used by strategy plugins to decide whether to place paper or live trades on Kalshi.
+The system has several async subsystems. The **ingestion pipeline** runs continuously and is catalyst-driven: the **Market Selector** reads active markets from the DB and asks each registered strategy `is_market_interesting(market)` to filter down to markets worth monitoring; the **Catalyst Generator** calls Claude Haiku per selected market to derive 3–5 targeted search queries (catalysts) representing events that could shift the probability — these are stored as `CatalystRun`/`CatalystQuery` DB rows and refreshed daily using RAG context; the **Ingestion Scheduler** reads the latest catalyst queries and runs Tavily, NewsAPI, Guardian, Reddit, GDELT, and TV archive fetchers against them, while the **Realtime Scheduler** polls TV chyron and Truth Social sources on a faster cadence. The **signal pipeline** embeds a market question, does semantic search against the document store (RAG), checks if the retrieval result is new (hash check), then calls Claude Sonnet for a probability estimate. Before final position sizing, `assess_signal_context()` can add source-quality and similar-market trust context; persisted assessments and source-quality snapshots are then visible in the dashboard.
 
 ---
 
@@ -28,7 +28,7 @@ freqpred/
 │   ├── strategy/           # IPredictionStrategy interface + bundled strategies
 │   ├── trading/            # order manager, risk, ledger
 │   ├── llm/                # Claude client + LLM audit logging
-│   ├── metrics/            # calibration, reporting
+│   ├── metrics/            # calibration, assessment, reporting
 │   ├── dashboard/          # FastAPI backend + React frontend
 │   │   ├── api/            # routes.py, schemas.py, app.py
 │   │   └── ui/             # React app (Vite, Tailwind, TanStack Query)
@@ -37,7 +37,7 @@ freqpred/
 │   │       └── src/
 │   │           ├── api/    # typed fetch wrappers
 │   │           ├── components/
-│   │           └── pages/  # 7 dashboard pages
+│   │           └── pages/  # 9 dashboard pages
 │   └── alerts/             # Telegram, Discord
 ├── strategies/             # user strategy files (gitignored)
 ├── config/                 # config.example.yaml + local config.yaml (gitignored)
@@ -132,8 +132,8 @@ Every call to any LLM (Claude, or the cheap Haiku pre-summarizer) must write a r
 ### 4. No secrets in code or config files
 All secrets go through environment variables or AWS Secrets Manager. `config.yaml` contains structure and defaults only — never actual keys. The `config/` directory (except `config.example.yaml`) is gitignored.
 
-### 5. Ingestion and signal pipelines are separate async processes
-The ingestion pipeline (fetch → embed → store) runs on its own schedule and writes to the document store. The signal pipeline reads from the document store. They communicate through the DB — not through direct function calls or shared state. This separation allows ingestion to run continuously without blocking signal analysis.
+### 5. Ingestion and signal pipelines are separate async subsystems
+The ingestion pipeline (fetch → embed → store) runs on its own schedule and writes to the document store. The signal pipeline reads from the document store. They communicate through the DB boundary — not through direct cross-pipeline calls or shared in-memory state. This separation allows ingestion to run continuously without blocking signal analysis.
 
 ### 6. Paper mode must be the default
 All trading defaults to `mode="paper"`. Live trading requires explicit `--mode live` flag AND the `LIVE_TRADING_ENABLED=true` environment variable. Never submit real orders unless both conditions are true.

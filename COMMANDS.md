@@ -47,6 +47,7 @@ Fetches live markets from the Kalshi API, writes them to the `markets` table, an
 
 ```bash
 uv run freqpred signal analyze --market-id <KALSHI-TICKER>
+uv run freqpred signal analyze --market-id <KALSHI-TICKER> --force
 ```
 
 Embeds the market question, retrieves relevant documents via vector search, and calls Claude for a probability estimate. Prints the full signal (probability, edge, confidence, direction, reasoning).
@@ -58,14 +59,14 @@ Embeds the market question, retrieves relevant documents via vector search, and 
 ```bash
 uv run freqpred ingestion run
 uv run freqpred ingestion run --limit 5
-uv run freqpred ingestion run --category politics --dry-run
+uv run freqpred ingestion run --category Elections --dry-run
 uv run freqpred ingestion run --min-volume 500
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `--limit` | `3` | Maximum number of markets to process |
-| `--category` | none | Only process markets in this category |
+| `--category` | none | Only process markets in this exact Kalshi category string |
 | `--min-volume` | `0` | Minimum 24h volume filter |
 | `--dry-run` | false | Generate catalysts but skip news fetching |
 
@@ -109,9 +110,15 @@ Calculates P&L based on the resolution outcome and closes the position in the da
 
 ```bash
 uv run freqpred metrics calibration
+uv run freqpred metrics calibration --days 30
+uv run freqpred metrics calibration --period month
 ```
 
-Prints overall Brier score vs. naive baseline and a probability-bucket breakdown over all resolved positions.
+Prints overall Brier score over finalized signals, compared against the market baseline (`market_mid_at_signal` vs. final outcome), plus a probability-bucket breakdown. This scores all qualifying signals, not just traded positions.
+
+Options:
+- `--days N` — restrict to signals created within the last N days
+- `--period day|week|month` — convenience aliases for `--days 1/7/30`
 
 ---
 
@@ -152,7 +159,7 @@ uv run freqpred alerts test --channel discord
 uv run freqpred alerts test --channel all
 ```
 
-Sends a test message to confirm that the configured credentials work. Missing credentials are silently skipped.
+Sends a test message to confirm that the configured credentials work. This command is only meaningful when the relevant channel credentials are configured.
 
 ---
 
@@ -182,7 +189,7 @@ In production, `freqpred run` also serves the built React SPA (from `freqpred/da
 
 ## Telegram bot commands
 
-When the bot token is configured and `authorized_users` is set, `freqpred run` starts an inbound polling loop. The bot accepts `/commands` from authorized users only — unrecognized senders are silently ignored.
+When the bot token is configured and `telegram_authorized_users` is set, `freqpred run` starts an inbound polling loop. The bot accepts `/commands` from authorized users only — unrecognized senders are silently ignored.
 
 ### Authorization
 

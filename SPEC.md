@@ -4,7 +4,7 @@
 
 **Version:** 0.1-draft
 **Last updated:** 2026-04-18
-**Status:** Phase 2 complete — paper trading running; Phase 3 (live trading) next
+**Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
 
@@ -87,13 +87,58 @@ Other categories (macro/Fed, geopolitics, sports) are supported by the architect
 
 ```mermaid
 graph TD
-    MW[Market Watcher] --> SP[Signal Pipeline - RAG + LLM]
-    SP --> SE[Strategy Engine - plugins]
-    MW --> IMC[IMarketClient - Kalshi]
-    SE --> OM[Order Manager - paper / live]
+    subgraph Ingestion[Ingestion]
+        MW[Market Watcher]
+        MS[Market Selector]
+        CG[Catalyst Generator]
+        IS[Ingestion Scheduler]
+        RS[Realtime Scheduler]
+        DS[(Document Store)]
+    end
+
+    subgraph Trading[Signal and Trading]
+        SP[Signal Pipeline]
+        SE[Strategy Engine]
+        AS[Assessment]
+        OM[Order Manager]
+    end
+
+    subgraph Metrics[Metrics]
+        SQS[Source Quality Scheduler]
+        SQ[(Source Quality Snapshots)]
+    end
+
+    subgraph Runtime[Runtime]
+        PW[Position Watcher]
+        PM[Position Monitor]
+        L[(Ledger and DB)]
+        API[Dashboard API]
+        DA[Dashboard and Alerts]
+    end
+
+    IMC[IMarketClient - Kalshi]
+
+    MW --> MS
+    MS --> CG
+    CG --> IS
+    CG --> RS
+    IS --> DS
+    RS --> DS
+    MW --> SP
+    DS --> SP
+    SP --> SE
+    SE --> AS
+    SQ --> AS
+    L --> AS
+    AS --> OM
     OM -->|orders| IMC
-    OM --> L[Ledger + DB - RDS Postgres]
-    L --> DA[Dashboard + Alerts]
+    OM --> L
+    SQS --> SQ
+    IMC --> PW
+    PW --> PM
+    PM --> L
+    L --> API
+    API --> DA
 ```
 
 ### Component Responsibilities
@@ -107,11 +152,13 @@ graph TD
 | **Ingestion Scheduler** | Reads the latest active catalyst queries per market from DB; runs Tavily + NewsAPI + Guardian + Reddit + GDELT + TV Archive fetchers against those queries (every 30 min); upserts results into Document store |
 | **Realtime Scheduler** | Polls cursor-based near-real-time sources on a faster cadence (default 5 min): TV chyrons via Internet Archive Third Eye API; Truth Social account feeds. Uses `fetcher_cursors` for dedup so frequent polling does not double-process. |
 | **Signal Pipeline** | Retrieves news context via RAG, runs LLM analysis, returns probability estimate |
-| **Strategy Engine** | Applies `IPredictionStrategy` plugins to signal output, decides trade/size/skip |
+| **Strategy Engine** | Applies `IPredictionStrategy` plugins to signal output, decides trade/skip, and provides the base position-sizing target |
+| **Assessment** | Builds source-quality and similar-market context, calls the judgment model when useful, and persists a sizing-only `SignalAssessment` before final position sizing |
+| **Source Quality Scheduler** | Refreshes rolling `source_quality_scores` snapshots daily so assessment and dashboard views have fresh source-level calibration data |
 | **IMarketClient** | Abstract interface over Kalshi (and future platforms); handles orders, positions, balance |
-| **Order Manager** | Executes paper or live trades; enforces hard risk caps before any order |
+| **Order Manager** | Executes paper or live trades; enforces hard risk caps before any order; passes optional persisted assessment into strategy sizing |
 | **Ledger** | Immutable trade log; records every signal, position, and resolution outcome |
-| **Dashboard** | Web UI for monitoring; Telegram/Discord for push alerts |
+| **Dashboard** | Web UI for monitoring signals, positions, decisions, markets, source quality, LLM audit/costs, strategy config, and system health; Telegram/Discord for push alerts |
 
 ---
 
@@ -164,7 +211,7 @@ Markets **without** open positions are REST-only. The WebSocket subscription set
 - Lives in `freqpred/markets/watcher.py` alongside the REST polling loop, as an independent async task.
 - Shares the same `AsyncSession` factory and `MarketRow` upsert logic as the REST watcher.
 - Auth token for the WebSocket handshake uses the same RSA-PSS signing as REST (`KalshiClient._make_auth_headers`).
-- Requires `websockets` or `httpx-ws` dependency (to be added when implemented — Phase 3).
+- Uses the `websockets` dependency for the Kalshi WebSocket client.
 - In paper mode, the WebSocket is still useful for accurate price tracking even though no real orders are submitted.
 
 ### Kalshi ↔ DB position reconciliation
@@ -1040,17 +1087,19 @@ Built with **FastAPI** (backend) + **React 18 + TypeScript** (frontend), served 
 
 **`freqpred dashboard` command:** Dev-only Vite launcher — starts the Vite dev server at `http://localhost:5173` for hot-reload UI development. Has no DB or business logic of its own; API calls are proxied to `freqpred run` on port 8000. In production, `freqpred run` serves both the API and the built React SPA (from `freqpred/dashboard/ui/dist/`) — no separate `dashboard` command needed.
 
-**Serve path:** `freqpred/dashboard/ui/` contains the React app. `npm run build` produces `freqpred/dashboard/ui/dist/`. FastAPI mounts this directory at `/` via `StaticFiles(html=True)` if it exists; otherwise falls back to Swagger UI redirect. In dev, Vite proxies `/api` to `localhost:8000`.
+**Serve path:** `freqpred/dashboard/ui/` contains the React app. `npm run build` produces `freqpred/dashboard/ui/dist/`. When that directory exists, FastAPI serves the built SPA from `/` and `/assets`; otherwise `/` redirects to Swagger UI so the API remains usable in dev. In dev, Vite proxies `/api` to `localhost:8000`.
 
 **Pages:**
 
-1. **Signal Feed** — live stream of new signals with market question, our probability, market price, edge, direction
-2. **Open Positions** — current paper/live positions with unrealized P&L, filterable by strategy
-3. **Ledger** — resolved positions, actual P&L, running totals, filterable by strategy/confidence tier
-4. **Calibration** — scatter plot of estimated probability vs. resolution rate; Brier score trend. Brier score is computed per-signal (each signal scores independently against the final market result) across all analyzed markets — not just traded ones. Supports lookback windows (daily, weekly, monthly, all-time) to track calibration drift. Baseline comparison is `market_brier_score` (market mid-price at signal time vs. outcome).
-5. **LLM Cost & Audit** — daily/weekly spend charts, cost by query type and strategy, query log with full prompt/response drilldown, budget burn rate vs. daily cap
-6. **Strategy Config** — view/edit active strategy parameters (no code changes needed for threshold tuning)
-7. **System Health** — API status, error rates, circuit breaker state, LLM budget circuit breaker status
+1. **Signal Feed** — live stream of new signals with market question, our probability, market price, edge, direction, and expandable assessment detail
+2. **Positions** — current paper/live positions with unrealized P&L, strategy filters, and force-exit controls
+3. **Decisions** — strategy entry/exit decision analysis, including exit counterfactuals and prior-signal comparisons
+4. **Markets** — searchable market browser with current signal detail and manual analyze-now actions
+5. **Calibration** — scatter plot of estimated probability vs. resolution rate; Brier score trend. Brier score is computed per-signal across all analyzed markets — not just traded ones. Supports lookback windows and category filtering. Baseline comparison is `market_brier_score` (market mid-price at signal time vs. outcome).
+6. **Source Quality** — per-source weighted Brier analysis vs overall baseline, with lookback and category filtering
+7. **LLM Cost & Audit** — daily/weekly spend charts, cost by query type and strategy, query log with full prompt/response drilldown, budget burn rate vs. daily cap
+8. **Strategy Config** — view/edit active strategy parameters (no code changes needed for threshold tuning)
+9. **System Health** — API status, error rates, circuit breaker state, LLM budget circuit breaker status
 
 ### Telegram / Discord Alerts
 
@@ -1204,16 +1253,16 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T37** [#37](https://github.com/ostersc/freqpred/issues/37) — OrderManager live branch: startup balance guard (abort if Kalshi balance < `bankroll_usd`); route to `KalshiClient.place_order()` when `mode=live`; record positions as `pending` with `exchange_order_id`; `reconcile_pending_orders()` stub. Depends on: T36.
 - [x] **T38** [#38](https://github.com/ostersc/freqpred/issues/38) — PositionMonitor live exits: submit IOC sell order on exit; close ledger only after exchange confirms; alert on `KalshiAPIError`. Depends on: T36, T37.
 - [x] **T39** [#39](https://github.com/ostersc/freqpred/issues/39) — PositionWatcher WebSocket `ticker`: persistent connection per open live position; sub-second price updates; triggers position monitor on each tick; exponential backoff reconnect; Kalshi↔DB position reconciliation on startup and reconnect (sync contracts, auto-close zero-net, skip manual-only). Depends on: T37, T38.
-- [x] **T40** [#40](https://github.com/ostersc/freqpred/issues/40) — PositionWatcher `market_lifecycle_v2`: resolution events; settle at $1/$0 on `settled` (`settlement_value` "1.0000"=YES/"0.0000"=NO, `event_type` not `status`); REST poll fallback for missed events. Depends on: T39.
+- [x] **T40** [#40](https://github.com/ostersc/freqpred/issues/40) — PositionWatcher `market_lifecycle_v2`: resolution events; settle at $1/$0 on `determined` (`settlement_value` "1.0000"=YES/"0.0000"=NO, `event_type` not `status`); REST poll fallback for missed events on later `settled` events. Depends on: T39.
 - [x] **T41** [#41](https://github.com/ostersc/freqpred/issues/41) — Dashboard: Strategy Config + System Health API endpoints; GET/PUT strategy params at runtime; circuit breaker state, WebSocket status, pending order count. Depends on: T36.
 - [ ] **T42** [#42](https://github.com/ostersc/freqpred/issues/42) — Production AWS deployment: ECS Fargate, RDS Postgres 16 + pgvector, Secrets Manager, CloudWatch alarms, deployment runbook. Depends on: T36.
 - [ ] **T43** [#43](https://github.com/ostersc/freqpred/issues/43) — GitHub Actions CI/CD: lint → test → build Docker → push to ECR → migrate → deploy to ECS. Depends on: T42.
-- [x] **T44** [#44](https://github.com/ostersc/freqpred/issues/44) — React dashboard frontend: all 7 pages (Signal Feed, Positions, Ledger, Calibration, LLM Cost & Audit, Strategy Config, System Health). Depends on: T41.
+- [x] **T44** [#44](https://github.com/ostersc/freqpred/issues/44) — React dashboard frontend foundation: initial dashboard shell and base monitoring pages, later expanded by T61/T62/T64/T65 into the current Signal Feed, Positions, Decisions, Markets, Calibration, Source Quality, LLM Cost, Strategy Config, and System Health views. Depends on: T41.
 - [x] **T45** [#45](https://github.com/ostersc/freqpred/issues/45) — Circuit breaker hardening: drawdown breaker implementation; all four breakers verified; Telegram alert format; incident runbook. Depends on: T36.
 - [ ] **T47** [#47](https://github.com/ostersc/freqpred/issues/47) — `OrderTypes` config + limit order entry: `OrderTypes` dataclass on `StrategyConfig`; `custom_entry_price()` hook; entry at `estimated_prob - min_edge`; pending position fill-check + timeout cancellation; paper mode only.
 - [ ] **T48** [#48](https://github.com/ostersc/freqpred/issues/48) — Limit order exits + exchange-hosted stoploss: `exit=limit` posts resting ROI/trailing targets; `custom_exit_price()` hook; `stoploss_on_exchange` with interval refresh; emergency/circuit-breaker always market. Depends on: T47.
 - [x] **T49** [#49](https://github.com/ostersc/freqpred/issues/49) — `IAlgoStrategy`: DataFrame-driven exits via WebSocket tick data; freqtrade-style `populate_indicators()` + `populate_exit_trend()` hooks; OHLC candle buffer per market; `force_exit()` reads `exit_long` column; `PositionMonitor.on_tick()` feeds ticks to algo strategy buffers. OHLC is direction-corrected before being passed to `populate_indicators`/`populate_exit_trend`: NO positions receive inverted candles (`no_high = 1 - yes_low`, `no_low = 1 - yes_high`) so that indicator logic (RSI, EMA crossovers, etc.) operates on contract value from the holder's perspective. Candle cache is keyed by `(market_id, direction)` so YES and NO positions maintain independent OHLC series. Depends on: T39.
-- [ ] **T57** [#57](https://github.com/ostersc/freqpred/issues/57) — Trade sizing judgment: `source_quality_scores` table (daily rolling snapshot per source name × market category) plus `signal_assessments` table (append-only, one row per assessed signal); `assess_signal_context()` in `freqpred/metrics/assessment.py` runs between `should_trade` and `position_size` in `order_manager.submit()`; assessment combines source-quality history and similar-market family history (`series_ticker`, plus exact-question subset stats), then uses the configured `judgment_model` (default Opus) to return `trust_score`, `verdict`, and reasoning; framework maps trust score into `[assessment_scale_min, assessment_scale_max]`; default `position_size()` applies the multiplier to ideal total exposure before subtracting `existing_market_exposure`; neutral assessment when no usable history exists and the LLM call is skipped. `StrategyConfig` gains `assessment_scale_min/max` and `similar_market_min_signals/trades`. Depends on: T56.
+- [x] **T57** [#57](https://github.com/ostersc/freqpred/issues/57) — Trade sizing judgment: `source_quality_scores` table (daily rolling snapshot per source name × market category) plus `signal_assessments` table (append-only, one row per assessed signal); `assess_signal_context()` in `freqpred/metrics/assessment.py` runs between `should_trade` and `position_size` in `order_manager.submit()`; assessment combines source-quality history and similar-market family history (`series_ticker`, plus exact-question subset stats), then uses the configured `judgment_model` (default Opus) to return `trust_score`, `verdict`, and reasoning; framework maps trust score into `[assessment_scale_min, assessment_scale_max]`; default `position_size()` applies the multiplier to ideal total exposure before subtracting `existing_market_exposure`; neutral assessment when no usable history exists and the LLM call is skipped. `StrategyConfig` gains `assessment_scale_min/max` and `similar_market_min_signals/trades`. Depends on: T56.
 - [ ] **T50** [#50](https://github.com/ostersc/freqpred/issues/50) — LLM-assisted exit analysis: `should_request_llm_exit()` predicate + `llm_exit_check()` async hook on `IAlgoStrategy`; PositionMonitor calls LLM when predicate fires; prompt includes candle metrics + P&L; response logged to `llm_queries`. Depends on: T49.
 - [x] **T51** [#51](https://github.com/ostersc/freqpred/issues/51) — TV chyron ingestion via Internet Archive Third Eye API + realtime scheduler: `tv_chyron.py` fetcher (`fetch_all`, `parse_and_groups`, `filter_chyrons`); new `realtime_scheduler.py` runs chyrons and Truth Social account feeds every 5 min (moved from main scheduler); `backoff.py` `tick_and_load` gains `services` filter so each scheduler manages its own counters independently; `ingestion.tv_chyron_enabled` and `ingestion.realtime_interval_seconds` config keys added.
 - [x] **T61** [#61](https://github.com/ostersc/freqpred/issues/61) — Dashboard: force-exit positions from Positions page; `POST /api/positions/{id}/force-exit` endpoint; "Force Exit" button in expanded detail panel (open positions only) with confirmation dialog; invalidates TanStack Query cache on success. `OrderManager.force_exit()` centralizes paper/live exit logic; API server embedded in `freqpred run`; `freqpred dashboard` is dev-only Vite launcher.
@@ -1317,8 +1366,11 @@ freqpred/
 │   │   ├── audit.py             # LLMQuery logging, cost tracking, budget circuit breaker
 │   │   └── models.py            # LLMQuery dataclass
 │   ├── metrics/
-│   │   ├── calibration.py       # Brier score, calibration curve
-│   │   └── reporting.py         # daily digest generation
+│   │   ├── assessment.py        # source-quality + similar-market sizing judgment
+│   │   ├── calibration.py       # Brier score, calibration curve, source quality
+│   │   ├── models.py            # signal assessment + source-quality ORM models
+│   │   ├── reporting.py         # daily digest generation
+│   │   └── scheduler.py         # source-quality refresh scheduler
 │   ├── dashboard/
 │   │   ├── api/                 # FastAPI routes + schemas
 │   │   └── ui/                  # React frontend (Vite, Tailwind, TanStack Query)
@@ -1327,7 +1379,7 @@ freqpred/
 │   │       └── src/
 │   │           ├── api/         # typed fetch wrappers per endpoint
 │   │           ├── components/  # NavBar, StatusBadge, LoadingSpinner, ErrorBanner
-│   │           └── pages/       # 7 dashboard pages
+│   │           └── pages/       # 9 dashboard pages
 │   └── alerts/
 │       ├── telegram.py
 │       └── discord.py

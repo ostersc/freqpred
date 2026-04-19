@@ -2,7 +2,7 @@
 
 **LLM-driven prediction market trading framework — freqtrade for prediction markets.**
 
-freqpred uses retrieval-augmented LLM analysis to estimate the "true" probability of prediction market outcomes, identifies edges against market-implied prices, and executes trades with systematic risk controls.
+freqpred uses retrieval-augmented LLM analysis to estimate the "true" probability of prediction market outcomes, identifies edges against market-implied prices, and executes trades with assessment-aware sizing plus systematic risk controls.
 
 **Status:** Phase 2 complete (paper trading + calibration running). Phase 3 (live trading) in progress.
 
@@ -14,7 +14,7 @@ freqpred uses retrieval-augmented LLM analysis to estimate the "true" probabilit
 2. **Ingests** targeted news via Tavily, NewsAPI, Reddit, GDELT, TV archives (catalyst-driven RAG)
 3. **Estimates** event probability using Claude Sonnet with structured output
 4. **Identifies** markets where LLM probability diverges meaningfully from market price
-5. **Trades** via a pluggable strategy interface with hard risk controls
+5. **Sizes and trades** via a pluggable strategy interface, assessment-aware sizing, and hard risk controls
 6. **Tracks** calibration — are our probability estimates actually accurate?
 
 > **Why no backtesting?** LLMs have seen market resolutions in training data, creating unavoidable look-ahead bias. freqpred validates via paper trading + Brier score calibration instead.
@@ -95,35 +95,37 @@ Bundled strategies: `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStra
 ```mermaid
 graph TD
     subgraph Exchange[Kalshi Exchange]
-        KREST[REST - orders and poll]
-        KWS[WebSocket - ticker and lifecycle]
+        KREST[REST API]
+        KWS[WebSocket]
     end
 
-    subgraph Ingestion[Ingestion Pipeline]
-        MW[Market Watcher - 5min poll]
+    subgraph Ingestion[Ingestion]
+        MW[Market Watcher]
         MS[Market Selector]
-        CG[Catalyst Generator - Haiku]
-        IS[Ingestion Scheduler - 30min]
-        RS[Realtime Scheduler - 5min]
-        DS[(Document Store - pgvector)]
+        CG[Catalyst Generator]
+        IS[Ingestion Scheduler]
+        RS[Realtime Scheduler]
+        DS[(Document Store)]
     end
 
-    subgraph Sources[Third-party Sources]
-        IS_SRC[Tavily · NewsAPI · Reddit · GDELT · TV Transcripts]
-        RS_SRC[TV Chyrons · Truth Social account feeds]
+    subgraph Metrics[Metrics]
+        SQS[Source Quality Scheduler]
+        SQ[(Source Quality Snapshots)]
     end
 
-    subgraph Signal[Signal Pipeline]
-        SP[Signal Pipeline - RAG + Sonnet]
+    subgraph Trading[Signal and Trading]
+        SP[Signal Pipeline]
         SE[Strategy Engine]
-        OM[Order Manager - paper / live]
+        AS[Assessment]
+        OM[Order Manager]
     end
 
-    subgraph Positions[Position Tracking]
-        PW[Position Watcher - WebSocket]
+    subgraph Runtime[Runtime]
+        PW[Position Watcher]
         PM[Position Monitor]
-        L[(Ledger - Postgres)]
-        DA[Dashboard + Alerts]
+        L[(Ledger and DB)]
+        API[Dashboard API]
+        UI[Dashboard and Alerts]
     end
 
     subgraph Plugin[Strategy Plugin]
@@ -140,45 +142,44 @@ graph TD
     DS --> SP
     MW -->|prices| SP
     SP --> SE
-    SE --> OM
+    SE --> AS
+    SQ --> AS
+    L --> AS
+    AS --> OM
     OM --> KREST
     KWS --> PW
-    PW -->|price ticks| PM
-    PW -->|determined / settled| PM
-    OM --> PM
-    PM --> KREST
+    PW --> PM
     PM --> L
-    L --> DA
-    IS --> IS_SRC
-    RS --> RS_SRC
+    OM --> L
+    L --> API
+    API --> UI
+    SQS --> SQ
     MS -. is_market_interesting .-> STRAT
-    SE -. "should_trade / position_size" .-> STRAT
-    PM -. "force_exit every tick" .-> STRAT
-    PM -. "custom_exit / should_exit on signal" .-> STRAT
-    PM -. on_resolution .-> STRAT
+    SE -. should_trade .-> STRAT
+    AS -. assessment-aware position_size .-> STRAT
+    PM -. exits and resolution .-> STRAT
 
     classDef exchange fill:#e8e8e8,stroke:#888,color:#333
     classDef ingestion fill:#d4edda,stroke:#28a745,color:#155724
+    classDef metrics fill:#e9ecef,stroke:#6c757d,color:#343a40
     classDef signal fill:#cce5ff,stroke:#0069d9,color:#004085
     classDef position fill:#fff3cd,stroke:#d39e00,color:#533f03
     classDef strategy fill:#f8d7da,stroke:#721c24,stroke-width:3px,color:#721c24
-    classDef sources fill:#e2d9f3,stroke:#7048a8,color:#3d1e6d
 
     class KREST,KWS exchange
     class MW,MS,CG,IS,RS,DS ingestion
-    class SP,SE,OM signal
-    class PW,PM,L,DA position
+    class SQS,SQ metrics
+    class SP,SE,AS,OM signal
+    class PW,PM,L,API,UI position
     class STRAT strategy
-    class IS_SRC,RS_SRC sources
 
-    linkStyle 21 stroke:#721c24,stroke-width:2px
     linkStyle 22 stroke:#721c24,stroke-width:2px
     linkStyle 23 stroke:#721c24,stroke-width:2px
     linkStyle 24 stroke:#721c24,stroke-width:2px
     linkStyle 25 stroke:#721c24,stroke-width:2px
 ```
 
-Three concurrent components: **ingestion** (catalyst-driven, continuous), **signal** (triggered, RAG + LLM), and **position watcher** (WebSocket, sub-second price + resolution events). All communicate through Postgres — no shared state.
+Four concurrent subsystems: **ingestion** (catalyst-driven, continuous), **signal and trading** (triggered, RAG + LLM + assessment-aware sizing), **position watcher** (WebSocket, sub-second price + resolution events), and **metrics** (daily source-quality snapshots). Persisted assessment and source-quality data are then surfaced in dashboard detail views.
 
 Red dashed edges show `IPredictionStrategy` callback invocations — the single plugin point for market selection, entry, exit, and resolution logic.
 
@@ -206,6 +207,8 @@ uv run freqpred dashboard  # dev-only Vite launcher (requires freqpred run for A
 ```
 
 **Alerts** — Telegram and Discord are independently optional. Missing credentials silently disable that channel. Set `telegram_authorized_users` in `config.yaml` to enable inbound bot commands (status queries, position management, circuit breaker control). See [COMMANDS.md — Telegram bot commands](COMMANDS.md#telegram-bot-commands).
+
+**Dashboard** — the current UI includes Signal Feed, Positions, Decisions, Markets, Calibration, Source Quality, LLM Cost, Strategy Config, and System Health. Signal and position detail views also show persisted assessment summaries and deep-link into the LLM audit page.
 
 ---
 
@@ -242,7 +245,7 @@ Adminer (database UI): `docker-compose up -d adminer` → `http://localhost:8080
 - **Claude (Anthropic)** — signal analysis (`claude-sonnet-4-6`) + catalyst generation (`claude-haiku-4-5`)
 - **sentence-transformers** — local document embeddings (`all-MiniLM-L6-v2`, 384 dims, no API key)
 - **Tavily + NewsAPI + Reddit + GDELT + Internet Archive TV** — news ingestion
-- **React 18 + TypeScript + Vite + Tailwind CSS** — dashboard frontend (served from FastAPI `/`)
+- **React 18 + TypeScript + Vite + Tailwind CSS** — dashboard frontend (served from FastAPI `/` when built; Vite in dev)
 - **uv** — dependency management
 
 ---
