@@ -37,6 +37,7 @@ from freqpred.rag.models import DocumentRow
 # Register all models with Base.metadata before create_all.
 import freqpred.ingestion.models  # noqa: F401
 import freqpred.llm.models        # noqa: F401
+import freqpred.metrics.models    # noqa: F401
 import freqpred.signal.models     # noqa: F401
 
 NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)

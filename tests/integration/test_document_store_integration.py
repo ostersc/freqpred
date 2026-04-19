@@ -30,6 +30,7 @@ from freqpred.rag.models import DocumentRow
 
 # Import all models so Base.metadata is fully populated before create_all.
 import freqpred.markets.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
 import freqpred.signal.models   # noqa: F401
 import freqpred.llm.models      # noqa: F401
 

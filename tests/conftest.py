@@ -11,6 +11,7 @@ from freqpred.config import Settings
 import freqpred.ingestion.models  # noqa: F401
 import freqpred.llm.models  # noqa: F401
 import freqpred.markets.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
 import freqpred.rag.models  # noqa: F401
 import freqpred.signal.models  # noqa: F401
 
