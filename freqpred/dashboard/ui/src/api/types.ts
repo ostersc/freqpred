@@ -30,8 +30,22 @@ export interface DocumentLinkOut {
   body_excerpt: string
 }
 
+export interface SignalAssessmentOut {
+  trust_score: number
+  size_multiplier: number
+  verdict: string
+  reasoning: string
+  key_factors: string[]
+  warnings: string[]
+  source_breakdown: Array<Record<string, unknown>>
+  similar_market_summary: Record<string, unknown>
+  llm_query_id: number | null
+  created_at: string
+}
+
 export interface SignalDetailOut extends SignalOut {
   document_links: DocumentLinkOut[]
+  assessment: SignalAssessmentOut | null
 }
 
 export interface SignalListResponse {
@@ -145,6 +159,21 @@ export interface CalibrationResponse {
   n_samples: number
   buckets: CalibrationBucketOut[]
   market_buckets: CalibrationBucketOut[]
+  available_categories: string[]
+}
+
+export interface SourceQualityScoreOut {
+  source_name: string
+  market_category: string | null
+  weighted_brier: number
+  overall_brier: number
+  n_signals: number
+  total_doc_uses: number
+  computed_at: string
+}
+
+export interface SourceQualityListResponse {
+  items: SourceQualityScoreOut[]
 }
 
 export interface LLMCostResponse {

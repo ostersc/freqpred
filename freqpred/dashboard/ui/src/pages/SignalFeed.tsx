@@ -3,8 +3,8 @@ import { useQuery } from '@tanstack/react-query'
 import { getSignals, getSignal } from '../api/signals'
 import LoadingSpinner from '../components/LoadingSpinner'
 import ErrorBanner from '../components/ErrorBanner'
-import { DocLinkItem } from '../components/DocLinkItem'
 import AnalyzeButton from '../components/AnalyzeButton'
+import { SignalDetail as SharedSignalDetail } from '../components/SignalDetail'
 import type { SignalOut } from '../api/types'
 
 const PAGE_SIZE = 20
@@ -33,26 +33,10 @@ function SignalDetail({ id, marketId }: { id: string; marketId: string }) {
   return (
     <div className="px-4 py-3 bg-gray-50 border-t text-sm space-y-3">
       <div className="flex items-center justify-between">
-        <span className="font-medium text-gray-700">Reasoning:</span>
+        <span className="font-medium text-gray-700">Signal detail</span>
         <AnalyzeButton marketId={marketId} />
       </div>
-      <p className="text-gray-600 whitespace-pre-wrap">{data.reasoning}</p>
-      {data.social_sentiment_summary && (
-        <div>
-          <span className="font-medium text-gray-700">Social sentiment:</span>
-          <p className="mt-1 text-gray-600">{data.social_sentiment_summary}</p>
-        </div>
-      )}
-      {data.document_links.length > 0 && (
-        <div>
-          <span className="font-medium text-gray-700">Evidence documents:</span>
-          <ul className="mt-1 space-y-1.5">
-            {data.document_links.map((d) => (
-              <DocLinkItem key={d.document_id} doc={d} />
-            ))}
-          </ul>
-        </div>
-      )}
+      <SharedSignalDetail signal={data} />
     </div>
   )
 }

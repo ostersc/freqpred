@@ -6,6 +6,7 @@ import StrategyDecisions from './pages/StrategyDecisions'
 import Markets from './pages/Markets'
 import Calibration from './pages/Calibration'
 import LLMCost from './pages/LLMCost'
+import SourceQuality from './pages/SourceQuality'
 import StrategyConfig from './pages/StrategyConfig'
 import SystemHealth from './pages/SystemHealth'
 
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="/decisions" element={<StrategyDecisions />} />
           <Route path="/markets" element={<Markets />} />
           <Route path="/calibration" element={<Calibration />} />
+          <Route path="/source-quality" element={<SourceQuality />} />
           <Route path="/llm" element={<LLMCost />} />
           <Route path="/strategy" element={<StrategyConfig />} />
           <Route path="/health" element={<SystemHealth />} />

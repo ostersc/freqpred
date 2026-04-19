@@ -28,10 +28,11 @@ type BucketPoint = CalibrationBucketOut & { _series: 'model' | 'market' }
 
 export default function Calibration() {
   const [lookbackDays, setLookbackDays] = useState<number | undefined>(undefined)
+  const [category, setCategory] = useState<string>('all')
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['calibration', lookbackDays],
-    queryFn: () => getCalibration(lookbackDays),
+    queryKey: ['calibration', lookbackDays, category],
+    queryFn: () => getCalibration(lookbackDays, category === 'all' ? undefined : category),
   })
 
   const modelPoints: BucketPoint[] = (data?.buckets ?? [])
@@ -46,20 +47,37 @@ export default function Calibration() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-bold text-gray-900">Calibration</h1>
-        <div className="flex gap-1">
-          {PRESETS.map((p) => (
-            <button
-              key={p.label}
-              onClick={() => setLookbackDays(p.days)}
-              className={`px-3 py-1 text-sm rounded border transition-colors ${
-                lookbackDays === p.days
-                  ? 'bg-blue-600 text-white border-blue-600'
-                  : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600'
-              }`}
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-sm text-gray-600">
+            <span className="mr-2">Category</span>
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="rounded border border-gray-300 bg-white px-3 py-2"
             >
-              {p.label}
-            </button>
-          ))}
+              <option value="all">All</option>
+              {(data?.available_categories ?? []).map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="flex gap-1">
+            {PRESETS.map((p) => (
+              <button
+                key={p.label}
+                onClick={() => setLookbackDays(p.days)}
+                className={`px-3 py-1 text-sm rounded border transition-colors ${
+                  lookbackDays === p.days
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

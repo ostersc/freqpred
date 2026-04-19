@@ -14,11 +14,12 @@ from freqpred.llm.audit import get_daily_spend_usd
 from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import MarketRow, PositionRow
-from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
-from freqpred.metrics.calibration import compute_calibration
+from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
+from freqpred.metrics.models import SignalAssessmentRow, SourceQualityScoreRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
 from freqpred.trading.ledger import get_portfolio_summary
+from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
 
 from .schemas import (
     AnalyzeResponse,
@@ -39,9 +40,12 @@ from .schemas import (
     PositionDetailOut,
     PositionListResponse,
     PositionOut,
+    SignalAssessmentOut,
     SignalDetailOut,
     SignalListResponse,
     SignalOut,
+    SourceQualityListResponse,
+    SourceQualityScoreOut,
     StrategyConfigOut,
     StrategyConfigUpdateRequest,
     StrategyDecisionListResponse,
@@ -131,6 +135,21 @@ def _signal_row_to_out(row: SignalRow, market_question: str | None = None) -> Si
     )
 
 
+def _assessment_row_to_out(row: SignalAssessmentRow) -> SignalAssessmentOut:
+    return SignalAssessmentOut(
+        trust_score=row.trust_score,
+        size_multiplier=row.size_multiplier,
+        verdict=row.verdict,
+        reasoning=row.reasoning,
+        key_factors=list(row.key_factors or []),
+        warnings=list(row.warnings or []),
+        source_breakdown=list(row.source_breakdown or []),
+        similar_market_summary=dict(row.similar_market_summary or {}),
+        llm_query_id=row.llm_query_id,
+        created_at=row.created_at,
+    )
+
+
 def _effective_mid(mid_price: float, yes_bid: float, yes_ask: float, last_price: float) -> float:
     """Return the best available mid price for unrealized P&L calculation.
 
@@ -178,6 +197,79 @@ def _position_row_to_out(row: PositionRow, current_mid: float | None = None) -> 
         unrealized_pnl=unrealized_pnl,
         unrealized_pnl_pct=unrealized_pnl_pct,
         created_at=row.created_at,
+    )
+
+
+async def _load_signal_assessment(
+    session: AsyncSession,
+    signal_id: _uuid.UUID,
+) -> SignalAssessmentOut | None:
+    assessment_row = (
+        await session.execute(
+            select(SignalAssessmentRow)
+            .where(SignalAssessmentRow.signal_id == signal_id)
+            .order_by(SignalAssessmentRow.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if assessment_row is None:
+        return None
+    return _assessment_row_to_out(assessment_row)
+
+
+async def _load_document_links(
+    session: AsyncSession,
+    signal_id: _uuid.UUID,
+) -> list[DocumentLinkOut]:
+    link_rows = (
+        await session.execute(
+            select(
+                DocumentMarketLinkRow.document_id,
+                DocumentMarketLinkRow.relevance_score,
+                DocumentRow.source_url,
+                DocumentRow.title,
+                DocumentRow.source_type,
+                DocumentRow.source_name,
+                DocumentRow.published_at,
+                DocumentRow.fetched_at,
+                DocumentRow.summary,
+                DocumentRow.body,
+            )
+            .join(DocumentRow, DocumentRow.id == DocumentMarketLinkRow.document_id)
+            .where(DocumentMarketLinkRow.signal_id == signal_id)
+            .order_by(DocumentMarketLinkRow.relevance_score.desc())
+        )
+    ).all()
+
+    return [
+        DocumentLinkOut(
+            document_id=str(doc_id),
+            source_url=source_url,
+            title=title or "",
+            relevance_score=relevance_score,
+            source_type=source_type,
+            source_name=source_name,
+            published_at=published_at,
+            fetched_at=fetched_at,
+            summary=summary,
+            body_excerpt=(body or "")[:400],
+        )
+        for doc_id, relevance_score, source_url, title,
+            source_type, source_name, published_at, fetched_at, summary, body
+        in link_rows
+    ]
+
+
+async def _build_signal_detail(
+    session: AsyncSession,
+    signal_row: SignalRow,
+    market_question: str | None,
+) -> SignalDetailOut:
+    base = _signal_row_to_out(signal_row, market_question)
+    return SignalDetailOut(
+        **base.model_dump(),
+        document_links=await _load_document_links(session, signal_row.id),
+        assessment=await _load_signal_assessment(session, signal_row.id),
     )
 
 
@@ -303,47 +395,7 @@ async def get_signal(
         raise HTTPException(status_code=404, detail="Signal not found")
     row, market_question = result
 
-    # Fetch document links with metadata
-    link_rows = (
-        await session.execute(
-            select(
-                DocumentMarketLinkRow.document_id,
-                DocumentMarketLinkRow.relevance_score,
-                DocumentRow.source_url,
-                DocumentRow.title,
-                DocumentRow.source_type,
-                DocumentRow.source_name,
-                DocumentRow.published_at,
-                DocumentRow.fetched_at,
-                DocumentRow.summary,
-                DocumentRow.body,
-            )
-            .join(DocumentRow, DocumentRow.id == DocumentMarketLinkRow.document_id)
-            .where(DocumentMarketLinkRow.signal_id == uid)
-            .order_by(DocumentMarketLinkRow.relevance_score.desc())
-        )
-    ).all()
-
-    doc_links = [
-        DocumentLinkOut(
-            document_id=str(doc_id),
-            source_url=source_url,
-            title=title or "",
-            relevance_score=relevance_score,
-            source_type=source_type,
-            source_name=source_name,
-            published_at=published_at,
-            fetched_at=fetched_at,
-            summary=summary,
-            body_excerpt=(body or "")[:400],
-        )
-        for doc_id, relevance_score, source_url, title,
-            source_type, source_name, published_at, fetched_at, summary, body
-        in link_rows
-    ]
-
-    base = _signal_row_to_out(row, market_question)
-    return SignalDetailOut(**base.model_dump(), document_links=doc_links)
+    return await _build_signal_detail(session, row, market_question)
 
 
 # ---------------------------------------------------------------------------
@@ -443,45 +495,7 @@ async def get_position_detail(
         raise HTTPException(status_code=404, detail="Entry signal not found")
     sig_row, _ = sig_result
 
-    link_rows = (
-        await session.execute(
-            select(
-                DocumentMarketLinkRow.document_id,
-                DocumentMarketLinkRow.relevance_score,
-                DocumentRow.source_url,
-                DocumentRow.title,
-                DocumentRow.source_type,
-                DocumentRow.source_name,
-                DocumentRow.published_at,
-                DocumentRow.fetched_at,
-                DocumentRow.summary,
-                DocumentRow.body,
-            )
-            .join(DocumentRow, DocumentRow.id == DocumentMarketLinkRow.document_id)
-            .where(DocumentMarketLinkRow.signal_id == entry_signal_uid)
-            .order_by(DocumentMarketLinkRow.relevance_score.desc())
-        )
-    ).all()
-
-    doc_links = [
-        DocumentLinkOut(
-            document_id=str(doc_id),
-            source_url=source_url,
-            title=title or "",
-            relevance_score=relevance_score,
-            source_type=source_type,
-            source_name=source_name,
-            published_at=published_at,
-            fetched_at=fetched_at,
-            summary=summary,
-            body_excerpt=(body or "")[:400],
-        )
-        for doc_id, relevance_score, source_url, title,
-            source_type, source_name, published_at, fetched_at, summary, body
-        in link_rows
-    ]
-    entry_signal_base = _signal_row_to_out(sig_row, market_question)
-    entry_signal = SignalDetailOut(**entry_signal_base.model_dump(), document_links=doc_links)
+    entry_signal = await _build_signal_detail(session, sig_row, market_question)
 
     # Fetch all signals for this market (chronological, capped at 100)
     market_sig_rows = (
@@ -902,9 +916,28 @@ async def get_ledger(
 async def get_calibration(
     session: Annotated[AsyncSession, Depends(get_db)],
     lookback_days: Annotated[int | None, Query(ge=1)] = None,
+    category: str | None = Query(default=None),
 ) -> CalibrationResponse:
     app_mode = await _get_mode(session)
-    report = await compute_calibration(session, mode=app_mode, lookback_days=lookback_days)
+    report = await compute_calibration(
+        session,
+        mode=app_mode,
+        lookback_days=lookback_days,
+        market_category=category,
+    )
+    categories_result = await session.execute(
+        select(MarketRow.category)
+        .join(SignalRow, SignalRow.market_id == MarketRow.id)
+        .where(
+            MarketRow.status == "finalized",
+            MarketRow.result.is_not(None),
+            SignalRow.model_used != "demo_harness",
+            SignalRow.prompt_version != "demo",
+        )
+        .distinct()
+        .order_by(MarketRow.category)
+    )
+    available_categories = [row[0] for row in categories_result.all()]
 
     def _map_buckets(buckets: list) -> list[CalibrationBucketOut]:
         return [
@@ -924,6 +957,124 @@ async def get_calibration(
         n_samples=report.n_samples,
         buckets=_map_buckets(report.buckets),
         market_buckets=_map_buckets(report.market_buckets),
+        available_categories=available_categories,
+    )
+
+
+async def _compute_source_quality_rows_live(
+    session: AsyncSession,
+    *,
+    lookback_days: int | None,
+    category: str | None,
+) -> list[SourceQualityScoreOut]:
+    computed_at = datetime.now(UTC)
+    categories: list[str | None]
+    if category is not None:
+        categories = [category]
+    else:
+        distinct_categories = await session.execute(
+            select(MarketRow.category)
+            .join(SignalRow, SignalRow.market_id == MarketRow.id)
+            .where(
+                MarketRow.status == "finalized",
+                MarketRow.result.is_not(None),
+                SignalRow.model_used != "demo_harness",
+                SignalRow.prompt_version != "demo",
+            )
+            .distinct()
+            .order_by(MarketRow.category)
+        )
+        categories = [None, *[row[0] for row in distinct_categories.all()]]
+
+    items: list[SourceQualityScoreOut] = []
+    for market_category in categories:
+        calibration = await compute_calibration(
+            session,
+            lookback_days=lookback_days,
+            market_category=market_category,
+        )
+        if calibration.n_samples == 0:
+            continue
+
+        scores = await compute_source_brier_scores(
+            session,
+            lookback_days=lookback_days,
+            market_category=market_category,
+        )
+        items.extend(
+            SourceQualityScoreOut(
+                source_name=score.source_name,
+                market_category=market_category,
+                weighted_brier=score.weighted_brier_score,
+                overall_brier=calibration.brier_score,
+                n_signals=score.n_signals,
+                total_doc_uses=score.total_doc_appearances,
+                computed_at=computed_at,
+            )
+            for score in scores
+        )
+
+    items.sort(
+        key=lambda item: (
+            item.weighted_brier,
+            "" if item.market_category is None else item.market_category,
+            item.source_name,
+        )
+    )
+    return items
+
+
+@router.get("/metrics/source-quality", response_model=SourceQualityListResponse)
+async def get_source_quality(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    category: str | None = Query(default=None),
+    lookback_days: Annotated[int | None, Query(ge=1)] = None,
+) -> SourceQualityListResponse:
+    filters = []
+    if category is not None:
+        filters.append(SourceQualityScoreRow.market_category == category)
+    if lookback_days is not None:
+        filters.append(SourceQualityScoreRow.lookback_days == lookback_days)
+
+    latest_snapshot = (
+        await session.execute(
+            select(func.max(SourceQualityScoreRow.computed_at)).where(*filters)
+        )
+    ).scalar_one()
+    if latest_snapshot is None:
+        return SourceQualityListResponse(
+            items=await _compute_source_quality_rows_live(
+                session,
+                lookback_days=lookback_days,
+                category=category,
+            )
+        )
+
+    rows = (
+        await session.execute(
+            select(SourceQualityScoreRow)
+            .where(SourceQualityScoreRow.computed_at == latest_snapshot, *filters)
+            .order_by(
+                SourceQualityScoreRow.weighted_brier.asc(),
+                SourceQualityScoreRow.market_category.asc().nullsfirst(),
+                SourceQualityScoreRow.source_name.asc(),
+            )
+        )
+    ).scalars().all()
+
+    return SourceQualityListResponse(
+        items=[
+            SourceQualityScoreOut(
+                source_name=row.source_name,
+                market_category=row.market_category,
+                weighted_brier=row.weighted_brier,
+                overall_brier=row.overall_brier,
+                n_signals=row.n_signals,
+                total_doc_uses=row.total_doc_uses,
+                computed_at=row.computed_at,
+            )
+            for row in rows
+        ]
     )
 
 

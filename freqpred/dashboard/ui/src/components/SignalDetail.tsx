@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getSignal } from '../api/signals'
 import type { SignalDetailOut } from '../api/types'
+import AssessmentCard from './AssessmentCard'
 import { DocLinkItem } from './DocLinkItem'
 
 // ---- Formatting helpers -------------------------------------------------
@@ -37,6 +38,7 @@ export function SignalDetail({ signal }: { signal: SignalDetailOut }) {
           <p className="text-gray-600">{signal.social_sentiment_summary}</p>
         </div>
       )}
+      <AssessmentCard assessment={signal.assessment} />
       {signal.document_links.length > 0 && (
         <div>
           <div className="font-medium text-gray-700 mb-1">Evidence documents:</div>

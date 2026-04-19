@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -43,8 +44,22 @@ class DocumentLinkOut(BaseModel):
     body_excerpt: str  # first 400 chars of body, for display when summary is absent
 
 
+class SignalAssessmentOut(BaseModel):
+    trust_score: float
+    size_multiplier: float
+    verdict: str
+    reasoning: str
+    key_factors: list[str]
+    warnings: list[str]
+    source_breakdown: list[dict[str, Any]]
+    similar_market_summary: dict[str, Any]
+    llm_query_id: int | None
+    created_at: datetime
+
+
 class SignalDetailOut(SignalOut):
     document_links: list[DocumentLinkOut]
+    assessment: SignalAssessmentOut | None
 
 
 class SignalListResponse(BaseModel):
@@ -167,6 +182,21 @@ class CalibrationResponse(BaseModel):
     n_samples: int
     buckets: list[CalibrationBucketOut]
     market_buckets: list[CalibrationBucketOut]
+    available_categories: list[str]
+
+
+class SourceQualityScoreOut(BaseModel):
+    source_name: str
+    market_category: str | None
+    weighted_brier: float
+    overall_brier: float
+    n_signals: int
+    total_doc_uses: int
+    computed_at: datetime
+
+
+class SourceQualityListResponse(BaseModel):
+    items: list[SourceQualityScoreOut]
 
 
 # ---------------------------------------------------------------------------

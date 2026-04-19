@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
 import { getLLMCost, getLLMQueries, getLLMQuery } from '../api/llm'
 import LoadingSpinner from '../components/LoadingSpinner'
@@ -59,9 +60,12 @@ function QueryModal({ id, onClose }: { id: number; onClose: () => void }) {
 }
 
 export default function LLMCost() {
-  const [selectedId, setSelectedId] = useState<number | null>(null)
   const [offset, setOffset] = useState(0)
+  const [searchParams, setSearchParams] = useSearchParams()
   const PAGE = 50
+  const selectedIdParam = searchParams.get('queryId')
+  const selectedId = selectedIdParam !== null ? Number(selectedIdParam) : null
+  const activeQueryId = selectedId !== null && Number.isFinite(selectedId) ? selectedId : null
 
   const { data: cost, isLoading: costLoading, error: costError } = useQuery({
     queryKey: ['llmCost'],
@@ -83,8 +87,15 @@ export default function LLMCost() {
 
   return (
     <div>
-      {selectedId !== null && (
-        <QueryModal id={selectedId} onClose={() => setSelectedId(null)} />
+      {activeQueryId !== null && (
+        <QueryModal
+          id={activeQueryId}
+          onClose={() => {
+            const next = new URLSearchParams(searchParams)
+            next.delete('queryId')
+            setSearchParams(next)
+          }}
+        />
       )}
       <h1 className="text-xl font-bold text-gray-900 mb-4">LLM Cost & Audit</h1>
       {isLoading && !cost && <LoadingSpinner />}
@@ -159,7 +170,11 @@ export default function LLMCost() {
                   <tr
                     key={q.id}
                     className="border-t hover:bg-blue-50 cursor-pointer transition-colors"
-                    onClick={() => setSelectedId(q.id)}
+                    onClick={() => {
+                      const next = new URLSearchParams(searchParams)
+                      next.set('queryId', String(q.id))
+                      setSearchParams(next)
+                    }}
                   >
                     <td className="px-3 py-2 text-xs text-gray-500">{new Date(q.timestamp).toLocaleString()}</td>
                     <td className="px-3 py-2">{q.query_type}</td>

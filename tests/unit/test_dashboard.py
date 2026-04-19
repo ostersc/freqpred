@@ -131,6 +131,37 @@ def _make_signal_row(**kw) -> MagicMock:
     return row
 
 
+def _make_signal_assessment_row(**kw) -> MagicMock:
+    row = MagicMock()
+    row.signal_id = kw.get("signal_id", uuid.uuid4())
+    row.trust_score = kw.get("trust_score", 0.64)
+    row.size_multiplier = kw.get("size_multiplier", 1.06)
+    row.verdict = kw.get("verdict", "size_up")
+    row.reasoning = kw.get("reasoning", "Strong recent sources and good family history.")
+    row.key_factors = kw.get("key_factors", ["Reliable source mix"])
+    row.warnings = kw.get("warnings", ["Exact-match history is still a small sample."])
+    row.source_breakdown = kw.get(
+        "source_breakdown",
+        [
+            {
+                "source_name": "Reuters",
+                "document_share": 0.7,
+                "delta_vs_overall": -0.03,
+            },
+        ],
+    )
+    row.similar_market_summary = kw.get(
+        "similar_market_summary",
+        {
+            "available": True,
+            "family_match": {"resolved_signals": 18, "family_signal_delta_vs_overall": -0.02},
+        },
+    )
+    row.llm_query_id = kw.get("llm_query_id", 42)
+    row.created_at = kw.get("created_at", datetime(2026, 1, 2, tzinfo=UTC))
+    return row
+
+
 def _make_position_row(**kw) -> MagicMock:
     row = MagicMock()
     row.id = kw.get("id", uuid.uuid4())
@@ -154,6 +185,19 @@ def _make_position_row(**kw) -> MagicMock:
     row.pnl = kw.get("pnl", None)
     row.pnl_pct = kw.get("pnl_pct", None)
     row.created_at = kw.get("created_at", datetime(2026, 1, 1, tzinfo=UTC))
+    return row
+
+
+def _make_source_quality_row(**kw) -> MagicMock:
+    row = MagicMock()
+    row.source_name = kw.get("source_name", "Reuters")
+    row.market_category = kw.get("market_category", "politics")
+    row.lookback_days = kw.get("lookback_days", 90)
+    row.weighted_brier = kw.get("weighted_brier", 0.141)
+    row.overall_brier = kw.get("overall_brier", 0.167)
+    row.n_signals = kw.get("n_signals", 24)
+    row.total_doc_uses = kw.get("total_doc_uses", 60)
+    row.computed_at = kw.get("computed_at", datetime(2026, 1, 4, tzinfo=UTC))
     return row
 
 
@@ -250,6 +294,55 @@ def test_signals_invalid_uuid_returns_404() -> None:
     assert resp.status_code == 404
 
 
+def test_signal_detail_returns_assessment_null_when_absent() -> None:
+    signal_id = uuid.uuid4()
+    signal_row = _make_signal_row(id=signal_id)
+
+    signal_result = MagicMock()
+    signal_result.one_or_none.return_value = (signal_row, "Will X happen?")
+
+    docs_result = _all_result([])
+    assessment_result = MagicMock()
+    assessment_result.scalar_one_or_none.return_value = None
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(signal_result, docs_result, assessment_result)
+
+    client = TestClient(_make_app(session))
+    resp = client.get(f"/api/signals/{signal_id}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["assessment"] is None
+    assert body["document_links"] == []
+
+
+def test_signal_detail_returns_serialized_assessment_when_present() -> None:
+    signal_id = uuid.uuid4()
+    signal_row = _make_signal_row(id=signal_id)
+    assessment_row = _make_signal_assessment_row(signal_id=signal_id)
+
+    signal_result = MagicMock()
+    signal_result.one_or_none.return_value = (signal_row, "Will X happen?")
+
+    docs_result = _all_result([])
+    assessment_result = MagicMock()
+    assessment_result.scalar_one_or_none.return_value = assessment_row
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(signal_result, docs_result, assessment_result)
+
+    client = TestClient(_make_app(session))
+    resp = client.get(f"/api/signals/{signal_id}")
+
+    assert resp.status_code == 200
+    assessment = resp.json()["assessment"]
+    assert assessment["trust_score"] == pytest.approx(0.64)
+    assert assessment["size_multiplier"] == pytest.approx(1.06)
+    assert assessment["reasoning"] == "Strong recent sources and good family history."
+    assert assessment["llm_query_id"] == 42
+
+
 # ---------------------------------------------------------------------------
 # /api/positions
 # ---------------------------------------------------------------------------
@@ -308,6 +401,50 @@ def test_positions_unknown_id_returns_404() -> None:
     assert resp.json()["detail"] == "Position not found"
 
 
+def test_position_detail_includes_entry_signal_assessment() -> None:
+    position_id = uuid.uuid4()
+    signal_id = uuid.uuid4()
+    position_row = _make_position_row(id=position_id, signal_id=signal_id)
+    market_row = MagicMock()
+    market_row.question = "Will X happen?"
+    market_row.mid_price = 0.55
+    market_row.yes_bid = 0.54
+    market_row.yes_ask = 0.56
+    market_row.last_price = 0.55
+    signal_row = _make_signal_row(id=signal_id)
+    assessment_row = _make_signal_assessment_row(signal_id=signal_id)
+
+    position_result = MagicMock()
+    position_result.scalar_one_or_none.return_value = position_row
+    market_result = MagicMock()
+    market_result.scalar_one_or_none.return_value = market_row
+    signal_result = MagicMock()
+    signal_result.one_or_none.return_value = (signal_row, "Will X happen?")
+    docs_result = _all_result([])
+    assessment_result = MagicMock()
+    assessment_result.scalar_one_or_none.return_value = assessment_row
+    market_signals_result = _scalars_result([signal_row])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        position_result,
+        market_result,
+        signal_result,
+        docs_result,
+        assessment_result,
+        market_signals_result,
+    )
+
+    client = TestClient(_make_app(session))
+    resp = client.get(f"/api/positions/{position_id}/detail")
+
+    assert resp.status_code == 200
+    entry_assessment = resp.json()["entry_signal"]["assessment"]
+    assert entry_assessment is not None
+    assert entry_assessment["verdict"] == "size_up"
+    assert entry_assessment["llm_query_id"] == 42
+
+
 # ---------------------------------------------------------------------------
 # /api/calibration
 # ---------------------------------------------------------------------------
@@ -320,9 +457,10 @@ def test_calibration_endpoint_returns_brier_score() -> None:
 
     result_mock = MagicMock()
     result_mock.all.return_value = rows
+    categories_result = _all_result([("politics",), ("economics",)])
 
     session = AsyncMock()
-    session.execute = AsyncMock(return_value=result_mock)
+    session.execute = _execute_side_effects(_mode_result(), result_mock, categories_result)
 
     client = TestClient(_make_app(session))
     resp = client.get("/api/calibration")
@@ -332,6 +470,7 @@ def test_calibration_endpoint_returns_brier_score() -> None:
     assert "brier_score" in data
     assert "n_samples" in data
     assert "buckets" in data
+    assert data["available_categories"] == ["politics", "economics"]
     assert data["n_samples"] == 1
     assert len(data["buckets"]) == 10
 
@@ -339,9 +478,10 @@ def test_calibration_endpoint_returns_brier_score() -> None:
 def test_calibration_endpoint_no_samples() -> None:
     result_mock = MagicMock()
     result_mock.all.return_value = []
+    categories_result = _all_result([])
 
     session = AsyncMock()
-    session.execute = AsyncMock(return_value=result_mock)
+    session.execute = _execute_side_effects(_mode_result(), result_mock, categories_result)
 
     client = TestClient(_make_app(session))
     resp = client.get("/api/calibration")
@@ -349,6 +489,138 @@ def test_calibration_endpoint_no_samples() -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["n_samples"] == 0
+
+
+def test_calibration_endpoint_accepts_category_filter() -> None:
+    rows = [(0.7, 0.5, 1)]
+    result_mock = MagicMock()
+    result_mock.all.return_value = rows
+    categories_result = _all_result([("Mentions",)])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(_mode_result(), result_mock, categories_result)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/calibration?category=Mentions&lookback_days=30")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available_categories"] == ["Mentions"]
+    assert data["n_samples"] == 1
+
+
+def test_source_quality_returns_rows_from_latest_snapshot() -> None:
+    latest_at = datetime(2026, 1, 4, tzinfo=UTC)
+    row1 = _make_source_quality_row(source_name="Reuters", computed_at=latest_at)
+    row2 = _make_source_quality_row(source_name="AP", computed_at=latest_at, weighted_brier=0.152)
+
+    latest_result = MagicMock()
+    latest_result.scalar_one.return_value = latest_at
+    rows_result = _scalars_result([row1, row2])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(latest_result, rows_result)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/metrics/source-quality")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [item["source_name"] for item in data["items"]] == ["Reuters", "AP"]
+    assert datetime.fromisoformat(data["items"][0]["computed_at"].replace("Z", "+00:00")) == latest_at
+
+
+def test_source_quality_filters_by_category() -> None:
+    latest_at = datetime(2026, 1, 4, tzinfo=UTC)
+    row = _make_source_quality_row(source_name="Reuters", market_category="economics", computed_at=latest_at)
+
+    latest_result = MagicMock()
+    latest_result.scalar_one.return_value = latest_at
+    rows_result = _scalars_result([row])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(latest_result, rows_result)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/metrics/source-quality?category=economics")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) == 1
+    assert data["items"][0]["market_category"] == "economics"
+
+
+def test_source_quality_filters_by_lookback_days() -> None:
+    latest_at = datetime(2026, 1, 4, tzinfo=UTC)
+    row = _make_source_quality_row(source_name="Reuters", lookback_days=30, computed_at=latest_at)
+
+    latest_result = MagicMock()
+    latest_result.scalar_one.return_value = latest_at
+    rows_result = _scalars_result([row])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(latest_result, rows_result)
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/metrics/source-quality?lookback_days=30")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) == 1
+    assert data["items"][0]["source_name"] == "Reuters"
+
+
+def test_source_quality_returns_empty_list_when_no_snapshot_and_no_live_data_exist() -> None:
+    latest_result = MagicMock()
+    latest_result.scalar_one.return_value = None
+    distinct_categories_result = _all_result([])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(latest_result, distinct_categories_result)
+
+    empty_report = MagicMock()
+    empty_report.n_samples = 0
+
+    with patch("freqpred.dashboard.api.routes.compute_calibration", return_value=empty_report):
+        client = TestClient(_make_app(session))
+        resp = client.get("/api/metrics/source-quality")
+
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []
+
+
+def test_source_quality_computes_live_when_requested_lookback_snapshot_missing() -> None:
+    latest_result = MagicMock()
+    latest_result.scalar_one.return_value = None
+    distinct_categories_result = _all_result([("Mentions",)])
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(latest_result, distinct_categories_result)
+
+    live_score = MagicMock()
+    live_score.source_name = "TVArchive"
+    live_score.weighted_brier_score = 0.14
+    live_score.n_signals = 12
+    live_score.total_doc_appearances = 33
+
+    live_report = MagicMock()
+    live_report.n_samples = 20
+    live_report.brier_score = 0.19
+
+    with (
+        patch("freqpred.dashboard.api.routes.compute_calibration", side_effect=[live_report, live_report]),
+        patch("freqpred.dashboard.api.routes.compute_source_brier_scores", return_value=[live_score]),
+    ):
+        client = TestClient(_make_app(session))
+        resp = client.get("/api/metrics/source-quality?lookback_days=7")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) == 2
+    assert {item["market_category"] for item in data["items"]} == {None, "Mentions"}
+    assert {item["source_name"] for item in data["items"]} == {"TVArchive"}
+    assert all(item["weighted_brier"] == pytest.approx(0.14) for item in data["items"])
+    assert all(item["overall_brier"] == pytest.approx(0.19) for item in data["items"])
 
 
 # ---------------------------------------------------------------------------
