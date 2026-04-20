@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { Fragment, useState, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getMarkets, getMarket } from '../api/markets'
 import type { MarketOut, MarketDetailOut } from '../api/types'
@@ -162,9 +162,8 @@ export default function Markets() {
               {data.items.map((m: MarketOut) => {
                 const isExp = expandedId === m.id
                 return (
-                  <>
+                  <Fragment key={m.id}>
                     <tr
-                      key={m.id}
                       className={isExp ? 'expanded' : ''}
                       onClick={() => toggleExpand(m.id)}
                       style={{ cursor: 'pointer' }}
@@ -189,13 +188,13 @@ export default function Markets() {
                       <td className="c"><span className={`caret${isExp ? ' open' : ''}`}>›</span></td>
                     </tr>
                     {isExp && (
-                      <tr key={`${m.id}-d`} className="detail-row">
+                      <tr className="detail-row">
                         <td colSpan={7}>
                           <MarketDetail market={m} />
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 )
               })}
               {data.items.length === 0 && (

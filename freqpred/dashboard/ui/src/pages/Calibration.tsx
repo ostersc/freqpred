@@ -113,13 +113,13 @@ export default function Calibration() {
                 <text x={W / 2} y={H - 16} fontSize="12" fill="var(--fg-2)" textAnchor="middle">Estimated probability</text>
                 <text x={18} y={H / 2} fontSize="12" fill="var(--fg-2)" textAnchor="middle" transform={`rotate(-90 18 ${H / 2})`}>Actual resolution rate</text>
                 <g transform={`translate(${W - pad - 220},${H - pad - 20})`}>
-                  <rect x={-10} y={-16} width={230} height={36} fill="var(--bg-1)" stroke="var(--line)" rx={6} />
+                  <rect x={-16} y={-20} width={244} height={44} fill="var(--bg-1)" stroke="var(--line)" rx={6} />
                   <line x1={0} y1={0} x2={18} y2={0} stroke="var(--fg-3)" strokeDasharray="4 4" />
                   <text x={24} y={4} fontSize="11" fill="var(--fg-2)">Perfect calibration</text>
-                  <circle cx={130} cy={0} r={4} fill="var(--accent)" />
-                  <text x={140} y={4} fontSize="11" fill="var(--fg-1)">Model</text>
-                  <circle cx={178} cy={0} r={4} fill="var(--warn)" />
-                  <text x={188} y={4} fontSize="11" fill="var(--fg-1)">Market</text>
+                  <circle cx={134} cy={0} r={4} fill="var(--accent)" />
+                  <text x={144} y={4} fontSize="11" fill="var(--fg-1)">Model</text>
+                  <circle cx={184} cy={0} r={4} fill="var(--warn)" />
+                  <text x={194} y={4} fontSize="11" fill="var(--fg-1)">Market</text>
                 </g>
               </svg>
               <div style={{ textAlign: 'center', color: 'var(--fg-3)', fontSize: 11, marginTop: 8 }}>

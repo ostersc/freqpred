@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { Fragment, useState, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getStrategyDecisions } from '../api/strategyDecisions'
 import type { StrategyDecisionOut } from '../api/types'
@@ -138,9 +138,8 @@ export default function StrategyDecisions() {
                 {data.items.map((row: StrategyDecisionOut) => {
                   const isExp = expandedId === row.id
                   return (
-                    <>
+                    <Fragment key={row.id}>
                       <tr
-                        key={row.id}
                         className={isExp ? 'expanded' : ''}
                         onClick={() => setExpandedId(isExp ? null : row.id)}
                         style={{ cursor: 'pointer' }}
@@ -187,13 +186,13 @@ export default function StrategyDecisions() {
                         <td className="c"><span className={`caret${isExp ? ' open' : ''}`}>›</span></td>
                       </tr>
                       {isExp && (
-                        <tr key={`${row.id}-d`} className="detail-row">
+                        <tr className="detail-row">
                           <td colSpan={14}>
                             <PositionDetailPanel positionId={row.id} />
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   )
                 })}
                 {data.items.length === 0 && (

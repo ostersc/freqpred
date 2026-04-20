@@ -1,5 +1,7 @@
-import { useQuery } from '@tanstack/react-query'
+import React from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getSystemHealth } from '../api/health'
+import { setRunState, shutdown } from '../api/system'
 import { Badge, Panel, Stat, LoadingSpinner, ErrorBanner, fmtUptime } from '../components/ui'
 
 function statusKind(s: string): 'pos' | 'neg' | 'warn' | 'info' | 'muted' {
@@ -16,10 +18,21 @@ function fmtAgeSecs(s: number | null): string {
 }
 
 export default function SystemHealth() {
+  const queryClient = useQueryClient()
+
   const { data, isLoading, error } = useQuery({
     queryKey: ['systemHealth'],
     queryFn: getSystemHealth,
     refetchInterval: 15_000,
+  })
+
+  const stateMutation = useMutation({
+    mutationFn: (state: 'running' | 'paused' | 'stopped') => setRunState(state),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['systemHealth'] }),
+  })
+
+  const shutdownMutation = useMutation({
+    mutationFn: shutdown,
   })
 
   return (
@@ -47,7 +60,40 @@ export default function SystemHealth() {
           )}
 
           <div className="grid grid-4" style={{ marginBottom: 12 }}>
-            <Stat label="Run state" value={<Badge kind={statusKind(data.run_state)} dot>{data.run_state}</Badge>} sub="strategy loop" />
+            <div className="stat">
+              <div className="stat-label">Run state</div>
+              <div style={{ marginBottom: 10 }}>
+                <Badge kind={statusKind(data.run_state)} dot>{data.run_state}</Badge>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <button
+                  className="btn sm"
+                  disabled={data.run_state === 'running' || stateMutation.isPending}
+                  onClick={() => stateMutation.mutate('running')}
+                >Start</button>
+                <button
+                  className="btn sm"
+                  disabled={data.run_state === 'paused' || stateMutation.isPending}
+                  onClick={() => stateMutation.mutate('paused')}
+                >Pause</button>
+                <button
+                  className="btn sm"
+                  disabled={data.run_state === 'stopped' || stateMutation.isPending}
+                  onClick={() => stateMutation.mutate('stopped')}
+                >Stop</button>
+                <button
+                  className="btn sm"
+                  style={{ borderColor: 'var(--neg)', color: 'var(--neg)' }}
+                  disabled={shutdownMutation.isPending}
+                  onClick={() => {
+                    if (window.confirm('Shut down freqpred?\n\nThis sends SIGTERM to the process. The dashboard and all loops will exit. You cannot restart from the dashboard — you must restart the process manually.')) {
+                      shutdownMutation.mutate()
+                    }
+                  }}
+                >Shutdown</button>
+              </div>
+              {stateMutation.isError && <div className="neg" style={{ fontSize: 11, marginTop: 6 }}>{String(stateMutation.error)}</div>}
+            </div>
             <Stat label="Mode" value={<Badge kind={statusKind(data.mode)}>{data.mode}</Badge>} sub={data.mode === 'paper' ? 'no real orders sent' : 'live trading'} />
             <Stat label="Database" value={<Badge kind={data.db_ok ? 'pos' : 'neg'} dot>{data.db_ok ? 'connected' : 'error'}</Badge>} sub="primary" />
             <Stat label="Uptime" value={fmtUptime(data.uptime_seconds)} />
@@ -165,8 +211,8 @@ export default function SystemHealth() {
                   const ok = s.status === 'ok'
                   const barColor = pct > 90 ? 'var(--neg)' : pct > 60 ? 'var(--warn)' : 'var(--pos)'
                   return (
-                    <>
-                      <tr key={s.service_name}>
+                    <React.Fragment key={s.service_name}>
+                      <tr>
                         <td>
                           <div className="mono" style={{ fontWeight: 500, fontSize: 12 }}>{s.service_name}</div>
                           <div style={{ fontSize: 10.5, color: 'var(--fg-3)', marginTop: 2 }}>stale after {fmtUptime(s.stale_after_seconds)}</div>
@@ -192,7 +238,7 @@ export default function SystemHealth() {
                           <Badge kind={ok ? 'pos' : 'neg'} dot>{ok ? 'ok' : s.status}</Badge>
                         </td>
                       </tr>
-                    </>
+                    </React.Fragment>
                   )
                 })}
               </tbody>

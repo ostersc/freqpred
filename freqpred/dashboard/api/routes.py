@@ -1,6 +1,10 @@
 """FastAPI router — all /api/* endpoints."""
 from __future__ import annotations
 
+import importlib.metadata
+import os
+import signal
+import subprocess
 import uuid as _uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -1481,3 +1485,50 @@ async def get_system_health(
         db_ok=db_ok,
         uptime_seconds=uptime_seconds,
     )
+
+
+# ---------------------------------------------------------------------------
+# Run-state control
+# ---------------------------------------------------------------------------
+
+_VALID_STATES = {"running", "paused", "stopped"}
+
+
+@router.post("/system/run-state", status_code=200)
+async def set_run_state_endpoint(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    body: dict,
+) -> dict:
+    """Set the run-loop state to running / paused / stopped."""
+    from freqpred.alerts.run_state import set_run_state  # noqa: PLC0415
+
+    state = body.get("state", "")
+    if state not in _VALID_STATES:
+        raise HTTPException(status_code=400, detail=f"Invalid state '{state}'. Must be one of: {sorted(_VALID_STATES)}")
+    await set_run_state(session, state)
+    log.info("dashboard.run_state_set", state=state)
+    return {"state": state}
+
+
+@router.post("/system/shutdown", status_code=200)
+async def shutdown_endpoint() -> dict:
+    """Send SIGTERM to the process — graceful shutdown. Cannot be undone from the dashboard."""
+    log.info("dashboard.shutdown_requested")
+    os.kill(os.getpid(), signal.SIGTERM)
+    return {"ok": True}
+
+
+@router.get("/system/version")
+async def get_version() -> dict:
+    try:
+        version = importlib.metadata.version("freqpred")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+    try:
+        git_hash = subprocess.run(  # noqa: S603
+            ["git", "rev-parse", "--short", "HEAD"],  # noqa: S607
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except Exception:
+        git_hash = "unknown"
+    return {"version": version, "git_hash": git_hash}

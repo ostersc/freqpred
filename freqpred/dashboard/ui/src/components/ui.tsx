@@ -39,18 +39,22 @@ export function Panel({ title, children, action, style, className = '', flush = 
 }
 
 // ---- Stat ----
-export function Stat({ label, value, sub, delta, deltaKind, spark, children }: {
+export function Stat({ label, value, sub, delta, deltaKind, spark, accent, children }: {
   label: string
   value: React.ReactNode
   sub?: string
   delta?: string
   deltaKind?: string
   spark?: React.ReactNode
+  accent?: string
   children?: React.ReactNode
 }) {
   return (
     <div className="stat">
-      <div className="stat-label">{label}</div>
+      <div className="stat-label">
+        {label}
+        {accent && <span style={{ width: 5, height: 5, borderRadius: '50%', background: accent, display: 'inline-block', marginLeft: 5 }} />}
+      </div>
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12 }}>
         <div>
           <div className="stat-value">{value}</div>
@@ -271,6 +275,8 @@ export const fmtPct = (v: number, d = 1) =>
 
 export const fmtSignedPct = (v: number, d = 1) =>
   (v >= 0 ? '+' : '') + (v * 100).toFixed(d) + '%'
+
+export const fmtCents = (v: number) => (v * 100).toFixed(1) + '¢'
 
 export function fmtAge(iso: string): string {
   const secs = (Date.now() - new Date(iso).getTime()) / 1000

@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import NavBar from './components/NavBar'
+import Footer from './components/Footer'
 import SignalFeed from './pages/SignalFeed'
 import Positions from './pages/Positions'
 import StrategyDecisions from './pages/StrategyDecisions'
@@ -15,7 +16,7 @@ export default function App() {
     <div style={{ minHeight: '100vh' }}>
       <NavBar />
       <Routes>
-        <Route path="/" element={<Navigate to="/markets" replace />} />
+        <Route path="/" element={<Navigate to="/positions" replace />} />
         <Route path="/markets" element={<Markets />} />
         <Route path="/signals" element={<SignalFeed />} />
         <Route path="/positions" element={<Positions />} />
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="/strategy" element={<StrategyConfig />} />
         <Route path="/health" element={<SystemHealth />} />
       </Routes>
+      <Footer />
     </div>
   )
 }

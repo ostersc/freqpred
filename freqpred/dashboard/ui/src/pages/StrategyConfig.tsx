@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { Fragment, useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getStrategyConfig, updateStrategyConfig } from '../api/strategy'
 import { Panel, LoadingSpinner, ErrorBanner } from '../components/ui'
@@ -146,11 +146,11 @@ export default function StrategyConfig() {
               </div>
 
               {NUM_FIELDS.map(([key, label], i) => (
-                <>
-                  <div key={`l-${key}`} style={rowStyle(i + 2)}>
+                <Fragment key={key}>
+                  <div style={rowStyle(i + 2)}>
                     <span>{label}</span>
                   </div>
-                  <div key={`v-${key}`} style={rowStyle(i + 2)}>
+                  <div style={rowStyle(i + 2)}>
                     <input
                       className="input mono"
                       style={{ maxWidth: 180 }}
@@ -160,15 +160,15 @@ export default function StrategyConfig() {
                       onChange={(e) => numEdit(key, e.target.value)}
                     />
                   </div>
-                </>
+                </Fragment>
               ))}
 
               {BOOL_FIELDS.map(([key, label], i) => (
-                <>
-                  <div key={`l-${key}`} style={rowStyle(NUM_FIELDS.length + i + 2)}>
+                <Fragment key={key}>
+                  <div style={rowStyle(NUM_FIELDS.length + i + 2)}>
                     <span>{label}</span>
                   </div>
-                  <div key={`v-${key}`} style={rowStyle(NUM_FIELDS.length + i + 2)}>
+                  <div style={rowStyle(NUM_FIELDS.length + i + 2)}>
                     <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
                       <input
                         type="checkbox"
@@ -178,7 +178,7 @@ export default function StrategyConfig() {
                       {boolVal(key) ? 'Enabled' : 'Disabled'}
                     </label>
                   </div>
-                </>
+                </Fragment>
               ))}
             </div>
           </Panel>

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getPositions, getPositionDetail } from '../api/positions'
 import type { PositionOut } from '../api/types'
@@ -95,7 +95,7 @@ export default function Positions() {
                 <th className="r">Entry</th>
                 <th className="r">Current</th>
                 <th className="r" style={{ minWidth: 140 }}>Exposure</th>
-                <th className="r">Signal history</th>
+                <th className="r" style={{ width: 100 }}>Market history</th>
                 <th className="r">P&amp;L</th>
                 <th className="r">%</th>
                 <th className="c">Status</th>
@@ -105,16 +105,15 @@ export default function Positions() {
               </tr>
             </thead>
             <tbody>
-              {data.items.map((p: PositionOut, i) => {
+              {data.items.map((p: PositionOut) => {
                 const isExp = expandedId === p.id
                 const pnl = p.status === 'open' ? p.unrealized_pnl : p.pnl
                 const pnlPct = p.status === 'open' ? p.unrealized_pnl_pct : p.pnl_pct
                 const exposure = p.entry_price * p.contracts
                 const expoPct = totalExposure > 0 ? (exposure / totalExposure) * 100 : 0
                 return (
-                  <>
+                  <Fragment key={p.id}>
                     <tr
-                      key={p.id}
                       className={isExp ? 'expanded' : ''}
                       onClick={() => toggleExpand(p.id)}
                       style={{ cursor: 'pointer' }}
@@ -165,13 +164,13 @@ export default function Positions() {
                       <td className="c"><span className={`caret${isExp ? ' open' : ''}`}>›</span></td>
                     </tr>
                     {isExp && (
-                      <tr key={`${p.id}-d`} className="detail-row">
+                      <tr className="detail-row">
                         <td colSpan={13}>
                           <PositionDetailPanel positionId={p.id} />
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 )
               })}
               {data.items.length === 0 && (
