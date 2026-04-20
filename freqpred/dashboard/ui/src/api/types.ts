@@ -160,6 +160,10 @@ export interface CalibrationResponse {
   buckets: CalibrationBucketOut[]
   market_buckets: CalibrationBucketOut[]
   available_categories: string[]
+  available_models: string[]
+  available_prompt_versions: string[]
+  available_directions: string[]
+  available_series_tickers: string[]
 }
 
 export interface SourceQualityScoreOut {

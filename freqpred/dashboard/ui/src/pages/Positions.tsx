@@ -42,9 +42,9 @@ export default function Positions() {
     (acc, p) => {
       const pnl = p.status === 'open' ? (p.unrealized_pnl ?? 0) : (p.pnl ?? 0)
       const exposure = p.entry_price * p.contracts
-      return { contracts: acc.contracts + p.contracts, exposure: acc.exposure + exposure, pnl: acc.pnl + pnl }
+      return { contracts: acc.contracts + p.contracts, exposure: acc.exposure + exposure, pnl: acc.pnl + pnl, weightedEntry: acc.weightedEntry + p.entry_price * p.contracts }
     },
-    { contracts: 0, exposure: 0, pnl: 0 },
+    { contracts: 0, exposure: 0, pnl: 0, weightedEntry: 0 },
   )
 
   const totalExposure = totals?.exposure ?? 1
@@ -150,7 +150,7 @@ export default function Positions() {
                         {pnl !== null ? fmtSignedMoney(pnl) : '—'}
                       </td>
                       <td className={`r ${pnlPct !== null && pnlPct >= 0 ? 'pos' : 'neg'}`}>
-                        {pnlPct !== null ? `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%` : '—'}
+                        {pnlPct !== null ? `${pnlPct >= 0 ? '+' : ''}${(pnlPct * 100).toFixed(1)}%` : '—'}
                       </td>
                       <td className="c">
                         <Badge kind={p.status === 'open' ? 'pos' : p.status === 'closed' ? 'muted' : 'warn'} dot>
@@ -183,11 +183,15 @@ export default function Positions() {
                   <td><b>TOTAL</b></td>
                   <td></td>
                   <td className="r">{totals.contracts}</td>
-                  <td></td><td></td>
+                  <td className="r">${totals.contracts > 0 ? (totals.weightedEntry / totals.contracts).toFixed(2) : '—'}</td>
+                  <td></td>
                   <td className="r"><b>${totals.exposure.toFixed(2)}</b></td>
                   <td></td>
                   <td className={`r ${totals.pnl >= 0 ? 'pos' : 'neg'}`}><b>{fmtSignedMoney(totals.pnl)}</b></td>
-                  <td></td><td></td><td></td><td></td><td></td>
+                  <td className={`r ${totals.pnl >= 0 ? 'pos' : 'neg'}`}>
+                    <b>{totals.exposure > 0 ? `${totals.pnl >= 0 ? '+' : ''}${(totals.pnl / totals.exposure * 100).toFixed(1)}%` : '—'}</b>
+                  </td>
+                  <td></td><td></td><td></td><td></td>
                 </tr>
               )}
             </tbody>

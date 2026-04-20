@@ -44,10 +44,10 @@ export default function NavBar() {
   return (
     <nav className="topnav">
       <div className="topnav-inner">
-        <div className="brand">
+        <NavLink to="/" className="brand" style={{ textDecoration: 'none' }}>
           <div className="brand-mark" />
           <span className="brand-name">freqpred<span className="brand-dot">.</span></span>
-        </div>
+        </NavLink>
         <div className="nav-tabs">
           {links.map(({ to, label }) => (
             <NavLink

@@ -7,7 +7,9 @@ type TooltipState = {
 } | null
 import { useQuery } from '@tanstack/react-query'
 import { getCalibration } from '../api/calibration'
-import { Stat, Panel, Segmented, LoadingSpinner, ErrorBanner, LabeledSelect } from '../components/ui'
+import type { CalibrationFilters } from '../api/calibration'
+import { getStrategyConfig } from '../api/strategy'
+import { Stat, Panel, Segmented, LoadingSpinner, ErrorBanner } from '../components/ui'
 
 const PRESETS = [
   { v: '7' as const,   label: '7d' },
@@ -25,10 +27,44 @@ function presetDays(p: Preset): number | undefined {
 export default function Calibration() {
   const [preset, setPreset] = useState<Preset>('all')
   const [category, setCategory] = useState('all')
+  const [tickerPrefix, setTickerPrefix] = useState('')
+  const [direction, setDirection] = useState('all')
+  const [modelUsed, setModelUsed] = useState('all')
+  const [promptVersion, setPromptVersion] = useState('all')
+  const [seriesTicker, setSeriesTicker] = useState('all')
+  // null = use strategy default; '' = explicitly cleared (no filter); '65' = explicit value
+  const [minConf, setMinConf] = useState<string | null>(null)
+  const [maxConf, setMaxConf] = useState('')
+
+  const { data: strategyConfig } = useQuery({
+    queryKey: ['strategy-config'],
+    queryFn: getStrategyConfig,
+    staleTime: 60_000,
+  })
+  const strategyMinConf = strategyConfig?.min_confidence
+
+  const effectiveMinConf = minConf === null
+    ? strategyMinConf
+    : (minConf !== '' ? Number(minConf) / 100 : undefined)
+  const minConfDisplay = minConf === null
+    ? (strategyMinConf != null ? String(Math.round(strategyMinConf * 100)) : '')
+    : minConf
+
+  const filters: CalibrationFilters = {
+    lookbackDays: presetDays(preset),
+    category: category === 'all' ? undefined : category,
+    tickerPrefix: tickerPrefix.trim() || undefined,
+    direction: direction === 'all' ? undefined : direction,
+    modelUsed: modelUsed === 'all' ? undefined : modelUsed,
+    promptVersion: promptVersion === 'all' ? undefined : promptVersion,
+    seriesTicker: seriesTicker === 'all' ? undefined : seriesTicker,
+    minConfidence: effectiveMinConf,
+    maxConfidence: maxConf !== '' ? Number(maxConf) / 100 : undefined,
+  }
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['calibration', preset, category],
-    queryFn: () => getCalibration(presetDays(preset), category === 'all' ? undefined : category),
+    queryKey: ['calibration', filters],
+    queryFn: () => getCalibration(filters),
   })
 
   const [tooltip, setTooltip] = useState<TooltipState>(null)
@@ -44,22 +80,71 @@ export default function Calibration() {
           <h1 className="page-title">Calibration</h1>
           <div className="page-subtitle">How well our signals track the world. Lower Brier score → better.</div>
         </div>
-        <div className="row" style={{ alignItems: 'flex-end' }}>
-          <LabeledSelect
-            label="Category"
-            value={category}
-            onChange={setCategory}
-            options={[
-              { value: 'all', label: 'All' },
-              ...(data?.available_categories ?? []).map((c) => ({ value: c, label: c })),
-            ]}
-          />
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             <label style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'transparent', marginBottom: 5, userSelect: 'none' }}>Range</label>
             <Segmented items={PRESETS} value={preset} onChange={setPreset} />
           </div>
         </div>
       </div>
+
+      <Panel style={{ marginBottom: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr) auto', gap: 12, alignItems: 'end' }}>
+          <div className="labeled-field">
+            <label className="field-label">Category</label>
+            <select className="input select" value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="all">All</option>
+              {(data?.available_categories ?? []).map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="labeled-field">
+            <label className="field-label">Series ticker</label>
+            <select className="input select" value={seriesTicker} onChange={(e) => setSeriesTicker(e.target.value)}>
+              <option value="all">All</option>
+              {(data?.available_series_tickers ?? []).map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="labeled-field">
+            <label className="field-label">Ticker prefix</label>
+            <input className="input" placeholder="e.g. KXBTC" value={tickerPrefix} onChange={(e) => setTickerPrefix(e.target.value)} />
+          </div>
+          <div className="labeled-field">
+            <label className="field-label">Direction</label>
+            <select className="input select" value={direction} onChange={(e) => setDirection(e.target.value)}>
+              <option value="all">All</option>
+              {(data?.available_directions ?? []).map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
+          <div /> {/* spacer to keep reset in col 5 row 2 */}
+          <div className="labeled-field">
+            <label className="field-label">Model</label>
+            <select className="input select" value={modelUsed} onChange={(e) => setModelUsed(e.target.value)}>
+              <option value="all">All</option>
+              {(data?.available_models ?? []).map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div className="labeled-field">
+            <label className="field-label">Prompt version</label>
+            <select className="input select" value={promptVersion} onChange={(e) => setPromptVersion(e.target.value)}>
+              <option value="all">All</option>
+              {(data?.available_prompt_versions ?? []).map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          <div className="labeled-field">
+            <label className="field-label">Min confidence %</label>
+            <input className="input" type="number" placeholder="0" min={0} max={100} value={minConfDisplay} onChange={(e) => setMinConf(e.target.value)} />
+          </div>
+          <div className="labeled-field">
+            <label className="field-label">Max confidence %</label>
+            <input className="input" type="number" placeholder="100" min={0} max={100} value={maxConf} onChange={(e) => setMaxConf(e.target.value)} />
+          </div>
+          <button className="btn ghost" onClick={() => {
+            setCategory('all'); setSeriesTicker('all'); setTickerPrefix('')
+            setDirection('all'); setModelUsed('all'); setPromptVersion('')
+            setMinConf(null); setMaxConf('')
+          }}>Reset</button>
+        </div>
+      </Panel>
 
       {isLoading && <LoadingSpinner />}
       {error && <ErrorBanner message={String(error)} />}
@@ -112,8 +197,8 @@ export default function Calibration() {
                 })()}
                 <text x={W / 2} y={H - 16} fontSize="12" fill="var(--fg-2)" textAnchor="middle">Estimated probability</text>
                 <text x={18} y={H / 2} fontSize="12" fill="var(--fg-2)" textAnchor="middle" transform={`rotate(-90 18 ${H / 2})`}>Actual resolution rate</text>
-                <g transform={`translate(${W - pad - 220},${H - pad - 20})`}>
-                  <rect x={-16} y={-20} width={244} height={44} fill="var(--bg-1)" stroke="var(--line)" rx={6} />
+                <g transform={`translate(${W - pad - 244},${H - pad - 21})`}>
+                  <rect x={-12} y={-16} width={254} height={35} fill="var(--bg-2)" stroke="var(--line)" rx={6} />
                   <line x1={0} y1={0} x2={18} y2={0} stroke="var(--fg-3)" strokeDasharray="4 4" />
                   <text x={24} y={4} fontSize="11" fill="var(--fg-2)">Perfect calibration</text>
                   <circle cx={134} cy={0} r={4} fill="var(--accent)" />

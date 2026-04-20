@@ -933,6 +933,13 @@ async def get_calibration(
     session: Annotated[AsyncSession, Depends(get_db)],
     lookback_days: Annotated[int | None, Query(ge=1)] = None,
     category: str | None = Query(default=None),
+    ticker_prefix: str | None = Query(default=None),
+    direction: str | None = Query(default=None),
+    model_used: str | None = Query(default=None),
+    prompt_version: str | None = Query(default=None),
+    series_ticker: str | None = Query(default=None),
+    min_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+    max_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
 ) -> CalibrationResponse:
     app_mode = await _get_mode(session)
     report = await compute_calibration(
@@ -940,20 +947,39 @@ async def get_calibration(
         mode=app_mode,
         lookback_days=lookback_days,
         market_category=category,
+        ticker_prefix=ticker_prefix,
+        direction=direction,
+        model_used=model_used,
+        prompt_version=prompt_version,
+        series_ticker=series_ticker,
+        min_confidence=min_confidence,
+        max_confidence=max_confidence,
     )
-    categories_result = await session.execute(
-        select(MarketRow.category)
-        .join(SignalRow, SignalRow.market_id == MarketRow.id)
-        .where(
-            MarketRow.status == "finalized",
-            MarketRow.result.is_not(None),
-            SignalRow.model_used != "demo_harness",
-            SignalRow.prompt_version != "demo",
+
+    # Fetch all available filter option values from finalized resolved signals
+    _base_where = [
+        MarketRow.status == "finalized",
+        MarketRow.result.is_not(None),
+        SignalRow.model_used != "demo_harness",
+        SignalRow.prompt_version != "demo",
+    ]
+
+    async def _distinct(col):  # type: ignore[no-untyped-def]
+        res = await session.execute(
+            select(col)
+            .select_from(MarketRow)
+            .join(SignalRow, SignalRow.market_id == MarketRow.id)
+            .where(*_base_where)
+            .distinct()
+            .order_by(col)
         )
-        .distinct()
-        .order_by(MarketRow.category)
-    )
-    available_categories = [row[0] for row in categories_result.all()]
+        return [row[0] for row in res.all() if row[0] is not None]
+
+    available_categories = await _distinct(MarketRow.category)
+    available_models = await _distinct(SignalRow.model_used)
+    available_prompt_versions = await _distinct(SignalRow.prompt_version)
+    available_directions = await _distinct(SignalRow.direction)
+    available_series_tickers = await _distinct(MarketRow.series_ticker)
 
     def _map_buckets(buckets: list) -> list[CalibrationBucketOut]:
         return [
@@ -974,6 +1000,10 @@ async def get_calibration(
         buckets=_map_buckets(report.buckets),
         market_buckets=_map_buckets(report.market_buckets),
         available_categories=available_categories,
+        available_models=available_models,
+        available_prompt_versions=available_prompt_versions,
+        available_directions=available_directions,
+        available_series_tickers=available_series_tickers,
     )
 
 

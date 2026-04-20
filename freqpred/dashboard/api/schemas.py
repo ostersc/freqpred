@@ -183,6 +183,10 @@ class CalibrationResponse(BaseModel):
     buckets: list[CalibrationBucketOut]
     market_buckets: list[CalibrationBucketOut]
     available_categories: list[str]
+    available_models: list[str]
+    available_prompt_versions: list[str]
+    available_directions: list[str]
+    available_series_tickers: list[str]
 
 
 class SourceQualityScoreOut(BaseModel):

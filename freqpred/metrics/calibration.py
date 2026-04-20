@@ -37,6 +37,13 @@ async def compute_calibration(
     mode: str = "paper",  # kept for API compat; signals are mode-agnostic
     lookback_days: int | None = None,
     market_category: str | None = None,
+    ticker_prefix: str | None = None,
+    direction: str | None = None,
+    model_used: str | None = None,
+    prompt_version: str | None = None,
+    series_ticker: str | None = None,
+    min_confidence: float | None = None,
+    max_confidence: float | None = None,
 ) -> CalibrationReport:
     """Compute Brier score over all signals for finalized markets.
 
@@ -50,6 +57,13 @@ async def compute_calibration(
         lookback_days: Only include signals created within the last N days.
                        None means all-time.
         market_category: Optional MarketRow.category filter. None means all categories.
+        ticker_prefix: Optional prefix filter on market ticker (MarketRow.id).
+        direction: Optional SignalRow.direction filter ("YES" | "NO" | "SKIP").
+        model_used: Optional SignalRow.model_used filter.
+        prompt_version: Optional SignalRow.prompt_version filter.
+        series_ticker: Optional MarketRow.series_ticker filter.
+        min_confidence: Optional lower bound on SignalRow.estimated_probability.
+        max_confidence: Optional upper bound on SignalRow.estimated_probability.
     """
     resolution_expr = case((MarketRow.result == "yes", 1), else_=0).label("resolution")
 
@@ -64,6 +78,20 @@ async def compute_calibration(
         where_clauses.append(SignalRow.created_at >= cutoff)
     if market_category is not None:
         where_clauses.append(MarketRow.category == market_category)
+    if ticker_prefix is not None:
+        where_clauses.append(MarketRow.id.ilike(f"{ticker_prefix}%"))
+    if direction is not None:
+        where_clauses.append(SignalRow.direction == direction)
+    if model_used is not None:
+        where_clauses.append(SignalRow.model_used == model_used)
+    if prompt_version is not None:
+        where_clauses.append(SignalRow.prompt_version == prompt_version)
+    if series_ticker is not None:
+        where_clauses.append(MarketRow.series_ticker == series_ticker)
+    if min_confidence is not None:
+        where_clauses.append(SignalRow.confidence >= min_confidence)
+    if max_confidence is not None:
+        where_clauses.append(SignalRow.confidence <= max_confidence)
 
     stmt = (
         select(
