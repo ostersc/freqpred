@@ -464,7 +464,10 @@ def test_calibration_endpoint_returns_brier_score() -> None:
     categories_result = _all_result([("politics",), ("economics",)])
 
     session = AsyncMock()
-    session.execute = _execute_side_effects(_mode_result(), result_mock, categories_result)
+    session.execute = _execute_side_effects(
+        _mode_result(), result_mock, categories_result,
+        _all_result([]), _all_result([]), _all_result([]), _all_result([]),
+    )
 
     client = TestClient(_make_app(session))
     resp = client.get("/api/calibration")
@@ -485,7 +488,10 @@ def test_calibration_endpoint_no_samples() -> None:
     categories_result = _all_result([])
 
     session = AsyncMock()
-    session.execute = _execute_side_effects(_mode_result(), result_mock, categories_result)
+    session.execute = _execute_side_effects(
+        _mode_result(), result_mock, categories_result,
+        _all_result([]), _all_result([]), _all_result([]), _all_result([]),
+    )
 
     client = TestClient(_make_app(session))
     resp = client.get("/api/calibration")
@@ -502,7 +508,10 @@ def test_calibration_endpoint_accepts_category_filter() -> None:
     categories_result = _all_result([("Mentions",)])
 
     session = AsyncMock()
-    session.execute = _execute_side_effects(_mode_result(), result_mock, categories_result)
+    session.execute = _execute_side_effects(
+        _mode_result(), result_mock, categories_result,
+        _all_result([]), _all_result([]), _all_result([]), _all_result([]),
+    )
 
     client = TestClient(_make_app(session))
     resp = client.get("/api/calibration?category=Mentions&lookback_days=30")
