@@ -24,6 +24,11 @@ function confColor(conf: number, minConf: number): string {
 
 const PAGE_SIZE = 20
 
+function firstSentence(text: string): string {
+  const m = text.match(/^[^.!?]*[.!?]/)
+  return m ? m[0] : text
+}
+
 type TriggerKind = 'scheduled' | 'price_moved' | 'entry_manual' | 'market_update' | string
 
 function triggerBadge(trigger: TriggerKind) {
@@ -48,7 +53,7 @@ function SignalDetailRow({ id, marketId }: { id: string; marketId: string }) {
   return (
     <div style={{ padding: '14px 20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-        <span style={{ fontWeight: 500, fontSize: 13 }}>Signal detail</span>
+        <span style={{ fontWeight: 500, fontSize: 13 }}>{data.market_question ?? 'Signal detail'}</span>
         <AnalyzeButton marketId={marketId} />
       </div>
       <SharedSignalDetail signal={data} />
@@ -66,7 +71,7 @@ function SignalRow({ signal, minConf }: { signal: SignalOut; minConf: number }) 
         style={{ cursor: 'pointer' }}
       >
         <td>
-          <div style={{ fontWeight: 500, marginBottom: 3 }}>{signal.market_question ?? signal.market_id}</div>
+          <div style={{ fontWeight: 500, marginBottom: 3 }}>{firstSentence(signal.market_question ?? signal.market_id)}</div>
           <div className="row" style={{ gap: 8 }}>
             <span className="ticker-id">{signal.market_id}</span>
             <Badge kind={triggerBadge(signal.trigger)} dot>{signal.trigger.replace('_', ' ')}</Badge>

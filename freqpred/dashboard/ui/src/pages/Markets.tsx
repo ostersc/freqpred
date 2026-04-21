@@ -5,6 +5,11 @@ import type { MarketOut, MarketDetailOut } from '../api/types'
 import { Badge, Panel, MiniStat, Segmented, ProbBar, Icon, LoadingSpinner, ErrorBanner } from '../components/ui'
 import AnalyzeButton from '../components/AnalyzeButton'
 
+function firstSentence(text: string): string {
+  const m = text.match(/^[^.!?]*[.!?]/)
+  return m ? m[0] : text
+}
+
 function MarketEdgeCell({ marketId }: { marketId: string }) {
   const { data } = useQuery({
     queryKey: ['market-detail', marketId],
@@ -169,7 +174,7 @@ export default function Markets() {
                       style={{ cursor: 'pointer' }}
                     >
                       <td>
-                        <div style={{ fontWeight: 500, marginBottom: 2 }}>{m.question}</div>
+                        <div style={{ fontWeight: 500, marginBottom: 2 }}>{firstSentence(m.question)}</div>
                         <div className="ticker-id">{m.id}</div>
                       </td>
                       <td className="r">{(m.mid_price * 100).toFixed(1)}¢</td>

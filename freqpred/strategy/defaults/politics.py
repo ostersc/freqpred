@@ -66,6 +66,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         min_volume_24h=1000.0,
         max_days_to_close=7,
         min_days_to_close=0.25,
+        min_mid_price=0.10,
         stoploss=-0.30,
         stoploss_cooldown_hours=48.0,
         trailing_stop=False,

@@ -5,6 +5,11 @@ import type { StrategyDecisionOut } from '../api/types'
 import { Badge, Panel, LoadingSpinner, ErrorBanner, fmtSignedMoney } from '../components/ui'
 import PositionDetailPanel from '../components/PositionDetail'
 
+function firstSentence(text: string): string {
+  const m = text.match(/^[^.!?]*[.!?]/)
+  return m ? m[0] : text
+}
+
 const PAGE_SIZE = 50
 
 function fmt(v: number | null, d = 2) {
@@ -149,7 +154,7 @@ export default function StrategyDecisions() {
                         </td>
                         <td>
                           <div className="ticker-id" style={{ color: 'var(--fg-0)', fontSize: 11.5 }}>{row.market_id}</div>
-                          {row.market_question && <div style={{ fontSize: 11, color: 'var(--fg-2)', marginTop: 2 }}>{row.market_question}</div>}
+                          {row.market_question && <div style={{ fontSize: 11, color: 'var(--fg-2)', marginTop: 2 }}>{firstSentence(row.market_question)}</div>}
                         </td>
                         <td className="c">
                           <Badge kind={row.direction === 'YES' ? 'pos' : 'neg'}>{row.direction}</Badge>
