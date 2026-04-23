@@ -1049,6 +1049,7 @@ def test_system_health_returns_real_websocket_fields() -> None:
             ingestion_interval_seconds=1800,
             realtime_interval_seconds=300,
             signal_interval_seconds=1800,
+            market_watcher_interval_seconds=300,
         ),
     )
     telemetry._websocket_connected = True
@@ -1082,6 +1083,7 @@ def test_system_health_marks_stale_services() -> None:
             ingestion_interval_seconds=1800,
             realtime_interval_seconds=300,
             signal_interval_seconds=1800,
+            market_watcher_interval_seconds=300,
         ),
     )
     old = datetime.now(UTC) - timedelta(hours=2)

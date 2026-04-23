@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from freqpred.alerts.dispatcher import AlertDispatcher
     from freqpred.runtime.telemetry import RuntimeTelemetry
 
+from freqpred.runtime.telemetry import SERVICE_MARKET_WATCHER
+
 # Max markets to re-fetch per sweep cycle (rate-limit safety).
 _RESOLVED_SWEEP_BATCH = 200
 
@@ -134,6 +136,11 @@ class MarketWatcher:
         )
         if stale_ids:
             log.warning("market_watcher_stale_markets", count=len(stale_ids))
+        if self._runtime_telemetry is not None:
+            await self._runtime_telemetry.mark_success(
+                SERVICE_MARKET_WATCHER,
+                details={"markets_polled": len(markets)},
+            )
 
     async def _sweep_closed_markets(self) -> int:
         """Re-fetch markets that have passed close_time or gone stale but aren't marked resolved.

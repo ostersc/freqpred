@@ -21,6 +21,7 @@ SERVICE_SIGNAL_LOOP = "signal_loop"
 SERVICE_SOURCE_QUALITY_SCHEDULER = "source_quality_scheduler"
 SERVICE_POSITION_WATCHER_LAST_MESSAGE = "position_watcher_last_message"
 SERVICE_POSITION_WATCHER_RECONCILE = "position_watcher_reconcile"
+SERVICE_MARKET_WATCHER = "market_watcher"
 
 EVENT_CATEGORY_KALSHI_API = "kalshi_api"
 EVENT_CATEGORY_STALE_SERVICE = "stale_service"
@@ -53,6 +54,7 @@ def build_freshness_specs(
     ingestion_interval_seconds: int,
     realtime_interval_seconds: int,
     signal_interval_seconds: int,
+    market_watcher_interval_seconds: int,
 ) -> dict[str, FreshnessSpec]:
     """Build dynamic freshness thresholds from runtime intervals."""
     return {
@@ -80,6 +82,11 @@ def build_freshness_specs(
             service_name=SERVICE_POSITION_WATCHER_LAST_MESSAGE,
             label="Position watcher feed",
             stale_after_seconds=10 * 60,
+        ),
+        SERVICE_MARKET_WATCHER: FreshnessSpec(
+            service_name=SERVICE_MARKET_WATCHER,
+            label="Market watcher",
+            stale_after_seconds=max(market_watcher_interval_seconds * 2, 900),
         ),
     }
 
@@ -314,7 +321,7 @@ class RuntimeTelemetry:
                 )
             )
 
-        return states
+        return sorted(states, key=lambda s: s.stale_after_seconds)
 
     def _websocket_service_status(self, *, current: datetime, stale_after_seconds: int) -> str:
         if self._websocket_connected is None:
@@ -339,23 +346,23 @@ class RuntimeTelemetry:
         details: dict[str, Any] | None = None,
     ) -> None:
         ts = datetime.now(UTC)
+        # Only include non-null timestamp fields so mark_error doesn't wipe
+        # last_success_at and mark_success doesn't wipe last_error_*.
+        update_fields: dict[str, Any] = {"details": dict(details or {}), "updated_at": ts}
+        if last_success_at is not None:
+            update_fields["last_success_at"] = last_success_at
+        if last_error_at is not None:
+            update_fields["last_error_at"] = last_error_at
+        if last_error_message is not None:
+            update_fields["last_error_message"] = last_error_message
+
         stmt = insert(ServiceHeartbeatRow).values(
             service_name=service_name,
-            last_success_at=last_success_at,
-            last_error_at=last_error_at,
-            last_error_message=last_error_message,
-            details=dict(details or {}),
-            updated_at=ts,
+            **update_fields,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=[ServiceHeartbeatRow.service_name],
-            set_={
-                "last_success_at": last_success_at,
-                "last_error_at": last_error_at,
-                "last_error_message": last_error_message,
-                "details": dict(details or {}),
-                "updated_at": ts,
-            },
+            set_=update_fields,
         )
         await session.execute(stmt)
 

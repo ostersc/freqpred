@@ -329,6 +329,7 @@ def _strategy_config_to_out(cfg: object) -> StrategyConfigOut:
     return StrategyConfigOut(
         name=cfg.name,
         min_edge=cfg.min_edge,
+        max_edge=cfg.max_edge,
         min_confidence=cfg.min_confidence,
         kelly_fraction=cfg.kelly_fraction,
         max_exposure_per_market=cfg.max_exposure_per_market,

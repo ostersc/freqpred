@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 @dataclass
 class StrategyConfig:
     name: str
-    min_edge: float
     min_confidence: float
     max_exposure_per_market: float
     kelly_fraction: float
@@ -22,6 +21,13 @@ class StrategyConfig:
     trailing_stop: bool = False
     trailing_stop_positive: float | None = None      # switch to tight trail once up this many cents
     trailing_stop_positive_offset: float = 0.02      # tight trail distance (cents) below peak
+
+    # Edge band filter: only enter when the signal's estimated edge falls within
+    # [min_edge, max_edge]. min_edge rejects weak signals where the model barely
+    # disagrees with the market. max_edge rejects overconfident signals — empirically,
+    # very high edge means the market is right and the model is wrong. None = no cap.
+    min_edge: float = 0.10
+    max_edge: float | None = None
 
     # Price range filter: skip markets the market has already decided.
     # Markets trading below min_mid_price or above max_mid_price are excluded

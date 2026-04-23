@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import structlog
 
-from freqpred.ingestion.store import RawDocument
+from freqpred.ingestion.store import RawDocument, _strip_html
 from freqpred.llm.client import LLMClient, LLMError
 
 log = structlog.get_logger(__name__)
@@ -35,11 +35,12 @@ def _build_user_prompt(
     query_text: str,
     market_question: str,
 ) -> str:
+    body_text = _strip_html(raw_doc.body)
     return (
         f"Market question: {market_question}\n"
         f"Search query used to find this article: {query_text}\n\n"
         f"Article title: {raw_doc.title}\n\n"
-        f"Article body:\n{raw_doc.body}"
+        f"Article body:\n{body_text}"
     )
 
 

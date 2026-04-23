@@ -266,6 +266,7 @@ class HealthResponse(BaseModel):
 class StrategyConfigOut(BaseModel):
     name: str
     min_edge: float
+    max_edge: float | None
     min_confidence: float
     kelly_fraction: float
     max_exposure_per_market: float
@@ -304,6 +305,7 @@ class StrategyConfigUpdateRequest(BaseModel):
 
     # Mutable
     min_edge: float | None = None
+    max_edge: float | None = None
     min_confidence: float | None = None
     kelly_fraction: float | None = None
     max_exposure_per_market: float | None = None

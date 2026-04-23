@@ -55,6 +55,12 @@ _MAX_EMBED_CHARS = 2_000
 # documents scoring below this are off-topic and not worth summarizing.
 _SUMMARY_THRESHOLD = 1_000   # 2 × the 500-char evidence excerpt limit in signal/llm.py
 _MIN_BM25_SCORE = 0.01       # ~42% of long linked docs score below this when using first-line market question (live data)
+_MAX_BODY_CHARS = 50_000     # skip docs still larger than this after HTML stripping — likely markup/boilerplate soup
+
+# Process-level cache of URLs permanently rejected as body_too_large.
+# Avoids re-processing the same oversized live-blog pages on every ingestion cycle.
+# Populated lazily; survives for the process lifetime (one re-attempt per restart).
+_rejected_urls: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +185,23 @@ async def upsert_document(
     Raises:
         DocumentSkipped: if the body is empty after HTML stripping.
     """
+    if raw_doc.source_url in _rejected_urls:
+        raise DocumentSkipped(raw_doc.source_url)
+
     body_clean = _sanitize(_strip_html(raw_doc.body))
 
     if not body_clean.strip():
         log.debug("store.upsert_document.skip", source_url=raw_doc.source_url, reason="empty_body")
+        raise DocumentSkipped(raw_doc.source_url)
+
+    if len(body_clean) > _MAX_BODY_CHARS:
+        _rejected_urls.add(raw_doc.source_url)
+        log.info(
+            "store.upsert_document.skip",
+            source_url=raw_doc.source_url,
+            reason="body_too_large",
+            body_len=len(body_clean),
+        )
         raise DocumentSkipped(raw_doc.source_url)
 
     content_hash = _sha256(body_clean)

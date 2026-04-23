@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from freqpred.markets.models import Market
-    from freqpred.signal.models import Signal
 
 # Politics markets move slowly — 5-min candles give meaningful structure
 # without excessive noise from thin order books.
@@ -66,6 +65,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         min_volume_24h=1000.0,
         max_days_to_close=7,
         min_days_to_close=0.25,
+        max_edge=0.74,
         min_mid_price=0.10,
         stoploss=-0.30,
         stoploss_cooldown_hours=48.0,
@@ -135,8 +135,3 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
     def is_market_interesting(self, market: "Market") -> bool:
         return "Trump" in market.question and super().is_market_interesting(market)
 
-    def should_trade(self, signal: "Signal", market: "Market") -> bool:
-        return (
-            signal.edge >= self.config.min_edge
-            and signal.confidence >= self.config.min_confidence
-        )

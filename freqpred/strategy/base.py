@@ -42,10 +42,20 @@ class IPredictionStrategy(ABC):
 
     config: StrategyConfig
 
-    @abstractmethod
     def should_trade(self, signal: Signal, market: Market) -> bool:
-        """Return True if this signal warrants opening a position."""
-        ...
+        """Return True if this signal warrants opening a position.
+
+        Default implementation enforces StrategyConfig entry filters:
+        min_edge, max_edge, and min_confidence. Override to add custom logic;
+        call super().should_trade() to preserve the base filter checks.
+        """
+        if signal.edge < self.config.min_edge:
+            return False
+        if self.config.max_edge is not None and signal.edge > self.config.max_edge:
+            return False
+        if signal.confidence < self.config.min_confidence:
+            return False
+        return True
 
     def position_size(
         self,

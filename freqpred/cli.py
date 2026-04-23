@@ -274,6 +274,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             ingestion_interval_seconds=config.ingestion.schedule_interval_seconds,
             realtime_interval_seconds=config.ingestion.realtime_interval_seconds,
             signal_interval_seconds=config.signal.interval_seconds,
+            market_watcher_interval_seconds=config.kalshi.polling_interval_seconds,
         ),
     )
 
