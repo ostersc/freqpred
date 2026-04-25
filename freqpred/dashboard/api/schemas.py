@@ -97,6 +97,7 @@ class PositionOut(BaseModel):
     pnl_pct: float | None
     unrealized_pnl: float | None
     unrealized_pnl_pct: float | None
+    current_mid: float | None
     created_at: datetime
 
 
@@ -107,7 +108,6 @@ class PositionListResponse(BaseModel):
 
 class PositionDetailOut(PositionOut):
     market_question: str | None
-    current_mid: float | None
     entry_signal: SignalDetailOut
     market_signals: list[SignalOut]
 

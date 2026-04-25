@@ -212,6 +212,7 @@ def _position_row_to_out(row: PositionRow, current_mid: float | None = None) -> 
         pnl_pct=row.pnl_pct,
         unrealized_pnl=unrealized_pnl,
         unrealized_pnl_pct=unrealized_pnl_pct,
+        current_mid=current_mid if row.status == "open" else None,
         created_at=row.created_at,
     )
 
@@ -528,7 +529,6 @@ async def get_position_detail(
     return PositionDetailOut(
         **_position_row_to_out(pos_row, current_mid=current_mid).model_dump(),
         market_question=market_question,
-        current_mid=current_mid,
         entry_signal=entry_signal,
         market_signals=market_signals,
     )

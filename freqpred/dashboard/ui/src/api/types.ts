@@ -78,6 +78,7 @@ export interface PositionOut {
   pnl_pct: number | null
   unrealized_pnl: number | null
   unrealized_pnl_pct: number | null
+  current_mid: number | null
   created_at: string
 }
 
@@ -104,9 +105,6 @@ export interface StrategyDecisionListResponse {
 
 export interface PositionDetailOut extends PositionOut {
   market_question: string | null
-  current_mid: number | null
-  unrealized_pnl: number | null
-  unrealized_pnl_pct: number | null
   entry_signal: SignalDetailOut
   market_signals: SignalOut[]
 }

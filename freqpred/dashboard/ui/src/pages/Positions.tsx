@@ -19,7 +19,9 @@ function PositionSparkline({ positionId, color }: { positionId: string; color: s
   const sorted = [...data.market_signals].sort(
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
   )
-  return <Sparkline data={sorted.map((s) => s.market_mid_at_signal * 100)} w={80} h={20} color={color} />
+  const sparkData = sorted.map((s) => s.market_mid_at_signal * 100)
+  if (data.status === 'open' && data.current_mid !== null) sparkData.push(data.current_mid * 100)
+  return <Sparkline data={sparkData} w={80} h={20} color={color} />
 }
 
 type StatusFilter = 'open' | 'closed' | 'all'
@@ -127,7 +129,9 @@ export default function Positions() {
                       <td className="r">{p.contracts}</td>
                       <td className="r">${p.entry_price.toFixed(2)}</td>
                       <td className="r dim">
-                        {p.exit_price !== null ? `$${p.exit_price.toFixed(2)}` : '—'}
+                        {p.status === 'open'
+                          ? (p.current_mid !== null ? `${(p.current_mid * 100).toFixed(1)}¢` : '—')
+                          : (p.exit_price !== null ? `$${p.exit_price.toFixed(2)}` : '—')}
                       </td>
                       <td className="r">
                         <div className="expo-cell">
