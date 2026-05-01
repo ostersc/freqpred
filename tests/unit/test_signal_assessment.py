@@ -105,9 +105,9 @@ def _valid_llm_json(**overrides: object) -> str:
 
 
 def test_parse_assessment_response_derives_size_up_from_trust_score() -> None:
-    parsed = _parse_assessment_response(_valid_llm_json(trust_score=0.524))
+    parsed = _parse_assessment_response(_valid_llm_json(trust_score=0.60))
     assert parsed["verdict"] == "size_up"
-    assert parsed["trust_score"] == pytest.approx(0.524)
+    assert parsed["trust_score"] == pytest.approx(0.60)
 
 
 def test_parse_assessment_response_derives_size_down_from_trust_score() -> None:
@@ -123,6 +123,28 @@ def test_parse_assessment_response_derives_size_up_high_score() -> None:
 def test_parse_assessment_response_derives_neutral_at_exactly_half() -> None:
     parsed = _parse_assessment_response(_valid_llm_json(trust_score=0.5))
     assert parsed["verdict"] == "neutral"
+
+
+def test_parse_assessment_response_neutral_dead_band_above() -> None:
+    # 0.52 is in the dead band (0.45–0.55) — must show neutral, not size_up
+    parsed = _parse_assessment_response(_valid_llm_json(trust_score=0.52))
+    assert parsed["verdict"] == "neutral"
+
+
+def test_parse_assessment_response_neutral_dead_band_below() -> None:
+    # 0.48 is in the dead band — must show neutral, not size_down
+    parsed = _parse_assessment_response(_valid_llm_json(trust_score=0.48))
+    assert parsed["verdict"] == "neutral"
+
+
+def test_parse_assessment_response_size_up_just_outside_dead_band() -> None:
+    parsed = _parse_assessment_response(_valid_llm_json(trust_score=0.56))
+    assert parsed["verdict"] == "size_up"
+
+
+def test_parse_assessment_response_size_down_just_outside_dead_band() -> None:
+    parsed = _parse_assessment_response(_valid_llm_json(trust_score=0.44))
+    assert parsed["verdict"] == "size_down"
 
 
 @pytest.mark.asyncio

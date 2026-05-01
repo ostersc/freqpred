@@ -318,6 +318,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         import structlog
         log = structlog.get_logger("freqpred.cli.signal_loop")
         log.info("signal_loop.started")
+        circuit_breaker_active = False
         while True:
             _signal_loop_error: str | None = None
             try:
@@ -398,7 +399,6 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 )
 
                 # Circuit breaker check at the top of each cycle
-                circuit_breaker_active = False
                 if order_manager is not None:
                     try:
                         async with session_factory() as cb_session:
@@ -418,12 +418,17 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                 daily_loss_ack_at=_daily_loss_ack_at,
                             )
                             # CB check passed — clear any previously persisted CB state.
+                            if circuit_breaker_active:
+                                log.info("signal_loop.circuit_breaker_cleared")
+                            circuit_breaker_active = False
                             await set_cb_state(cb_session, active=False, reason=None)
                     except TradingCircuitBreakerError as exc:
                         log.warning("signal_loop.circuit_breaker_fired", reason=str(exc))
-                        circuit_breaker_active = True
                         cb_type = "daily_loss" if "daily loss" in str(exc) else "drawdown"
-                        await alert_dispatcher.circuit_breaker_alert(cb_type, str(exc))
+                        if not circuit_breaker_active:
+                            # Only alert on the initial trip, not every subsequent cycle.
+                            await alert_dispatcher.circuit_breaker_alert(cb_type, str(exc))
+                        circuit_breaker_active = True
                         async with session_factory() as _cb_persist_session:
                             await set_cb_state(_cb_persist_session, active=True, reason=str(exc))
 

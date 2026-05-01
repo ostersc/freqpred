@@ -230,6 +230,7 @@ class KalshiClient(IMarketClient):
             category=category,
             status=s.status or "active",
             result=s.result or None,
+            settlement_value=s.settlement_value,
             close_time=close_time,
             yes_bid=s.yes_bid,
             yes_ask=s.yes_ask,

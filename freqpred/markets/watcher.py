@@ -333,7 +333,7 @@ class MarketWatcher:
         """
         async with self._session_factory() as session:
             result = await session.execute(
-                select(PositionRow.id, PositionRow.direction, MarketRow.result)
+                select(PositionRow.id, PositionRow.direction, MarketRow.result, MarketRow.settlement_value)
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
                 .where(
                     PositionRow.status.in_(["open", "pending"]),
@@ -349,9 +349,13 @@ class MarketWatcher:
 
         for row in rows:
             market_result: str = row.result
+            settlement_value: float | None = row.settlement_value
             resolution = 1 if market_result.lower() == "yes" else 0
             wins = row.direction.upper() == market_result.upper()
-            exit_price = 1.0 if wins else 0.0
+            if settlement_value is not None:
+                exit_price = settlement_value if row.direction.upper() == "YES" else round(1.0 - settlement_value, 4)
+            else:
+                exit_price = 1.0 if wins else 0.0
             async with self._session_factory() as close_session:
                 await ledger.close_position(
                     close_session,

@@ -328,11 +328,19 @@ class TestEvaluateExit:
         assert result is not None
         assert result[0] == "signal"
 
-    def test_market_resolved_when_close_time_passed(self) -> None:
+    def test_no_exit_when_close_time_passed_but_result_unknown(self) -> None:
+        """close_time in the past but market.result is None → hold, don't close.
+
+        Kalshi may pause/delay settlement after close_time. Closing at current
+        price would lock in an arbitrary P&L before the real result is known.
+        The sweep in MarketWatcher will eventually populate market.result and
+        step 0 of evaluate_exit will handle the actual settlement.
+        """
         strategy = _make_strategy()
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50)
         market = _make_market(mid_price=0.52, close_time=NOW - timedelta(hours=1))
+        # market.result is None — Kalshi hasn't posted a result yet
 
         result = monitor.evaluate_exit(
             position=pos,
@@ -340,8 +348,7 @@ class TestEvaluateExit:
             current_price=0.52,
             strategy=strategy,
         )
-        assert result is not None
-        assert result[0] == "market_resolved"
+        assert result is None
 
     def test_market_resolved_when_kalshi_status_resolved(self) -> None:
         """Fires market_resolved when Kalshi marks status='resolved', even if close_time is future."""
@@ -401,13 +408,18 @@ class TestEvaluateExit:
         assert result[0] == "market_resolved"
         assert result[1] == pytest.approx(0.0)
 
-    def test_market_resolved_uses_mid_when_result_unknown(self) -> None:
-        """close_time passed but result not yet published → falls back to effective_price."""
+    def test_no_exit_when_close_time_passed_and_status_non_terminal(self) -> None:
+        """close_time passed, result None, status non-terminal → hold position.
+
+        Replaced the old 'falls back to effective_price' behavior. We no longer
+        close on close_time alone — we wait for market.result (step 0) or a
+        terminal status from Kalshi (step 6).
+        """
         strategy = _make_strategy()
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50, direction="YES")
         market = _make_market(mid_price=0.52, close_time=NOW - timedelta(hours=1))
-        # market.result is None (not yet set by Kalshi)
+        # market.result is None, market.status is "active" (non-terminal)
 
         result = monitor.evaluate_exit(
             position=pos,
@@ -415,9 +427,7 @@ class TestEvaluateExit:
             current_price=0.52,
             strategy=strategy,
         )
-        assert result is not None
-        assert result[0] == "market_resolved"
-        assert result[1] == pytest.approx(0.52)
+        assert result is None
 
     def test_no_market_resolved_when_status_open_and_close_time_future(self) -> None:
         strategy = _make_strategy()
@@ -502,12 +512,11 @@ class TestEvaluateExit:
             "NO position winning (market resolved NO) should exit at 1.0, not 0.0"
         )
 
-    def test_phantom_zero_suppressed_yes_position_last_price_high(self) -> None:
-        """YES position: yes_bid=0 but last_price=0.99 → phantom zero, stoploss suppressed.
+    def test_empty_book_yes_position_last_price_high(self) -> None:
+        """YES position: yes_bid=0, last_price=0.99, result=None → proxy=0.99, no stoploss.
 
-        Kalshi clears the order book before writing result.  The last actual trade at 0.99
-        proves the market resolved YES; the bid of 0 is an artifact of an empty book, not
-        a genuine price.  We must hold until market.result is populated.
+        Kalshi clears the order book on close before writing result. last_price is used
+        as the effective price proxy — far above entry, so stoploss doesn't fire.
         """
         strategy = _make_strategy(stoploss=-0.10)
         monitor = self._monitor(strategy)
@@ -522,10 +531,35 @@ class TestEvaluateExit:
         result = monitor.evaluate_exit(
             position=pos, market=market, current_price=0.0, strategy=strategy
         )
-        assert result is None, "Phantom zero (last_price=0.99, yes_bid=0) must not fire stoploss"
+        assert result is None, "Empty book (last_price=0.99) must not fire stoploss"
+
+    def test_empty_book_yes_position_mid_range_last_price(self) -> None:
+        """YES position: yes_bid=0, last_price=0.43 (suspended market), result=None → no stoploss.
+
+        Covers paused/suspended markets where last_price is mid-range, not near settlement.
+        The old guard (last_price >= 0.95) would have let this stoploss fire at 0.
+        Proxy = 0.43; entry = 0.38 → delta = +0.05, above stoploss threshold.
+        """
+        strategy = _make_strategy(stoploss=-0.10)
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.38, direction="YES")
+        market = _make_market(mid_price=0.5)
+        market.yes_bid = 0.0
+        market.yes_ask = 1.0
+        market.last_price = 0.43
+        market.result = None
+        market.status = "closed"
+
+        result = monitor.evaluate_exit(
+            position=pos, market=market, current_price=0.0, strategy=strategy
+        )
+        assert result is None, "Suspended market with mid-range last_price must not fire stoploss at 0"
 
     def test_real_zero_yes_position_stoploss_fires(self) -> None:
-        """YES position: yes_bid=0 and last_price=0.01 → genuine collapse, stoploss fires."""
+        """YES position: yes_bid=0 and last_price=0.01 → genuine collapse, stoploss fires.
+
+        Proxy = last_price = 0.01; entry = 0.53 → delta = -0.52, exceeds stoploss threshold.
+        """
         strategy = _make_strategy(stoploss=-0.10)
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.53, direction="YES")
@@ -541,12 +575,10 @@ class TestEvaluateExit:
         assert result is not None
         assert result[0] == "stoploss"
 
-    def test_phantom_zero_suppressed_no_position_last_price_low(self) -> None:
-        """NO position: yes_ask=1.0 (empty book) + last_price=0.01 → phantom zero, suppressed.
+    def test_empty_book_no_position_last_price_low(self) -> None:
+        """NO position: yes_ask=1.0 (empty book), last_price=0.01, result=None → proxy=0.99, no stoploss.
 
-        If Kalshi defaults yes_ask to 1.0 on an empty book even after NO resolution, the
-        no_bid computes to 0.  last_price=0.01 proves the last YES trade was near zero
-        (YES lost, NO won) — the NO position is a winner, stoploss must be suppressed.
+        Proxy for NO = 1 - last_price = 0.99; entry = 0.47 → large gain, stoploss suppressed.
         """
         strategy = _make_strategy(stoploss=-0.10)
         monitor = self._monitor(strategy)
@@ -561,7 +593,7 @@ class TestEvaluateExit:
         result = monitor.evaluate_exit(
             position=pos, market=market, current_price=0.0, strategy=strategy
         )
-        assert result is None, "Phantom zero (last_price=0.01, no_bid=0) must not fire stoploss"
+        assert result is None, "Empty book (NO position, last_price=0.01) must not fire stoploss"
 
     def test_no_exit_when_conditions_not_met(self) -> None:
         strategy = _make_strategy(stoploss=-0.20)
@@ -747,6 +779,7 @@ class TestCheckAllPositions:
                     category=market.category,
                     status="resolved",
                     result="yes",
+                    settlement_value=None,
                     close_time=market.close_time,
                     yes_bid=market.yes_bid,
                     yes_ask=market.yes_ask,

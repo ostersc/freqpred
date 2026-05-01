@@ -274,13 +274,17 @@ class PositionWatcher:
                     raw=str(inner)[:200],
                 )
                 return
-            # settlement_value is present on "determined" events only ("1.0000"=YES, "0.0000"=NO).
+            # settlement_value is present on "determined" events only.
+            # For binary markets: "1.0000"=YES wins, "0.0000"=NO wins.
+            # For scalar markets: a fractional value (e.g. "0.7400") — store it so
+            # position exits use the actual payout, not a rounded 0 or 1.
             # "settled" events carry only settled_ts — no result field.
             sv = inner.get("settlement_value")
-            result = ("yes" if float(sv) >= 0.5 else "no") if sv is not None else None
-            # Always update DB status/result for any market we have a row for.
+            settlement_value = float(sv) if sv is not None else None
+            result = ("yes" if settlement_value >= 0.5 else "no") if settlement_value is not None else None
+            # Always update DB status/result/settlement_value for any market we have a row for.
             if status:
-                await self._update_market_status(market_id, status, result)
+                await self._update_market_status(market_id, status, result, settlement_value)
             # Only drive position lifecycle for markets we're subscribed to.
             if market_id not in self._subscribed:
                 log.debug(
@@ -289,7 +293,7 @@ class PositionWatcher:
                     event_type=status,
                 )
                 return
-            await self._on_market_lifecycle(market_id, status, result)
+            await self._on_market_lifecycle(market_id, status, result, settlement_value)
 
         elif msg_type == "error":
             code = msg.get("msg", {}).get("code")
@@ -365,13 +369,14 @@ class PositionWatcher:
         await self._position_monitor.check_all_positions()
 
     async def _on_market_lifecycle(
-        self, market_id: str, status: str, result: str | None
+        self, market_id: str, status: str, result: str | None,
+        settlement_value: float | None = None,
     ) -> None:
         """Handle a market_lifecycle_v2 WebSocket event.
 
         Kalshi lifecycle: "active" → "determined" → "settled"
 
-        - "determined": carries settlement_value (result) — close positions immediately.
+        - "determined": carries settlement_value — close positions immediately.
         - "settled":    no settlement_value; positions should already be closed from
                         "determined", but if missed we fall back to REST to get result.
         - other:        log at debug level and continue.
@@ -381,6 +386,7 @@ class PositionWatcher:
                 "position_watcher.market_determined",
                 market_id=market_id,
                 result=result,
+                settlement_value=settlement_value,
             )
             if result is None:
                 # Unexpected — determined should carry settlement_value.
@@ -389,7 +395,7 @@ class PositionWatcher:
                     market_id=market_id,
                 )
                 return
-            await self._close_positions_for_resolved_market(market_id, result)
+            await self._close_positions_for_resolved_market(market_id, result, settlement_value)
             await self.unsubscribe(market_id)
             return
 
@@ -408,13 +414,16 @@ class PositionWatcher:
         await self.unsubscribe(market_id)
 
     async def _close_positions_for_resolved_market(
-        self, market_id: str, result: str
+        self, market_id: str, result: str, settlement_value: float | None = None,
     ) -> None:
         """Close all open live positions for a market that has resolved.
 
-        Payout logic:
-          - direction matches result (e.g. YES holds YES-wins market) → exit_price = 1.00
+        Payout logic (binary market):
+          - direction matches result → exit_price = 1.00
           - direction opposes result → exit_price = 0.00
+        Payout logic (scalar market, settlement_value set):
+          - YES position → exit_price = settlement_value
+          - NO position  → exit_price = 1.0 - settlement_value
         """
         resolution = 1 if result.lower() == "yes" else 0
 
@@ -439,7 +448,10 @@ class PositionWatcher:
 
         for row in rows:
             wins = row.direction.upper() == result.upper()
-            exit_price = 1.0 if wins else 0.0
+            if settlement_value is not None:
+                exit_price = settlement_value if row.direction.upper() == "YES" else round(1.0 - settlement_value, 4)
+            else:
+                exit_price = 1.0 if wins else 0.0
             async with self._session_factory() as close_session:
                 closed = await ledger.close_position(
                     close_session,
@@ -560,15 +572,18 @@ class PositionWatcher:
     # ------------------------------------------------------------------
 
     async def _update_market_status(
-        self, market_id: str, status: str, result: str | None
+        self, market_id: str, status: str, result: str | None,
+        settlement_value: float | None = None,
     ) -> None:
-        """Persist market status/result from a market_lifecycle_v2 event.
+        """Persist market status/result/settlement_value from a market_lifecycle_v2 event.
 
         Silently skips if the market has no DB row (markets we don't monitor).
         """
         values: dict = {"status": status}
         if result is not None:
             values["result"] = result
+        if settlement_value is not None:
+            values["settlement_value"] = settlement_value
         async with self._session_factory() as session:
             await session.execute(
                 update(MarketRow).where(MarketRow.id == market_id).values(**values)

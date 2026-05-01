@@ -161,6 +161,24 @@ def parse_signal_response(content: str) -> dict | None:
         log.warning("signal.llm.invalid_direction", direction=direction)
         return None
 
+    # Guard against internally inconsistent LLM output (e.g. direction=YES but
+    # probability=0.87 while the reasoning text says "lean toward NO"). Reject
+    # rather than open a position with fabricated edge.
+    if direction == "YES" and probability < 0.5:
+        log.warning(
+            "signal.llm.direction_probability_mismatch",
+            direction=direction,
+            probability=probability,
+        )
+        return None
+    if direction == "NO" and probability > 0.5:
+        log.warning(
+            "signal.llm.direction_probability_mismatch",
+            direction=direction,
+            probability=probability,
+        )
+        return None
+
     reasoning = str(data.get("reasoning", ""))
     evidence_used: list[str] = [str(e) for e in data.get("evidence_used", [])]
 

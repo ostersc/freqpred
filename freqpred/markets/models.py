@@ -48,6 +48,7 @@ class MarketRow(Base):
     # Market state
     status: Mapped[str] = mapped_column(VARCHAR(50), nullable=False, server_default="active")
     result: Mapped[str | None] = mapped_column(VARCHAR(10), nullable=True)
+    settlement_value: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Price snapshot
     yes_bid: Mapped[float] = mapped_column(Float, nullable=False)
@@ -204,6 +205,7 @@ class Market:
     open_time: datetime | None = None
     status: str = "active"
     result: str | None = None
+    settlement_value: float | None = None
     last_price: float = 0.0
     liquidity: float = 0.0
     series_ticker: str | None = None
@@ -245,6 +247,7 @@ class KalshiMarketSchema(BaseModel):
     no_ask_dollars: str = "0.0000"
     last_price_dollars: str = "0.0000"
     liquidity_dollars: str = "0.0000"
+    settlement_value_dollars: str | None = None
     volume_24h: float = Field(default=0.0, alias="volume_24h_fp")
     volume_total: float = Field(default=0.0, alias="volume_fp")
     open_interest: float = Field(default=0.0, alias="open_interest_fp")
@@ -260,6 +263,15 @@ class KalshiMarketSchema(BaseModel):
         if v is None:
             return "0.0000"
         return str(v)
+
+    @property
+    def settlement_value(self) -> float | None:
+        if self.settlement_value_dollars is None:
+            return None
+        try:
+            return float(self.settlement_value_dollars)
+        except (ValueError, TypeError):
+            return None
 
     @property
     def yes_bid(self) -> float:

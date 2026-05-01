@@ -1,11 +1,20 @@
-import { Fragment, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getPositions, getPositionDetail } from '../api/positions'
 import type { PositionOut } from '../api/types'
 import { Badge, Panel, Segmented, LoadingSpinner, ErrorBanner, Sparkline, fmtSignedMoney } from '../components/ui'
 import PositionDetailPanel from '../components/PositionDetail'
 
-function PositionSparkline({ positionId, color }: { positionId: string; color: string }) {
+function formatEnteredAt(value: string): string {
+  const d = new Date(value)
+  const hour24 = d.getHours()
+  const hour12 = hour24 % 12 || 12
+  const minute = String(d.getMinutes()).padStart(2, '0')
+  const suffix = hour24 >= 12 ? 'p' : 'a'
+  return `${d.getMonth() + 1}/${d.getDate()} ${hour12}:${minute}${suffix}`
+}
+
+function PositionSparkline({ positionId, color, width }: { positionId: string; color: string; width: number }) {
   const { data } = useQuery({
     queryKey: ['position-detail', positionId],
     queryFn: () => getPositionDetail(positionId),
@@ -13,7 +22,7 @@ function PositionSparkline({ positionId, color }: { positionId: string; color: s
   })
 
   if (!data || data.market_signals.length < 2) {
-    return <span style={{ display: 'inline-block', width: 80, height: 20, opacity: 0.2, background: 'var(--line-soft)', borderRadius: 2 }} />
+    return <span style={{ display: 'inline-block', width, height: 12, opacity: 0.2, background: 'var(--line-soft)', borderRadius: 2 }} />
   }
 
   const sorted = [...data.market_signals].sort(
@@ -21,7 +30,7 @@ function PositionSparkline({ positionId, color }: { positionId: string; color: s
   )
   const sparkData = sorted.map((s) => s.market_mid_at_signal * 100)
   if (data.status === 'open' && data.current_mid !== null) sparkData.push(data.current_mid * 100)
-  return <Sparkline data={sparkData} w={80} h={20} color={color} />
+  return <Sparkline data={sparkData} w={width} h={12} color={color} />
 }
 
 type StatusFilter = 'open' | 'closed' | 'all'
@@ -29,6 +38,8 @@ type StatusFilter = 'open' | 'closed' | 'all'
 export default function Positions() {
   const [status, setStatus] = useState<StatusFilter>('open')
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const marketHistoryHeaderRef = useRef<HTMLSpanElement | null>(null)
+  const [marketHistoryWidth, setMarketHistoryWidth] = useState(96)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['positions', status],
@@ -40,6 +51,22 @@ export default function Positions() {
     setExpandedId((prev) => (prev === id ? null : id))
   }
 
+  useEffect(() => {
+    const el = marketHistoryHeaderRef.current
+    if (!el) return
+
+    const updateWidth = () => {
+      const next = Math.ceil(el.getBoundingClientRect().width)
+      if (next > 0) setMarketHistoryWidth(next)
+    }
+
+    updateWidth()
+
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
   const totals = data?.items.reduce(
     (acc, p) => {
       const pnl = p.status === 'open' ? (p.unrealized_pnl ?? 0) : (p.pnl ?? 0)
@@ -50,6 +77,13 @@ export default function Positions() {
   )
 
   const totalExposure = totals?.exposure ?? 1
+
+  const maxAbsPnl = data
+    ? Math.max(
+        Math.abs(totals?.pnl ?? 0),
+        ...data.items.map((p) => Math.abs(p.status === 'open' ? (p.unrealized_pnl ?? 0) : (p.pnl ?? 0))),
+      )
+    : 1
 
   return (
     <div className="page">
@@ -88,7 +122,8 @@ export default function Positions() {
 
       {data && (
         <Panel flush>
-          <table className="tbl">
+          <div className="tbl-scroll">
+          <table className="tbl tbl-positions">
             <thead>
               <tr>
                 <th>Market</th>
@@ -96,14 +131,15 @@ export default function Positions() {
                 <th className="r">Contracts</th>
                 <th className="r">Entry</th>
                 <th className="r">Current</th>
-                <th className="r" style={{ minWidth: 140 }}>Exposure</th>
-                <th className="r" style={{ width: 100 }}>Market history</th>
-                <th className="r">P&amp;L</th>
+                <th className="r">Exposure</th>
+                <th className="r positions-market-history">
+                  <span ref={marketHistoryHeaderRef} className="positions-market-history-content">Market history</span>
+                </th>
+                <th className="c">P&amp;L</th>
                 <th className="r">%</th>
                 <th className="c">Status</th>
-                <th className="c">Strategy</th>
+                <th>Strategy</th>
                 <th className="r">Entered</th>
-                <th style={{ width: 36 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -121,7 +157,7 @@ export default function Positions() {
                       style={{ cursor: 'pointer' }}
                     >
                       <td>
-                        <span className="ticker-id" style={{ color: 'var(--fg-0)', fontSize: 12 }}>{p.market_id}</span>
+                        <span className="ticker-id positions-market" style={{ color: 'var(--fg-0)', fontSize: 12 }} title={p.market_id}>{p.market_id}</span>
                       </td>
                       <td className="c">
                         <Badge kind={p.direction === 'YES' ? 'pos' : 'neg'}>{p.direction}</Badge>
@@ -134,7 +170,7 @@ export default function Positions() {
                           : (p.exit_price !== null ? `$${p.exit_price.toFixed(2)}` : '—')}
                       </td>
                       <td className="r">
-                        <div className="expo-cell">
+                        <div className="expo-cell expo-cell-inline">
                           <div className="expo-bar">
                             <div className="expo-fill" style={{ width: `${expoPct}%` }} />
                           </div>
@@ -144,14 +180,28 @@ export default function Positions() {
                           </div>
                         </div>
                       </td>
-                      <td className="r">
-                        <PositionSparkline
-                          positionId={p.id}
-                          color={pnl !== null && pnl >= 0 ? 'var(--pos)' : 'var(--neg)'}
-                        />
+                      <td className="r positions-market-history">
+                        <span className="positions-market-history-content">
+                          <PositionSparkline
+                            positionId={p.id}
+                            color={pnl !== null && pnl >= 0 ? 'var(--pos)' : 'var(--neg)'}
+                            width={marketHistoryWidth}
+                          />
+                        </span>
                       </td>
-                      <td className={`r ${pnl !== null && pnl >= 0 ? 'pos' : 'neg'}`} style={{ fontWeight: 500 }}>
-                        {pnl !== null ? fmtSignedMoney(pnl) : '—'}
+                      <td className="c" style={{ position: 'relative', overflow: 'hidden', fontFamily: 'var(--f-mono)', fontVariantNumeric: 'tabular-nums' }}>
+                        {pnl !== null && (() => {
+                          const barPct = maxAbsPnl > 0 ? (Math.abs(pnl) / maxAbsPnl) * 50 : 0
+                          const barLeft = pnl >= 0 ? 50 : 50 - barPct
+                          return (
+                            <div className="pnl-bar">
+                              <div className={`pnl-fill ${pnl >= 0 ? 'pos' : 'neg'}`} style={{ left: `${barLeft}%`, width: `${barPct}%` }} />
+                            </div>
+                          )
+                        })()}
+                        <span className={pnl !== null && pnl >= 0 ? 'pos' : 'neg'} style={{ fontWeight: 500 }}>
+                          {pnl !== null ? fmtSignedMoney(pnl) : '—'}
+                        </span>
                       </td>
                       <td className={`r ${pnlPct !== null && pnlPct >= 0 ? 'pos' : 'neg'}`}>
                         {pnlPct !== null ? `${pnlPct >= 0 ? '+' : ''}${(pnlPct * 100).toFixed(1)}%` : '—'}
@@ -161,16 +211,20 @@ export default function Positions() {
                           {p.status}
                         </Badge>
                       </td>
-                      <td className="c"><span style={{ fontSize: 11, color: 'var(--fg-2)' }}>{p.strategy_name}</span></td>
-                      <td className="r dim" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
-                        {new Date(p.entry_time).toLocaleString()}
+                      <td><span className="positions-strategy" style={{ fontSize: 11, color: 'var(--fg-2)' }} title={p.strategy_name}>{p.strategy_name}</span></td>
+                      <td className="r dim positions-entered-cell" style={{ fontSize: 11 }}>
+                        <span className="positions-entered-wrap" title={new Date(p.entry_time).toLocaleString()}>
+                          <span className="positions-entered">{formatEnteredAt(p.entry_time)}</span>
+                          <span className={`caret positions-caret${isExp ? ' open' : ''}`}>›</span>
+                        </span>
                       </td>
-                      <td className="c"><span className={`caret${isExp ? ' open' : ''}`}>›</span></td>
                     </tr>
                     {isExp && (
                       <tr className="detail-row">
-                        <td colSpan={13}>
-                          <PositionDetailPanel positionId={p.id} />
+                        <td colSpan={12}>
+                          <div className="positions-detail-wrap">
+                            <PositionDetailPanel positionId={p.id} />
+                          </div>
                         </td>
                       </tr>
                     )}
@@ -179,7 +233,7 @@ export default function Positions() {
               })}
               {data.items.length === 0 && (
                 <tr>
-                  <td colSpan={13} style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-3)' }}>No positions</td>
+                  <td colSpan={12} style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-3)' }}>No positions</td>
                 </tr>
               )}
               {totals && data.items.length > 0 && (
@@ -191,15 +245,16 @@ export default function Positions() {
                   <td></td>
                   <td className="r"><b>${totals.exposure.toFixed(2)}</b></td>
                   <td></td>
-                  <td className={`r ${totals.pnl >= 0 ? 'pos' : 'neg'}`}><b>{fmtSignedMoney(totals.pnl)}</b></td>
+                  <td className={`c ${totals.pnl >= 0 ? 'pos' : 'neg'}`} style={{ fontFamily: 'var(--f-mono)', fontVariantNumeric: 'tabular-nums' }}><b>{fmtSignedMoney(totals.pnl)}</b></td>
                   <td className={`r ${totals.pnl >= 0 ? 'pos' : 'neg'}`}>
                     <b>{totals.exposure > 0 ? `${totals.pnl >= 0 ? '+' : ''}${(totals.pnl / totals.exposure * 100).toFixed(1)}%` : '—'}</b>
                   </td>
-                  <td></td><td></td><td></td><td></td>
+                  <td></td><td></td><td></td>
                 </tr>
               )}
             </tbody>
           </table>
+          </div>
         </Panel>
       )}
     </div>

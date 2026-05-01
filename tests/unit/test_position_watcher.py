@@ -646,11 +646,12 @@ async def test_rest_fallback_resolves_if_websocket_missed() -> None:
     mock_session.commit = AsyncMock()
     session_factory.return_value = mock_session
 
-    # Row simulating a join result (PositionRow.id, PositionRow.direction, MarketRow.result)
+    # Row simulating a join result (PositionRow.id, PositionRow.direction, MarketRow.result, MarketRow.settlement_value)
     row = MagicMock()
     row.id = uuid.uuid4()
     row.direction = "YES"
     row.result = "yes"
+    row.settlement_value = None
 
     mock_session.execute = AsyncMock(return_value=_make_db_result([row]))
 

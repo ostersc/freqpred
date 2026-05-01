@@ -132,12 +132,12 @@ body {
 .page {
   max-width: 1680px;
   margin: 0 auto;
-  padding: 24px 20px 60px;
+  padding: 10px 20px 60px;
 }
 .page-head {
   display: flex; align-items: flex-end; justify-content: space-between;
-  margin-bottom: 20px;
-  gap: 20px;
+  margin-bottom: 10px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 .page-title {
@@ -243,11 +243,53 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+.tbl-scroll { overflow-x: auto; }
+.tbl.tbl-positions { width: max-content; min-width: 100%; table-layout: auto; }
+.tbl.tbl-positions thead th { padding: 8px 10px; }
+.tbl.tbl-positions tbody td { padding: 6px 10px; }
+.tbl.tbl-positions thead th,
+.tbl.tbl-positions tbody tr:not(.detail-row) > td { white-space: nowrap; }
+.tbl.tbl-positions .positions-market-history { width: 1%; }
+.tbl.tbl-positions .positions-market-history-content {
+  display: inline-block;
+  width: max-content;
+}
+.tbl.tbl-positions td.positions-market-history .positions-market-history-content {
+  text-align: right;
+}
+.tbl.tbl-positions td.positions-market-history .spark {
+  display: block;
+}
+.tbl.tbl-positions .positions-entered-cell { white-space: nowrap; }
+.tbl.tbl-positions .positions-entered-wrap { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.tbl.tbl-positions .positions-caret { color: var(--fg-2); }
+.tbl.tbl-positions .badge { padding-top: 1px; padding-bottom: 1px; line-height: 1.35; }
+.tbl.tbl-positions tbody tr.detail-row > td {
+  white-space: normal;
+  width: auto;
+}
+.tbl.tbl-positions .positions-detail-wrap {
+  width: 0;
+  min-width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 /* =========== Exposure databar =========== */
-.expo-cell { display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
+.expo-cell { display: inline-flex; flex-direction: column; align-items: stretch; gap: 3px; width: max-content; margin-left: auto; }
+.expo-cell-inline { position: relative; display: inline-flex; align-items: baseline; width: max-content; padding-bottom: 2px; }
 .expo-vals { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-family: var(--f-mono); font-variant-numeric: tabular-nums; font-size: 12px; }
-.expo-bar { position: relative; height: 4px; width: 100%; background: var(--bg-2); border-radius: 2px; overflow: hidden; min-width: 80px; }
-.expo-fill { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, var(--accent), color-mix(in oklch, var(--accent) 70%, transparent)); border-radius: 2px; }
+.expo-cell-inline .expo-vals { display: inline-flex; gap: 6px; }
+.expo-bar { position: relative; height: 3px; width: 100%; background: var(--bg-2); border-radius: 2px; overflow: hidden; }
+.expo-cell-inline .expo-bar { position: absolute; left: 0; right: 0; bottom: 0; }
+.expo-fill { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, var(--accent), color-mix(in oklch, var(--accent) 70%, transparent)); }
+
+/* =========== P&L databar =========== */
+.pnl-bar { position: absolute; bottom: 0; left: 0; right: 0; height: 3px; overflow: hidden; background: var(--bg-2); }
+.pnl-bar::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.pnl-fill { position: absolute; top: 0; bottom: 0; }
+.pnl-fill.pos { background: linear-gradient(90deg, color-mix(in oklch, var(--pos) 60%, transparent), var(--pos)); }
+.pnl-fill.neg { background: linear-gradient(90deg, var(--neg), color-mix(in oklch, var(--neg) 60%, transparent)); }
 
 /* =========== Button =========== */
 .btn {

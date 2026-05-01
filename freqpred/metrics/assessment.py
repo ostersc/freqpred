@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_PROMPT_VERSION = "assessment-v2"
+_PROMPT_VERSION = "assessment-v3"
 _QUERY_TYPE = "signal_assessment"
 _LOOKBACK_DAYS = 90
 _MAX_FACTORS = 5
@@ -44,6 +44,8 @@ Guidelines:
 - Exact-family history is more important than broad analogies.
 - If source quality and similar-market history disagree, explain the conflict and stay closer to neutral unless one side clearly has stronger data.
 - Treat this as a sizing-confidence judgment, not a market-prediction task.
+- If you populate the warnings field with any concern, your trust_score MUST be ≤ 0.5. Warnings and a trust_score above 0.5 are contradictory — do not do both.
+- Unusually large edge (> 0.4) is a warning sign of stale/illiquid pricing, not genuine alpha. Treat it as a reason to stay neutral or go below 0.5 unless you have strong calibration data that supports the edge.
 
 Return valid JSON only with exactly these keys:
 {
@@ -134,10 +136,12 @@ def _parse_assessment_response(content: str) -> dict[str, Any]:
     data["warnings"] = [v.strip() for v in warnings if v.strip()][:_MAX_WARNINGS]
 
     # Derive verdict from trust_score — it is not provided by the LLM.
+    # Dead band ±0.05 around neutral prevents borderline scores (e.g. 0.52) from
+    # showing as a green "Size up" badge when the assessment is essentially neutral.
     ts = data["trust_score"]
-    if ts < 0.5:
+    if ts < 0.45:
         data["verdict"] = "size_down"
-    elif ts > 0.5:
+    elif ts > 0.55:
         data["verdict"] = "size_up"
     else:
         data["verdict"] = "neutral"
@@ -361,6 +365,8 @@ def _build_prompt_payload(
     strategy_name: str,
     source_breakdown: list[dict[str, Any]],
     similar_market_summary: dict[str, Any],
+    scale_min: float = 0.80,
+    scale_max: float = 1.20,
 ) -> dict[str, Any]:
     weighted_delta = None
     if source_breakdown:
@@ -379,13 +385,30 @@ def _build_prompt_payload(
     now = datetime.now(tz=timezone.utc)
     days_to_close = (market.close_time - now).total_seconds() / 86400
 
+    # Show the LLM what its trust_score output actually does to position size.
+    # Scores are linearly interpolated: 0.0 → scale_min, 0.5 → 1.0x, 1.0 → scale_max.
+    score_examples = {
+        "0.0 (maximum concern)": f"{scale_min:.2f}x",
+        "0.25 (significant concern)": f"{(scale_min + (1.0 - scale_min) * 0.5):.2f}x",
+        "0.45 (mild concern, neutral zone)": f"{(scale_min + (1.0 - scale_min) * 0.9):.2f}x",
+        "0.50 (neutral — no adjustment)": "1.00x",
+        "0.55 (mild confidence, neutral zone)": f"{(1.0 + (scale_max - 1.0) * 0.1):.2f}x",
+        "0.75 (solid confidence)": f"{(1.0 + (scale_max - 1.0) * 0.5):.2f}x",
+        "1.0 (maximum confidence)": f"{scale_max:.2f}x",
+    }
+
     return {
         "task": "Assess whether the trade should be sized down, left neutral, or sized up relative to the base Kelly target.",
+        "sizing_scale": {
+            "description": "Your trust_score maps to a position-size multiplier via linear interpolation. Use this table to calibrate your output.",
+            "score_to_multiplier_examples": score_examples,
+            "neutral_dead_band": "Scores between 0.45 and 0.55 will display as 'neutral' — reserve values outside this range for cases where you have meaningful signal.",
+        },
         "market": {
             "market_id": market.id,
             "series_ticker": market.series_ticker,
             "category": market.category,
-            "question_first_line": _question_first_line(market.question),
+            "question": market.question,
             "close_time": market.close_time.isoformat(),
             "days_to_close": round(days_to_close, 1),
         },
@@ -396,6 +419,16 @@ def _build_prompt_payload(
             "market_mid_at_signal": signal.market_mid_at_signal,
             "edge": signal.edge,
             "confidence": signal.confidence,
+        },
+        "market_liquidity": {
+            "yes_bid": market.yes_bid,
+            "yes_ask": market.yes_ask,
+            "spread": round(market.yes_ask - market.yes_bid, 4),
+            "volume_24h": market.volume_24h,
+            "open_interest": market.open_interest,
+            "liquidity": market.liquidity,
+            "price_updated_at": market.price_updated_at.isoformat(),
+            "note": "Wide spread or very low volume suggests stale/illiquid pricing — a large edge in this context is likely artificial.",
         },
         "source_quality_summary": {
             "lookback_days": _LOOKBACK_DAYS,
@@ -473,6 +506,8 @@ async def assess_signal_context(
         strategy.config.name,
         source_breakdown,
         similar_market_summary,
+        scale_min=strategy.config.assessment_scale_min,
+        scale_max=strategy.config.assessment_scale_max,
     )
     prompt = json.dumps(prompt_payload, indent=2, sort_keys=True)
     llm_query_id: int | None = None

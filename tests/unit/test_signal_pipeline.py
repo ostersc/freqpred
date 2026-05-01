@@ -344,7 +344,7 @@ class TestParseSignalResponse:
         assert result["probability"] == 1.0
 
     def test_probability_clamped_below_zero(self) -> None:
-        result = parse_signal_response(_valid_llm_json(probability=-0.1))
+        result = parse_signal_response(_valid_llm_json(probability=-0.1, direction="NO"))
         assert result is not None
         assert result["probability"] == 0.0
 
@@ -355,7 +355,7 @@ class TestParseSignalResponse:
         assert result["probability"] == 0.70
 
     def test_direction_no_is_valid(self) -> None:
-        result = parse_signal_response(_valid_llm_json(direction="NO"))
+        result = parse_signal_response(_valid_llm_json(direction="NO", probability=0.30))
         assert result is not None
         assert result["direction"] == "NO"
 
@@ -363,6 +363,16 @@ class TestParseSignalResponse:
         result = parse_signal_response(_valid_llm_json(direction="SKIP"))
         assert result is not None
         assert result["direction"] == "SKIP"
+
+    def test_yes_direction_with_low_probability_returns_none(self) -> None:
+        # LLM returned direction=YES but probability=0.13 — internally inconsistent.
+        result = parse_signal_response(_valid_llm_json(direction="YES", probability=0.13))
+        assert result is None
+
+    def test_no_direction_with_high_probability_returns_none(self) -> None:
+        # LLM returned direction=NO but probability=0.87 — the bug that opened a phantom YES.
+        result = parse_signal_response(_valid_llm_json(direction="NO", probability=0.87))
+        assert result is None
 
     def test_non_numeric_probability_returns_none(self) -> None:
         data = {

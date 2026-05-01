@@ -263,44 +263,43 @@ class PositionMonitor:
         # Kalshi orderbook fetch, which makes no_bid appear as 0.0 — a phantom stoploss).
         # Checking result first prevents spurious stoploss exits on resolved markets.
         if market.result is not None:
-            wins = position.direction.upper() == market.result.upper()
-            return ("market_resolved", 1.0 if wins else 0.0)
+            if market.settlement_value is not None:
+                # Scalar market: use actual settlement price, not a rounded 0 or 1.
+                exit_price = (
+                    market.settlement_value if position.direction.upper() == "YES"
+                    else round(1.0 - market.settlement_value, 4)
+                )
+            else:
+                wins = position.direction.upper() == market.result.upper()
+                exit_price = 1.0 if wins else 0.0
+            return ("market_resolved", exit_price)
 
-        # 0.5. Phantom zero guard: after a market stops trading, Kalshi clears the order book
-        # before the result field is committed. This creates a window where bid → 0 even though
-        # the last actual trade was nowhere near zero. Use last_price (last traded price) as the
-        # "was this a real trade at zero?" sentinel — a genuine collapse to zero requires actual
-        # trades near zero, which would show up in last_price.
+        # 0.5. Empty order book guard: when bid collapses to 0 but market.result is not yet
+        # set, the zero is an order book artefact (Kalshi clears the book on close/pause before
+        # writing result), not a real traded price. Substitute last_price as the effective price
+        # so stoploss and trailing stop evaluate against the most recent actual trade.
         #
-        # YES position: yes_bid → 0 when the order book empties. If the last trade was near 1.0,
-        # the market resolved YES — suppress stoploss and wait for market.result.
+        # YES position: effective_price = yes_bid → 0; proxy = last_price (last YES trade).
+        # NO position:  effective_price = 1 - yes_ask → 0; proxy = 1 - last_price.
         #
-        # NO position: yes_ask → 1.0 (Kalshi default for empty book) makes no_bid = 1 - 1.0 = 0.
-        # If the last YES trade was near 0, the market resolved NO (NO wins) — also suppress.
-        #
-        # The inverse cases are correct exits and are not suppressed:
-        # YES position + last_price near 0 → YES genuinely lost → stoploss is valid.
-        # NO position + last_price near 1 → YES won → NO genuinely lost → stoploss is valid.
-        if position.direction == "YES" and effective_price == 0.0 and market.last_price >= 0.95:
-            logger.debug(
-                "position_monitor.phantom_zero_suppressed",
-                position_id=position.id,
-                market_id=position.market_id,
-                direction="YES",
-                last_price=market.last_price,
-                yes_bid=market.yes_bid,
-            )
-            return _NO_EXIT
-        if position.direction == "NO" and effective_price == 0.0 and market.last_price <= 0.05:
-            logger.debug(
-                "position_monitor.phantom_zero_suppressed",
-                position_id=position.id,
-                market_id=position.market_id,
-                direction="NO",
-                last_price=market.last_price,
-                yes_ask=market.yes_ask,
-            )
-            return _NO_EXIT
+        # A genuine collapse to zero still fires: if last_price is also near 0 for a YES
+        # position (or near 1 for a NO position), the proxy is similarly small and the
+        # stoploss check below will correctly trigger.
+        if effective_price == 0.0 and market.result is None:
+            if position.direction == "YES":
+                proxy = market.last_price
+            else:
+                proxy = round(1.0 - market.last_price, 4)
+            if proxy > 0.0:
+                logger.debug(
+                    "position_monitor.empty_book_proxy",
+                    position_id=position.id,
+                    market_id=position.market_id,
+                    direction=position.direction,
+                    last_price=market.last_price,
+                    proxy=proxy,
+                )
+                effective_price = proxy
 
         # 1. Hard stoploss (framework-enforced)
         result = _check_stoploss(position, effective_price, config.stoploss)
@@ -336,10 +335,12 @@ class PositionMonitor:
             if strategy.should_exit(position, fresh_signal, market):
                 return ("signal", effective_price)
 
-        # 6. Market resolution — Kalshi status is "finalized"/"resolved"/"settled" OR close_time has passed
+        # 6. Market resolution — Kalshi has confirmed a terminal status.
         # Note: market.result is not None is already handled at step 0 above.
-        # This branch catches markets that have expired but whose result is not yet published.
-        if market.status in ("finalized", "resolved", "settled") or market.close_time <= now:
+        # Do NOT close on close_time alone — Kalshi may pause/delay settlement and
+        # the result field won't be set yet. Wait for _sweep_closed_markets to
+        # populate market.result (caught by step 0) or a terminal status.
+        if market.status in ("finalized", "resolved", "settled"):
             return ("market_resolved", effective_price)
 
         return _NO_EXIT
@@ -580,6 +581,7 @@ def _market_row_to_domain(row: MarketRow) -> Market:
         category=row.category,
         status=row.status,
         result=row.result,
+        settlement_value=row.settlement_value,
         close_time=row.close_time,
         yes_bid=row.yes_bid,
         yes_ask=row.yes_ask,
