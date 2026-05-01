@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_PROMPT_VERSION = "assessment-v3"
+_PROMPT_VERSION = "assessment-v4"
 _QUERY_TYPE = "signal_assessment"
 _LOOKBACK_DAYS = 90
 _MAX_FACTORS = 5
@@ -426,9 +426,8 @@ def _build_prompt_payload(
             "spread": round(market.yes_ask - market.yes_bid, 4),
             "volume_24h": market.volume_24h,
             "open_interest": market.open_interest,
-            "liquidity": market.liquidity,
             "price_updated_at": market.price_updated_at.isoformat(),
-            "note": "Wide spread or very low volume suggests stale/illiquid pricing — a large edge in this context is likely artificial.",
+            "note": "Wide spread or very low volume_24h suggests stale/illiquid pricing — a large edge in this context is likely artificial.",
         },
         "source_quality_summary": {
             "lookback_days": _LOOKBACK_DAYS,
