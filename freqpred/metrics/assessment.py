@@ -424,10 +424,12 @@ def _build_prompt_payload(
             "yes_bid": market.yes_bid,
             "yes_ask": market.yes_ask,
             "spread": round(market.yes_ask - market.yes_bid, 4),
+            "yes_bid_size_dollars": market.yes_bid_size,
+            "yes_ask_size_dollars": market.yes_ask_size,
             "volume_24h": market.volume_24h,
             "open_interest": market.open_interest,
             "price_updated_at": market.price_updated_at.isoformat(),
-            "note": "Wide spread or very low volume_24h suggests stale/illiquid pricing — a large edge in this context is likely artificial.",
+            "note": "Wide spread, very low volume_24h, or small book depth (yes_bid_size/yes_ask_size) suggests thin/illiquid pricing — a large edge in this context is likely artificial.",
         },
         "source_quality_summary": {
             "lookback_days": _LOOKBACK_DAYS,

@@ -12,8 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import (
     JSON,
     VARCHAR,
-    BigInteger,
-    Boolean,
     Float,
     ForeignKey,
     Integer,
@@ -58,7 +56,8 @@ class MarketRow(Base):
     volume_24h: Mapped[float] = mapped_column(Float, nullable=False)
     volume_total: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     open_interest: Mapped[float] = mapped_column(Float, nullable=False)
-    liquidity: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    yes_bid_size: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    yes_ask_size: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
 
     # Event metadata (populated from /events)
     series_ticker: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -207,7 +206,8 @@ class Market:
     result: str | None = None
     settlement_value: float | None = None
     last_price: float = 0.0
-    liquidity: float = 0.0
+    yes_bid_size: float = 0.0
+    yes_ask_size: float = 0.0
     series_ticker: str | None = None
     volume_total: float = 0.0
 
@@ -246,15 +246,16 @@ class KalshiMarketSchema(BaseModel):
     no_bid_dollars: str = "0.0000"
     no_ask_dollars: str = "0.0000"
     last_price_dollars: str = "0.0000"
-    liquidity_dollars: str = "0.0000"
     settlement_value_dollars: str | None = None
     volume_24h: float = Field(default=0.0, alias="volume_24h_fp")
     volume_total: float = Field(default=0.0, alias="volume_fp")
     open_interest: float = Field(default=0.0, alias="open_interest_fp")
+    yes_bid_size: float = Field(default=0.0, alias="yes_bid_size_fp")
+    yes_ask_size: float = Field(default=0.0, alias="yes_ask_size_fp")
 
     @field_validator(
         "yes_bid_dollars", "yes_ask_dollars", "no_bid_dollars", "no_ask_dollars",
-        "last_price_dollars", "liquidity_dollars",
+        "last_price_dollars",
         mode="before",
     )
     @classmethod
@@ -284,10 +285,6 @@ class KalshiMarketSchema(BaseModel):
     @property
     def last_price(self) -> float:
         return float(self.last_price_dollars)
-
-    @property
-    def liquidity(self) -> float:
-        return float(self.liquidity_dollars)
 
     @property
     def mid_price(self) -> float:
