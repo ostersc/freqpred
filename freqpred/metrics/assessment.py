@@ -461,6 +461,31 @@ def _row_to_assessment(row: SignalAssessmentRow) -> SignalAssessment:
     )
 
 
+async def _load_prior_assessment_by_hash(
+    session: AsyncSession,
+    signal: "Signal",
+    market: "Market",
+) -> SignalAssessmentRow | None:
+    """Return the most recent non-neutral assessment for the same retrieval_hash on this market.
+
+    Used to carry forward the original sizing decision to price_moved clone signals,
+    which have no DocumentMarketLink rows and would otherwise always return neutral.
+    """
+    result = await session.execute(
+        select(SignalAssessmentRow)
+        .join(SignalRow, SignalAssessmentRow.signal_id == SignalRow.id)
+        .where(
+            SignalRow.market_id == market.id,
+            SignalRow.retrieval_hash == signal.retrieval_hash,
+            SignalAssessmentRow.signal_id != uuid.UUID(signal.id),
+            SignalAssessmentRow.verdict != "neutral",
+        )
+        .order_by(SignalAssessmentRow.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def assess_signal_context(
     session: AsyncSession,
     signal: "Signal",
@@ -484,6 +509,37 @@ async def assess_signal_context(
     neutral.similar_market_summary = similar_market_summary
 
     if not source_breakdown and not similar_market_summary.get("available"):
+        # For price_moved clones, the evidence set is unchanged — carry forward the
+        # original signal's sizing decision rather than defaulting to neutral (1.0),
+        # which would undo any assessment-driven size reduction from the first entry.
+        if signal.trigger == "price_moved":
+            prior = await _load_prior_assessment_by_hash(session, signal, market)
+            if prior is not None:
+                row = SignalAssessmentRow(
+                    signal_id=uuid.UUID(signal.id),
+                    trust_score=prior.trust_score,
+                    size_multiplier=prior.size_multiplier,
+                    verdict=prior.verdict,
+                    reasoning=prior.reasoning,
+                    key_factors=list(prior.key_factors or []),
+                    warnings=list(prior.warnings or []),
+                    source_breakdown=list(prior.source_breakdown or []),
+                    similar_market_summary=dict(prior.similar_market_summary or {}),
+                    llm_query_id=None,
+                )
+                session.add(row)
+                await session.flush()
+                await session.commit()
+                log.debug(
+                    "signal_assessment.carried_forward",
+                    market_id=market.id,
+                    signal_id=signal.id,
+                    prior_signal_id=str(prior.signal_id),
+                    size_multiplier=prior.size_multiplier,
+                    verdict=prior.verdict,
+                )
+                return _row_to_assessment(row)
+
         row = SignalAssessmentRow(
             signal_id=uuid.UUID(signal.id),
             trust_score=neutral.trust_score,

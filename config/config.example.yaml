@@ -32,7 +32,7 @@ anthropic:
   api_key: ""
   primary_model: "claude-sonnet-4-6"
   cheap_model: "claude-haiku-4-5-20251001"
-  judgment_model: "claude-opus-4-6"
+  judgment_model: "claude-opus-4-7"
 
 tavily:
   # Overridden by TAVILY_API_KEY env var

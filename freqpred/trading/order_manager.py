@@ -159,6 +159,39 @@ class OrderManager:
             )
             existing_market_exposure: float = float(existing_exposure_result.scalar_one())
 
+            # Price-improvement gate: if we already hold a position in this market,
+            # only add to it when the entry price is strictly better than the weighted
+            # average of what we already paid.  Blocks assessment-jitter add-ons and
+            # price_moved re-entries at the same or worse price.
+            if existing_market_exposure > 0.0:
+                entry_price_check = (
+                    market.yes_ask
+                    if signal.direction == "YES"
+                    else round(1.0 - market.yes_bid, 4)
+                )
+                avg_entry_result = await session.execute(
+                    select(
+                        func.sum(PositionRow.contracts * PositionRow.entry_price)
+                        / func.sum(PositionRow.contracts)
+                    ).where(
+                        PositionRow.status == "open",
+                        PositionRow.market_id == market.id,
+                        PositionRow.mode == self._mode,
+                        PositionRow.direction == signal.direction,
+                    )
+                )
+                avg_entry = avg_entry_result.scalar_one_or_none()
+                if avg_entry is not None and entry_price_check >= float(avg_entry):
+                    logger.info(
+                        "order_manager.no_price_improvement",
+                        market_id=market.id,
+                        signal_id=signal.id,
+                        new_entry_price=entry_price_check,
+                        avg_existing_entry=round(float(avg_entry), 4),
+                        direction=signal.direction,
+                    )
+                    return None
+
             assessment = None
             if self._llm_client is not None and self._judgment_model:
                 from freqpred.metrics.assessment import assess_signal_context  # noqa: PLC0415

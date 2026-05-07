@@ -32,7 +32,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.alerts.run_state import get_run_state, reset_drawdown, set_run_state
+from freqpred.alerts.run_state import get_run_state, reset_drawdown, set_cb_state, set_run_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Awaitable
@@ -223,6 +223,7 @@ def register_system_commands(
                 session, config.trading.bankroll_usd, mode=mode
             )
             reset_at = await reset_drawdown(session, net_bankroll)
+            await set_cb_state(session, active=False, reason=None)
         log.info(
             "telegram.reset_drawdown",
             chat_id=chat_id, reset_at=reset_at.isoformat(), net_bankroll=net_bankroll,

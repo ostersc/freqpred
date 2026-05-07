@@ -416,7 +416,7 @@ class PositionWatcher:
     async def _close_positions_for_resolved_market(
         self, market_id: str, result: str, settlement_value: float | None = None,
     ) -> None:
-        """Close all open live positions for a market that has resolved.
+        """Close all open positions (any mode) for a market that has resolved.
 
         Payout logic (binary market):
           - direction matches result → exit_price = 1.00
@@ -436,7 +436,6 @@ class PositionWatcher:
             pos_res = await session.execute(
                 select(PositionRow).where(
                     PositionRow.market_id == market_id,
-                    PositionRow.mode == "live",
                     PositionRow.status.in_(["open", "pending"]),
                 )
             )

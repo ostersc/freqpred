@@ -122,7 +122,7 @@ class MarketWatcher:
 
         resolved = await self._sweep_closed_markets()
         missing_resolved = await self._sweep_missing_results()
-        rest_fallback_resolved = await self._resolve_settled_live_positions()
+        rest_fallback_resolved = await self._resolve_settled_open_positions()
 
         log.info(
             "market_watcher_cycle_complete",
@@ -323,31 +323,100 @@ class MarketWatcher:
             log.info("market_watcher.missing_results_sweep", resolved=resolved)
         return resolved
 
-    async def _resolve_settled_live_positions(self) -> int:
-        """REST-poll fallback: close open live positions on already-settled markets.
+    async def _resolve_settled_open_positions(self) -> int:
+        """REST-poll fallback: close open positions (any mode) on already-settled markets.
 
-        Handles resolutions missed by the WebSocket during reconnect windows.
+        Two-pass approach:
+        1. Markets already resolved in DB (status settled/finalized, result set) → close immediately.
+        2. Markets past close_time but not yet resolved in DB → fetch from Kalshi, upsert, then close.
+           This handles the case where the sweep batch hasn't reached these markets yet.
+
+        Handles resolutions missed by the WebSocket during reconnect windows,
+        and catches paper positions that the WS path skips.
         Idempotent — positions already closed are excluded by the status filter.
 
         Returns the number of positions closed.
         """
+        now = datetime.now(UTC)
+
+        # Pass 1: markets already resolved in DB.
         async with self._session_factory() as session:
             result = await session.execute(
-                select(PositionRow.id, PositionRow.direction, MarketRow.result, MarketRow.settlement_value)
+                select(PositionRow.id, PositionRow.direction, PositionRow.market_id, MarketRow.result, MarketRow.settlement_value)
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
                 .where(
                     PositionRow.status.in_(["open", "pending"]),
-                    PositionRow.mode == "live",
-                    MarketRow.status.in_(["settled", "finalized"]),
+                    MarketRow.status.in_(["resolved", "settled", "finalized"]),
                     MarketRow.result.is_not(None),
                 )
             )
-            rows = result.all()
+            resolved_rows = result.all()
 
-        if not rows:
+        # Pass 2: open positions where market is past close_time but not yet resolved in DB.
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(PositionRow.id, PositionRow.market_id)
+                .join(MarketRow, PositionRow.market_id == MarketRow.id)
+                .where(
+                    PositionRow.status.in_(["open", "pending"]),
+                    MarketRow.close_time <= now,
+                    MarketRow.result.is_(None),
+                )
+            )
+            unresolved_pos = result.all()
+
+        # For unresolved markets with open positions, fetch result from Kalshi now.
+        if unresolved_pos:
+            unresolved_market_ids = list({row.market_id for row in unresolved_pos})
+            for market_id in unresolved_market_ids:
+                try:
+                    market = await self._client.get_market(market_id)
+                    if market.result is not None:
+                        async with self._session_factory() as session:
+                            await upsert_markets(session, [market])
+                        log.info(
+                            "market_watcher.fallback_fetched_result",
+                            market_id=market_id,
+                            result=market.result,
+                        )
+                    elif isinstance(self._client, KalshiClient):
+                        # Try the settled endpoint as a fallback.
+                        settled = await self._client.get_market_from_settled(market_id)
+                        if settled is not None and settled.result is not None:
+                            async with self._session_factory() as session:
+                                await upsert_markets(session, [settled])
+                            log.info(
+                                "market_watcher.fallback_fetched_result_settled",
+                                market_id=market_id,
+                                result=settled.result,
+                            )
+                except Exception:
+                    log.warning("market_watcher.fallback_fetch_failed", market_id=market_id)
+
+            # Re-query now that markets may have been updated.
+            async with self._session_factory() as session:
+                result = await session.execute(
+                    select(PositionRow.id, PositionRow.direction, PositionRow.market_id, MarketRow.result, MarketRow.settlement_value)
+                    .join(MarketRow, PositionRow.market_id == MarketRow.id)
+                    .where(
+                        PositionRow.status.in_(["open", "pending"]),
+                        MarketRow.close_time <= now,
+                        MarketRow.result.is_not(None),
+                    )
+                )
+                newly_resolved = result.all()
+            # Merge with pass-1 rows, deduplicating by position id.
+            seen = {row.id for row in resolved_rows}
+            for row in newly_resolved:
+                if row.id not in seen:
+                    resolved_rows = list(resolved_rows) + [row]
+                    seen.add(row.id)
+
+        if not resolved_rows:
             return 0
 
-        for row in rows:
+        closed = 0
+        for row in resolved_rows:
             market_result: str = row.result
             settlement_value: float | None = row.settlement_value
             resolution = 1 if market_result.lower() == "yes" else 0
@@ -371,8 +440,9 @@ class MarketWatcher:
                 result=market_result,
                 exit_price=exit_price,
             )
+            closed += 1
 
-        return len(rows)
+        return closed
 
     async def _check_price_move_triggers(
         self,

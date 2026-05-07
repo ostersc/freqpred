@@ -203,6 +203,7 @@ class SignalPipeline:
                 retrieval_hash=new_hash,
                 raw_context=prompt,
                 trigger=trigger,
+                llm_query_id=llm_response.llm_query_id,
             )
             await session.commit()
 
@@ -231,6 +232,7 @@ class SignalPipeline:
         retrieval_hash: str,
         raw_context: str,
         trigger: str,
+        llm_query_id: int | None = None,
     ) -> Signal:
         """Insert Signal, DocumentMarketLinks, and update Market.current_signal_id.
 
@@ -272,6 +274,7 @@ class SignalPipeline:
             prompt_version=PROMPT_VERSION,
             trigger=trigger,
             raw_context=raw_context,
+            llm_query_id=llm_query_id,
         )
         session.add(signal_row)
 

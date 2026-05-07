@@ -148,6 +148,7 @@ def _signal_row_to_out(row: SignalRow, market_question: str | None = None) -> Si
         trigger=row.trigger,
         created_at=row.created_at,
         social_sentiment_summary=row.social_sentiment_summary,
+        llm_query_id=row.llm_query_id,
     )
 
 

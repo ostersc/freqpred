@@ -17,9 +17,11 @@ import freqpred.signal.models  # noqa: F401
 from freqpred.markets.models import Market
 from freqpred.metrics.assessment import (
     assess_signal_context,
+    _load_prior_assessment_by_hash,
     _parse_assessment_response,
     _trust_score_to_multiplier,
 )
+from freqpred.metrics.models import SignalAssessmentRow
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
@@ -179,3 +181,151 @@ async def test_assess_signal_context_skips_llm_when_no_data() -> None:
     assert assessment.verdict == "neutral"
     llm_client.complete.assert_not_awaited()
     session.commit.assert_awaited_once()
+
+
+def _make_prior_assessment_row(
+    *,
+    trust_score: float = 0.2,
+    size_multiplier: float = 0.88,
+    verdict: str = "size_down",
+) -> SignalAssessmentRow:
+    row = MagicMock(spec=SignalAssessmentRow)
+    row.signal_id = uuid.uuid4()
+    row.trust_score = trust_score
+    row.size_multiplier = size_multiplier
+    row.verdict = verdict
+    row.reasoning = "prior reasoning"
+    row.key_factors = ["low trust source"]
+    row.warnings = ["sparse data"]
+    row.source_breakdown = [{"source": "twitter"}]
+    row.similar_market_summary = {"available": False}
+    row.llm_query_id = None
+    row.created_at = NOW
+    return row
+
+
+@pytest.mark.asyncio
+async def test_price_moved_clone_carries_forward_prior_assessment() -> None:
+    """A price_moved clone with no doc links reuses the prior signal's assessment
+    instead of falling back to neutral (multiplier=1.0)."""
+    prior_row = _make_prior_assessment_row(size_multiplier=0.88, verdict="size_down")
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    llm_client = MagicMock()
+    llm_client.complete = AsyncMock()
+
+    clone_signal = _make_signal()
+    clone_signal = Signal(
+        **{**clone_signal.__dict__, "trigger": "price_moved"},
+    )
+
+    with patch(
+        "freqpred.metrics.assessment._load_source_breakdown",
+        new_callable=AsyncMock,
+        return_value=[],
+    ), patch(
+        "freqpred.metrics.assessment._load_similar_market_summary",
+        new_callable=AsyncMock,
+        return_value={"available": False, "reason": "insufficient_matched_history"},
+    ), patch(
+        "freqpred.metrics.assessment._load_prior_assessment_by_hash",
+        new_callable=AsyncMock,
+        return_value=prior_row,
+    ):
+        assessment = await assess_signal_context(
+            session,
+            clone_signal,
+            _make_market(),
+            _StubStrategy(),
+            llm_client,
+            "claude-opus-4-6",
+        )
+
+    assert assessment.size_multiplier == pytest.approx(0.88)
+    assert assessment.verdict == "size_down"
+    assert assessment.trust_score == pytest.approx(0.2)
+    llm_client.complete.assert_not_awaited()
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_price_moved_clone_falls_back_to_neutral_when_no_prior() -> None:
+    """A price_moved clone with no doc links and no prior assessment falls back to neutral."""
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    llm_client = MagicMock()
+    llm_client.complete = AsyncMock()
+
+    clone_signal = _make_signal()
+    clone_signal = Signal(
+        **{**clone_signal.__dict__, "trigger": "price_moved"},
+    )
+
+    with patch(
+        "freqpred.metrics.assessment._load_source_breakdown",
+        new_callable=AsyncMock,
+        return_value=[],
+    ), patch(
+        "freqpred.metrics.assessment._load_similar_market_summary",
+        new_callable=AsyncMock,
+        return_value={"available": False, "reason": "insufficient_matched_history"},
+    ), patch(
+        "freqpred.metrics.assessment._load_prior_assessment_by_hash",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        assessment = await assess_signal_context(
+            session,
+            clone_signal,
+            _make_market(),
+            _StubStrategy(),
+            llm_client,
+            "claude-opus-4-6",
+        )
+
+    assert assessment.size_multiplier == pytest.approx(1.0)
+    assert assessment.verdict == "neutral"
+    llm_client.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_signal_with_no_data_still_returns_neutral() -> None:
+    """Non-price_moved signals with no data still return neutral (unchanged behaviour)."""
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    llm_client = MagicMock()
+    llm_client.complete = AsyncMock()
+
+    scheduled_signal = _make_signal()  # trigger="scheduled" by default
+
+    with patch(
+        "freqpred.metrics.assessment._load_source_breakdown",
+        new_callable=AsyncMock,
+        return_value=[],
+    ), patch(
+        "freqpred.metrics.assessment._load_similar_market_summary",
+        new_callable=AsyncMock,
+        return_value={"available": False, "reason": "insufficient_matched_history"},
+    ), patch(
+        "freqpred.metrics.assessment._load_prior_assessment_by_hash",
+        new_callable=AsyncMock,
+        return_value=_make_prior_assessment_row(),
+    ) as mock_prior:
+        assessment = await assess_signal_context(
+            session,
+            scheduled_signal,
+            _make_market(),
+            _StubStrategy(),
+            llm_client,
+            "claude-opus-4-6",
+        )
+
+    assert assessment.size_multiplier == pytest.approx(1.0)
+    assert assessment.verdict == "neutral"
+    mock_prior.assert_not_awaited()  # prior lookup not called for scheduled signals

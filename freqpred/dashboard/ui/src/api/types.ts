@@ -15,6 +15,7 @@ export interface SignalOut {
   trigger: string
   created_at: string
   social_sentiment_summary: string | null
+  llm_query_id: number | null
 }
 
 export interface DocumentLinkOut {

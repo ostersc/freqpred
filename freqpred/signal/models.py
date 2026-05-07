@@ -50,6 +50,7 @@ class SignalRow(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default="now()"
     )
     raw_context: Mapped[str] = mapped_column(Text, nullable=False)
+    llm_query_id: Mapped[int | None] = mapped_column(nullable=True)
 
     # Relationships
     market: Mapped["MarketRow"] = relationship(  # type: ignore[name-defined]  # noqa: F821

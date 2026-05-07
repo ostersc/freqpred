@@ -29,6 +29,7 @@ class SignalOut(BaseModel):
     trigger: str
     created_at: datetime
     social_sentiment_summary: str | None
+    llm_query_id: int | None
 
 
 class DocumentLinkOut(BaseModel):

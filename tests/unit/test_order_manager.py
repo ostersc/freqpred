@@ -908,10 +908,12 @@ async def test_doubledown_allowed_when_edge_increases() -> None:
     high_ideal = strategy.position_size(sig_high, BANKROLL, existing_market_exposure=0.0)
     assert high_ideal > low_ideal, "sanity: higher edge → bigger ideal"
 
-    # DB reports existing exposure = low_ideal (one position already open).
+    # DB reports existing exposure = low_ideal (one position already open at a worse
+    # price so the price-improvement gate passes: avg_entry=0.60 > yes_ask=0.56).
     mock_session = sf.return_value.__aenter__.return_value
     exposure_result = MagicMock()
     exposure_result.scalar_one.return_value = low_ideal
+    exposure_result.scalar_one_or_none.return_value = 0.60  # avg existing entry (worse)
     mock_session.execute = AsyncMock(return_value=exposure_result)
 
     expected_position = _make_position()
@@ -940,10 +942,12 @@ async def test_reentry_blocked_when_conviction_drops() -> None:
     # Second signal with lower edge.
     sig_low = _make_signal(edge=0.15, estimated_probability=0.65)
 
-    # DB reports existing exposure = high_ideal.
+    # DB reports existing exposure = high_ideal, avg entry lower than new ask so
+    # price gate passes (test is about conviction-drop blocking, not price gate).
     mock_session = sf.return_value.__aenter__.return_value
     exposure_result = MagicMock()
     exposure_result.scalar_one.return_value = high_ideal
+    exposure_result.scalar_one_or_none.return_value = 0.40  # avg entry well below ask
     mock_session.execute = AsyncMock(return_value=exposure_result)
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
@@ -951,6 +955,116 @@ async def test_reentry_blocked_when_conviction_drops() -> None:
 
     assert result is None
     mock_ledger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reentry_blocked_at_worse_price() -> None:
+    """Price-improvement gate: new entry price >= avg existing entry → return None."""
+    om, sf = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.50, yes_ask=0.54)  # yes_ask = 0.54
+
+    mock_session = sf.return_value.__aenter__.return_value
+    result_mock = MagicMock()
+    result_mock.scalar_one.return_value = 20.0     # existing exposure > 0
+    result_mock.scalar_one_or_none.return_value = 0.50  # avg existing entry better than 0.54
+    mock_session.execute = AsyncMock(return_value=result_mock)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    assert result is None
+    mock_ledger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reentry_blocked_at_equal_price() -> None:
+    """Price-improvement gate: entry price == avg existing entry → return None."""
+    om, sf = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.50, yes_ask=0.54)  # yes_ask = 0.54
+
+    mock_session = sf.return_value.__aenter__.return_value
+    result_mock = MagicMock()
+    result_mock.scalar_one.return_value = 20.0
+    result_mock.scalar_one_or_none.return_value = 0.54  # exactly equal → blocked
+    mock_session.execute = AsyncMock(return_value=result_mock)
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    assert result is None
+    mock_ledger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reentry_allowed_at_better_price() -> None:
+    """Price-improvement gate: new entry price < avg existing entry → trade proceeds."""
+    om, sf = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.50, yes_ask=0.46)  # yes_ask 0.46 < avg_entry 0.54
+
+    mock_session = sf.return_value.__aenter__.return_value
+    result_mock = MagicMock()
+    result_mock.scalar_one.return_value = 20.0
+    result_mock.scalar_one_or_none.return_value = 0.54  # avg existing entry worse
+    mock_session.execute = AsyncMock(return_value=result_mock)
+
+    expected_position = _make_position()
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        result = await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    assert result is expected_position
+    mock_ledger.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_price_gate_skipped_when_no_existing_position() -> None:
+    """Price-improvement gate is not applied when existing_market_exposure == 0."""
+    om, sf = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.50, yes_ask=0.54)
+
+    # Default mock returns scalar_one=0.0 (no existing exposure).
+    expected_position = _make_position()
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        result = await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    assert result is expected_position
+    mock_ledger.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_price_gate_no_direction_positions_skips_block() -> None:
+    """Price gate skips when avg_entry_result is None (no same-direction positions open)."""
+    om, sf = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.50, yes_ask=0.54)
+
+    mock_session = sf.return_value.__aenter__.return_value
+    result_mock = MagicMock()
+    result_mock.scalar_one.return_value = 20.0   # some exposure (opposite direction)
+    result_mock.scalar_one_or_none.return_value = None  # no same-direction avg
+    mock_session.execute = AsyncMock(return_value=result_mock)
+
+    expected_position = _make_position()
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        result = await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    assert result is expected_position
+    mock_ledger.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

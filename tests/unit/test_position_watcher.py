@@ -633,7 +633,7 @@ async def test_telegram_alert_sent_on_resolution() -> None:
 
 @pytest.mark.asyncio
 async def test_rest_fallback_resolves_if_websocket_missed() -> None:
-    """MarketWatcher._resolve_settled_live_positions() closes open live positions for settled markets."""
+    """MarketWatcher._resolve_settled_open_positions() closes open positions (any mode) for settled markets."""
     from freqpred.markets.watcher import MarketWatcher
 
     mock_client = MagicMock()
@@ -659,7 +659,7 @@ async def test_rest_fallback_resolves_if_websocket_missed() -> None:
 
     with patch("freqpred.markets.watcher.ledger") as mock_ledger:
         mock_ledger.close_position = AsyncMock()
-        count = await watcher._resolve_settled_live_positions()
+        count = await watcher._resolve_settled_open_positions()
 
     assert count == 1
     mock_ledger.close_position.assert_awaited_once()
