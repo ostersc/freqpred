@@ -5,6 +5,7 @@ including failed calls (success=False). This is non-negotiable.
 """
 from __future__ import annotations
 
+import json
 import time
 
 import anthropic
@@ -63,11 +64,13 @@ class LLMClient:
         query_type: str,
         *,
         system: str | None = None,
+        cache_system: bool = False,
         market_id: str | None = None,
         signal_id: str | None = None,
         strategy: str | None = None,
         prompt_version: str | None = None,
         max_tokens: int = 1024,
+        json_tool: dict | None = None,
     ) -> LLMResponse:
         """Call the Anthropic messages API and return an ``LLMResponse``.
 
@@ -83,6 +86,11 @@ class LLMClient:
             signal_id:  Optional signal produced by this call.
             strategy:   Strategy name; falls back to ``default_strategy``.
             max_tokens: Maximum tokens in the response (default: 1024).
+            json_tool:  If provided, forces a tool call with this definition
+                        (must have "name", "description", "input_schema" keys).
+                        The tool input dict is serialised to JSON and returned
+                        as ``LLMResponse.content``, guaranteeing valid JSON
+                        output without any prose preamble.
 
         Returns:
             ``LLMResponse`` on success.
@@ -115,7 +123,18 @@ class LLMClient:
             messages=[{"role": "user", "content": prompt}],
         )
         if system:
-            create_kwargs["system"] = system
+            if cache_system:
+                create_kwargs["system"] = [
+                    {"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+                ]
+            else:
+                create_kwargs["system"] = system
+        if json_tool:
+            tool_entry = dict(json_tool)
+            if cache_system:
+                tool_entry["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+            create_kwargs["tools"] = [tool_entry]
+            create_kwargs["tool_choice"] = {"type": "tool", "name": json_tool["name"]}
 
         try:
             message = await self._client.messages.create(**create_kwargs)
@@ -146,7 +165,16 @@ class LLMClient:
 
         self._consecutive_errors = 0
         latency_ms = int((time.monotonic() - start) * 1000)
-        content = message.content[0].text
+
+        if json_tool:
+            tool_block = next((b for b in message.content if b.type == "tool_use"), None)
+            if tool_block is not None:
+                content = json.dumps(tool_block.input)
+            else:
+                content = next((b.text for b in message.content if hasattr(b, "text")), "")
+        else:
+            content = message.content[0].text
+
         tokens_in = message.usage.input_tokens
         tokens_out = message.usage.output_tokens
         cost = calculate_cost(model, tokens_in, tokens_out)
@@ -167,11 +195,19 @@ class LLMClient:
             signal_id=signal_id,
         )
 
+        cache_read = getattr(message.usage, "cache_read_input_tokens", 0) or 0
+        cache_created = getattr(message.usage, "cache_creation_input_tokens", 0) or 0
+        total_input = tokens_in + cache_read + cache_created
         log.debug(
             "llm_complete",
             model=model,
             query_type=query_type,
-            tokens_total=tokens_in + tokens_out,
+            tokens_input_uncached=tokens_in,
+            tokens_output=tokens_out,
+            tokens_total_input=total_input,
+            cache_read_tokens=cache_read,
+            cache_created_tokens=cache_created,
+            cache_hit=cache_read > 0,
             cost_usd=round(cost, 6),
             latency_ms=latency_ms,
         )

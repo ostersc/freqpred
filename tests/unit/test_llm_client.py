@@ -39,6 +39,8 @@ def _make_anthropic_response(
     msg.content = [block]
     msg.usage.input_tokens = input_tokens
     msg.usage.output_tokens = output_tokens
+    msg.usage.cache_read_input_tokens = 0
+    msg.usage.cache_creation_input_tokens = 0
     return msg
 
 

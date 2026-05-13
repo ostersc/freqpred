@@ -47,20 +47,27 @@ Guidelines:
 - If you populate the warnings field with any concern, your trust_score MUST be ≤ 0.5. Warnings and a trust_score above 0.5 are contradictory — do not do both.
 - Unusually large edge (> 0.4) is a warning sign of stale/illiquid pricing, not genuine alpha. Treat it as a reason to stay neutral or go below 0.5 unless you have strong calibration data that supports the edge.
 
-Return valid JSON only with exactly these keys:
-{
-  "trust_score": number,
-  "reasoning": string,
-  "key_factors": [string],
-  "warnings": [string]
-}
-
-Output rules:
-- trust_score must be between 0.0 and 1.0; 0.5 means neutral, below 0.5 means lower confidence, above 0.5 means higher confidence
-- reasoning must be 1-3 concise sentences
-- key_factors must contain 1-5 short strings
-- warnings must contain 0-3 short strings
+Call the submit_assessment tool with your judgment:
+- trust_score: 0.0–1.0; 0.5 = neutral, < 0.5 = lower confidence, > 0.5 = higher confidence
+- reasoning: 1-3 concise sentences
+- key_factors: 1-5 short strings
+- warnings: 0-3 short strings; if any warnings present, trust_score MUST be ≤ 0.5
 """
+
+_ASSESSMENT_TOOL: dict = {
+    "name": "submit_assessment",
+    "description": "Submit the sizing-confidence assessment for this signal.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "trust_score": {"type": "number"},
+            "reasoning": {"type": "string"},
+            "key_factors": {"type": "array", "items": {"type": "string"}},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["trust_score", "reasoning", "key_factors", "warnings"],
+    },
+}
 
 
 def _question_first_line(question: str) -> str:
@@ -580,6 +587,7 @@ async def assess_signal_context(
             strategy=strategy.config.name,
             prompt_version=_PROMPT_VERSION,
             max_tokens=512,
+            json_tool=_ASSESSMENT_TOOL,
         )
         llm_query_id = llm_response.llm_query_id
         parsed = _parse_assessment_response(llm_response.content)

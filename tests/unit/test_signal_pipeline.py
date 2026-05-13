@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from freqpred.signal.cache import should_skip
-from freqpred.signal.llm import build_prompt, parse_signal_response
+from freqpred.signal.llm import SYSTEM_PROMPT, build_prompt, parse_signal_response
 from freqpred.signal.pipeline import SignalPipeline
 from freqpred.signal.models import Signal
 
@@ -136,14 +136,21 @@ def _valid_llm_json(
     probability: float = 0.70,
     confidence: float = 0.80,
     direction: str = "YES",
-    doc_ids: list[str] | None = None,
+    prior: float | None = None,
+    posterior: float | None = None,
+    updates_applied: list | None = None,
 ) -> str:
+    _prior = prior if prior is not None else probability
+    _posterior = posterior if posterior is not None else probability
     return json.dumps({
+        "prior": _prior,
+        "prior_basis": "Subject tweets frequently; 14-day window; historically high base rate.",
+        "updates_applied": updates_applied if updates_applied is not None else [],
+        "posterior": _posterior,
         "probability": probability,
         "confidence": confidence,
         "direction": direction,
         "reasoning": "Strong evidence suggests YES.",
-        "evidence_used": doc_ids or [],
     })
 
 
@@ -318,8 +325,12 @@ class TestParseSignalResponse:
         assert parse_signal_response("not json at all") is None
 
     def test_missing_field_returns_none(self) -> None:
-        data = {"probability": 0.5, "confidence": 0.6, "direction": "YES", "reasoning": "ok"}
-        # missing evidence_used
+        data = {
+            "prior_basis": "base rate", "updates_applied": [],
+            "posterior": 0.5, "probability": 0.5, "confidence": 0.6,
+            "direction": "YES", "reasoning": "ok",
+        }
+        # missing "prior"
         assert parse_signal_response(json.dumps(data)) is None
 
     def test_invalid_direction_returns_none(self) -> None:
@@ -328,11 +339,10 @@ class TestParseSignalResponse:
 
     def test_direction_case_normalized(self) -> None:
         data = {
-            "probability": 0.5,
-            "confidence": 0.5,
+            "prior": 0.5, "prior_basis": "base rate", "updates_applied": [],
+            "posterior": 0.5, "probability": 0.5, "confidence": 0.5,
             "direction": "yes",  # lowercase
             "reasoning": "ok",
-            "evidence_used": [],
         }
         result = parse_signal_response(json.dumps(data))
         assert result is not None
@@ -376,13 +386,22 @@ class TestParseSignalResponse:
 
     def test_non_numeric_probability_returns_none(self) -> None:
         data = {
-            "probability": "high",
-            "confidence": 0.5,
-            "direction": "YES",
-            "reasoning": "ok",
-            "evidence_used": [],
+            "prior": 0.5, "prior_basis": "base rate", "updates_applied": [],
+            "posterior": 0.5, "probability": "high", "confidence": 0.5,
+            "direction": "YES", "reasoning": "ok",
         }
         assert parse_signal_response(json.dumps(data)) is None
+
+    def test_probability_posterior_mismatch_corrected(self) -> None:
+        result = parse_signal_response(_valid_llm_json(probability=0.80, posterior=0.65))
+        assert result is not None
+        assert result["probability"] == 0.65  # posterior wins
+
+    def test_non_list_updates_applied_defaults_to_empty(self) -> None:
+        result = parse_signal_response(_valid_llm_json(updates_applied="not a list"))  # type: ignore[arg-type]
+        assert result is not None
+        assert result["updates_applied"] == []
+        assert result["evidence_used"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -457,12 +476,18 @@ class TestBuildPrompt:
         prompt = build_prompt(market, [])
         assert "Market Opened (Issuance Date): unknown" in prompt
 
-    def test_includes_pre_issuance_warning(self) -> None:
-        """Prompt must warn LLM that pre-issuance evidence cannot directly resolve the market."""
+    def test_does_not_include_temporal_rules(self) -> None:
+        """Static instructions must live in SYSTEM_PROMPT, not the user-turn prompt."""
         market = _make_market()
         prompt = build_prompt(market, [])
-        assert "TEMPORAL EVIDENCE RULES" in prompt
-        assert "date of the SPECIFIC EVENT" in prompt
+        assert "TEMPORAL EVIDENCE RULES" not in prompt
+        assert "REASONING PROCESS" not in prompt
+
+    def test_system_prompt_includes_temporal_rules(self) -> None:
+        """SYSTEM_PROMPT must contain the temporal evidence rules and reasoning process."""
+        assert "TEMPORAL EVIDENCE RULES" in SYSTEM_PROMPT
+        assert "date of the SPECIFIC EVENT" in SYSTEM_PROMPT
+        assert "REASONING PROCESS" in SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +552,7 @@ class TestSignalPipelineAnalyze:
         doc = _make_document()
         pipeline, _, _ = self._make_pipeline(
             docs=[doc],
-            llm_content=_valid_llm_json(doc_ids=[doc.id]),
+            llm_content=_valid_llm_json(),
             current_signal_hash=None,  # no prior signal
         )
 
@@ -565,7 +590,7 @@ class TestSignalPipelineAnalyze:
         doc = _make_document()
         pipeline, _, llm_client = self._make_pipeline(
             docs=[doc],
-            llm_content=_valid_llm_json(doc_ids=[doc.id]),
+            llm_content=_valid_llm_json(),
             current_signal_hash="different_hash" + "x" * 50,  # won't match
         )
 
@@ -608,7 +633,7 @@ class TestSignalPipelineAnalyze:
         doc = _make_document()
         pipeline, session, _ = self._make_pipeline(
             docs=[doc],
-            llm_content=_valid_llm_json(doc_ids=[doc.id]),
+            llm_content=_valid_llm_json(),
             current_signal_hash=None,
         )
 
@@ -624,7 +649,7 @@ class TestSignalPipelineAnalyze:
         doc = _make_document()
         pipeline, session, _ = self._make_pipeline(
             docs=[doc],
-            llm_content=_valid_llm_json(doc_ids=[doc.id]),
+            llm_content=_valid_llm_json(),
             current_signal_hash=None,
         )
 
@@ -640,7 +665,7 @@ class TestSignalPipelineAnalyze:
         doc = _make_document()
         pipeline, session, _ = self._make_pipeline(
             docs=[doc],
-            llm_content=_valid_llm_json(doc_ids=[doc.id]),
+            llm_content=_valid_llm_json(),
             current_signal_hash=None,
         )
 
@@ -706,7 +731,7 @@ class TestSignalPipelineAnalyze:
         cosine_similarity = 0.73
         pipeline, session, _ = self._make_pipeline(
             docs=[doc],
-            llm_content=_valid_llm_json(doc_ids=[doc.id]),
+            llm_content=_valid_llm_json(),
             current_signal_hash=None,
         )
 

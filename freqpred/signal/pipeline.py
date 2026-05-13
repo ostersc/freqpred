@@ -14,7 +14,7 @@ from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.models import Document, DocumentMarketLinkRow
 from freqpred.rag.retriever import Embedder, compute_retrieval_hash, retrieve
 from freqpred.signal.cache import scheduled_cooldown_remaining, should_skip
-from freqpred.signal.llm import PROMPT_VERSION, SYSTEM_PROMPT, build_prompt, parse_signal_response
+from freqpred.signal.llm import PROMPT_VERSION, SIGNAL_ANALYSIS_TOOL, SYSTEM_PROMPT, build_prompt, parse_signal_response
 from freqpred.signal.models import Signal, SignalRow
 
 log = structlog.get_logger(__name__)
@@ -173,8 +173,10 @@ class SignalPipeline:
                     self._model,
                     query_type="market_analysis",
                     system=SYSTEM_PROMPT,
+                    cache_system=True,
                     market_id=market.id,
                     max_tokens=1024,
+                    json_tool=SIGNAL_ANALYSIS_TOOL,
                 )
             except LLMError as exc:
                 log.error(
@@ -193,6 +195,22 @@ class SignalPipeline:
                     content_preview=llm_response.content[:200],
                 )
                 return None
+
+            # Monitoring: log prior→posterior delta for calibration health checks
+            _prior = parsed.get("prior")
+            _posterior = parsed.get("posterior")
+            _update_count = len(parsed.get("updates_applied") or [])
+            if _prior is not None and _posterior is not None:
+                _delta = round(abs(_posterior - _prior), 4)
+                log.info(
+                    "signal.prior_posterior",
+                    market_id=str(market.id),
+                    prior=_prior,
+                    posterior=_posterior,
+                    delta=_delta,
+                    update_count=_update_count,
+                    flagged_underjustified=_delta > 0.15 and _update_count == 0,
+                )
 
             # Step 6: write signal + document links + update market atomically
             signal = await self._write_signal(

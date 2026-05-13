@@ -216,7 +216,7 @@ class KalshiClient(IMarketClient):
         open_time = (
             datetime.fromisoformat(s.open_time.replace("Z", "+00:00"))
             if s.open_time
-            else now
+            else None
         )
 
         return Market(
