@@ -329,6 +329,42 @@ class KalshiClient(IMarketClient):
             return []
         return [self._to_market(m) for m in data.get("markets", [])]
 
+    async def get_series_settled_history(self, series_ticker: str) -> list[dict[str, Any]]:
+        """Return all settled markets for a series, paginated.
+
+        Each dict has at minimum: ticker, result, yes_sub_title.
+        """
+        results: list[dict[str, Any]] = []
+        cursor: str | None = None
+
+        while True:
+            params: dict[str, Any] = {
+                "status": "settled",
+                "series_ticker": series_ticker,
+                "limit": 200,
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                data = await self._get("/markets", params=params)
+            except KalshiAPIError as exc:
+                log.warning(
+                    "kalshi.series_history.error",
+                    series_ticker=series_ticker,
+                    status=exc.status_code,
+                )
+                break
+
+            markets: list[dict[str, Any]] = data.get("markets", [])
+            results.extend(markets)
+
+            cursor = data.get("cursor") or None
+            if not cursor or len(markets) < 200:
+                break
+
+        return results
+
     async def get_orderbook(self, market_id: str) -> dict[str, float]:
         """Return best bid/ask from the Kalshi orderbook.
 

@@ -13,6 +13,7 @@ from freqpred.llm.client import LLMClient, LLMError
 from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.models import Document, DocumentMarketLinkRow
 from freqpred.rag.retriever import Embedder, compute_retrieval_hash, retrieve
+from freqpred.metrics.series_history import get_series_history_for_market
 from freqpred.signal.cache import scheduled_cooldown_remaining, should_skip
 from freqpred.signal.llm import PROMPT_VERSION, SIGNAL_ANALYSIS_TOOL, SYSTEM_PROMPT, build_prompt, parse_signal_response
 from freqpred.signal.models import Signal, SignalRow
@@ -166,7 +167,13 @@ class SignalPipeline:
                     return None
 
             # Step 6: build prompt and call LLM
-            prompt = build_prompt(market, docs)
+            series_history = None
+            if market.series_ticker:
+                option_code = market.id.rsplit("-", 1)[-1] if "-" in market.id else market.id
+                series_history = await get_series_history_for_market(
+                    session, market.series_ticker, option_code
+                )
+            prompt = build_prompt(market, docs, series_history=series_history)
             try:
                 llm_response = await self._llm_client.complete(
                     prompt,

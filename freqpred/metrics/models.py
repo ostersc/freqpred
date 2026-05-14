@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import Float, ForeignKey, Integer, Text, VARCHAR
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.schema import PrimaryKeyConstraint
 
 from freqpred.db import Base
 
@@ -57,6 +58,24 @@ class SignalAssessmentRow(Base):
     similar_market_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     llm_query_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("llm_queries.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
+
+
+class SeriesOptionHistoryRow(Base):
+    """Cached YES/NO settlement counts for a series option (or the aggregate row)."""
+
+    __tablename__ = "series_option_history"
+
+    series_ticker: Mapped[str] = mapped_column(Text, primary_key=True)
+    option_code: Mapped[str] = mapped_column(Text, primary_key=True)
+    option_label: Mapped[str] = mapped_column(Text, nullable=False)
+    yes_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    no_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_fetched_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default="now()"

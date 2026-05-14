@@ -21,8 +21,9 @@ from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.ingestion.models import ApiDailyCounterRow  # registers the table
 from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow, PositionRow
-from freqpred.metrics.models import SignalAssessmentRow, SourceQualityScoreRow
+from freqpred.metrics.models import SeriesOptionHistoryRow, SignalAssessmentRow, SourceQualityScoreRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
+from freqpred.runtime.models import RuntimeEventRow, ServiceHeartbeatRow  # registers the tables
 from freqpred.signal.models import SignalRow
 from freqpred.strategy.models import RuntimeConfigOverrideRow  # registers the table
 
@@ -63,6 +64,7 @@ def test_all_tables_registered():
         "signal_assessments",
         "service_heartbeats",
         "runtime_events",
+        "series_option_history",
     }
     registered = set(Base.metadata.tables.keys())
     assert expected == registered

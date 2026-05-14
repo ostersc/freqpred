@@ -116,6 +116,16 @@ uv run freqpred markets list           # list active Kalshi markets
 uv run freqpred signal analyze --market-id <id>  # analyze a specific market
 ```
 
+### Querying the database
+
+`psql` is not installed locally. Always use `docker exec` without the `-it` flag:
+
+```bash
+docker exec freqpred-db-1 psql -U freqpred -d freqpred -c "SELECT ..."
+```
+
+Never use `psql` directly and never add `-it` to `docker exec` — it fails when stdin is not a terminal.
+
 ---
 
 ## Hard constraints — never violate these
@@ -251,6 +261,11 @@ Before declaring any task complete, verify every acceptance criterion listed in 
 **For any task that adds, removes, or changes a CLI command or Telegram bot command:**
 - Update [COMMANDS.md](COMMANDS.md) to reflect the change before declaring the task done.
 - This includes: new commands, removed commands, changed option names/defaults, new Telegram bot commands registered via `TelegramCommandHandler.register()`.
+
+**For any task that adds, removes, or changes a scheduled background task:**
+- Add or update a `SERVICE_*` constant and a `FreshnessSpec` entry in `freqpred/runtime/telemetry.py:build_freshness_specs()` before declaring the task done.
+- Wire `telemetry.mark_success()` and `telemetry.mark_error()` calls into the scheduler loop for that service — each scheduled task must report its own heartbeat independently, even if it runs inside another scheduler's loop.
+- The purpose of telemetry is to surface stale data sources. Two conceptually unrelated tasks must never share a heartbeat even if they share a scheduler loop.
 
 ---
 

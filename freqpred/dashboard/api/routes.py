@@ -884,6 +884,7 @@ async def analyze_market(
             str(market_row.current_signal_id) if market_row.current_signal_id else None
         ),
         open_time=market_row.open_time,
+        series_ticker=market_row.series_ticker,
     )
 
     new_signal = await pipeline.analyze(market, trigger="manual", force=True)  # type: ignore[union-attr]

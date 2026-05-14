@@ -597,4 +597,5 @@ def _market_row_to_domain(row: MarketRow) -> Market:
         current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
         metadata=row.metadata_ or {},
         open_time=row.open_time,
+        series_ticker=row.series_ticker,
     )

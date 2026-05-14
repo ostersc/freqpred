@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-05-10
+**Last updated:** 2026-05-13
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -155,6 +155,7 @@ graph TD
 | **Strategy Engine** | Applies `IPredictionStrategy` plugins to signal output, decides trade/skip, and provides the base position-sizing target |
 | **Assessment** | Builds source-quality and similar-market context, calls the judgment model when useful, and persists a sizing-only `SignalAssessment` before final position sizing |
 | **Source Quality Scheduler** | Refreshes rolling `source_quality_scores` snapshots daily so assessment and dashboard views have fresh source-level calibration data |
+| **Series History Scheduler** | Fetches all settled markets per active series from the Kalshi API and upserts per-option YES/NO counts plus an aggregate row into `series_option_history`; runs daily (07:00 ET) + at startup; per-series 6-hour skip guard prevents redundant fetches |
 | **IMarketClient** | Abstract interface over Kalshi (and future platforms); handles orders, positions, balance |
 | **Order Manager** | Executes paper or live trades; enforces hard risk caps before any order; passes optional persisted assessment into strategy sizing |
 | **Ledger** | Immutable trade log; records every signal, position, and resolution outcome |
@@ -608,6 +609,32 @@ A **cost budget circuit breaker** enforces a configurable daily LLM spend cap (d
 
 ---
 
+### SeriesOptionHistory
+
+Caches YES/NO settlement counts per `(series_ticker, option_code)` pair so the signal pipeline can inject historical base rates into the LLM prompt without hitting the Kalshi API on the critical path.
+
+```python
+@dataclass
+class SeriesOptionHistory:
+    series_ticker: str         # e.g. "KXTRUMPSAY"
+    option_code: str           # last dash-segment of ticker, or "__series__" for the aggregate row
+    option_label: str          # yes_sub_title for option rows; series_ticker for the aggregate row
+    yes_count: int             # settled YES count
+    no_count: int              # settled NO count
+    last_fetched_at: datetime  # when this row was last refreshed from the Kalshi API
+    created_at: datetime
+```
+
+**Key rules:**
+- Primary key is `(series_ticker, option_code)` — one row per option, plus one `option_code = "__series__"` aggregate row per series that accumulates counts across all options and all weeks.
+- Populated by `freqpred/metrics/series_history.py:refresh_series_history()` via `GET /markets?status=settled&series_ticker=X`.
+- The signal pipeline reads this table immediately before building the LLM prompt (`get_series_history_for_market()`). When a matching row exists, a `=== HISTORICAL BASE RATE ===` block is injected between `=== MARKET CONTEXT ===` and `=== EVIDENCE ===`.
+- `MIN_SAMPLE = 3`: option rows with `yes_count + no_count < 3` are shown with a "small sample, treat as weak signal" note; the series aggregate is always shown when available.
+- **Type A series** (e.g. `KXTRUMPSAY`, `KXTRUMPACT`): option code repeats across weekly events, so per-option rates are meaningful.
+- **Type B series** (e.g. `KXTRUMPPHOTO`): option code encodes the event date — each code is unique, so per-option rows have `n=1`. The series aggregate still applies; the option block is omitted from the prompt when below `MIN_SAMPLE`.
+
+---
+
 ## 8. Strategy Plugin Interface
 
 Strategies are Python classes that implement `IPredictionStrategy`. The design mirrors freqtrade's `IStrategy` — entry signals, exit signals, stoploss, and trailing stops are all strategy-owned. The framework enforces hard caps on top; strategy logic defines the alpha.
@@ -849,9 +876,12 @@ flowchart TD
     HS --> CS[Catalyst supplemental - top-1 per query not in core]
     CS --> RH{Retrieval Hash Check}
     RH -->|no new evidence| SKIP([Skip - no LLM call])
-    RH -->|hash changed| LLM[LLM Analysis - Claude Sonnet]
+    RH -->|hash changed| BR[Load series base-rate history]
+    BR --> LLM[LLM Analysis - Claude Sonnet]
     LLM --> SC[Signal Creation]
 ```
+
+**Base-rate prompt enrichment:** immediately before building the LLM prompt, the pipeline calls `get_series_history_for_market(session, series_ticker, option_code)` for markets that have a `series_ticker`. When data exists, a `=== HISTORICAL BASE RATE ===` block is injected into the prompt between `=== MARKET CONTEXT ===` and `=== EVIDENCE ===`. See `SeriesOptionHistory` in §7 for the data model and Type A / Type B series semantics. Prompt version: `signal-v7`.
 
 ### Retrieval Sources
 

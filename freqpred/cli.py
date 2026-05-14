@@ -183,6 +183,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     from freqpred.markets.models import Market, MarketRow
     from freqpred.markets.watcher import MarketWatcher
     from freqpred.rag.embedder import LocalEmbedder
+    from freqpred.signal.llm import PROMPT_VERSION
     from freqpred.signal.pipeline import SignalPipeline
     from freqpred.strategy.loader import load_strategy
 
@@ -206,7 +207,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     llm_client = LLMClient(
         anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
         session_factory,
-        prompt_version="signal-v1",
+        prompt_version=PROMPT_VERSION,
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
         max_consecutive_errors=config.risk.max_consecutive_llm_errors,
     )
@@ -366,6 +367,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                         current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
                         metadata=dict(row.metadata_),
                         open_time=row.open_time,
+                        series_ticker=row.series_ticker,
                     )
                     for row in market_rows
                 ]
@@ -693,6 +695,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     session_factory=session_factory,
                     refresh_time=config.alerts.digest_time,
                     refresh_timezone=config.alerts.digest_timezone,
+                    kalshi_client=kalshi_client,
                     telemetry=runtime_telemetry,
                 ),
                 name="source_quality_scheduler",
@@ -1213,16 +1216,18 @@ async def _signal_analyze(config: object, market_id: str, *, force: bool = False
             current_signal_id=str(row.current_signal_id) if row.current_signal_id else None,
             metadata=dict(row.metadata_),
             open_time=row.open_time,
+            series_ticker=row.series_ticker,
         )
 
         click.echo(f"Analyzing: {market.question}")
         click.echo(f"Category : {market.category}  |  Mid: {market.mid_price:.3f}")
 
         embedder = LocalEmbedder()
+        from freqpred.signal.llm import PROMPT_VERSION  # noqa: PLC0415
         llm_client = LLMClient(
             anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
             session_factory,
-            prompt_version="signal-v1",
+            prompt_version=PROMPT_VERSION,
         )
         pipeline = SignalPipeline(
             session_factory=session_factory,

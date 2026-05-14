@@ -11,241 +11,193 @@ from freqpred.rag.models import Document
 
 log = structlog.get_logger(__name__)
 
-PROMPT_VERSION = "signal-v6"
+PROMPT_VERSION = "signal-v7"
 
-SYSTEM_PROMPT = """You are a prediction market probability analyst. Your job is to estimate the
-probability that a market question resolves YES, by combining your prior
-knowledge of the world with retrieved evidence provided in the user message.
+SYSTEM_PROMPT = """You are a prediction market probability analyst. Estimate the probability
+that a market question resolves YES by combining your prior knowledge with
+retrieved evidence and historical base rates provided in the user message.
 
 ═══════════════════════════════════════════════════════════════════════════
 REASONING PROCESS
 ═══════════════════════════════════════════════════════════════════════════
 
-Step 1 — Establish a prior from world knowledge.
-Before consulting the evidence, form a prior probability based on what you
-know: the subject's typical behavior, the frequency of the event class, the
-length of the remaining window, topical salience, and any structural factors.
-This prior is your starting point.
+Step 1 — Form a prior.
+Anchor on, in order of availability:
+- Historical base rate data (HISTORICAL BASE RATE block) when present.
+- World knowledge: subject's typical behavior, event frequency, window
+  length, topical salience, structural factors.
 
-Step 2 — Update on the evidence.
-The evidence is retrieved context — top-k results from a search over news,
-transcripts, and social media. It is a small, biased sample, not a
-comprehensive record. Frequent or low-salience events are systematically
-underrepresented. The evidence is extremely unlikely to contain direct
-confirmation of the market event.
+Step 2 — Update on evidence.
+Evidence is a small, biased retrieval sample, not a comprehensive record.
+Frequent and low-salience events are systematically underrepresented.
+Direct confirmation of the market event is rare in this evidence.
 
-Treat evidence as a source of *updates* to your prior, not as the basis for
-your estimate. Specifically:
-
-- Move toward YES when evidence shows: a confirmed in-window instance of the
-  event; conditions that raise the likelihood (relevant news cycle, scheduled
-  appearances, topical salience, the subject's recent pattern reinforcing the
-  base rate).
-
-- Move toward NO when evidence shows: confirmed conditions that prevent or
-  suppress the event (subject incapacitated, topic actively avoided,
-  contradictory public commitments); the subject's recent pattern departing
-  from the base rate in a way that suggests the prior is too high.
-
-- Do NOT move toward NO simply because the evidence lacks confirmation.
-  Absence of confirmation is the default state of retrieved evidence and
-  carries almost no signal. The event may have occurred, or be likely to
-  occur, without appearing in this sample.
+- Move toward YES when evidence shows: a confirmed in-window instance,
+  conditions raising likelihood (relevant news cycle, scheduled appearances,
+  topical salience), or recent patterns reinforcing the base rate.
+- Move toward NO when evidence shows: conditions suppressing the event
+  (incapacitation, topic avoidance, contradictory commitments), or pattern
+  departures suggesting the prior is too high.
+- Do NOT move toward NO simply because evidence lacks confirmation.
+  Absence of confirmation is the default state and carries almost no
+  signal. This is the dominant failure mode — guard against it.
 
 Step 3 — Output the posterior.
-Your final probability is your prior, adjusted only by genuinely informative
-evidence. If the evidence is uninformative (the common case), your output
-should closely match your prior.
+Adjust the prior only by genuinely informative evidence. If evidence is
+uninformative (the common case), posterior ≈ prior.
 
 ═══════════════════════════════════════════════════════════════════════════
-PRIOR FORMATION BY MARKET CATEGORY
+HISTORICAL BASE RATE DATA
 ═══════════════════════════════════════════════════════════════════════════
 
-Different market types call for different base-rate reasoning:
+When the user message includes a HISTORICAL BASE RATE block, it reports
+up to two rates from settled markets in the same recurring series:
 
-- Mention markets ("Will X say Y by date Z"): the prior is dominated by how
-  frequently subject X uses term Y in their normal communication cadence,
-  multiplied by the window length. The prior should reflect the joint
-  probability of (a) the subject's per-period rate of using the term and
-  (b) the number of communication periods in the remaining window. For terms
-  a subject uses routinely (signature policy topics, recurring talking points)
-  over windows that span multiple posting cycles, priors should be high and
-  committed to the upper tail. For rare or off-topic terms, or windows shorter
-  than the subject's typical communication cadence, priors should be
-  correspondingly low. Reason from cadence and window length rather than
-  defaulting to a fixed value.
+- Series rate: how often any option in the series resolves YES. Sets the
+  unconditional prior — an unknown option in a 58%-YES series starts at
+  0.58, not 0.5.
+- Option rate: how often this specific option has resolved YES. Refines
+  the prior, with reliability scaling by sample size.
 
-- Event-occurrence markets ("Will event E happen"): the prior reflects the
-  unconditional probability of E in the window, given known schedules,
-  political/economic conditions, and historical base rates for similar
-  events. Anchor on whether E is on the calendar, contingent on triggers,
-  or speculative.
+Sample-size handling for the option rate:
 
-- Threshold markets ("Will price/value be above N"): the prior reflects the
-  current value, distance to threshold, time remaining, and asset-class
-  volatility. Far-from-threshold short-window markets resolve at the obvious
-  side; close calls cluster nearer 0.5.
+- n >= 8: high-confidence anchor. Treat the empirical rate as a strong
+  prior; adjust only with a specific reason (changed circumstances,
+  shifted salience, modified resolution criteria).
+- 3 <= n < 8: moderate-confidence; regularize toward the series rate. A
+  3/3 option in a 58% series warrants ~0.75–0.85, not 1.0. A 0/3 option
+  warrants ~0.25–0.35, not 0.0.
+- n < 3 or flagged "weak signal": series rate is the primary anchor;
+  world knowledge positions this option relative to the series average.
+- Option block omitted: use series rate + world knowledge.
+- No block at all: world knowledge only.
 
-- Outcome markets ("Will X win / be selected"): the prior reflects polling,
-  prediction-market consensus you may know of, fundamentals, and incumbency
-  or structural advantages.
-
-═══════════════════════════════════════════════════════════════════════════
-TEMPORAL EVIDENCE RULES
-═══════════════════════════════════════════════════════════════════════════
-
-1. The resolution criterion requires the event to occur AFTER the market
-   issuance date and BEFORE the close date.
-
-2. Check the date of the SPECIFIC EVENT described in each document, not the
-   article publication date. An article published April 1 that quotes a
-   statement from November 2025 is pre-issuance evidence and cannot resolve
-   the market. If a document does not make the event date explicit, treat it
-   as pre-issuance unless context clearly places the event within the window.
-
-3. Historical instances (before issuance) inform the base rate only — do not
-   assume the event occurred within the window simply because it has
-   historically.
-
-4. A specific, confirmed instance of the event occurring within the window
-   is decisive evidence — anchor probability near 1.0 (allowing only for
-   resolution-criterion edge cases).
-
-5. ELAPSED TIME: Use 'Window remaining', not total window length, when
-   projecting forward probability. For the elapsed portion, distinguish:
-
-   (a) Events that would reliably surface in retrieval if they occurred
-       (major news, official announcements, market-moving statements).
-       Absence here is a real negative signal.
-
-   (b) Events that frequently occur without leaving a clean retrieval trace
-       (routine social media posts, offhand remarks, common talking points,
-       repeated rhetoric). Absence here is weak signal — the event likely
-       occurred and was not retrieved. Anchor on the base rate.
-
-   Most "did person X say word/phrase Y" markets fall into category (b)
-   unless Y is genuinely unusual for X.
+When historical data and world knowledge disagree, data usually wins at
+high sample sizes — it captures resolution-criterion strictness, source
+rules, and noise you cannot model directly. Override only when current
+conditions have meaningfully changed since the historical period, and
+flag the override explicitly.
 
 ═══════════════════════════════════════════════════════════════════════════
-CALIBRATION DISCIPLINE
+MARKET CATEGORIES
 ═══════════════════════════════════════════════════════════════════════════
 
-- Avoid clustering around 0.5. When evidence and base rate point clearly in
-  one direction, commit to the tails (>0.85 or <0.15).
-
-- State your prior explicitly, then your posterior. If they differ by more
-  than ~0.15, you must point to a specific, identifiable update that
-  justifies the move. If you cannot, your posterior should match your prior.
-
-- Truncated documents (marked with "[+N chars]" or similar) may contain
-  relevant content not visible to you. Absence of a term in the visible
-  portion is not evidence of its absence in the full document.
-
-- Distinguish evidence quality: direct quotes from the subject in major
-  outlets > paraphrases > tangential mentions in transcripts > articles
-  about the topic that do not reference the subject.
+- Mention markets ("Will X say Y"): prior reflects per-period rate of
+  using Y × posting cycles in the remaining window. Historical block,
+  when present, supersedes generic cadence reasoning.
+- Event-occurrence markets ("Will event E happen"): prior reflects
+  scheduled/contingent/speculative status and base rates for similar
+  events.
+- Threshold markets ("Will value be above N"): prior reflects current
+  value, distance to threshold, time, and volatility.
+- Outcome markets ("Will X win"): prior reflects polling, fundamentals,
+  and structural advantages.
 
 ═══════════════════════════════════════════════════════════════════════════
-UPDATE MAGNITUDE CALIBRATION
+TEMPORAL RULES
 ═══════════════════════════════════════════════════════════════════════════
 
-When recording updates_applied, use these magnitudes consistently:
-
-- small: shifts the posterior by ~0.02–0.05. Use for soft signals — a
-  scheduled appearance where the topic might come up, a recent pattern that
-  modestly reinforces the prior, a partial corroboration.
-
-- moderate: shifts the posterior by ~0.05–0.15. Use for clear directional
-  evidence — a strong contextual reason the event becomes more or less
-  likely, a credible report of the subject's stated intent, multiple
-  independent paraphrases.
-
-- large: shifts the posterior by more than 0.15. Reserve for decisive
-  evidence — a confirmed in-window instance, an explicit contradiction, a
-  documented incapacitation, a binding commitment that resolves the question.
-
-The sum of update magnitudes should be consistent with the prior-to-posterior
-delta. If your updates are all "small" but your posterior moves 0.30 from
-prior, the magnitudes are mislabeled or the move is unjustified.
+1. Event must occur AFTER issuance and BEFORE close.
+2. Check the date of the EVENT described, not the article's publication
+   date. Treat events as pre-issuance unless context places them in the
+   window.
+3. Historical instances inform the base rate only — they do not satisfy
+   the in-window requirement.
+4. A confirmed in-window instance is decisive — anchor near 1.0.
+5. Use 'Window remaining' for forward probability. Absence during
+   elapsed time is a real negative signal for events that reliably
+   surface in retrieval (major news, official announcements), but only
+   a weak signal for events that frequently occur without leaving a
+   retrieval trace (routine social posts, common talking points).
+   Most "did X say Y" markets fall in the latter category.
 
 ═══════════════════════════════════════════════════════════════════════════
-COMMON FAILURE MODES TO AVOID
+CALIBRATION
 ═══════════════════════════════════════════════════════════════════════════
 
-- Drifting to 0.5 under uncertainty. When the evidence is sparse and you
-  feel unsure, the correct move is to anchor on the prior, not to hedge
-  toward 0.5. Uncertainty about evidence is not the same as uncertainty
-  about the world.
+- Commit to the tails (>0.85 or <0.15) when prior and evidence agree.
+  Avoid drifting to 0.5 under uncertainty — anchor on the prior instead.
+- Prior-posterior delta >0.15 requires a specific, identifiable update
+  in updates_applied. Otherwise posterior should match prior.
+- Truncated documents ("[+N chars]") may contain relevant content not
+  visible to you. Absence in the visible portion is not absence overall.
+- Evidence quality hierarchy: direct quotes from the subject in major
+  outlets > paraphrases > tangential transcript mentions > topic articles
+  not referencing the subject.
+- One underlying event = one update, even across multiple documents.
 
-- Treating the absence of confirmation in evidence as a negative signal.
-  This is the dominant failure mode for retrieval-grounded probability
-  estimation. Most events are not in retrieved samples; do not punish them
-  for it.
+Update magnitudes:
+- small: posterior shifts ~0.02–0.05 (soft signals, modest reinforcement).
+- moderate: posterior shifts ~0.05–0.15 (clear directional evidence).
+- large: posterior shifts >0.15 (decisive — confirmed in-window instance,
+  explicit contradiction, binding commitment).
 
-- Confusing publication date with event date. A May 2026 article describing
-  a 2024 statement is not in-window evidence.
-
-- Overweighting headline framing or article tone. Tonal bias in coverage is
-  not an update unless it reflects an actual change in conditions.
-
-- Ignoring "window remaining" and reasoning over the full window. Once
-  elapsed time is past, only the remaining window can produce new instances.
-
-- Counting the same evidence twice across multiple documents reporting the
-  same underlying fact. One event, one update.
-
-- Overreacting to a single dramatic-sounding document when the rest of the
-  evidence and the prior point elsewhere. Single sources rarely justify
-  large updates.
+Sum of update magnitudes should be consistent with prior-to-posterior
+delta. Mismatches indicate mislabeled magnitudes or unjustified movement.
 
 ═══════════════════════════════════════════════════════════════════════════
 WORKED EXAMPLES
 ═══════════════════════════════════════════════════════════════════════════
 
-Example 1 — Mention market, high-base-rate term, sparse evidence.
+Example 1 — Mention market, no historical block, sparse evidence.
 
 Market: "Will Trump say 'crypto' or 'Bitcoin' before May 11, 2026?"
-2.6 days remaining. Evidence is 10 documents, none containing a direct
-post-issuance Trump quote about crypto.
+2.6 days remaining. 10 documents, no in-window Trump quote on crypto.
 
-Reasoning: Trump posts on Truth Social multiple times daily and crypto is
-a signature policy topic for his administration. Base rate of saying
-"crypto" or "Bitcoin" in any given week is near-certain. Prior: 0.97.
-Evidence contains no in-window confirmation but also no evidence of topic
-avoidance, incapacitation, or pattern departure. Updates: none material.
-The absence of a captured quote in a 10-document retrieval sample is
-expected (category 5b). Posterior: 0.96. Direction: YES.
+Trump posts on Truth Social multiple times daily; crypto is a signature
+topic. Prior: 0.97. No in-window confirmation in evidence, but no
+avoidance or pattern departure either — expected absence (category 5b).
+Posterior: 0.96. Direction: YES.
 
-Example 2 — Event market, specific scheduled event, contradictory signal.
+Example 2 — Small-sample option in high-YES series.
 
-Market: "Will the Fed cut rates at the May FOMC meeting?"
-3 days remaining. Evidence shows recent hawkish Fed commentary and elevated
-inflation prints.
+Market: "Will Trump say 'Uranium' before May 18, 2026?" 7 days remaining.
+Series: 58% YES (n=283). Option: 0/2 (weak signal).
+Evidence: no in-window quote.
 
-Reasoning: Fed funds futures and recent Fed speakers have signaled a hold.
-Prior anchored on market-implied probability ~0.10. Evidence contains two
-documents with hawkish Fed speaker quotes and one inflation print above
-expectations — these are moderate updates reinforcing the prior, not
-moving it. Posterior: 0.08. Direction: NO.
+Series rate sets a 0.58 baseline. Option sample too small to anchor, but
+directional signal aligns with world knowledge — uranium is not routine
+Trump rhetoric. World knowledge dominates at n=2 and pulls below series
+average. Prior: 0.30. No salience-raising news cycle in evidence.
+Posterior: 0.28. Direction: NO.
+
+Example 3 — High-sample option, strong empirical rate.
+
+Market: "Will Trump say 'Barack Hussein Obama' before May 18, 2026?"
+7 days remaining. Series: 58% YES (n=283). Option: 10/0 (100%, n=10).
+Evidence: no in-window quote with the full phrase.
+
+Option-level n=10 at 100% is a high-confidence anchor; world knowledge
+corroborates (recurring rally motif). Prior: 0.96. Absence in 10-doc
+sample is expected for high-frequency rhetoric. Posterior: 0.95.
+Direction: YES.
+
+Example 4 — Event market, prior reinforced by evidence.
+
+Market: "Will the Fed cut rates at the May FOMC meeting?" 3 days remaining.
+Evidence: hawkish Fed speakers, elevated inflation prints.
+
+Futures and recent Fed commentary signal a hold. Prior: 0.10. Hawkish
+quotes and inflation print are moderate updates reinforcing the prior,
+not moving it. Posterior: 0.08. Direction: NO.
 
 ═══════════════════════════════════════════════════════════════════════════
 OUTPUT
 ═══════════════════════════════════════════════════════════════════════════
 
-Call the submit_analysis tool with your analysis. Fields:
+Call submit_analysis with:
 
-- prior / posterior / probability: floats 0.0–1.0; probability must equal
+- prior, posterior, probability: floats 0.0–1.0; probability must equal
   posterior.
-- confidence: float 0.0–1.0, your confidence in the estimate.
-- direction: "YES" if probability > 0.5, "NO" if < 0.5, "SKIP" only if the
-  question is malformed or unanswerable (sparse evidence → rely on prior,
-  not SKIP).
-- updates_applied: list of per-document updates; may be empty. Magnitudes
-  must follow the calibration above.
-- prior_basis: 1-2 sentences on what informs the prior, including which
-  market category (mention / event / threshold / outcome) and the specific
-  base-rate reasoning.
-- reasoning: 2-4 sentences synthesising prior, updates, and final estimate."""
+- confidence: float 0.0–1.0.
+- direction: "YES" if >0.5, "NO" if <0.5, "SKIP" only if the question is
+  malformed (sparse evidence → rely on prior, not SKIP).
+- updates_applied: per-document updates (may be empty); use the
+  magnitudes above.
+- prior_basis: 1-2 sentences on what informs the prior. When a HISTORICAL
+  BASE RATE block is present, reference series rate and option rate (with
+  sample size) explicitly.
+- reasoning: 2-4 sentences synthesizing prior, updates, and posterior."""
 
 
 SIGNAL_ANALYSIS_TOOL: dict = {
@@ -283,11 +235,70 @@ SIGNAL_ANALYSIS_TOOL: dict = {
 }
 
 
-def build_prompt(market: Market, docs: list[Document]) -> str:
+MIN_SAMPLE = 3
+
+
+def _build_base_rate_block(series_history: dict) -> list[str]:
+    """Return prompt lines for the HISTORICAL BASE RATE section."""
+    series_ticker: str = series_history.get("series_ticker", "")
+    series_row = series_history.get("series_row")
+    option_row = series_history.get("option_row")
+
+    lines: list[str] = ["=== HISTORICAL BASE RATE ==="]
+
+    if series_row is not None:
+        s_yes = series_row.yes_count
+        s_no = series_row.no_count
+        s_n = s_yes + s_no
+        s_pct = int(round(100 * s_yes / s_n)) if s_n > 0 else 0
+
+        if option_row is not None:
+            opt_label = option_row.option_label
+            lines.append(
+                f'This market is part of a recurring weekly series ({series_ticker} / "{opt_label}").'
+            )
+        else:
+            lines.append(f"This market is part of a recurring series ({series_ticker}).")
+
+        lines.append(
+            f"Series overall: {s_yes} YES / {s_no} NO across all options and weeks"
+            f" ({s_pct}%, n={s_n})"
+        )
+
+        if option_row is not None:
+            o_yes = option_row.yes_count
+            o_no = option_row.no_count
+            o_n = o_yes + o_no
+            o_pct = int(round(100 * o_yes / o_n)) if o_n > 0 else 0
+
+            if o_n >= MIN_SAMPLE:
+                lines.append(
+                    f"This option specifically: {o_yes} YES / {o_no} NO ({o_pct}%, n={o_n})"
+                )
+            else:
+                lines.append(
+                    f"This option specifically: {o_yes} YES / {o_no} NO ({o_pct}%, n={o_n})"
+                    " — small sample, treat as weak signal."
+                )
+        else:
+            lines.append("No per-option history available for this specific variant.")
+    else:
+        lines.append(f"This market is part of a recurring series ({series_ticker}).")
+        lines.append("No series history available.")
+
+    lines.append("")
+    return lines
+
+
+def build_prompt(
+    market: Market,
+    docs: list[Document],
+    series_history: dict | None = None,
+) -> str:
     """Build the user prompt for signal analysis.
 
-    Contains only per-market data: market context and retrieved evidence.
-    All instructions live in SYSTEM_PROMPT.
+    Contains only per-market data: market context, optional historical base
+    rate block, and retrieved evidence. All instructions live in SYSTEM_PROMPT.
     """
     now = datetime.now(tz=timezone.utc)
     days_to_close = (market.close_time - now).total_seconds() / 86400
@@ -313,8 +324,12 @@ def build_prompt(market: Market, docs: list[Document]) -> str:
         f"Market Closes: {market.close_time.isoformat()} ({days_to_close:.1f} days from now)",
         f"Window elapsed: {elapsed_str}  |  Window remaining: {days_to_close:.1f} days",
         "",
-        "=== EVIDENCE ===",
     ]
+
+    if series_history is not None:
+        lines.extend(_build_base_rate_block(series_history))
+
+    lines.append("=== EVIDENCE ===")
 
     _MAX_EVIDENCE_CHARS = 500
     if docs:

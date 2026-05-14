@@ -480,13 +480,12 @@ class TestBuildPrompt:
         """Static instructions must live in SYSTEM_PROMPT, not the user-turn prompt."""
         market = _make_market()
         prompt = build_prompt(market, [])
-        assert "TEMPORAL EVIDENCE RULES" not in prompt
+        assert "TEMPORAL RULES" not in prompt
         assert "REASONING PROCESS" not in prompt
 
     def test_system_prompt_includes_temporal_rules(self) -> None:
-        """SYSTEM_PROMPT must contain the temporal evidence rules and reasoning process."""
-        assert "TEMPORAL EVIDENCE RULES" in SYSTEM_PROMPT
-        assert "date of the SPECIFIC EVENT" in SYSTEM_PROMPT
+        """SYSTEM_PROMPT must contain the temporal rules and reasoning process."""
+        assert "TEMPORAL RULES" in SYSTEM_PROMPT
         assert "REASONING PROCESS" in SYSTEM_PROMPT
 
 
