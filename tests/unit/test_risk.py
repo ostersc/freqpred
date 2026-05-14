@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from freqpred.config import RiskConfig
+from freqpred.markets.models import Market
 from freqpred.signal.models import Signal
 from freqpred.trading.risk import RiskDecision, RiskEngine, TradingCircuitBreakerError
 
@@ -483,3 +484,224 @@ async def test_cooldown_disabled_when_zero() -> None:
     )
 
     assert decision.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Helper factories for new public method tests
+# ---------------------------------------------------------------------------
+
+
+def _make_capacity_session(open_count: int, total_exposure: float) -> MagicMock:
+    """Session for check_entry_capacity: open_count then total_exposure."""
+    call_returns: list[object] = [open_count, total_exposure]
+    session = MagicMock()
+
+    async def _execute(stmt: object) -> MagicMock:
+        result = MagicMock()
+        result.scalar_one.return_value = call_returns.pop(0)
+        return result
+
+    session.execute = _execute
+    return session
+
+
+def _make_stoploss_session(stoploss_count: int) -> MagicMock:
+    """Session for _check_stoploss_reentry: single stoploss count query."""
+    call_returns: list[object] = [stoploss_count]
+    session = MagicMock()
+
+    async def _execute(stmt: object) -> MagicMock:
+        result = MagicMock()
+        result.scalar_one.return_value = call_returns.pop(0)
+        return result
+
+    session.execute = _execute
+    return session
+
+
+def _make_market(yes_bid: float = 0.40, yes_ask: float = 0.50) -> Market:
+    return Market(
+        id=MARKET_ID,
+        platform="kalshi",
+        question="Will X happen?",
+        category="Politics",
+        close_time=NOW,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
+        mid_price=(yes_bid + yes_ask) / 2,
+        volume_24h=1000.0,
+        open_interest=500.0,
+        last_fetched_at=NOW,
+        price_updated_at=NOW,
+        metadata_fetched_at=NOW,
+    )
+
+
+# ---------------------------------------------------------------------------
+# check_entry_capacity tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_entry_capacity_max_positions_blocked() -> None:
+    engine = RiskEngine(_make_config(max_open_positions=5))
+    session = _make_capacity_session(open_count=5, total_exposure=0.0)
+
+    blocked, reason = await engine.check_entry_capacity(session, BANKROLL, mode="paper")
+
+    assert blocked is True
+    assert "open positions" in reason
+
+
+@pytest.mark.asyncio
+async def test_check_entry_capacity_total_exposure_blocked() -> None:
+    # 40% of 2000 = 800; existing exposure = 850 → blocked
+    engine = RiskEngine(_make_config(max_total_exposure_pct=0.40))
+    session = _make_capacity_session(open_count=3, total_exposure=850.0)
+
+    blocked, reason = await engine.check_entry_capacity(session, BANKROLL, mode="paper")
+
+    assert blocked is True
+    assert "exposure" in reason
+
+
+@pytest.mark.asyncio
+async def test_check_entry_capacity_ok() -> None:
+    engine = RiskEngine(_make_config(max_open_positions=20, max_total_exposure_pct=0.40))
+    session = _make_capacity_session(open_count=3, total_exposure=200.0)
+
+    blocked, reason = await engine.check_entry_capacity(session, BANKROLL, mode="paper")
+
+    assert blocked is False
+    assert reason == ""
+
+
+# ---------------------------------------------------------------------------
+# pre_signal_gate tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_signal_gate_spread_too_wide() -> None:
+    engine = RiskEngine(_make_config())
+    market = _make_market(yes_bid=0.40, yes_ask=0.60)  # spread = 0.20
+    session = MagicMock()  # should not be called — spread fails first
+
+    blocked, reason = await engine.pre_signal_gate(
+        session, market, mode="paper",
+        effective_max_spread=0.10,
+        block_reentry_after_stoploss=False,
+        stoploss_cooldown_hours=0.0,
+    )
+
+    assert blocked is True
+    assert "spread" in reason
+    session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pre_signal_gate_stoploss_block_reentry() -> None:
+    engine = RiskEngine(_make_config())
+    market = _make_market(yes_bid=0.45, yes_ask=0.50)  # spread = 0.05, within 0.10 max
+    session = _make_stoploss_session(stoploss_count=1)
+
+    blocked, reason = await engine.pre_signal_gate(
+        session, market, mode="paper",
+        effective_max_spread=0.10,
+        block_reentry_after_stoploss=True,
+        stoploss_cooldown_hours=0.0,
+    )
+
+    assert blocked is True
+    assert "block_reentry_after_stoploss" in reason
+
+
+@pytest.mark.asyncio
+async def test_pre_signal_gate_stoploss_cooldown_active() -> None:
+    engine = RiskEngine(_make_config())
+    market = _make_market(yes_bid=0.45, yes_ask=0.50)
+    session = _make_stoploss_session(stoploss_count=2)
+
+    blocked, reason = await engine.pre_signal_gate(
+        session, market, mode="paper",
+        effective_max_spread=0.10,
+        block_reentry_after_stoploss=False,
+        stoploss_cooldown_hours=4.0,
+    )
+
+    assert blocked is True
+    assert "cooldown" in reason
+
+
+@pytest.mark.asyncio
+async def test_pre_signal_gate_stoploss_cooldown_expired() -> None:
+    engine = RiskEngine(_make_config())
+    market = _make_market(yes_bid=0.45, yes_ask=0.50)
+    session = _make_stoploss_session(stoploss_count=0)
+
+    blocked, reason = await engine.pre_signal_gate(
+        session, market, mode="paper",
+        effective_max_spread=0.10,
+        block_reentry_after_stoploss=False,
+        stoploss_cooldown_hours=4.0,
+    )
+
+    assert blocked is False
+    assert reason == ""
+
+
+@pytest.mark.asyncio
+async def test_pre_signal_gate_ok() -> None:
+    """No spread violation, no stoploss guards configured → gate passes."""
+    engine = RiskEngine(_make_config())
+    market = _make_market(yes_bid=0.45, yes_ask=0.50)
+    session = MagicMock()  # should not be called when both guards are disabled
+
+    blocked, reason = await engine.pre_signal_gate(
+        session, market, mode="paper",
+        effective_max_spread=0.10,
+        block_reentry_after_stoploss=False,
+        stoploss_cooldown_hours=0.0,
+    )
+
+    assert blocked is False
+    assert reason == ""
+    session.execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# check_position regression: behavior unchanged after helper extraction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_position_still_blocks_on_max_positions() -> None:
+    """check_position still blocks when max positions hit — via _check_global_capacity."""
+    engine = RiskEngine(_make_config(max_open_positions=3))
+    signal = _make_signal(edge=0.20)
+    session = _make_session(open_count=3, total_exposure=0.0, daily_pnl=0.0)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+    )
+
+    assert decision.allowed is False
+    assert "open positions" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_check_position_still_blocks_on_stoploss_cooldown() -> None:
+    """check_position still blocks stoploss cooldown — via _check_stoploss_reentry."""
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    session = _make_session(recent_stoploss_count=1)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+        stoploss_cooldown_hours=4.0,
+    )
+
+    assert decision.allowed is False
+    assert "cooldown" in decision.reason

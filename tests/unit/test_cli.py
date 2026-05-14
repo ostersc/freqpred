@@ -436,7 +436,10 @@ class TestPaperTradingSignalLoop:
         mock_om_instance.submit = AsyncMock(return_value=None)
         mock_om_instance._risk = AsyncMock()
         mock_om_instance._risk.check_circuit_breakers = AsyncMock(return_value=None)
+        mock_om_instance._risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
+        mock_om_instance._risk.pre_signal_gate = AsyncMock(return_value=(False, ""))
         mock_om_instance._bankroll = 1000.0
+        mock_om_instance._mode = "paper"
         mock_om_cls = MagicMock(return_value=mock_om_instance)
 
         mock_risk_cls = MagicMock(return_value=MagicMock())

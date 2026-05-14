@@ -48,6 +48,14 @@ class StrategyConfig:
     block_reentry_after_stoploss: bool = False
     stoploss_cooldown_hours: float = 4.0  # set to 0.0 to disable cooldown
 
+    # Pre-signal risk gate: skip LLM analysis for new-entry markets where risk
+    # would block the resulting trade anyway (global exposure caps reached, spread
+    # too wide, or stoploss re-entry blocked). Set to False to always generate
+    # fresh signals regardless of risk state — useful when signals are needed for
+    # calibration or analytics even when trading is constrained.
+    # Has no effect in signal-only mode (order manager is not active).
+    pre_signal_risk_gate: bool = True
+
     # Assessment-based sizing controls. The Opus judgment model outputs a
     # trust_score, which the framework maps to this multiplier range.
     assessment_scale_min: float = 0.80

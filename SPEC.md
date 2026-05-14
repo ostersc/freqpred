@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-05-13
+**Last updated:** 2026-05-14
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -415,6 +415,14 @@ class StrategyConfig:
     # Block re-entry into a market for this many hours after a stoploss or
     # trailing_stop exit. Set to 0.0 to disable. Ignored if
     # block_reentry_after_stoploss is True.
+
+    # --- Pre-signal risk gate ---
+    pre_signal_risk_gate: bool = True
+    # Skip LLM analysis for new-entry markets where risk would block the resulting
+    # trade (global capacity caps reached, spread too wide, stoploss re-entry blocked).
+    # Set to False to always generate fresh signals — useful when signals are needed
+    # for calibration or analytics even when trading is constrained.
+    # Has no effect in signal-only mode (order manager is not active).
 
     # --- Assessment-driven sizing controls ---
     assessment_scale_min: float = 0.80
@@ -871,7 +879,13 @@ Runs when a signal refresh trigger fires (scheduled, price moved, new evidence, 
 ```mermaid
 flowchart TD
     T([Signal trigger fires for a market])
-    T --> CQ[Load active catalyst queries for market]
+    T --> HOP{Has open position?}
+    HOP -->|yes| CQ
+    HOP -->|no| RG{Pre-signal risk gate enabled?}
+    RG -->|no - gate disabled| CQ
+    RG -->|yes| GC{Global capacity full or per-market blocked?}
+    GC -->|spread too wide or stoploss block or caps full| SKIP2([Skip - no LLM call])
+    GC -->|pass| CQ[Load active catalyst queries for market]
     CQ --> HS[Hybrid Search - market question core set]
     HS --> CS[Catalyst supplemental - top-1 per query not in core]
     CS --> RH{Retrieval Hash Check}
@@ -880,6 +894,8 @@ flowchart TD
     BR --> LLM[LLM Analysis - Claude Sonnet]
     LLM --> SC[Signal Creation]
 ```
+
+**Pre-signal risk gate:** when running in trading mode (`order_manager` active) with `StrategyConfig.pre_signal_risk_gate=True` (default), the signal loop evaluates two gate layers for each new-entry market before invoking the LLM pipeline. First, a single cycle-level check (`check_entry_capacity`) determines whether global caps (max open positions, total exposure ceiling) are already full — if so, every new-entry market in that cycle is skipped. Then, per-market checks (`pre_signal_gate`) verify that the spread is within limits and the stoploss re-entry policy allows entry. Markets with existing open positions bypass both gates — exit signals must always fire. Set `pre_signal_risk_gate=False` in your strategy to always generate signals regardless of risk state (useful for calibration or analytics runs).
 
 **Base-rate prompt enrichment:** immediately before building the LLM prompt, the pipeline calls `get_series_history_for_market(session, series_ticker, option_code)` for markets that have a `series_ticker`. When data exists, a `=== HISTORICAL BASE RATE ===` block is injected into the prompt between `=== MARKET CONTEXT ===` and `=== EVIDENCE ===`. See `SeriesOptionHistory` in §7 for the data model and Type A / Type B series semantics. Prompt version: `signal-v7`.
 
@@ -1304,6 +1320,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T68** [#68](https://github.com/ostersc/freqpred/issues/68) — Ops freshness telemetry: persist heartbeat/freshness timestamps for ingestion, signal, source-quality, and WebSocket loops; expose real websocket connectivity + last-message telemetry and stale-loop indicators in System Health; optional alerts when critical loops stop making progress. Depends on: T41.
 - [ ] **T69** [#69](https://github.com/ostersc/freqpred/issues/69) — Correlated exposure caps: enforce series/category/event-family risk limits so multiple related markets cannot collectively exceed configured exposure even when per-market limits pass. Depends on: T17.
 - [ ] **T70** [#70](https://github.com/ostersc/freqpred/issues/70) — Series option base-rate history: `series_option_history` table keyed by `(series_ticker, option_code)`; background refresh fetches all settled markets per active series from Kalshi API and upserts YES/NO counts + label; signal prompt receives a base-rate context block when `n >= 3`; Type B single-option series degrade gracefully via low counts.
+- [x] **T71** [#71](https://github.com/ostersc/freqpred/issues/71) — Pre-signal risk gate: skip LLM analysis for new-entry markets where risk would block the resulting trade (global capacity caps, spread too wide, stoploss re-entry blocked); gate is opt-out via `StrategyConfig.pre_signal_risk_gate` (default `True`); markets with open positions always bypass the gate.
 
 **`OrderTypes` interface** (strategy-level, all fields have defaults — existing strategies unchanged):
 ```python

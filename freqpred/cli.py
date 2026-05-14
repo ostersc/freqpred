@@ -435,7 +435,64 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                         async with session_factory() as _cb_persist_session:
                             await set_cb_state(_cb_persist_session, active=True, reason=str(exc))
 
+                # Pre-signal risk gate: check global capacity once per cycle so we can
+                # skip LLM calls for new-entry markets that risk would block anyway.
+                _gate_enabled = (
+                    order_manager is not None
+                    and not circuit_breaker_active
+                    and strategy.config.pre_signal_risk_gate
+                )
+                _entry_globally_blocked = False
+                _entry_blocked_reason = ""
+                _effective_max_spread: float | None = None
+                if _gate_enabled:
+                    sc = strategy.config
+                    _effective_max_spread = (
+                        sc.max_spread if sc.max_spread is not None else sc.min_edge / 2
+                    )
+                    from freqpred.trading import ledger as _ledger  # noqa: PLC0415
+                    async with session_factory() as _cap_session:
+                        _cap_bankroll = await _ledger.get_net_bankroll(
+                            _cap_session, order_manager._bankroll, mode=order_manager._mode
+                        )
+                        _entry_globally_blocked, _entry_blocked_reason = (
+                            await order_manager._risk.check_entry_capacity(
+                                _cap_session, _cap_bankroll, mode=order_manager._mode
+                            )
+                        )
+                    if _entry_globally_blocked:
+                        log.info(
+                            "signal_loop.entry_capacity_full",
+                            reason=_entry_blocked_reason,
+                        )
+
                 for market in interesting:
+                    # Pre-signal gate: skip LLM for new-entry markets risk would block
+                    if _gate_enabled and market.id not in open_market_ids:
+                        if _entry_globally_blocked:
+                            log.info("signal.skipped.capacity_full", market_id=market.id)
+                            continue
+                        assert _effective_max_spread is not None
+                        sc = strategy.config
+                        async with session_factory() as _gate_session:
+                            _gate_blocked, _gate_reason = (
+                                await order_manager._risk.pre_signal_gate(
+                                    _gate_session,
+                                    market,
+                                    mode=order_manager._mode,
+                                    effective_max_spread=_effective_max_spread,
+                                    block_reentry_after_stoploss=sc.block_reentry_after_stoploss,
+                                    stoploss_cooldown_hours=sc.stoploss_cooldown_hours,
+                                )
+                            )
+                        if _gate_blocked:
+                            log.info(
+                                "signal.skipped.risk_gate",
+                                market_id=market.id,
+                                reason=_gate_reason,
+                            )
+                            continue
+
                     signal = await pipeline.analyze(market, trigger="scheduled")
                     if signal is None:
                         async with session_factory() as synth_session:

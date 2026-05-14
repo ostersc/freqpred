@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import func, select
@@ -15,6 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from freqpred.config import RiskConfig
 from freqpred.markets.models import PositionRow
 from freqpred.signal.models import Signal
+
+if TYPE_CHECKING:
+    from freqpred.markets.models import Market
 
 logger = structlog.get_logger(__name__)
 
@@ -33,6 +37,137 @@ class TradingCircuitBreakerError(Exception):
 class RiskEngine:
     def __init__(self, config: RiskConfig) -> None:
         self._config = config
+
+    async def _check_stoploss_reentry(
+        self,
+        session: AsyncSession,
+        market_id: str,
+        mode: str,
+        block_reentry_after_stoploss: bool,
+        stoploss_cooldown_hours: float,
+    ) -> tuple[bool, str]:
+        """Return (blocked, reason) if stoploss re-entry policy prevents a new entry.
+
+        Returns (False, "") when neither guard is configured or no blocking exit found.
+        """
+        if not block_reentry_after_stoploss and stoploss_cooldown_hours <= 0:
+            return False, ""
+        _stoploss_reasons = ("stoploss", "trailing_stop")
+        stoploss_where = [
+            PositionRow.status == "closed",
+            PositionRow.exit_reason.in_(_stoploss_reasons),
+            PositionRow.market_id == market_id,
+            PositionRow.mode == mode,
+        ]
+        if not block_reentry_after_stoploss:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=stoploss_cooldown_hours)
+            stoploss_where.append(PositionRow.exit_time >= cutoff)
+        stoploss_count_result = await session.execute(
+            select(func.count(PositionRow.id)).where(*stoploss_where)
+        )
+        stoploss_count: int = stoploss_count_result.scalar_one()
+        if stoploss_count > 0:
+            if block_reentry_after_stoploss:
+                reason = f"market {market_id} blocked: stoploss previously fired (block_reentry_after_stoploss=True)"
+            else:
+                reason = (
+                    f"market {market_id} in stoploss cooldown: "
+                    f"{stoploss_count} stoploss exit(s) within the last {stoploss_cooldown_hours:.1f}h"
+                )
+            logger.info("risk.stoploss_reentry_blocked", market_id=market_id, stoploss_count=stoploss_count)
+            return True, reason
+        return False, ""
+
+    async def _check_global_capacity(
+        self,
+        session: AsyncSession,
+        bankroll: float,
+        mode: str,
+    ) -> tuple[bool, str, float]:
+        """Return (blocked, reason, total_exposure) from global position cap checks.
+
+        Checks max_open_positions then max_total_exposure_pct.
+        Returns (False, "", total_exposure) when capacity remains.
+        Callers that only need (blocked, reason) should use check_entry_capacity().
+        """
+        open_count_result = await session.execute(
+            select(func.count()).select_from(PositionRow).where(
+                PositionRow.status == "open",
+                PositionRow.mode == mode,
+            )
+        )
+        open_count: int = open_count_result.scalar_one()
+        if open_count >= self._config.max_open_positions:
+            logger.info(
+                "risk.max_open_positions_reached",
+                open_count=open_count,
+                max=self._config.max_open_positions,
+            )
+            return True, f"open positions {open_count} >= max {self._config.max_open_positions}", 0.0
+
+        exposure_result = await session.execute(
+            select(func.sum(PositionRow.contracts * PositionRow.entry_price)).where(
+                PositionRow.status == "open",
+                PositionRow.mode == mode,
+            )
+        )
+        total_exposure: float = exposure_result.scalar_one() or 0.0
+        max_exposure = bankroll * self._config.max_total_exposure_pct
+        if total_exposure >= max_exposure:
+            logger.info(
+                "risk.total_exposure_exceeded",
+                exposure=total_exposure,
+                max_exposure=max_exposure,
+            )
+            return True, (
+                f"total exposure {total_exposure:.2f} >= max {max_exposure:.2f} "
+                f"({self._config.max_total_exposure_pct:.0%} of bankroll)"
+            ), total_exposure
+        return False, "", total_exposure
+
+    async def check_entry_capacity(
+        self,
+        session: AsyncSession,
+        bankroll: float,
+        mode: str,
+    ) -> tuple[bool, str]:
+        """Return (blocked, reason) when global caps prevent any new entry.
+
+        Checks max_open_positions and max_total_exposure_pct.
+        Returns (False, "") when at least one new position could be opened.
+        """
+        blocked, reason, _ = await self._check_global_capacity(session, bankroll, mode)
+        return blocked, reason
+
+    async def pre_signal_gate(
+        self,
+        session: AsyncSession,
+        market: "Market",
+        mode: str,
+        *,
+        effective_max_spread: float,
+        block_reentry_after_stoploss: bool,
+        stoploss_cooldown_hours: float,
+    ) -> tuple[bool, str]:
+        """Return (blocked, reason) if this market should skip signal generation.
+
+        Checks spread (no DB) then stoploss re-entry policy.
+        Returns (False, "") if signal generation should proceed.
+        Only applies to new-entry markets — callers must exclude markets with
+        open positions, which always need signals for exit decisions.
+        """
+        spread = round(market.yes_ask - market.yes_bid, 4)
+        if spread > effective_max_spread:
+            logger.info(
+                "risk.pre_signal_gate.spread_too_wide",
+                market_id=market.id,
+                spread=spread,
+                max_spread=effective_max_spread,
+            )
+            return True, f"spread {spread:.4f} > max {effective_max_spread:.4f}"
+        return await self._check_stoploss_reentry(
+            session, market.id, mode, block_reentry_after_stoploss, stoploss_cooldown_hours
+        )
 
     async def check_position(
         self,
@@ -70,38 +205,17 @@ class RiskEngine:
             )
 
         # 2. Stoploss re-entry guard
-        _stoploss_reasons = ("stoploss", "trailing_stop")
-        if block_reentry_after_stoploss or stoploss_cooldown_hours > 0:
-            stoploss_where = [
-                PositionRow.status == "closed",
-                PositionRow.exit_reason.in_(_stoploss_reasons),
-                PositionRow.market_id == market_id,
-                PositionRow.mode == mode,
-            ]
-            if not block_reentry_after_stoploss:
-                # Cooldown window only
-                cutoff = datetime.now(timezone.utc) - timedelta(hours=stoploss_cooldown_hours)
-                stoploss_where.append(PositionRow.exit_time >= cutoff)
-            stoploss_count_result = await session.execute(
-                select(func.count(PositionRow.id)).where(*stoploss_where)
-            )
-            stoploss_count: int = stoploss_count_result.scalar_one()
-            if stoploss_count > 0:
-                if block_reentry_after_stoploss:
-                    reason = f"market {market_id} blocked: stoploss previously fired (block_reentry_after_stoploss=True)"
-                else:
-                    reason = (
-                        f"market {market_id} in stoploss cooldown: "
-                        f"{stoploss_count} stoploss exit(s) within the last {stoploss_cooldown_hours:.1f}h"
-                    )
-                logger.info("risk.stoploss_reentry_blocked", market_id=market_id, stoploss_count=stoploss_count)
-                return RiskDecision(allowed=False, reason=reason, capped_size=0.0)
+        sl_blocked, sl_reason = await self._check_stoploss_reentry(
+            session, market_id, mode, block_reentry_after_stoploss, stoploss_cooldown_hours
+        )
+        if sl_blocked:
+            return RiskDecision(allowed=False, reason=sl_reason, capped_size=0.0)
 
         # 3. Cap position size at max_position_pct of bankroll
         max_size = bankroll * self._config.max_position_pct
         capped_size = min(requested_size, max_size)
 
-        # 3. Per-market cumulative exposure check.
+        # 4. Per-market cumulative exposure check.
         # Counts existing open positions on this market so that multiple signals
         # on the same market cannot stack exposure beyond the strategy limit.
         market_exposure_result = await session.execute(
@@ -131,50 +245,12 @@ class RiskEngine:
         # Also cap capped_size so the new position doesn't push over the limit.
         capped_size = min(capped_size, remaining_market_capacity)
 
-        # 4. Max open positions check
-        open_count_result = await session.execute(
-            select(func.count()).select_from(PositionRow).where(
-                PositionRow.status == "open",
-                PositionRow.mode == mode,
-            )
-        )
-        open_count: int = open_count_result.scalar_one()
-        if open_count >= self._config.max_open_positions:
-            logger.info(
-                "risk.max_open_positions_reached",
-                open_count=open_count,
-                max=self._config.max_open_positions,
-            )
-            return RiskDecision(
-                allowed=False,
-                reason=f"open positions {open_count} >= max {self._config.max_open_positions}",
-                capped_size=0.0,
-            )
+        # 5. Max open positions + total exposure (via shared helper)
+        cap_blocked, cap_reason, total_exposure = await self._check_global_capacity(session, bankroll, mode)
+        if cap_blocked:
+            return RiskDecision(allowed=False, reason=cap_reason, capped_size=0.0)
 
-        # 5. Total exposure check
-        exposure_result = await session.execute(
-            select(func.sum(PositionRow.contracts * PositionRow.entry_price)).where(
-                PositionRow.status == "open",
-                PositionRow.mode == mode,
-            )
-        )
-        total_exposure: float = exposure_result.scalar_one() or 0.0
         max_exposure = bankroll * self._config.max_total_exposure_pct
-        if total_exposure >= max_exposure:
-            logger.info(
-                "risk.total_exposure_exceeded",
-                exposure=total_exposure,
-                max_exposure=max_exposure,
-            )
-            return RiskDecision(
-                allowed=False,
-                reason=(
-                    f"total exposure {total_exposure:.2f} >= max {max_exposure:.2f} "
-                    f"({self._config.max_total_exposure_pct:.0%} of bankroll)"
-                ),
-                capped_size=0.0,
-            )
-        # Cap so the new position cannot push total exposure over the limit.
         remaining_total_capacity = max_exposure - total_exposure
         capped_size = min(capped_size, remaining_total_capacity)
 
