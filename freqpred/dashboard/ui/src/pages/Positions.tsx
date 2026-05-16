@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
+import React, { Fragment, useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getPositions, getPositionDetail } from '../api/positions'
 import type { PositionOut } from '../api/types'
@@ -29,8 +29,58 @@ function PositionSparkline({ positionId, color, width }: { positionId: string; c
     (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
   )
   const sparkData = sorted.map((s) => s.market_mid_at_signal * 100)
-  if (data.status === 'open' && data.current_mid !== null) sparkData.push(data.current_mid * 100)
-  return <Sparkline data={sparkData} w={width} h={12} color={color} />
+  const sparkTs = sorted.map((s) => new Date(s.created_at).getTime())
+  if (data.status === 'open' && data.current_mid !== null) {
+    sparkData.push(data.current_mid * 100)
+    sparkTs.push(Date.now())
+  }
+  return <Sparkline data={sparkData} timestamps={sparkTs} w={width} h={12} color={color} />
+}
+
+function settlementIntensity(currentMid: number | null): number {
+  if (currentMid === null) return 0
+  const price = currentMid * 100
+  if (price >= 90) return (price - 90) / 10
+  if (price <= 10) return (10 - price) / 10
+  return 0
+}
+
+function pillStyle(bg: string, fg: string, intensity: number): React.CSSProperties {
+  const mixPct = Math.round(intensity * 100)
+  return {
+    display: 'inline-block',
+    padding: '1px 7px',
+    borderRadius: 4,
+    fontSize: 10.5,
+    fontWeight: 500,
+    letterSpacing: '0.02em',
+    background: `color-mix(in oklch, ${bg} ${mixPct}%, transparent)`,
+    color: fg,
+  }
+}
+
+function settlementPillStyle(currentMid: number | null): React.CSSProperties | null {
+  if (currentMid === null) return null
+  const price = currentMid * 100
+  const intensity = settlementIntensity(currentMid)
+  if (intensity === 0) return null
+  const isHigh = price >= 90
+  return pillStyle(
+    isHigh ? 'var(--pos-soft)' : 'var(--neg-soft)',
+    isHigh ? 'var(--pos)' : 'var(--neg)',
+    intensity,
+  )
+}
+
+function lockInPillStyle(currentMid: number | null, pnl: number | null): React.CSSProperties | null {
+  const intensity = settlementIntensity(currentMid)
+  if (intensity === 0 || pnl === null) return null
+  const profit = pnl >= 0
+  return pillStyle(
+    profit ? 'var(--pos-soft)' : 'var(--neg-soft)',
+    profit ? 'var(--pos)' : 'var(--neg)',
+    intensity,
+  )
 }
 
 type StatusFilter = 'open' | 'closed' | 'all'
@@ -149,6 +199,9 @@ export default function Positions() {
                 const pnlPct = p.status === 'open' ? p.unrealized_pnl_pct : p.pnl_pct
                 const exposure = p.entry_price * p.contracts
                 const expoPct = totalExposure > 0 ? (exposure / totalExposure) * 100 : 0
+                const displayedMid = p.current_mid !== null
+                  ? (p.direction === 'YES' ? p.current_mid : 1 - p.current_mid)
+                  : null
                 return (
                   <Fragment key={p.id}>
                     <tr
@@ -166,7 +219,11 @@ export default function Positions() {
                       <td className="r">${p.entry_price.toFixed(2)}</td>
                       <td className="r dim">
                         {p.status === 'open'
-                          ? (p.current_mid !== null ? `${(p.current_mid * 100).toFixed(1)}¢` : '—')
+                          ? (displayedMid !== null ? (() => {
+                              const pill = settlementPillStyle(displayedMid)
+                              const text = `${(displayedMid * 100).toFixed(1)}¢`
+                              return pill ? <span style={pill}>{text}</span> : text
+                            })() : '—')
                           : (p.exit_price !== null ? `$${p.exit_price.toFixed(2)}` : '—')}
                       </td>
                       <td className="r">
@@ -199,12 +256,20 @@ export default function Positions() {
                             </div>
                           )
                         })()}
-                        <span className={pnl !== null && pnl >= 0 ? 'pos' : 'neg'} style={{ fontWeight: 500 }}>
-                          {pnl !== null ? fmtSignedMoney(pnl) : '—'}
-                        </span>
+                        {(() => {
+                          const pill = lockInPillStyle(p.current_mid, pnl)
+                          const text = pnl !== null ? fmtSignedMoney(pnl) : '—'
+                          return pill
+                            ? <span style={pill}>{text}</span>
+                            : <span className={pnl !== null && pnl >= 0 ? 'pos' : 'neg'} style={{ fontWeight: 500 }}>{text}</span>
+                        })()}
                       </td>
                       <td className={`r ${pnlPct !== null && pnlPct >= 0 ? 'pos' : 'neg'}`}>
-                        {pnlPct !== null ? `${pnlPct >= 0 ? '+' : ''}${(pnlPct * 100).toFixed(1)}%` : '—'}
+                        {(() => {
+                          const pill = lockInPillStyle(p.current_mid, pnl)
+                          const text = pnlPct !== null ? `${pnlPct >= 0 ? '+' : ''}${(pnlPct * 100).toFixed(1)}%` : '—'
+                          return pill ? <span style={pill}>{text}</span> : text
+                        })()}
                       </td>
                       <td className="c">
                         <Badge kind={p.status === 'open' ? 'pos' : p.status === 'closed' ? 'muted' : 'warn'} dot>

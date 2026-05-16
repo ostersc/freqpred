@@ -683,11 +683,12 @@ async def test_existing_exposure_passed_to_position_size() -> None:
     signal = _make_signal(edge=0.15, estimated_probability=0.65)
     market = _make_market(yes_bid=0.52, yes_ask=0.56)
 
-    # Mock DB: report $25.00 of existing exposure.
+    # Mock DB: report $25.00 of existing same-direction exposure, no opposite-side positions.
     mock_session = sf.return_value.__aenter__.return_value
-    exposure_result = MagicMock()
-    exposure_result.scalar_one.return_value = 25.0
-    mock_session.execute = AsyncMock(return_value=exposure_result)
+    _exp = MagicMock(); _exp.scalar_one.return_value = 25.0
+    _count = MagicMock(); _count.scalar_one.return_value = 0
+    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = None
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     # Use a spy strategy to capture the args passed to position_size.
     captured_args: list[tuple] = []
@@ -773,9 +774,10 @@ async def test_assessment_enabled_keeps_legacy_three_arg_override_working() -> N
     signal = _make_signal()
     market = _make_market()
     mock_session = sf.return_value.__aenter__.return_value
-    exposure_result = MagicMock()
-    exposure_result.scalar_one.return_value = 25.0
-    mock_session.execute = AsyncMock(return_value=exposure_result)
+    _exp = MagicMock(); _exp.scalar_one.return_value = 25.0
+    _count = MagicMock(); _count.scalar_one.return_value = 0
+    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = None
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
     assessment = SignalAssessment(
         signal_id=signal.id,
         trust_score=0.65,
@@ -837,9 +839,10 @@ async def test_assessment_enabled_passes_assessment_to_supported_strategy() -> N
     signal = _make_signal()
     market = _make_market()
     mock_session = sf.return_value.__aenter__.return_value
-    exposure_result = MagicMock()
-    exposure_result.scalar_one.return_value = 10.0
-    mock_session.execute = AsyncMock(return_value=exposure_result)
+    _exp = MagicMock(); _exp.scalar_one.return_value = 10.0
+    _count = MagicMock(); _count.scalar_one.return_value = 0
+    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = None
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
     assessment = SignalAssessment(
         signal_id=signal.id,
         trust_score=0.70,
@@ -908,13 +911,13 @@ async def test_doubledown_allowed_when_edge_increases() -> None:
     high_ideal = strategy.position_size(sig_high, BANKROLL, existing_market_exposure=0.0)
     assert high_ideal > low_ideal, "sanity: higher edge → bigger ideal"
 
-    # DB reports existing exposure = low_ideal (one position already open at a worse
-    # price so the price-improvement gate passes: avg_entry=0.60 > yes_ask=0.56).
+    # DB reports existing exposure = low_ideal (same direction, no opposite-side positions).
+    # avg_entry=0.60 > yes_ask=0.56, so price-improvement gate passes.
     mock_session = sf.return_value.__aenter__.return_value
-    exposure_result = MagicMock()
-    exposure_result.scalar_one.return_value = low_ideal
-    exposure_result.scalar_one_or_none.return_value = 0.60  # avg existing entry (worse)
-    mock_session.execute = AsyncMock(return_value=exposure_result)
+    _exp = MagicMock(); _exp.scalar_one.return_value = low_ideal
+    _count = MagicMock(); _count.scalar_one.return_value = 0
+    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.60
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     expected_position = _make_position()
     with patch(
@@ -942,13 +945,12 @@ async def test_reentry_blocked_when_conviction_drops() -> None:
     # Second signal with lower edge.
     sig_low = _make_signal(edge=0.15, estimated_probability=0.65)
 
-    # DB reports existing exposure = high_ideal, avg entry lower than new ask so
-    # price gate passes (test is about conviction-drop blocking, not price gate).
+    # DB reports existing exposure = high_ideal (same direction, no opposite-side positions).
     mock_session = sf.return_value.__aenter__.return_value
-    exposure_result = MagicMock()
-    exposure_result.scalar_one.return_value = high_ideal
-    exposure_result.scalar_one_or_none.return_value = 0.40  # avg entry well below ask
-    mock_session.execute = AsyncMock(return_value=exposure_result)
+    _exp = MagicMock(); _exp.scalar_one.return_value = high_ideal
+    _count = MagicMock(); _count.scalar_one.return_value = 0
+    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.40
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
         result = await om.submit(sig_low, market, strategy)
@@ -965,10 +967,10 @@ async def test_reentry_blocked_at_worse_price() -> None:
     market = _make_market(yes_bid=0.50, yes_ask=0.54)  # yes_ask = 0.54
 
     mock_session = sf.return_value.__aenter__.return_value
-    result_mock = MagicMock()
-    result_mock.scalar_one.return_value = 20.0     # existing exposure > 0
-    result_mock.scalar_one_or_none.return_value = 0.50  # avg existing entry better than 0.54
-    mock_session.execute = AsyncMock(return_value=result_mock)
+    _exp = MagicMock(); _exp.scalar_one.return_value = 20.0
+    _count = MagicMock(); _count.scalar_one.return_value = 0   # same-direction existing position
+    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.50  # avg entry better than 0.54
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
         result = await om.submit(_make_signal(direction="YES"), market, strategy)
@@ -985,10 +987,10 @@ async def test_reentry_blocked_at_equal_price() -> None:
     market = _make_market(yes_bid=0.50, yes_ask=0.54)  # yes_ask = 0.54
 
     mock_session = sf.return_value.__aenter__.return_value
-    result_mock = MagicMock()
-    result_mock.scalar_one.return_value = 20.0
-    result_mock.scalar_one_or_none.return_value = 0.54  # exactly equal → blocked
-    mock_session.execute = AsyncMock(return_value=result_mock)
+    _exp = MagicMock(); _exp.scalar_one.return_value = 20.0
+    _count = MagicMock(); _count.scalar_one.return_value = 0
+    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.54  # equal → blocked
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
         result = await om.submit(_make_signal(direction="YES"), market, strategy)
@@ -1005,10 +1007,10 @@ async def test_reentry_allowed_at_better_price() -> None:
     market = _make_market(yes_bid=0.50, yes_ask=0.46)  # yes_ask 0.46 < avg_entry 0.54
 
     mock_session = sf.return_value.__aenter__.return_value
-    result_mock = MagicMock()
-    result_mock.scalar_one.return_value = 20.0
-    result_mock.scalar_one_or_none.return_value = 0.54  # avg existing entry worse
-    mock_session.execute = AsyncMock(return_value=result_mock)
+    _exp = MagicMock(); _exp.scalar_one.return_value = 20.0
+    _count = MagicMock(); _count.scalar_one.return_value = 0   # same-direction existing
+    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.54  # avg worse than new ask
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     expected_position = _make_position()
     with patch(
@@ -1043,28 +1045,41 @@ async def test_price_gate_skipped_when_no_existing_position() -> None:
 
 
 @pytest.mark.asyncio
-async def test_price_gate_no_direction_positions_skips_block() -> None:
-    """Price gate skips when avg_entry_result is None (no same-direction positions open)."""
+async def test_yes_position_blocks_no_entry() -> None:
+    """Opposite-side guard: open YES position → NO signal entry is blocked."""
     om, sf = _make_order_manager()
     strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
-    market = _make_market(yes_bid=0.50, yes_ask=0.54)
+    market = _make_market(yes_bid=0.85, yes_ask=0.88)
 
     mock_session = sf.return_value.__aenter__.return_value
-    result_mock = MagicMock()
-    result_mock.scalar_one.return_value = 20.0   # some exposure (opposite direction)
-    result_mock.scalar_one_or_none.return_value = None  # no same-direction avg
-    mock_session.execute = AsyncMock(return_value=result_mock)
+    _exp = MagicMock(); _exp.scalar_one.return_value = 20.0   # total exposure > 0
+    _count = MagicMock(); _count.scalar_one.return_value = 1  # one YES position (opposite of NO signal)
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count])
 
-    expected_position = _make_position()
-    with patch(
-        "freqpred.trading.order_manager.ledger.open_position",
-        new_callable=AsyncMock,
-        return_value=expected_position,
-    ) as mock_ledger:
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
+        result = await om.submit(_make_signal(direction="NO"), market, strategy)
+
+    assert result is None
+    mock_ledger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_position_blocks_yes_entry() -> None:
+    """Opposite-side guard: open NO position → YES signal entry is blocked."""
+    om, sf = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.12, yes_ask=0.15)
+
+    mock_session = sf.return_value.__aenter__.return_value
+    _exp = MagicMock(); _exp.scalar_one.return_value = 10.0   # total exposure > 0
+    _count = MagicMock(); _count.scalar_one.return_value = 1  # one NO position (opposite of YES signal)
+    mock_session.execute = AsyncMock(side_effect=[_exp, _count])
+
+    with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
         result = await om.submit(_make_signal(direction="YES"), market, strategy)
 
-    assert result is expected_position
-    mock_ledger.assert_called_once()
+    assert result is None
+    mock_ledger.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

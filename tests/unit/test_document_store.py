@@ -354,7 +354,7 @@ async def test_local_embedder_embed_batch_empty():
 # Summarization behaviour in upsert_document
 # ---------------------------------------------------------------------------
 
-_LONG_BODY = "Federal Reserve holds interest rates steady. " * 30  # ~1350 chars
+_LONG_BODY = "Federal Reserve holds interest rates steady. " * 50  # ~2250 chars
 _MARKET_Q = "Will the Federal Reserve raise rates before June 2026?\nIf yes this market resolves Yes."
 
 

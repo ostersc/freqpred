@@ -128,8 +128,9 @@ export function Icon({ name, size = 14 }: { name: IconName; size?: number }) {
 }
 
 // ---- Sparkline ----
-export function Sparkline({ data, w = 80, h = 22, color = 'var(--accent)', fill = true }: {
+export function Sparkline({ data, timestamps, w = 80, h = 22, color = 'var(--accent)', fill = true }: {
   data: number[]
+  timestamps?: number[]
   w?: number
   h?: number
   color?: string
@@ -138,8 +139,12 @@ export function Sparkline({ data, w = 80, h = 22, color = 'var(--accent)', fill 
   if (!data || data.length < 2) return null
   const min = Math.min(...data), max = Math.max(...data)
   const range = max - min || 1
+  const useTime = timestamps && timestamps.length === data.length
+  const tMin = useTime ? Math.min(...timestamps!) : 0
+  const tMax = useTime ? Math.max(...timestamps!) : 0
+  const tRange = tMax - tMin || 1
   const pts = data.map((v, i) => [
-    (i / (data.length - 1)) * w,
+    useTime ? ((timestamps![i] - tMin) / tRange) * w : (i / (data.length - 1)) * w,
     h - 2 - ((v - min) / range) * (h - 4),
   ])
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')

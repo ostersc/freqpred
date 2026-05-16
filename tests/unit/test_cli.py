@@ -109,6 +109,7 @@ def _make_run_mocks(market_row: MagicMock, signal: "Signal | None"):
         "pipeline_instance": mock_pipeline_instance,
         "strategy": mock_strategy,
         "kalshi_cls": mock_kalshi_cls,
+        "session_result": mock_result,  # expose so tests can configure .all() for positions query
     }
 
 
@@ -490,6 +491,80 @@ class TestPaperTradingSignalLoop:
             await _run_main(config, "TestStrategy", "signal-only")
 
         mock_om_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_signal_flip_calls_check_all_positions_before_submit(self) -> None:
+        """When a market has an open position and the signal direction flips,
+        check_all_positions(fresh_signals=...) must be called before submit().
+
+        This is the wiring test: it verifies that the signal loop actually passes
+        the fresh signal to the position monitor so should_exit() can fire, not
+        just that should_exit() works when called in isolation.
+        """
+        from freqpred.cli import _run_main
+
+        config = _make_config()
+        market_row = _make_market_row("MKT-1")
+        fake_signal = _make_fake_signal(direction="NO")  # flipped from existing YES position
+        mocks = _make_run_mocks(market_row, fake_signal)
+
+        # Make the open-positions query return one open position for MKT-1 so
+        # open_market_ids = {"MKT-1"} and the monitor call fires.
+        pos_row = MagicMock()
+        pos_row.market_id = "MKT-1"
+        mocks["session_result"].all.return_value = [pos_row]
+
+        mock_om_instance = AsyncMock()
+        mock_om_instance._risk = AsyncMock()
+        mock_om_instance._risk.check_circuit_breakers = AsyncMock(return_value=None)
+        mock_om_instance._risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
+        mock_om_instance._risk.pre_signal_gate = AsyncMock(return_value=(False, ""))
+        mock_om_instance._bankroll = 1000.0
+        mock_om_instance._mode = "paper"
+        mock_om_cls = MagicMock(return_value=mock_om_instance)
+
+        mock_pm_instance = AsyncMock()
+        mock_pm_cls = MagicMock(return_value=mock_pm_instance)
+
+        call_order: list[str] = []
+
+        async def _check_all(*, fresh_signals=None) -> list:
+            call_order.append("check_all_positions")
+            return []
+
+        async def _submit(*args, **kwargs):
+            call_order.append("submit")
+            return None
+
+        mock_pm_instance.check_all_positions = AsyncMock(side_effect=_check_all)
+        mock_om_instance.submit = AsyncMock(side_effect=_submit)
+
+        mock_risk_cls = MagicMock(return_value=MagicMock())
+
+        async def _cancel_on_sleep(_: float) -> None:
+            raise asyncio.CancelledError()
+
+        with patch("freqpred.db.make_engine", return_value=mocks["engine"]), \
+             patch("freqpred.db.make_session_factory", return_value=mocks["factory"]), \
+             patch("freqpred.strategy.loader.load_strategy", return_value=mocks["strategy"]), \
+             patch("freqpred.signal.pipeline.SignalPipeline", mocks["pipeline_cls"]), \
+             patch("freqpred.rag.embedder.LocalEmbedder"), \
+             patch("freqpred.llm.client.LLMClient"), \
+             patch("freqpred.markets.kalshi.KalshiClient", mocks["kalshi_cls"]), \
+             patch("freqpred.trading.risk.RiskEngine", mock_risk_cls), \
+             patch("freqpred.trading.order_manager.OrderManager", mock_om_cls), \
+             patch("freqpred.trading.position_monitor.PositionMonitor", mock_pm_cls), \
+             patch("asyncio.sleep", side_effect=_cancel_on_sleep), \
+             patch("anthropic.AsyncAnthropic"):
+            await _run_main(config, "TestStrategy", "paper")
+
+        mock_pm_instance.check_all_positions.assert_called_once_with(
+            fresh_signals={"MKT-1": fake_signal}
+        )
+        mock_om_instance.submit.assert_called_once()
+        assert call_order == ["check_all_positions", "submit"], (
+            "check_all_positions must be called before submit on a direction flip"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -514,6 +514,15 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                             and signal.direction != "SKIP"
                             and run_state == "running"
                         ):
+                            # If this market has an open position, evaluate exits
+                            # with the fresh signal before attempting entry.  This
+                            # ensures should_exit() fires (e.g. direction flip) and
+                            # the position is closed in the DB before submit() runs
+                            # its opposite-side guard — all within the same cycle.
+                            if market.id in open_market_ids:
+                                await position_monitor.check_all_positions(
+                                    fresh_signals={market.id: signal}
+                                )
                             position = await order_manager.submit(signal, market, strategy)
                             if position:
                                 log.info(

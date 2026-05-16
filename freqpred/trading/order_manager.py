@@ -159,6 +159,29 @@ class OrderManager:
             )
             existing_market_exposure: float = float(existing_exposure_result.scalar_one())
 
+            # Opposite-side guard: block entry when any open position in this market
+            # holds the other direction.  The position monitor must close it first
+            # (via should_exit) before we flip sides.
+            if existing_market_exposure > 0.0:
+                opposite_direction = "NO" if signal.direction == "YES" else "YES"
+                opposite_count_result = await session.execute(
+                    select(func.count(PositionRow.id)).where(
+                        PositionRow.status == "open",
+                        PositionRow.market_id == market.id,
+                        PositionRow.mode == self._mode,
+                        PositionRow.direction == opposite_direction,
+                    )
+                )
+                if opposite_count_result.scalar_one() > 0:
+                    logger.info(
+                        "order_manager.opposite_side_blocked",
+                        market_id=market.id,
+                        signal_id=signal.id,
+                        signal_direction=signal.direction,
+                        existing_direction=opposite_direction,
+                    )
+                    return None
+
             # Price-improvement gate: if we already hold a position in this market,
             # only add to it when the entry price is strictly better than the weighted
             # average of what we already paid.  Blocks assessment-jitter add-ons and

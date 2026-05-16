@@ -53,7 +53,7 @@ _MAX_EMBED_CHARS = 2_000
 # Bodies longer than _SUMMARY_THRESHOLD are candidates for LLM summarization.
 # _MIN_BM25_SCORE is the ts_rank floor against the market question's first line;
 # documents scoring below this are off-topic and not worth summarizing.
-_SUMMARY_THRESHOLD = 1_000   # 2 × the 500-char evidence excerpt limit in signal/llm.py
+_SUMMARY_THRESHOLD = 2_000   # 4 × the 500-char evidence excerpt limit in signal/llm.py
 _MIN_BM25_SCORE = 0.01       # ~42% of long linked docs score below this when using first-line market question (live data)
 _MAX_BODY_CHARS = 50_000     # skip docs still larger than this after HTML stripping — likely markup/boilerplate soup
 

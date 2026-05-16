@@ -832,6 +832,82 @@ class TestCheckAllPositions:
 
         assert result == []
 
+    @pytest.mark.asyncio
+    async def test_fresh_signal_flip_triggers_exit(self) -> None:
+        """check_all_positions(fresh_signals=...) fires should_exit when direction flips."""
+        strategy = _make_strategy(min_confidence=0.70)
+        pos = _make_position(entry_price=0.60, direction="YES", strategy_name="TestStrategy")
+        pos_id = pos.id
+
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        session_factory = MagicMock()
+        session_factory.return_value = session
+
+        monitor = PositionMonitor(
+            session_factory=session_factory,
+            strategies={"TestStrategy": strategy},
+        )
+
+        closed_pos = Position(
+            **{**pos.__dict__, "status": "closed", "exit_price": 0.58,
+               "exit_reason": "signal", "pnl": -0.02, "pnl_pct": -0.033}
+        )
+
+        market = _make_market(mid_price=0.60)
+        flip_signal = _make_signal(direction="NO", confidence=0.85)
+
+        scalars_mock = MagicMock()
+        scalars_mock.scalars.return_value.all.return_value = [
+            MagicMock(
+                id=market.id,
+                platform=market.platform,
+                question=market.question,
+                category=market.category,
+                status="open",
+                result=None,
+                settlement_value=None,
+                close_time=market.close_time,
+                yes_bid=market.yes_bid,
+                yes_ask=market.yes_ask,
+                mid_price=market.mid_price,
+                last_price=0.58,
+                volume_24h=market.volume_24h,
+                open_interest=market.open_interest,
+                yes_bid_size=0.0,
+                yes_ask_size=0.0,
+                last_fetched_at=market.last_fetched_at,
+                price_updated_at=market.price_updated_at,
+                metadata_fetched_at=market.metadata_fetched_at,
+                current_signal_id=None,
+                metadata_={},
+                open_time=None,
+                series_ticker=None,
+            )
+        ]
+
+        with (
+            patch(
+                "freqpred.trading.position_monitor.ledger.get_open_positions",
+                new_callable=AsyncMock,
+                return_value=[pos],
+            ),
+            patch(
+                "freqpred.trading.position_monitor.ledger.close_position",
+                new_callable=AsyncMock,
+                return_value=closed_pos,
+            ) as mock_close,
+        ):
+            session.execute = AsyncMock(return_value=scalars_mock)
+            result = await monitor.check_all_positions(
+                fresh_signals={"MKT-1": flip_signal}
+            )
+
+        assert len(result) == 1
+        assert result[0].exit_reason == "signal"
+        mock_close.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # Peak price tracking

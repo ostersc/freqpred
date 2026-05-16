@@ -18,6 +18,7 @@ from freqpred.llm.client import LLMClient, LLMError
 log = structlog.get_logger(__name__)
 
 _MAX_SUMMARY_CHARS = 500      # matches the evidence excerpt limit in signal/llm.py
+_MAX_INPUT_BODY_CHARS = 4_000  # news articles front-load key facts; beyond this adds noise not value
 _PROMPT_VERSION = "body-summarizer-v2"
 _MODEL = "claude-haiku-4-5-20251001"
 
@@ -35,7 +36,7 @@ def _build_user_prompt(
     query_text: str,
     market_question: str,
 ) -> str:
-    body_text = _strip_html(raw_doc.body)
+    body_text = _strip_html(raw_doc.body)[:_MAX_INPUT_BODY_CHARS]
     return (
         f"Market question: {market_question}\n"
         f"Search query used to find this article: {query_text}\n\n"

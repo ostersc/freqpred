@@ -170,6 +170,8 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 - Every new module gets a corresponding test file. Aim for coverage on all public functions.
 - LLM calls in tests should always be mocked — never make real API calls in tests.
 
+**Wiring tests for pipeline changes.** When changing how two pipeline components interact — e.g. the signal loop calling the position monitor, the order manager calling risk, ingestion feeding the signal pipeline — always add a test that verifies the *wiring*, not just the *component*. A unit test that calls a function in isolation with the right arguments does not prove that anything ever calls it with those arguments in production. The wiring test must exercise the caller (e.g. the signal loop in `_run_main`) and assert that the callee (e.g. `position_monitor.check_all_positions`) receives the expected arguments, in the expected order, relative to any subsequent calls. If you only test the component in isolation and skip the wiring test, bugs like "should_exit() is correct but is never called" will not be caught.
+
 **There is no such thing as a pre-existing failure or a flaky test that can be ignored.** If any test is failing — for any reason, in any file — it must be fixed before the task is considered done. Never declare work complete while tests are red. Never attribute a failure to "pre-existing" state and move on; investigate and fix it.
 
 ---
