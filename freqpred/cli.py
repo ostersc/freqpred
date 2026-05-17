@@ -196,9 +196,15 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         click.echo("ERROR: ANTHROPIC_API_KEY not configured.", err=True)
         return
 
+    from freqpred.ingestion.fetchers.factbase import FactbasePhraseCache, run_factbase_scheduler
+
     strategy = load_strategy(strategy_name)
     click.echo(f"Loaded strategy: {strategy.config.name}")
     click.echo(f"Starting freqpred | strategy={strategy_name} | mode={mode}")
+
+    phrase_cache = FactbasePhraseCache()
+    if hasattr(strategy, "_phrase_cache"):
+        strategy._phrase_cache = phrase_cache
 
     engine = make_engine(config.database.url)
     session_factory = make_session_factory(engine)
@@ -211,12 +217,14 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
         max_consecutive_errors=config.risk.max_consecutive_llm_errors,
     )
+    _factbase_allowlist = frozenset(getattr(strategy.config, "factbase_series_allowlist", []))
     pipeline = SignalPipeline(
         session_factory=session_factory,
         embedder=embedder,
         llm_client=llm_client,
         model=config.anthropic.primary_model,
         top_k=config.signal.top_k_documents,
+        factbase_series_allowlist=_factbase_allowlist,
     )
 
     from freqpred.alerts.telegram import TelegramSender
@@ -728,6 +736,27 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             )
         )
 
+        import structlog as _sl
+        _sl.get_logger("freqpred.cli").info(
+            "startup.factbase_scheduler",
+            allowlist=list(_factbase_allowlist),
+            enabled=bool(_factbase_allowlist),
+        )
+        if _factbase_allowlist:
+            tasks.append(
+                asyncio.create_task(
+                    run_factbase_scheduler(
+                        session_factory=session_factory,
+                        series_allowlist=_factbase_allowlist,
+                        phrase_cache=phrase_cache,
+                        llm_client=llm_client,
+                        interval_seconds=300,
+                        telemetry=runtime_telemetry,
+                    ),
+                    name="factbase_scheduler",
+                )
+            )
+
         tasks.append(asyncio.create_task(signal_loop(), name="signal_loop"))
         tasks.append(asyncio.create_task(position_monitor.run(), name="position_monitor"))
         if position_watcher is not None:
@@ -1218,14 +1247,15 @@ def signal() -> None:
 @signal.command(name="analyze")
 @click.option("--market-id", required=True, help="Kalshi market ID to analyze.")
 @click.option("--force", is_flag=True, default=False, help="Bypass hash deduplication and force a new LLM call.")
+@click.option("--strategy", "strategy_name", default="PoliticsEdgeStrategy", show_default=True, help="Strategy to load (determines factbase allowlist and other config).")
 @click.pass_context
-def signal_analyze(ctx: click.Context, market_id: str, force: bool) -> None:
+def signal_analyze(ctx: click.Context, market_id: str, force: bool, strategy_name: str) -> None:
     """One-shot signal analysis for a specific market."""
     config = ctx.obj["config"]
-    asyncio.run(_signal_analyze(config, market_id, force=force))
+    asyncio.run(_signal_analyze(config, market_id, force=force, strategy_name=strategy_name))
 
 
-async def _signal_analyze(config: object, market_id: str, *, force: bool = False) -> None:
+async def _signal_analyze(config: object, market_id: str, *, force: bool = False, strategy_name: str = "PoliticsEdgeStrategy") -> None:
     import anthropic
 
     import freqpred.signal.models  # noqa: F401
@@ -1295,12 +1325,18 @@ async def _signal_analyze(config: object, market_id: str, *, force: bool = False
             session_factory,
             prompt_version=PROMPT_VERSION,
         )
+        from freqpred.strategy.loader import load_strategy as _load_strategy  # noqa: PLC0415
+        _cli_strategy = _load_strategy(strategy_name)
+        _cli_factbase_allowlist = frozenset(
+            getattr(getattr(_cli_strategy, "config", None), "factbase_series_allowlist", [])
+        )
         pipeline = SignalPipeline(
             session_factory=session_factory,
             embedder=embedder,
             llm_client=llm_client,
             model=config.anthropic.primary_model,
             top_k=config.signal.top_k_documents,
+            factbase_series_allowlist=_cli_factbase_allowlist,
         )
 
         signal = await pipeline.analyze(market, trigger="manual", force=force)

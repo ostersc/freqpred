@@ -42,12 +42,14 @@ class SignalPipeline:
         llm_client: LLMClient,
         model: str = _DEFAULT_MODEL,
         top_k: int = _TOP_K,
+        factbase_series_allowlist: frozenset[str] = frozenset(),
     ) -> None:
         self._session_factory = session_factory
         self._embedder = embedder
         self._llm_client = llm_client
         self._model = model
         self._top_k = top_k
+        self._factbase_series_allowlist = factbase_series_allowlist
 
     async def analyze(
         self,
@@ -55,14 +57,16 @@ class SignalPipeline:
         trigger: str = "scheduled",
         force: bool = False,
     ) -> Signal | None:
-        """Analyze a market and return a new Signal if evidence has changed.
+        """Analyze a market and return a new Signal.
 
         Steps:
         1. Retrieve top-K documents via RAG.
         2. If no documents retrieved → return None (no evidence to analyze).
         3. Compute retrieval hash from doc IDs.
-        4. If hash == current signal hash → return None (no new evidence).
-           Skipped when *force* is True.
+        4. If hash == current signal hash and trigger is not "scheduled" → return None.
+           Skipped when *force* is True. Scheduled runs always call the LLM because
+           context beyond raw documents (series history, FactBase counts) can shift
+           the probability even when the doc set is unchanged.
         5. Call Claude with market question + docs as context.
         6. Parse JSON response.
         7. Write Signal + DocumentMarketLinks + update Market.current_signal_id
@@ -74,9 +78,9 @@ class SignalPipeline:
                    always call the LLM regardless of whether evidence has changed.
 
         Returns:
-            A new ``Signal`` if evidence has changed and LLM analysis succeeded.
-            ``None`` if evidence is unchanged (and not forced), the LLM call
-            fails, or the response is malformed.
+            A new ``Signal`` if analysis succeeded.
+            ``None`` if no documents exist, the LLM call fails, or the response
+            is malformed.
         """
         async with self._session_factory() as session:
             # Load active catalyst queries for this market so the retriever can
@@ -120,8 +124,10 @@ class SignalPipeline:
             doc_ids = [d.id for d in docs]
             new_hash = compute_retrieval_hash(doc_ids)
 
-            # Step 5: skip if evidence unchanged since last signal (unless forced)
-            if not force and await should_skip(session, market.current_signal_id, new_hash):
+            # Step 5: skip if evidence unchanged since last signal (unless forced or scheduled).
+            # Scheduled runs always proceed to the LLM — series history and FactBase counts
+            # can shift the probability even when the doc set hasn't changed.
+            if not force and trigger != "scheduled" and await should_skip(session, market.current_signal_id, new_hash):
                 # Evidence unchanged — but if price moved we can still create a
                 # new signal by cloning the current one at the new price (no LLM call).
                 cloned = await self._clone_at_price(session, market)
@@ -173,7 +179,19 @@ class SignalPipeline:
                 series_history = await get_series_history_for_market(
                     session, market.series_ticker, option_code
                 )
-            prompt = build_prompt(market, docs, series_history=series_history)
+
+            phrase_data = None
+            if market.series_ticker and market.series_ticker in self._factbase_series_allowlist:
+                from freqpred.ingestion.models import FactbasePhraseRow
+                from freqpred.ingestion.fetchers.factbase import phrase_row_to_data
+                fb_result = await session.execute(
+                    select(FactbasePhraseRow).where(FactbasePhraseRow.market_id == market.id)
+                )
+                fb_row = fb_result.scalar_one_or_none()
+                if fb_row is not None:
+                    phrase_data = phrase_row_to_data(fb_row)
+
+            prompt = build_prompt(market, docs, series_history=series_history, phrase_data=phrase_data)
             try:
                 llm_response = await self._llm_client.complete(
                     prompt,

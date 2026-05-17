@@ -3,15 +3,19 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 import structlog
 
 from freqpred.markets.models import Market
 from freqpred.rag.models import Document
 
+if TYPE_CHECKING:
+    from freqpred.ingestion.fetchers.factbase import FactbasePhraseData
+
 log = structlog.get_logger(__name__)
 
-PROMPT_VERSION = "signal-v7"
+PROMPT_VERSION = "signal-v8"
 
 SYSTEM_PROMPT = """You are a prediction market probability analyst. Estimate the probability
 that a market question resolves YES by combining your prior knowledge with
@@ -23,6 +27,13 @@ REASONING PROCESS
 
 Step 1 — Form a prior.
 Anchor on, in order of availability:
+- Phrase frequency data (PHRASE FREQUENCY DATA block) when present —
+  empirical occurrence counts from the speaker's full transcript archive.
+  If in_market_count > 0, the phrase has already been said during this
+  market window: treat this as near-decisive YES evidence (anchor ~0.95+).
+  Otherwise, use the 7d/30d/365d counts to calibrate your base rate for
+  the remaining window.  This data is specific and direct; prioritize it
+  over world knowledge for the prior on mention markets.
 - Historical base rate data (HISTORICAL BASE RATE block) when present.
 - World knowledge: subject's typical behavior, event frequency, window
   length, topical salience, structural factors.
@@ -290,10 +301,40 @@ def _build_base_rate_block(series_history: dict) -> list[str]:
     return lines
 
 
+def _build_factbase_block(data: "FactbasePhraseData") -> list[str]:
+    lines = [
+        "=== PHRASE FREQUENCY DATA (FactBase) ===",
+        f'Phrase: "{data.display_phrase}"',
+        "Speaker: Donald Trump",
+        "",
+        "Occurrence counts (Trump statements archive):",
+        f"  Since market opened : {data.in_market_count}",
+        f"  Last 7 days         : {data.count_7d}",
+        f"  Last 30 days        : {data.count_30d}",
+        f"  Last 365 days       : {data.count_365d}",
+    ]
+    if data.top_quotes:
+        lines.append("")
+        lines.append("Most recent Trump quotes:")
+        for q in data.top_quotes:
+            lines.append(
+                f"  [{q.get('date', '')}] \"{q.get('text', '')[:120]}\"  ({q.get('event_type', '')})"
+            )
+    lines += [
+        "",
+        "Note: in_market_count > 0 means Trump has already said this phrase during",
+        "the market window — treat as near-decisive YES evidence. Trend counts",
+        "(7d/30d/365d) calibrate the base rate for remaining window probability.",
+        "",
+    ]
+    return lines
+
+
 def build_prompt(
     market: Market,
     docs: list[Document],
     series_history: dict | None = None,
+    phrase_data: "FactbasePhraseData | None" = None,
 ) -> str:
     """Build the user prompt for signal analysis.
 
@@ -328,6 +369,9 @@ def build_prompt(
 
     if series_history is not None:
         lines.extend(_build_base_rate_block(series_history))
+
+    if phrase_data is not None:
+        lines.extend(_build_factbase_block(phrase_data))
 
     lines.append("=== EVIDENCE ===")
 

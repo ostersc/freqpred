@@ -488,6 +488,37 @@ class TestBuildPrompt:
         assert "TEMPORAL RULES" in SYSTEM_PROMPT
         assert "REASONING PROCESS" in SYSTEM_PROMPT
 
+    def test_build_prompt_includes_factbase_block(self) -> None:
+        from datetime import UTC
+        from freqpred.ingestion.fetchers.factbase import FactbasePhraseData
+
+        market = _make_market()
+        phrase_data = FactbasePhraseData(
+            display_phrase="witch hunt",
+            api_query='"witch hunt"',
+            speaker_slug="trump",
+            in_market_count=2,
+            count_7d=5,
+            count_30d=12,
+            count_365d=80,
+            top_quotes=[{"date": "2026-05-01", "text": "It's a witch hunt!", "event_type": "speech"}],
+            fetched_at=datetime.now(UTC),
+        )
+        prompt = build_prompt(market, [], phrase_data=phrase_data)
+        assert "PHRASE FREQUENCY DATA" in prompt
+        assert "witch hunt" in prompt
+        assert "Since market opened" in prompt
+        assert "Since market opened : 2" in prompt
+
+    def test_build_prompt_no_factbase_block_when_none(self) -> None:
+        market = _make_market()
+        prompt = build_prompt(market, [], phrase_data=None)
+        assert "PHRASE FREQUENCY DATA" not in prompt
+
+    def test_prompt_version_is_v8(self) -> None:
+        from freqpred.signal.llm import PROMPT_VERSION
+        assert PROMPT_VERSION == "signal-v8"
+
 
 # ---------------------------------------------------------------------------
 # SignalPipeline.analyze — full pipeline tests
@@ -564,8 +595,8 @@ class TestSignalPipelineAnalyze:
         assert 0.0 <= result.estimated_probability <= 1.0
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_evidence_unchanged(self) -> None:
-        """Second call with same docs → same hash → None returned, no LLM call."""
+    async def test_returns_none_when_evidence_unchanged_manual(self) -> None:
+        """Manual trigger + same hash → None returned, no LLM call."""
         from freqpred.rag.retriever import compute_retrieval_hash
 
         doc = _make_document()
@@ -574,14 +605,34 @@ class TestSignalPipelineAnalyze:
         pipeline, _, llm_client = self._make_pipeline(
             docs=[doc],
             llm_content=_valid_llm_json(),
-            current_signal_hash=doc_hash,  # current signal already has this hash
+            current_signal_hash=doc_hash,
         )
 
         with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
-            result = await pipeline.analyze(_make_market(current_signal_id=FAKE_SIGNAL_ID))
+            result = await pipeline.analyze(_make_market(current_signal_id=FAKE_SIGNAL_ID), trigger="manual")
 
         assert result is None
         llm_client.complete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scheduled_bypasses_hash_check(self) -> None:
+        """Scheduled trigger always calls LLM even when doc hash is unchanged."""
+        from freqpred.rag.retriever import compute_retrieval_hash
+
+        doc = _make_document()
+        doc_hash = compute_retrieval_hash([doc.id])
+
+        pipeline, _, llm_client = self._make_pipeline(
+            docs=[doc],
+            llm_content=_valid_llm_json(),
+            current_signal_hash=doc_hash,  # same hash as current signal
+        )
+
+        with patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])):
+            result = await pipeline.analyze(_make_market(current_signal_id=FAKE_SIGNAL_ID), trigger="scheduled")
+
+        assert result is not None
+        llm_client.complete.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_new_document_triggers_llm_call(self) -> None:

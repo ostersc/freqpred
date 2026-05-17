@@ -105,7 +105,9 @@ graph TD
         CG[Catalyst Generator]
         IS[Ingestion Scheduler]
         RS[Realtime Scheduler]
+        FB[FactBase Scheduler]
         DS[(Document Store)]
+        FBD[(FactBase Phrase DB)]
     end
 
     subgraph Metrics[Metrics]
@@ -139,6 +141,9 @@ graph TD
     CG --> RS
     IS --> DS
     RS --> DS
+    FB --> FBD
+    FBD --> SP
+    FBD --> AS
     DS --> SP
     MW -->|prices| SP
     SP --> SE
@@ -155,6 +160,7 @@ graph TD
     API --> UI
     SQS --> SQ
     MS -. is_market_interesting .-> STRAT
+    FB -. phrase cache gate .-> STRAT
     SE -. should_trade .-> STRAT
     AS -. assessment-aware position_size .-> STRAT
     PM -. exits and resolution .-> STRAT
@@ -167,16 +173,17 @@ graph TD
     classDef strategy fill:#f8d7da,stroke:#721c24,stroke-width:3px,color:#721c24
 
     class KREST,KWS exchange
-    class MW,MS,CG,IS,RS,DS ingestion
+    class MW,MS,CG,IS,RS,FB,DS,FBD ingestion
     class SQS,SQ metrics
     class SP,SE,AS,OM signal
     class PW,PM,L,API,UI position
     class STRAT strategy
 
-    linkStyle 22 stroke:#721c24,stroke-width:2px
-    linkStyle 23 stroke:#721c24,stroke-width:2px
-    linkStyle 24 stroke:#721c24,stroke-width:2px
     linkStyle 25 stroke:#721c24,stroke-width:2px
+    linkStyle 26 stroke:#721c24,stroke-width:2px
+    linkStyle 27 stroke:#721c24,stroke-width:2px
+    linkStyle 28 stroke:#721c24,stroke-width:2px
+    linkStyle 29 stroke:#721c24,stroke-width:2px
 ```
 
 Four concurrent subsystems: **ingestion** (catalyst-driven, continuous), **signal and trading** (triggered, RAG + LLM + assessment-aware sizing), **position watcher** (WebSocket, sub-second price + resolution events), and **metrics** (daily source-quality snapshots). Persisted assessment and source-quality data are then surfaced in dashboard detail views.

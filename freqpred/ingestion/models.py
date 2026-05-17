@@ -8,10 +8,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, SmallInteger, Text, VARCHAR
+from sqlalchemy import Boolean, Date, ForeignKey, Integer, JSON, SmallInteger, Text, VARCHAR
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.schema import PrimaryKeyConstraint
+from sqlalchemy import text as sa_text
 
 from freqpred.db import Base
 
@@ -110,6 +111,36 @@ class FetcherCursorRow(Base):
     fetcher: Mapped[str] = mapped_column(Text, nullable=False)
     key: Mapped[str] = mapped_column(Text, nullable=False)
     last_run_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class FactbasePhraseRow(Base):
+    """ORM model for the ``factbase_phrase_frequency`` table.
+
+    One row per market. Stores the Haiku-extracted search terms and the
+    pre-computed frequency counts for each time window. ``api_query`` is
+    the Lucene OR query sent to the FactBase API; ``display_phrase`` is
+    the human-readable label used in prompts.
+    """
+
+    __tablename__ = "factbase_phrase_frequency"
+
+    market_id: Mapped[str] = mapped_column(
+        VARCHAR(255), ForeignKey("markets.id"), primary_key=True
+    )
+    display_phrase: Mapped[str] = mapped_column(Text, nullable=False)
+    api_query: Mapped[str] = mapped_column(Text, nullable=False)
+    speaker_slug: Mapped[str] = mapped_column(Text, nullable=False, server_default="trump")
+    in_market_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    count_7d: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    count_30d: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    count_365d: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    top_quotes: Mapped[list] = mapped_column(
+        JSON, nullable=False, server_default=sa_text("'[]'::json")
+    )
+    last_fetched_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
 
 
 class FetcherRateLimitRow(Base):

@@ -58,6 +58,7 @@ def test_all_tables_registered():
         "api_daily_counters",
         "fetcher_cursors",
         "fetcher_rate_limits",
+        "factbase_phrase_frequency",
         "run_state",
         "runtime_config_overrides",
         "source_quality_scores",

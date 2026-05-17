@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-05-14
+**Last updated:** 2026-05-17
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -93,7 +93,9 @@ graph TD
         CG[Catalyst Generator]
         IS[Ingestion Scheduler]
         RS[Realtime Scheduler]
+        FB[FactBase Scheduler]
         DS[(Document Store)]
+        FBD[(FactBase Phrase DB)]
     end
 
     subgraph Trading[Signal and Trading]
@@ -124,6 +126,9 @@ graph TD
     CG --> RS
     IS --> DS
     RS --> DS
+    FB --> FBD
+    FBD --> SP
+    FBD --> AS
     MW --> SP
     DS --> SP
     SP --> SE
@@ -156,6 +161,7 @@ graph TD
 | **Assessment** | Builds source-quality and similar-market context, calls the judgment model when useful, and persists a sizing-only `SignalAssessment` before final position sizing |
 | **Source Quality Scheduler** | Refreshes rolling `source_quality_scores` snapshots daily so assessment and dashboard views have fresh source-level calibration data |
 | **Series History Scheduler** | Fetches all settled markets per active series from the Kalshi API and upserts per-option YES/NO counts plus an aggregate row into `series_option_history`; runs daily (07:00 ET) + at startup; per-series 6-hour skip guard prevents redundant fetches |
+| **FactBase Scheduler** | For KXTRUMPSAY markets: uses Haiku (once per market lifetime) to extract quoted phrase and all plural/possessive variants; queries FactBase API for occurrence counts (`in_market_count`, `count_7d`, `count_30d`, `count_365d`) plus top Trump quotes; persists to `factbase_phrase_frequency`; populates in-process `FactbasePhraseCache` so `is_market_interesting()` gates KXTRUMPSAY markets until data is ready; refreshes every 5 min, re-fetches counts every 24 h |
 | **IMarketClient** | Abstract interface over Kalshi (and future platforms); handles orders, positions, balance |
 | **Order Manager** | Executes paper or live trades; enforces hard risk caps before any order; passes optional persisted assessment into strategy sizing |
 | **Ledger** | Immutable trade log; records every signal, position, and resolution outcome |
@@ -1322,6 +1328,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [ ] **T70** [#70](https://github.com/ostersc/freqpred/issues/70) — Series option base-rate history: `series_option_history` table keyed by `(series_ticker, option_code)`; background refresh fetches all settled markets per active series from Kalshi API and upserts YES/NO counts + label; signal prompt receives a base-rate context block when `n >= 3`; Type B single-option series degrade gracefully via low counts.
 - [x] **T71** [#71](https://github.com/ostersc/freqpred/issues/71) — Pre-signal risk gate: skip LLM analysis for new-entry markets where risk would block the resulting trade (global capacity caps, spread too wide, stoploss re-entry blocked); gate is opt-out via `StrategyConfig.pre_signal_risk_gate` (default `True`); markets with open positions always bypass the gate.
 - [x] **T72** [#72](https://github.com/ostersc/freqpred/issues/72) — Dashboard: P&L over time page; `GET /api/pnl/time-series` with 7 filter dimensions (strategy, signal model, prompt version, direction, category, series, market); Recharts `ComposedChart` with daily P&L bars, cumulative P&L line, EMA overlay, dual Y-axis for P&L vs LLM spend; projection tab with CAGR extrapolation, linear LLM spend projection, and "days until broke" countdown (broke = initial_bankroll + projected_trading_pnl − projected_llm_spend ≤ 0).
+- [ ] **T73** [#73](https://github.com/ostersc/freqpred/issues/73) — FactBase phrase frequency gate + signal enrichment for KXTRUMPSAY markets: Haiku extracts search terms (slash variants + plurals/possessives) once per market; `factbase_phrase_frequency` table caches window counts (`in_market_count`, 7d, 30d, 365d) + top Trump quotes; `is_market_interesting()` blocks until cache is ready; signal prompt gets a `PHRASE FREQUENCY DATA` block; assessor payload gets `phrase_frequency`; `SERVICE_FACTBASE_SCHEDULER` telemetry heartbeat; bumps signal prompt to `signal-v8`. Depends on: T70, T71.
 
 **`OrderTypes` interface** (strategy-level, all fields have defaults — existing strategies unchanged):
 ```python

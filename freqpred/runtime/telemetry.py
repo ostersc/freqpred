@@ -20,6 +20,7 @@ SERVICE_REALTIME_SCHEDULER = "realtime_scheduler"
 SERVICE_SIGNAL_LOOP = "signal_loop"
 SERVICE_SOURCE_QUALITY_SCHEDULER = "source_quality_scheduler"
 SERVICE_SERIES_HISTORY_SCHEDULER = "series_history_scheduler"
+SERVICE_FACTBASE_SCHEDULER = "factbase_scheduler"
 SERVICE_POSITION_WATCHER_LAST_MESSAGE = "position_watcher_last_message"
 SERVICE_POSITION_WATCHER_RECONCILE = "position_watcher_reconcile"
 SERVICE_MARKET_WATCHER = "market_watcher"
@@ -82,6 +83,11 @@ def build_freshness_specs(
         SERVICE_SERIES_HISTORY_SCHEDULER: FreshnessSpec(
             service_name=SERVICE_SERIES_HISTORY_SCHEDULER,
             label="Series option history refresh",
+            stale_after_seconds=36 * 3600,
+        ),
+        SERVICE_FACTBASE_SCHEDULER: FreshnessSpec(
+            service_name=SERVICE_FACTBASE_SCHEDULER,
+            label="FactBase phrase refresh",
             stale_after_seconds=36 * 3600,
         ),
         SERVICE_POSITION_WATCHER_LAST_MESSAGE: FreshnessSpec(

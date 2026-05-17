@@ -17,6 +17,7 @@ import freqpred.signal.models  # noqa: F401
 from freqpred.markets.models import Market
 from freqpred.metrics.assessment import (
     assess_signal_context,
+    _build_prompt_payload,
     _load_prior_assessment_by_hash,
     _parse_assessment_response,
     _trust_score_to_multiplier,
@@ -329,3 +330,57 @@ async def test_scheduled_signal_with_no_data_still_returns_neutral() -> None:
     assert assessment.size_multiplier == pytest.approx(1.0)
     assert assessment.verdict == "neutral"
     mock_prior.assert_not_awaited()  # prior lookup not called for scheduled signals
+
+
+# ---------------------------------------------------------------------------
+# _build_prompt_payload — phrase_data injection
+# ---------------------------------------------------------------------------
+
+
+def _make_phrase_data() -> object:
+    from datetime import UTC
+    from freqpred.ingestion.fetchers.factbase import FactbasePhraseData
+
+    return FactbasePhraseData(
+        display_phrase="witch hunt",
+        api_query='"witch hunt"',
+        speaker_slug="trump",
+        in_market_count=3,
+        count_7d=8,
+        count_30d=22,
+        count_365d=150,
+        top_quotes=[{"date": "2026-05-01", "text": "A witch hunt!", "event_type": "speech"}],
+        fetched_at=datetime.now(UTC),
+    )
+
+
+def test_phrase_data_injected_into_payload() -> None:
+    phrase_data = _make_phrase_data()
+    payload = _build_prompt_payload(
+        _make_signal(),
+        _make_market(),
+        "TestStrategy",
+        source_breakdown=[],
+        similar_market_summary={"available": False},
+        phrase_data=phrase_data,
+    )
+    assert "phrase_frequency" in payload
+    pf = payload["phrase_frequency"]
+    assert pf["phrase"] == "witch hunt"
+    assert pf["in_market_count"] == 3
+    assert pf["count_7d"] == 8
+    assert pf["count_30d"] == 22
+    assert pf["count_365d"] == 150
+    assert pf["weekly_rate_30d"] == pytest.approx(22 / 4.3, rel=0.01)
+
+
+def test_no_phrase_data_no_key() -> None:
+    payload = _build_prompt_payload(
+        _make_signal(),
+        _make_market(),
+        "TestStrategy",
+        source_breakdown=[],
+        similar_market_summary={"available": False},
+        phrase_data=None,
+    )
+    assert "phrase_frequency" not in payload

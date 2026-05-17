@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from freqpred.ingestion.fetchers.factbase import FactbasePhraseCache
 from freqpred.strategy.algo_base import IAlgoStrategy
 from freqpred.strategy.config import StrategyConfig
 
@@ -35,10 +36,6 @@ _TIMEFRAME = "5min"
 # low prices).  0.05 = 5¢ average range per 5-min candle.
 _CHOPPINESS_THRESHOLD = 0.05
 
-# Require at least this many complete 5-min candles for indicators to settle.
-# 25 × 5min = ~2 hours of data before any TA exit fires.
-_MIN_CANDLES = 25
-
 
 class PoliticsEdgeStrategy(IAlgoStrategy):
     """US politics markets with conservative Kelly sizing and PM-native exits.
@@ -53,7 +50,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
 
     timeframe: str = _TIMEFRAME
     max_candles: int = 500
-    min_candles: int = _MIN_CANDLES
+    min_candles: int = 3
 
     config = StrategyConfig(
         name="PoliticsEdgeStrategy",
@@ -72,10 +69,12 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         trailing_stop=False,
         trailing_stop_positive=None,
         trailing_stop_positive_offset=0.02,
+        factbase_series_allowlist=["KXTRUMPSAY", "KXTRUMPSAYMONTH", "KXTRUMPSAYNICKNAME", "KXTRUMPSAYTRUMP"],
     )
 
-    def __init__(self) -> None:
+    def __init__(self, phrase_cache: FactbasePhraseCache | None = None) -> None:
         super().__init__()
+        self._phrase_cache = phrase_cache
 
     def populate_indicators(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
         """Per-candle oscillation: wide range but small body (price moved but reversed).
@@ -102,8 +101,8 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         entry = metadata["entry_price"]
         p_est = metadata["p_est"]
 
-        safe_low = min(entry, p_est) - self.config.min_edge
-        safe_high = max(entry, p_est) + self.config.min_edge
+        safe_low = max(0.0, min(entry, p_est) - self.config.min_edge)
+        safe_high = min(1.0, max(entry, p_est) + self.config.min_edge)
         outside_safe = (df["close"] < safe_low) | (df["close"] > safe_high)
 
         # Choppiness: wide range but small body (oscillation, not trend).
@@ -133,5 +132,12 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         return df
 
     def is_market_interesting(self, market: "Market") -> bool:
+        if (
+            market.series_ticker
+            and market.series_ticker in self.config.factbase_series_allowlist
+            and self._phrase_cache is not None
+            and not self._phrase_cache.is_ready(market.id)
+        ):
+            return False
         return "Trump" in market.question and super().is_market_interesting(market)
 

@@ -218,6 +218,18 @@ class OrderManager:
             assessment = None
             if self._llm_client is not None and self._judgment_model:
                 from freqpred.metrics.assessment import assess_signal_context  # noqa: PLC0415
+                from freqpred.ingestion.fetchers.factbase import phrase_row_to_data  # noqa: PLC0415
+                from freqpred.ingestion.models import FactbasePhraseRow  # noqa: PLC0415
+
+                phrase_data = None
+                fb_allowlist = getattr(strategy.config, "factbase_series_allowlist", [])
+                if market.series_ticker and market.series_ticker in fb_allowlist:
+                    fb_result = await session.execute(
+                        select(FactbasePhraseRow).where(FactbasePhraseRow.market_id == market.id)
+                    )
+                    fb_row = fb_result.scalar_one_or_none()
+                    if fb_row is not None:
+                        phrase_data = phrase_row_to_data(fb_row)
 
                 assessment = await assess_signal_context(
                     session,
@@ -226,6 +238,7 @@ class OrderManager:
                     strategy,
                     self._llm_client,
                     self._judgment_model,
+                    phrase_data=phrase_data,
                 )
 
             # Step 2: raw position size (uses net bankroll so Kelly sizing shrinks with losses)

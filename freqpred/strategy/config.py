@@ -62,3 +62,9 @@ class StrategyConfig:
     assessment_scale_max: float = 1.20
     similar_market_min_signals: int = 10
     similar_market_min_trades: int = 5
+
+    # FactBase phrase frequency gate. Markets whose series_ticker appears in
+    # this list are held as not-interesting until phrase frequency data is
+    # cached in DB. Haiku extracts the search terms once per market lifetime.
+    # Only meaningful for KXTRUMPSAY-style "will he say X" markets.
+    factbase_series_allowlist: list[str] = field(default_factory=list)

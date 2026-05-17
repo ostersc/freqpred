@@ -15,6 +15,7 @@ from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
 
 if TYPE_CHECKING:
+    from freqpred.ingestion.fetchers.factbase import FactbasePhraseData
     from freqpred.llm.client import LLMClient
     from freqpred.markets.models import Market
     from freqpred.signal.models import Signal
@@ -374,6 +375,7 @@ def _build_prompt_payload(
     similar_market_summary: dict[str, Any],
     scale_min: float = 0.80,
     scale_max: float = 1.20,
+    phrase_data: "FactbasePhraseData | None" = None,
 ) -> dict[str, Any]:
     weighted_delta = None
     if source_breakdown:
@@ -449,6 +451,25 @@ def _build_prompt_payload(
             "similar_market_available": bool(similar_market_summary.get("available")),
             "notes": notes,
         },
+        **(
+            {
+                "phrase_frequency": {
+                    "phrase": phrase_data.display_phrase,
+                    "in_market_count": phrase_data.in_market_count,
+                    "count_7d": phrase_data.count_7d,
+                    "count_30d": phrase_data.count_30d,
+                    "count_365d": phrase_data.count_365d,
+                    "weekly_rate_30d": round(phrase_data.count_30d / 4.3, 1),
+                    "top_quotes": phrase_data.top_quotes[:3],
+                    "note": (
+                        "in_market_count > 0 = confirmed YES occurrence in window. "
+                        "Use weekly_rate_30d to judge if signal probability aligns with empirical cadence."
+                    ),
+                }
+            }
+            if phrase_data is not None
+            else {}
+        ),
     }
 
 
@@ -500,6 +521,7 @@ async def assess_signal_context(
     strategy: "IPredictionStrategy",
     llm_client: "LLMClient",
     judgment_model: str,
+    phrase_data: "FactbasePhraseData | None" = None,
 ) -> SignalAssessment:
     """Return and persist one signal assessment row for trade sizing."""
     source_breakdown = await _load_source_breakdown(session, signal, market)
@@ -572,6 +594,7 @@ async def assess_signal_context(
         similar_market_summary,
         scale_min=strategy.config.assessment_scale_min,
         scale_max=strategy.config.assessment_scale_max,
+        phrase_data=phrase_data,
     )
     prompt = json.dumps(prompt_payload, indent=2, sort_keys=True)
     llm_query_id: int | None = None
