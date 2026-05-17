@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-PROMPT_VERSION = "signal-v8"
+PROMPT_VERSION = "signal-v9"
 
 SYSTEM_PROMPT = """You are a prediction market probability analyst. Estimate the probability
 that a market question resolves YES by combining your prior knowledge with
@@ -89,6 +90,13 @@ rules, and noise you cannot model directly. Override only when current
 conditions have meaningfully changed since the historical period, and
 flag the override explicitly.
 
+For mention markets with a PHRASE FREQUENCY DATA block present: the
+historical option/series rates provide useful context, but the Poisson
+remaining-window baseline (from PHRASE FREQUENCY DATA) is the primary
+anchor for the prior. The historical rate is the unconditional full-window
+probability at f=0; the Poisson baseline is the conditional probability for
+the time actually remaining.
+
 ═══════════════════════════════════════════════════════════════════════════
 MARKET CATEGORIES
 ═══════════════════════════════════════════════════════════════════════════
@@ -115,12 +123,78 @@ TEMPORAL RULES
 3. Historical instances inform the base rate only — they do not satisfy
    the in-window requirement.
 4. A confirmed in-window instance is decisive — anchor near 1.0.
-5. Use 'Window remaining' for forward probability. Absence during
-   elapsed time is a real negative signal for events that reliably
-   surface in retrieval (major news, official announcements), but only
-   a weak signal for events that frequently occur without leaving a
-   retrieval trace (routine social posts, common talking points).
-   Most "did X say Y" markets fall in the latter category.
+5. Use 'Window remaining' for forward probability. For RAG evidence,
+   absence is only a real negative signal for events that reliably
+   surface in retrieval (major news, official announcements). For events
+   that frequently occur without leaving a retrieval trace (social posts,
+   common talking points), RAG absence is a weak signal. Most "did X
+   say Y" markets fall in the latter category for RAG evidence.
+   Exception: when a PHRASE FREQUENCY DATA block is present,
+   in_market_count = 0 IS meaningful — it reflects direct absence in the
+   speaker's transcript archive, not just absence from news retrieval.
+   See MENTION MARKET TIME DECAY AND CONFIDENCE below.
+
+═══════════════════════════════════════════════════════════════════════════
+MENTION MARKET TIME DECAY AND CONFIDENCE
+═══════════════════════════════════════════════════════════════════════════
+
+These rules apply when a PHRASE FREQUENCY DATA block is present and
+in_market_count = 0.
+
+PROBABILITY — use the Poisson remaining-window baseline, not the option
+win rate.
+
+The historical option win rate (e.g. "67% YES, n=9") is the unconditional
+full-window probability at f=0. Once time has elapsed without an occurrence,
+the correct starting probability is the Poisson baseline for the REMAINING
+window. The PHRASE FREQUENCY DATA block always provides this precomputed as
+"Poisson baseline P(≥1 occurrence in remaining N days)". If for any reason
+the block omits it, approximate as: 1 − exp(−(count_365d/365) × days_remaining).
+
+  Wrong: "Option rate is 67%. Modest downward adjustment for elapsed
+         time → posterior 0.65."
+  Right: "Poisson baseline for remaining window is 12–21%. Adjust from
+         there based on evidence → posterior 0.19."
+
+Use the 30d baseline when ELEVATED RECENT ACTIVITY is flagged (the term
+is being used more frequently in the recent past than its long-run average —
+weight the higher 30d baseline) or RECENT DROUGHT is flagged (the term is
+being used less frequently than its long-run average — weight the lower 30d
+baseline). Otherwise the 365d baseline is the primary anchor.
+
+Evidence can shift the posterior above the Poisson baseline when it confirms
+specific salience or conditions raising the per-day rate in this window. But
+absent a confirmed in-window instance, the posterior must stay near the range
+implied by the Poisson baselines — not drift back toward the full-window
+historical rate.
+
+CONFIDENCE — follows a U-shaped curve across the window fraction f.
+
+f < 0.4 (early window): confidence reflects prior reliability. For
+  well-sampled options (n ≥ 8) with clear cadence patterns, 0.70–0.90 is
+  appropriate, scaling higher when the prior is near-decisive (e.g. very
+  high-cadence term, series rate > 90%). The outcome has not surfaced but
+  the prior is trustworthy.
+
+f = 0.4–0.7 (uncertain middle): reduce confidence to 0.45–0.65. Both YES
+  and NO paths remain plausible. The prior's predictive power is waning but
+  absence is not yet strongly informative. Do not report high confidence
+  unless in_market_count > 0.
+
+f > 0.8 (late window), in_market_count = 0: confidence rises as absence
+  becomes increasingly informative. A phrase with reliable FactBase coverage
+  that has not appeared through 80%+ of its window is trending NO with
+  growing certainty. Confidence 0.65–0.80 is appropriate for a NO-direction
+  estimate. Do not stay anchored on the historical YES rate with high
+  confidence — that rate applies to f=0, not to the current elapsed state.
+
+f > 0.8 (late window), in_market_count > 0: confirmed instance — confidence
+  0.90+ regardless of other factors.
+
+Trading implication: downstream logic gates entries on confidence exceeding
+a threshold. Low mid-window confidence correctly prevents entries on
+genuinely uncertain estimates. High late-window confidence in NO correctly
+suppresses entries and triggers exits.
 
 ═══════════════════════════════════════════════════════════════════════════
 CALIBRATION
@@ -192,6 +266,28 @@ Futures and recent Fed commentary signal a hold. Prior: 0.10. Hawkish
 quotes and inflation print are moderate updates reinforcing the prior,
 not moving it. Posterior: 0.08. Direction: NO.
 
+Example 5 — Late-window mention market, no in-window occurrence.
+
+Market: "Will Trump say 'Rigged Election' before May 18, 2026?"
+f = 0.88 (6.5 of 7.4 days elapsed). Window remaining: 0.9 days.
+Series: 60% YES (n=261). Option: 6/3 (67%, n=9).
+FactBase: count_365d=53, count_30d=8, count_7d=0, in_market_count=0.
+Poisson baseline: 12.3% (365d rate) / 21.3% (30d rate).
+ELEVATED RECENT ACTIVITY: 30d above monthly average.
+
+Prior: 0.19. The 30d-based Poisson baseline (21.3%) is the correct anchor
+for the remaining 0.9 days — not the 67% option win rate, which is the
+unconditional full-window probability at f=0. Elevated recent activity
+warrants the 30d baseline over the 365d baseline.
+updates_applied: [{doc: "posting-spree article", direction: "+",
+  magnitude: "small", reason: "high posting volume in window raises
+  per-day rate slightly, but not phrase-specific — weak positive only"}].
+Posterior: 0.22. Direction: NO. Confidence: 0.62. At f=0.88 with
+in_market_count=0, absence is becoming informative but elevated 30d activity
+preserves genuine uncertainty; mid-range confidence is correct here. Do not
+report confidence > 0.65 in YES direction without a confirmed in-window
+instance.
+
 ═══════════════════════════════════════════════════════════════════════════
 OUTPUT
 ═══════════════════════════════════════════════════════════════════════════
@@ -201,7 +297,7 @@ Call submit_analysis with:
 - prior, posterior, probability: floats 0.0–1.0; probability must equal
   posterior.
 - confidence: float 0.0–1.0.
-- direction: "YES" if >0.5, "NO" if <0.5, "SKIP" only if the question is
+- direction: "YES" if >0.5, "NO" if <=0.5, "SKIP" only if the question is
   malformed (sparse evidence → rely on prior, not SKIP).
 - updates_applied: per-document updates (may be empty); use the
   magnitudes above.
@@ -301,18 +397,73 @@ def _build_base_rate_block(series_history: dict) -> list[str]:
     return lines
 
 
-def _build_factbase_block(data: "FactbasePhraseData") -> list[str]:
+def _build_factbase_block(
+    data: "FactbasePhraseData",
+    days_to_close: float,
+    days_elapsed: float | None,
+    total_window_days: float | None,
+) -> list[str]:
     lines = [
         "=== PHRASE FREQUENCY DATA (FactBase) ===",
         f'Phrase: "{data.display_phrase}"',
         "Speaker: Donald Trump",
+        "",
+    ]
+
+    if days_elapsed is not None and total_window_days and total_window_days > 0:
+        f = days_elapsed / total_window_days
+        lines.append(
+            f"Window fraction elapsed (f): {f:.2f}"
+            f"  ({days_elapsed:.1f} of {total_window_days:.1f} days elapsed,"
+            f" {days_to_close:.1f} days remaining)"
+        )
+    else:
+        lines.append(f"Window remaining: {days_to_close:.1f} days")
+
+    lines += [
         "",
         "Occurrence counts (Trump statements archive):",
         f"  Since market opened : {data.in_market_count}",
         f"  Last 7 days         : {data.count_7d}",
         f"  Last 30 days        : {data.count_30d}",
         f"  Last 365 days       : {data.count_365d}",
+        "",
     ]
+
+    daily_rate_365d = data.count_365d / 365.0
+    weekly_rate_365d = daily_rate_365d * 7
+    poisson_365d = 1.0 - math.exp(-daily_rate_365d * days_to_close) if daily_rate_365d > 0 else 0.0
+
+    daily_rate_30d = data.count_30d / 30.0
+    poisson_30d = 1.0 - math.exp(-daily_rate_30d * days_to_close) if daily_rate_30d > 0 else 0.0
+
+    lines += [
+        "Derived rates:",
+        f"  Annual rate (365d)   : {daily_rate_365d:.4f}/day  (~{weekly_rate_365d:.2f}/week)",
+        f"  Recent rate (30d)    : {daily_rate_30d:.4f}/day  ({data.count_30d} mentions in last 30 days)",
+        "",
+        f"Poisson baseline P(≥1 occurrence in remaining {days_to_close:.1f} days):",
+        f"  Using 365d rate      : {poisson_365d:.1%}",
+        f"  Using 30d rate       : {poisson_30d:.1%}",
+    ]
+
+    monthly_expected = data.count_365d / 12.0
+    if monthly_expected > 0:
+        if data.count_30d < monthly_expected * 0.5:
+            lines += [
+                "",
+                f"RECENT DROUGHT: count_30d ({data.count_30d}) is well below the monthly"
+                f" average ({monthly_expected:.1f}). Current usage rate appears suppressed."
+                " Weight the 30d Poisson baseline (lower).",
+            ]
+        elif data.count_30d > monthly_expected * 1.5:
+            lines += [
+                "",
+                f"ELEVATED RECENT ACTIVITY: count_30d ({data.count_30d}) is above the"
+                f" monthly average ({monthly_expected:.1f}). Recent usage running above"
+                " annual baseline. Weight the 30d Poisson baseline (higher).",
+            ]
+
     if data.top_quotes:
         lines.append("")
         lines.append("Most recent Trump quotes:")
@@ -320,11 +471,15 @@ def _build_factbase_block(data: "FactbasePhraseData") -> list[str]:
             lines.append(
                 f"  [{q.get('date', '')}] \"{q.get('text', '')[:120]}\"  ({q.get('event_type', '')})"
             )
+
     lines += [
         "",
-        "Note: in_market_count > 0 means Trump has already said this phrase during",
-        "the market window — treat as near-decisive YES evidence. Trend counts",
-        "(7d/30d/365d) calibrate the base rate for remaining window probability.",
+        "INTERPRETATION:",
+        "  in_market_count > 0: near-decisive YES (anchor ~0.95+).",
+        "  in_market_count = 0: use the Poisson remaining-window baseline as your",
+        "    probability estimate — NOT the historical option win rate (which reflects",
+        "    full-window probability at f=0, not the conditional probability given",
+        "    elapsed time without an occurrence).",
         "",
     ]
     return lines
@@ -347,13 +502,24 @@ def build_prompt(
         (now - market.open_time).total_seconds() / 86400
         if market.open_time else None
     )
+    total_window_days = (
+        days_elapsed + days_to_close if days_elapsed is not None else None
+    )
 
     open_time_str = (
         market.open_time.isoformat() if market.open_time else "unknown"
     )
-    elapsed_str = (
-        f"{days_elapsed:.1f} days" if days_elapsed is not None else "unknown (issuance date not available)"
-    )
+    if days_elapsed is not None and total_window_days:
+        f = days_elapsed / total_window_days
+        window_line = (
+            f"Window elapsed: {days_elapsed:.1f} days  |  Window remaining: {days_to_close:.1f} days"
+            f"  |  f (fraction elapsed): {f:.2f}"
+        )
+    else:
+        window_line = (
+            f"Window elapsed: unknown (issuance date not available)"
+            f"  |  Window remaining: {days_to_close:.1f} days"
+        )
 
     lines: list[str] = [
         "=== MARKET CONTEXT ===",
@@ -363,7 +529,7 @@ def build_prompt(
         f"Current Date (UTC): {now.strftime('%Y-%m-%d %H:%M')}",
         f"Market Opened (Issuance Date): {open_time_str}",
         f"Market Closes: {market.close_time.isoformat()} ({days_to_close:.1f} days from now)",
-        f"Window elapsed: {elapsed_str}  |  Window remaining: {days_to_close:.1f} days",
+        window_line,
         "",
     ]
 
@@ -371,7 +537,7 @@ def build_prompt(
         lines.extend(_build_base_rate_block(series_history))
 
     if phrase_data is not None:
-        lines.extend(_build_factbase_block(phrase_data))
+        lines.extend(_build_factbase_block(phrase_data, days_to_close, days_elapsed, total_window_days))
 
     lines.append("=== EVIDENCE ===")
 

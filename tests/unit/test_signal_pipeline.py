@@ -491,8 +491,10 @@ class TestBuildPrompt:
     def test_build_prompt_includes_factbase_block(self) -> None:
         from datetime import UTC
         from freqpred.ingestion.fetchers.factbase import FactbasePhraseData
+        from freqpred.markets.models import Market
 
         market = _make_market()
+        market.open_time = datetime(2026, 6, 23, tzinfo=timezone.utc)
         phrase_data = FactbasePhraseData(
             display_phrase="witch hunt",
             api_query='"witch hunt"',
@@ -509,15 +511,19 @@ class TestBuildPrompt:
         assert "witch hunt" in prompt
         assert "Since market opened" in prompt
         assert "Since market opened : 2" in prompt
+        # v9: derived rates and Poisson baseline must be present
+        assert "Poisson baseline" in prompt
+        assert "Derived rates" in prompt
+        assert "Window fraction elapsed" in prompt
 
     def test_build_prompt_no_factbase_block_when_none(self) -> None:
         market = _make_market()
         prompt = build_prompt(market, [], phrase_data=None)
         assert "PHRASE FREQUENCY DATA" not in prompt
 
-    def test_prompt_version_is_v8(self) -> None:
+    def test_prompt_version_is_v9(self) -> None:
         from freqpred.signal.llm import PROMPT_VERSION
-        assert PROMPT_VERSION == "signal-v8"
+        assert PROMPT_VERSION == "signal-v9"
 
 
 # ---------------------------------------------------------------------------
