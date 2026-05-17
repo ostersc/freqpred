@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.config import RiskConfig
@@ -52,29 +52,33 @@ class RiskEngine:
         """
         if not block_reentry_after_stoploss and stoploss_cooldown_hours <= 0:
             return False, ""
-        _stoploss_reasons = ("stoploss", "trailing_stop")
-        stoploss_where = [
+        # Block on hard stoploss, trailing stop, or a signal exit that closed at a loss.
+        loss_exit_condition = or_(
+            PositionRow.exit_reason.in_(("stoploss", "trailing_stop")),
+            (PositionRow.exit_reason == "signal") & (PositionRow.pnl < 0),
+        )
+        loss_where = [
             PositionRow.status == "closed",
-            PositionRow.exit_reason.in_(_stoploss_reasons),
+            loss_exit_condition,
             PositionRow.market_id == market_id,
             PositionRow.mode == mode,
         ]
         if not block_reentry_after_stoploss:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=stoploss_cooldown_hours)
-            stoploss_where.append(PositionRow.exit_time >= cutoff)
-        stoploss_count_result = await session.execute(
-            select(func.count(PositionRow.id)).where(*stoploss_where)
+            loss_where.append(PositionRow.exit_time >= cutoff)
+        loss_count_result = await session.execute(
+            select(func.count(PositionRow.id)).where(*loss_where)
         )
-        stoploss_count: int = stoploss_count_result.scalar_one()
-        if stoploss_count > 0:
+        loss_count: int = loss_count_result.scalar_one()
+        if loss_count > 0:
             if block_reentry_after_stoploss:
-                reason = f"market {market_id} blocked: stoploss previously fired (block_reentry_after_stoploss=True)"
+                reason = f"market {market_id} blocked: prior loss exit (block_reentry_after_stoploss=True)"
             else:
                 reason = (
-                    f"market {market_id} in stoploss cooldown: "
-                    f"{stoploss_count} stoploss exit(s) within the last {stoploss_cooldown_hours:.1f}h"
+                    f"market {market_id} in loss cooldown: "
+                    f"{loss_count} loss exit(s) within the last {stoploss_cooldown_hours:.1f}h"
                 )
-            logger.info("risk.stoploss_reentry_blocked", market_id=market_id, stoploss_count=stoploss_count)
+            logger.info("risk.loss_reentry_blocked", market_id=market_id, loss_count=loss_count)
             return True, reason
         return False, ""
 

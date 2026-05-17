@@ -468,6 +468,41 @@ async def test_blocks_reentry_permanently_when_flag_set() -> None:
 
 
 @pytest.mark.asyncio
+async def test_blocks_reentry_after_signal_loss_exit() -> None:
+    """Signal exit with a loss triggers the same cooldown as a stoploss."""
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    # Count=1 simulates a signal exit with pnl < 0 found in the window.
+    session = _make_session(recent_stoploss_count=1)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=100.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+        stoploss_cooldown_hours=48.0,
+    )
+
+    assert decision.allowed is False
+    assert "cooldown" in decision.reason
+
+
+@pytest.mark.asyncio
+async def test_allows_reentry_after_signal_win_exit() -> None:
+    """Signal exit that was profitable does not trigger the cooldown."""
+    engine = RiskEngine(_make_config())
+    signal = _make_signal(edge=0.20)
+    # Count=0 simulates no loss exits (profitable signal exit not counted).
+    session = _make_session(recent_stoploss_count=0)
+
+    decision = await engine.check_position(
+        session, signal, requested_size=50.0, bankroll=BANKROLL,
+        market_id=MARKET_ID, max_market_exposure=MAX_MARKET_EXPOSURE,
+        stoploss_cooldown_hours=48.0,
+    )
+
+    assert decision.allowed is True
+
+
+@pytest.mark.asyncio
 async def test_cooldown_disabled_when_zero() -> None:
     """No stoploss DB query fired when stoploss_cooldown_hours=0 and flag is False."""
     engine = RiskEngine(_make_config())
