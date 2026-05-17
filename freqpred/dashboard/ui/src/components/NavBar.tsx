@@ -9,6 +9,7 @@ const links = [
   { to: '/signals',        label: 'Signal Feed' },
   { to: '/positions',      label: 'Positions' },
   { to: '/decisions',      label: 'Decisions' },
+  { to: '/pnl',            label: 'P&L History' },
   { to: '/calibration',    label: 'Calibration' },
   { to: '/source-quality', label: 'Source Quality' },
   { to: '/llm',            label: 'LLM Cost' },

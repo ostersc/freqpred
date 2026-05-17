@@ -415,3 +415,42 @@ class SystemHealthResponse(BaseModel):
     open_positions: int
     db_ok: bool
     uptime_seconds: int
+
+
+# ---------------------------------------------------------------------------
+# P&L over time
+# ---------------------------------------------------------------------------
+
+
+class PnLDayOut(BaseModel):
+    date: str               # "YYYY-MM-DD"
+    daily_pnl: float
+    cumulative_pnl: float
+    trade_count: int
+
+
+class LLMSpendDayOut(BaseModel):
+    date: str               # "YYYY-MM-DD"
+    daily_spend: float
+    cumulative_spend: float
+
+
+class PromptVersionStart(BaseModel):
+    version: str
+    date: str               # "YYYY-MM-DD" — first closed-position date for this prompt version
+
+
+class PnLTimeSeriesResponse(BaseModel):
+    pnl_series: list[PnLDayOut]
+    llm_series: list[LLMSpendDayOut]
+    prompt_version_starts: list[PromptVersionStart]
+    initial_bankroll: float         # from app.state.bankroll_usd; needed for "days until broke"
+    total_trades: int
+    all_time_pnl: float
+    available_strategies: list[str]
+    available_models: list[str]
+    available_prompt_versions: list[str]
+    available_directions: list[str]
+    available_categories: list[str]
+    available_series_tickers: list[str]
+    available_market_ids: list[str]

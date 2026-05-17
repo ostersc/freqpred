@@ -328,7 +328,7 @@ body {
 .input:focus {
   outline: none;
   border-color: var(--accent);
-  background: oklch(0.19 0.008 255);
+  background: var(--bg-focus, oklch(0.19 0.008 255));
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .input.mono { font-family: var(--f-mono); }
@@ -340,6 +340,7 @@ body {
   cursor: pointer;
 }
 .select option { background: oklch(0.20 0.008 255); color: var(--fg-0); }
+body.light .select option { background: oklch(0.98 0.002 255); }
 
 /* =========== Segmented =========== */
 .seg {
@@ -474,6 +475,7 @@ body.dense .panel-body { padding: 12px; }
 
 /* =========== Light mode =========== */
 body.light {
+  --bg-focus: oklch(1 0 0);
   --bg-0: oklch(0.98 0.002 255);
   --bg-1: oklch(1 0 0);
   --bg-2: oklch(0.96 0.003 255);

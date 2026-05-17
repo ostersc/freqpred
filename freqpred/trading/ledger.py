@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import Market, MarketRow, Position, PositionRow
-from freqpred.signal.models import Signal
+from freqpred.signal.models import Signal, SignalRow
 
 
 async def open_position(
@@ -142,6 +143,137 @@ async def get_daily_pnl(session: AsyncSession, mode: str = "paper") -> float:
         )
     )
     return float(result.scalar_one())
+
+
+async def get_pnl_time_series(
+    session: AsyncSession,
+    mode: str = "paper",
+    lookback_days: int | None = None,
+    strategy_name: str | None = None,
+    model_used: str | None = None,
+    prompt_version: str | None = None,
+    direction: str | None = None,
+    category: str | None = None,
+    series_ticker: str | None = None,
+    market_id: str | None = None,
+) -> list[dict]:
+    """Return daily realized P&L buckets for closed positions matching all filters.
+
+    Only closed positions with a non-null exit_time are included. Filters are
+    AND-combined. Signal-level filters require a JOIN to SignalRow; market-level
+    filters require a JOIN to MarketRow — both JOINs are conditional so the
+    common case (no such filters) avoids the extra join cost.
+
+    Returns a list sorted by date asc, each entry:
+        {"date": "YYYY-MM-DD", "daily_pnl": float, "cumulative_pnl": float, "trade_count": int}
+    """
+    base_filters = [
+        PositionRow.status == "closed",
+        PositionRow.mode == mode,
+        PositionRow.exit_time.is_not(None),
+    ]
+
+    if lookback_days is not None:
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)
+        base_filters.append(PositionRow.exit_time >= cutoff)
+
+    if direction:
+        base_filters.append(PositionRow.direction == direction.upper())
+
+    if strategy_name:
+        base_filters.append(PositionRow.strategy_name == strategy_name)
+
+    if market_id:
+        base_filters.append(PositionRow.market_id == market_id)
+
+    stmt = select(
+        func.date(PositionRow.exit_time).label("day"),
+        func.coalesce(func.sum(PositionRow.pnl), 0.0).label("daily_pnl"),
+        func.count(PositionRow.id).label("trade_count"),
+    ).where(*base_filters)
+
+    needs_signal_join = model_used is not None or prompt_version is not None
+    needs_market_join = category is not None or series_ticker is not None
+
+    if needs_signal_join:
+        stmt = stmt.join(SignalRow, SignalRow.id == PositionRow.signal_id)
+        if model_used:
+            stmt = stmt.where(SignalRow.model_used == model_used)
+        if prompt_version:
+            stmt = stmt.where(SignalRow.prompt_version == prompt_version)
+
+    if needs_market_join:
+        stmt = stmt.join(MarketRow, MarketRow.id == PositionRow.market_id)
+        if category:
+            stmt = stmt.where(MarketRow.category == category)
+        if series_ticker:
+            stmt = stmt.where(MarketRow.series_ticker == series_ticker)
+
+    stmt = stmt.group_by(func.date(PositionRow.exit_time)).order_by(
+        func.date(PositionRow.exit_time).asc()
+    )
+
+    rows = (await session.execute(stmt)).all()
+
+    cumulative = 0.0
+    result = []
+    for day, daily_pnl, trade_count in rows:
+        daily_pnl_f = float(daily_pnl)
+        cumulative += daily_pnl_f
+        result.append(
+            {
+                "date": str(day),
+                "daily_pnl": round(daily_pnl_f, 4),
+                "cumulative_pnl": round(cumulative, 4),
+                "trade_count": int(trade_count),
+            }
+        )
+    return result
+
+
+async def get_llm_spend_time_series(
+    session: AsyncSession,
+    lookback_days: int | None = None,
+) -> list[dict]:
+    """Return daily LLM spend buckets, unfiltered by position dimensions.
+
+    LLM spend is global — it is not attributed to individual positions or
+    strategies and therefore ignores any position-level filter the caller may
+    hold. Only the time window is respected.
+
+    Returns a list sorted by date asc, each entry:
+        {"date": "YYYY-MM-DD", "daily_spend": float, "cumulative_spend": float}
+    """
+    filters = []
+    if lookback_days is not None:
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)
+        filters.append(LLMQueryRow.timestamp >= cutoff)
+
+    stmt = (
+        select(
+            func.date(LLMQueryRow.timestamp).label("day"),
+            func.coalesce(func.sum(LLMQueryRow.cost_usd), 0.0).label("daily_spend"),
+        )
+        .where(*filters)
+        .group_by(func.date(LLMQueryRow.timestamp))
+        .order_by(func.date(LLMQueryRow.timestamp).asc())
+    )
+
+    rows = (await session.execute(stmt)).all()
+
+    cumulative = 0.0
+    result = []
+    for day, daily_spend in rows:
+        daily_spend_f = float(daily_spend)
+        cumulative += daily_spend_f
+        result.append(
+            {
+                "date": str(day),
+                "daily_spend": round(daily_spend_f, 6),
+                "cumulative_spend": round(cumulative, 6),
+            }
+        )
+    return result
 
 
 async def get_portfolio_summary(session: AsyncSession, mode: str = "paper") -> dict:

@@ -28,7 +28,7 @@ from freqpred.runtime.telemetry import (
     list_service_heartbeats,
 )
 from freqpred.signal.models import SignalRow
-from freqpred.trading.ledger import get_portfolio_summary
+from freqpred.trading.ledger import get_llm_spend_time_series, get_pnl_time_series, get_portfolio_summary
 from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
 
 from .schemas import (
@@ -44,12 +44,16 @@ from .schemas import (
     LLMQueryDetailOut,
     LLMQueryListResponse,
     LLMQueryOut,
+    LLMSpendDayOut,
     MarketDetailOut,
     MarketListResponse,
     MarketOut,
     PositionDetailOut,
     PositionListResponse,
     PositionOut,
+    PnLDayOut,
+    PnLTimeSeriesResponse,
+    PromptVersionStart,
     SignalAssessmentOut,
     SignalDetailOut,
     SignalListResponse,
@@ -1126,6 +1130,120 @@ async def get_source_quality(
             )
             for row in rows
         ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# P&L over time
+# ---------------------------------------------------------------------------
+
+
+@router.get("/pnl/time-series", response_model=PnLTimeSeriesResponse)
+async def get_pnl_time_series_endpoint(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    initial_bankroll: Annotated[float, Depends(_bankroll_usd)],
+    lookback_days: Annotated[int | None, Query(ge=1)] = None,
+    strategy: str | None = Query(default=None),
+    model_used: str | None = Query(default=None),
+    prompt_version: str | None = Query(default=None),
+    direction: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    series_ticker: str | None = Query(default=None),
+    market_id: str | None = Query(default=None),
+) -> PnLTimeSeriesResponse:
+    app_mode = await _get_mode(session)
+
+    pnl_series_raw = await get_pnl_time_series(
+        session,
+        mode=app_mode,
+        lookback_days=lookback_days,
+        strategy_name=strategy,
+        model_used=model_used,
+        prompt_version=prompt_version,
+        direction=direction,
+        category=category,
+        series_ticker=series_ticker,
+        market_id=market_id,
+    )
+
+    llm_series_raw = await get_llm_spend_time_series(
+        session,
+        lookback_days=lookback_days,
+    )
+
+    # Stable filter options — use the full closed-position set for this mode,
+    # not the narrowed set from the active filters.  Same pattern as /calibration.
+    _base = [
+        PositionRow.status == "closed",
+        PositionRow.mode == app_mode,
+        PositionRow.exit_time.is_not(None),
+    ]
+
+    async def _distinct_pos(col):  # type: ignore[no-untyped-def]
+        res = await session.execute(
+            select(col).where(*_base).distinct().order_by(col)
+        )
+        return [r[0] for r in res.all() if r[0] is not None]
+
+    async def _distinct_via(col, join_model, join_condition):  # type: ignore[no-untyped-def]
+        res = await session.execute(
+            select(col)
+            .select_from(PositionRow)
+            .join(join_model, join_condition)
+            .where(*_base)
+            .distinct()
+            .order_by(col)
+        )
+        return [r[0] for r in res.all() if r[0] is not None]
+
+    available_strategies = await _distinct_pos(PositionRow.strategy_name)
+    available_directions = await _distinct_pos(PositionRow.direction)
+    available_market_ids = await _distinct_pos(PositionRow.market_id)
+    available_models = await _distinct_via(
+        SignalRow.model_used, SignalRow, SignalRow.id == PositionRow.signal_id
+    )
+    available_prompt_versions = await _distinct_via(
+        SignalRow.prompt_version, SignalRow, SignalRow.id == PositionRow.signal_id
+    )
+    available_categories = await _distinct_via(
+        MarketRow.category, MarketRow, MarketRow.id == PositionRow.market_id
+    )
+    available_series_tickers = await _distinct_via(
+        MarketRow.series_ticker, MarketRow, MarketRow.id == PositionRow.market_id
+    )
+
+    # First closed-position date per prompt version (for chart milestone flags)
+    pv_res = await session.execute(
+        select(SignalRow.prompt_version, func.min(func.date(PositionRow.exit_time)))
+        .select_from(PositionRow)
+        .join(SignalRow, SignalRow.id == PositionRow.signal_id)
+        .where(*_base)
+        .group_by(SignalRow.prompt_version)
+        .order_by(func.min(func.date(PositionRow.exit_time)))
+    )
+    prompt_version_starts = [
+        PromptVersionStart(version=str(row[0]), date=str(row[1]))
+        for row in pv_res.all()
+        if row[0] is not None and row[1] is not None
+    ]
+
+    total_trades = sum(d["trade_count"] for d in pnl_series_raw)
+    all_time_pnl = pnl_series_raw[-1]["cumulative_pnl"] if pnl_series_raw else 0.0
+
+    return PnLTimeSeriesResponse(
+        pnl_series=[PnLDayOut(**d) for d in pnl_series_raw],
+        llm_series=[LLMSpendDayOut(**d) for d in llm_series_raw],
+        prompt_version_starts=prompt_version_starts,
+        initial_bankroll=initial_bankroll,
+        total_trades=total_trades,
+        all_time_pnl=all_time_pnl,
+        available_strategies=available_strategies,
+        available_models=available_models,
+        available_prompt_versions=available_prompt_versions,
+        available_directions=available_directions,
+        available_categories=available_categories,
+        available_series_tickers=available_series_tickers,
+        available_market_ids=available_market_ids,
     )
 
 

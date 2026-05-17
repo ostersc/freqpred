@@ -10,6 +10,7 @@ import LLMCost from './pages/LLMCost'
 import SourceQuality from './pages/SourceQuality'
 import StrategyConfig from './pages/StrategyConfig'
 import SystemHealth from './pages/SystemHealth'
+import PLOverTime from './pages/PLOverTime'
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
         <Route path="/signals" element={<SignalFeed />} />
         <Route path="/positions" element={<Positions />} />
         <Route path="/decisions" element={<StrategyDecisions />} />
+        <Route path="/pnl" element={<PLOverTime />} />
         <Route path="/calibration" element={<Calibration />} />
         <Route path="/source-quality" element={<SourceQuality />} />
         <Route path="/llm" element={<LLMCost />} />
