@@ -52,10 +52,11 @@ class RiskEngine:
         """
         if not block_reentry_after_stoploss and stoploss_cooldown_hours <= 0:
             return False, ""
-        # Block on hard stoploss, trailing stop, or a signal exit that closed at a loss.
+        # Block on hard stoploss, trailing stop, or any exit that closed at a loss.
         loss_exit_condition = or_(
             PositionRow.exit_reason.in_(("stoploss", "trailing_stop")),
             (PositionRow.exit_reason == "signal") & (PositionRow.pnl < 0),
+            (PositionRow.exit_reason == "force_exit:manual") & (PositionRow.pnl < 0),
         )
         loss_where = [
             PositionRow.status == "closed",
