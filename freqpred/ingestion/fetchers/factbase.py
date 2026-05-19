@@ -203,13 +203,14 @@ async def fetch_phrase_frequency(
     market_open_time: datetime | None,
     *,
     http_timeout: float = _REQUEST_TIMEOUT,
+    _now: datetime | None = None,
 ) -> FactbasePhraseData:
     """Fetch occurrence counts for all time windows from the FactBase API.
 
     Paginates until segments older than 365 days are reached, then counts
     in Python. Returns zeros + empty quotes on any error (never raises).
     """
-    now = datetime.now(UTC)
+    now = _now if _now is not None else datetime.now(UTC)
     cutoff_365d = now - timedelta(days=365)
     cutoff_30d = now - timedelta(days=30)
     cutoff_7d = now - timedelta(days=7)

@@ -174,6 +174,8 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 
 **There is no such thing as a pre-existing failure or a flaky test that can be ignored.** If any test is failing — for any reason, in any file — it must be fixed before the task is considered done. Never declare work complete while tests are red. Never attribute a failure to "pre-existing" state and move on; investigate and fix it.
 
+**Never hardcode dates or timestamps in tests.** Any test that makes assertions about time windows (7d, 30d, 365d, age in hours, etc.) must control the clock — either by accepting a `_now: datetime | None = None` parameter in the production function (defaulting to `datetime.now(UTC)`) and passing a fixed value in the test, or by using `freezegun`. A hardcoded `_NOW = datetime(2026, 5, 16, ...)` combined with a function that calls `datetime.now()` internally will silently become incorrect as calendar time advances. This has happened repeatedly. The rule: if a function uses `datetime.now()` and a test makes time-relative assertions, the function must accept an injectable clock.
+
 ---
 
 ## Database conventions

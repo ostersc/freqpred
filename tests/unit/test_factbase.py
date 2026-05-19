@@ -163,7 +163,7 @@ async def test_compute_windows_in_market() -> None:
         mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        data = await fetch_phrase_frequency(search_terms, "trump", market_open)
+        data = await fetch_phrase_frequency(search_terms, "trump", market_open, _now=_NOW)
 
     assert data.in_market_count == 1
     assert data.count_7d == 2
@@ -194,7 +194,7 @@ async def test_top_quotes_trump_only() -> None:
         mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        data = await fetch_phrase_frequency(search_terms, "trump", market_open)
+        data = await fetch_phrase_frequency(search_terms, "trump", market_open, _now=_NOW)
 
     assert len(data.top_quotes) == 2
     assert all(q["text"] != "Something else" for q in data.top_quotes)
