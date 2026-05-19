@@ -72,6 +72,7 @@ async def compute_calibration(
         MarketRow.result.is_not(None),
         SignalRow.model_used != "demo_harness",
         SignalRow.prompt_version != "demo",
+        SignalRow.trigger != "price_moved",
     ]
     if lookback_days is not None:
         cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
