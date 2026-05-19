@@ -211,6 +211,12 @@ export default function Positions() {
                     >
                       <td>
                         <span className="ticker-id positions-market" style={{ color: 'var(--fg-0)', fontSize: 12 }} title={p.market_id}>{p.market_id}</span>
+                        {(p.has_factbase || p.series_ticker) && (
+                          <div className="row" style={{ gap: 5, marginTop: 4, flexWrap: 'wrap' }}>
+                            {p.has_factbase && <Badge kind="accent" dot>factbase</Badge>}
+                            {p.series_ticker && <Badge kind="muted">{p.series_ticker}</Badge>}
+                          </div>
+                        )}
                       </td>
                       <td className="c">
                         <Badge kind={p.direction === 'YES' ? 'pos' : 'neg'}>{p.direction}</Badge>

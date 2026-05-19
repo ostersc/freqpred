@@ -8,6 +8,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from freqpred.ingestion.models import FactbasePhraseRow
 from freqpred.signal.models import SignalRow
 
 log = structlog.get_logger(__name__)
@@ -60,6 +61,54 @@ async def should_skip(
         match=match,
     )
     return match
+
+
+async def should_skip_scheduled(
+    session: AsyncSession,
+    market_id: str,
+    new_hash: str,
+    max_interval_hours: float = 24.0,
+) -> bool:
+    """Return True if a scheduled LLM call should be skipped.
+
+    Skips only when ALL of the following hold:
+    - The last scheduled signal is less than ``max_interval_hours`` old
+      (temporal-reasoning rerun not yet due).
+    - The retrieval hash hasn't changed (same RAG doc set).
+    - FactBase data hasn't been refreshed since the last scheduled signal.
+
+    Returns False (→ run the LLM) the moment any one condition fails, so the
+    pipeline reacts immediately to new evidence or new FactBase data, and still
+    re-runs at least once every ``max_interval_hours`` for temporal reasoning.
+    """
+    result = await session.execute(
+        select(SignalRow.retrieval_hash, SignalRow.created_at)
+        .where(SignalRow.market_id == market_id, SignalRow.trigger == "scheduled")
+        .order_by(SignalRow.created_at.desc())
+        .limit(1)
+    )
+    row = result.one_or_none()
+    if row is None:
+        return False
+
+    last_hash, last_created_at = row
+    age_hours = (datetime.now(tz=timezone.utc) - last_created_at).total_seconds() / 3600
+
+    if age_hours >= max_interval_hours:
+        return False
+
+    if last_hash != new_hash:
+        return False
+
+    fb_result = await session.execute(
+        select(FactbasePhraseRow.last_fetched_at)
+        .where(FactbasePhraseRow.market_id == market_id)
+    )
+    fb_row = fb_result.one_or_none()
+    if fb_row is not None and fb_row[0] > last_created_at:
+        return False
+
+    return True
 
 
 async def scheduled_cooldown_remaining(

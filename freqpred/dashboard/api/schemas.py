@@ -30,6 +30,10 @@ class SignalOut(BaseModel):
     created_at: datetime
     social_sentiment_summary: str | None
     llm_query_id: int | None
+    rag_hit_count: int
+    has_factbase: bool
+    series_ticker: str | None
+    has_assessment: bool
 
 
 class DocumentLinkOut(BaseModel):
@@ -100,6 +104,8 @@ class PositionOut(BaseModel):
     unrealized_pnl_pct: float | None
     current_mid: float | None
     created_at: datetime
+    has_factbase: bool
+    series_ticker: str | None
 
 
 class PositionListResponse(BaseModel):

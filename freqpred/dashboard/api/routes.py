@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.llm.audit import get_daily_spend_usd
 from freqpred.llm.models import LLMQueryRow
+from freqpred.ingestion.models import FactbasePhraseRow
 from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
@@ -134,7 +135,14 @@ def _runtime_telemetry(request: Request) -> RuntimeTelemetry | None:
 # ---------------------------------------------------------------------------
 
 
-def _signal_row_to_out(row: SignalRow, market_question: str | None = None) -> SignalOut:
+def _signal_row_to_out(
+    row: SignalRow,
+    market_question: str | None = None,
+    rag_hit_count: int = 0,
+    has_factbase: bool = False,
+    series_ticker: str | None = None,
+    has_assessment: bool = False,
+) -> SignalOut:
     return SignalOut(
         id=str(row.id),
         market_id=row.market_id,
@@ -153,6 +161,10 @@ def _signal_row_to_out(row: SignalRow, market_question: str | None = None) -> Si
         created_at=row.created_at,
         social_sentiment_summary=row.social_sentiment_summary,
         llm_query_id=row.llm_query_id,
+        rag_hit_count=rag_hit_count,
+        has_factbase=has_factbase,
+        series_ticker=series_ticker,
+        has_assessment=has_assessment,
     )
 
 
@@ -183,7 +195,12 @@ def _effective_mid(mid_price: float, yes_bid: float, yes_ask: float, last_price:
     return mid_price
 
 
-def _position_row_to_out(row: PositionRow, current_mid: float | None = None) -> PositionOut:
+def _position_row_to_out(
+    row: PositionRow,
+    current_mid: float | None = None,
+    has_factbase: bool = False,
+    series_ticker: str | None = None,
+) -> PositionOut:
     unrealized_pnl: float | None = None
     unrealized_pnl_pct: float | None = None
     if row.status == "open" and current_mid is not None:
@@ -219,6 +236,8 @@ def _position_row_to_out(row: PositionRow, current_mid: float | None = None) -> 
         unrealized_pnl_pct=unrealized_pnl_pct,
         current_mid=current_mid if row.status == "open" else None,
         created_at=row.created_at,
+        has_factbase=has_factbase,
+        series_ticker=series_ticker,
     )
 
 
@@ -286,12 +305,29 @@ async def _build_signal_detail(
     session: AsyncSession,
     signal_row: SignalRow,
     market_question: str | None,
+    series_ticker: str | None = None,
 ) -> SignalDetailOut:
-    base = _signal_row_to_out(signal_row, market_question)
+    document_links = await _load_document_links(session, signal_row.id)
+    assessment = await _load_signal_assessment(session, signal_row.id)
+    has_factbase = bool(
+        (await session.execute(
+            select(func.count())
+            .select_from(FactbasePhraseRow)
+            .where(FactbasePhraseRow.market_id == signal_row.market_id)
+        )).scalar_one()
+    )
+    base = _signal_row_to_out(
+        signal_row,
+        market_question,
+        rag_hit_count=len(document_links),
+        has_factbase=has_factbase,
+        series_ticker=series_ticker,
+        has_assessment=assessment is not None,
+    )
     return SignalDetailOut(
         **base.model_dump(),
-        document_links=await _load_document_links(session, signal_row.id),
-        assessment=await _load_signal_assessment(session, signal_row.id),
+        document_links=document_links,
+        assessment=assessment,
     )
 
 
@@ -372,8 +408,36 @@ async def list_signals(
     market_id: str | None = Query(default=None),
     direction: str | None = Query(default=None),
 ) -> SignalListResponse:
+    rag_count_subq = (
+        select(func.count())
+        .select_from(DocumentMarketLinkRow)
+        .where(DocumentMarketLinkRow.signal_id == SignalRow.id)
+        .correlate(SignalRow)
+        .scalar_subquery()
+    )
+    has_factbase_subq = (
+        select(func.count())
+        .select_from(FactbasePhraseRow)
+        .where(FactbasePhraseRow.market_id == SignalRow.market_id)
+        .correlate(SignalRow)
+        .scalar_subquery()
+    )
+    has_assessment_subq = (
+        select(func.count())
+        .select_from(SignalAssessmentRow)
+        .where(SignalAssessmentRow.signal_id == SignalRow.id)
+        .correlate(SignalRow)
+        .scalar_subquery()
+    )
     stmt = (
-        select(SignalRow, MarketRow.question)
+        select(
+            SignalRow,
+            MarketRow.question,
+            MarketRow.series_ticker,
+            rag_count_subq.label("rag_hit_count"),
+            has_factbase_subq.label("has_factbase"),
+            has_assessment_subq.label("has_assessment"),
+        )
         .outerjoin(MarketRow, MarketRow.id == SignalRow.market_id)
         .order_by(SignalRow.created_at.desc())
     )
@@ -390,7 +454,10 @@ async def list_signals(
     result_rows = (await session.execute(stmt.offset(offset).limit(limit))).all()
 
     return SignalListResponse(
-        items=[_signal_row_to_out(r, q) for r, q in result_rows],
+        items=[
+            _signal_row_to_out(r, q, int(rag), bool(fb), st, bool(asmnt))
+            for r, q, st, rag, fb, asmnt in result_rows
+        ],
         total=total,
         limit=limit,
         offset=offset,
@@ -409,16 +476,16 @@ async def get_signal(
 
     result = (
         await session.execute(
-            select(SignalRow, MarketRow.question)
+            select(SignalRow, MarketRow.question, MarketRow.series_ticker)
             .outerjoin(MarketRow, MarketRow.id == SignalRow.market_id)
             .where(SignalRow.id == uid)
         )
     ).one_or_none()
     if result is None:
         raise HTTPException(status_code=404, detail="Signal not found")
-    row, market_question = result
+    row, market_question, series_ticker = result
 
-    return await _build_signal_detail(session, row, market_question)
+    return await _build_signal_detail(session, row, market_question, series_ticker)
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +499,23 @@ async def list_positions(
     status: str = Query(default="all", pattern="^(open|closed|all)$"),
 ) -> PositionListResponse:
     app_mode = await _get_mode(session)
+    pos_has_factbase_subq = (
+        select(func.count())
+        .select_from(FactbasePhraseRow)
+        .where(FactbasePhraseRow.market_id == PositionRow.market_id)
+        .correlate(PositionRow)
+        .scalar_subquery()
+    )
     stmt = (
-        select(PositionRow, MarketRow.mid_price, MarketRow.yes_bid, MarketRow.yes_ask, MarketRow.last_price)
+        select(
+            PositionRow,
+            MarketRow.mid_price,
+            MarketRow.yes_bid,
+            MarketRow.yes_ask,
+            MarketRow.last_price,
+            MarketRow.series_ticker,
+            pos_has_factbase_subq.label("has_factbase"),
+        )
         .outerjoin(MarketRow, MarketRow.id == PositionRow.market_id)
         .where(PositionRow.mode == app_mode)
         .order_by(PositionRow.entry_time.desc())
@@ -453,8 +535,10 @@ async def list_positions(
                 r,
                 current_mid=_effective_mid(mid, yes_bid or 0.0, yes_ask or 0.0, last_price or 0.0)
                 if mid is not None else None,
+                has_factbase=bool(fb),
+                series_ticker=st,
             )
-            for r, mid, yes_bid, yes_ask, last_price in rows
+            for r, mid, yes_bid, yes_ask, last_price, st, fb in rows
         ],
         total=total,
     )
@@ -518,7 +602,10 @@ async def get_position_detail(
         raise HTTPException(status_code=404, detail="Entry signal not found")
     sig_row, _ = sig_result
 
-    entry_signal = await _build_signal_detail(session, sig_row, market_question)
+    entry_signal = await _build_signal_detail(
+        session, sig_row, market_question,
+        series_ticker=market_row.series_ticker if market_row else None,
+    )
 
     # Fetch all signals for this market (chronological, capped at 100)
     market_sig_rows = (
@@ -532,7 +619,12 @@ async def get_position_detail(
     market_signals = [_signal_row_to_out(r, market_question) for r in market_sig_rows]
 
     return PositionDetailOut(
-        **_position_row_to_out(pos_row, current_mid=current_mid).model_dump(),
+        **_position_row_to_out(
+            pos_row,
+            current_mid=current_mid,
+            has_factbase=entry_signal.has_factbase,
+            series_ticker=market_row.series_ticker if market_row else None,
+        ).model_dump(),
         market_question=market_question,
         entry_signal=entry_signal,
         market_signals=market_signals,

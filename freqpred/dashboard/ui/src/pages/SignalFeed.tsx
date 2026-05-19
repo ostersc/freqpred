@@ -41,6 +41,26 @@ function triggerBadge(trigger: TriggerKind) {
   return map[trigger] ?? 'muted'
 }
 
+function ragBadgeKind(count: number): 'warn' | 'info' | 'accent' {
+  if (count === 0) return 'warn'
+  if (count <= 3) return 'info'
+  return 'accent'
+}
+
+function SignalDataBadges({ signal }: { signal: SignalOut }) {
+  return (
+    <div className="row" style={{ gap: 5, marginTop: 4, flexWrap: 'wrap' }}>
+      <Badge kind={ragBadgeKind(signal.rag_hit_count)}>
+        {signal.rag_hit_count === 0 ? 'no docs' : `${signal.rag_hit_count} doc${signal.rag_hit_count === 1 ? '' : 's'}`}
+      </Badge>
+      {signal.has_factbase && <Badge kind="accent" dot>factbase</Badge>}
+      {signal.series_ticker && <Badge kind="muted">{signal.series_ticker}</Badge>}
+      {signal.has_assessment && <Badge kind="pos">assessed</Badge>}
+      {signal.social_sentiment_summary && <Badge kind="info">social</Badge>}
+    </div>
+  )
+}
+
 function SignalDetailRow({ id, marketId }: { id: string; marketId: string }) {
   const { data, isLoading } = useQuery({
     queryKey: ['signal', id],
@@ -76,6 +96,7 @@ function SignalRow({ signal, minConf }: { signal: SignalOut; minConf: number }) 
             <span className="ticker-id">{signal.market_id}</span>
             <Badge kind={triggerBadge(signal.trigger)} dot>{signal.trigger.replace('_', ' ')}</Badge>
           </div>
+          <SignalDataBadges signal={signal} />
         </td>
         <td style={{ width: 200 }}>
           <div style={{ fontSize: 10.5, color: 'var(--fg-2)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Our · Market</div>

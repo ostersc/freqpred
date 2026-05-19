@@ -14,7 +14,7 @@ from freqpred.markets.models import Market, MarketRow
 from freqpred.rag.models import Document, DocumentMarketLinkRow
 from freqpred.rag.retriever import Embedder, compute_retrieval_hash, retrieve
 from freqpred.metrics.series_history import get_series_history_for_market
-from freqpred.signal.cache import scheduled_cooldown_remaining, should_skip
+from freqpred.signal.cache import scheduled_cooldown_remaining, should_skip, should_skip_scheduled
 from freqpred.signal.llm import PROMPT_VERSION, SIGNAL_ANALYSIS_TOOL, SYSTEM_PROMPT, build_prompt, parse_signal_response
 from freqpred.signal.models import Signal, SignalRow
 
@@ -43,6 +43,7 @@ class SignalPipeline:
         model: str = _DEFAULT_MODEL,
         top_k: int = _TOP_K,
         factbase_series_allowlist: frozenset[str] = frozenset(),
+        max_scheduled_interval_hours: float = 24.0,
     ) -> None:
         self._session_factory = session_factory
         self._embedder = embedder
@@ -50,6 +51,7 @@ class SignalPipeline:
         self._model = model
         self._top_k = top_k
         self._factbase_series_allowlist = factbase_series_allowlist
+        self._max_scheduled_interval_hours = max_scheduled_interval_hours
 
     async def analyze(
         self,
@@ -124,10 +126,20 @@ class SignalPipeline:
             doc_ids = [d.id for d in docs]
             new_hash = compute_retrieval_hash(doc_ids)
 
-            # Step 5: skip if evidence unchanged since last signal (unless forced or scheduled).
-            # Scheduled runs always proceed to the LLM — series history and FactBase counts
-            # can shift the probability even when the doc set hasn't changed.
-            if not force and trigger != "scheduled" and await should_skip(session, market.current_signal_id, new_hash):
+            # Step 5: skip if there is nothing new to analyse.
+            # - Non-scheduled: skip when the RAG doc set hasn't changed (hash match).
+            # - Scheduled: skip when the doc set AND FactBase are both unchanged AND
+            #   the minimum rerun interval hasn't elapsed yet.  This lets us react
+            #   immediately to new evidence while still guaranteeing a temporal-
+            #   reasoning rerun at least once every max_scheduled_interval_hours.
+            _skip: bool
+            if trigger == "scheduled":
+                _skip = await should_skip_scheduled(
+                    session, market.id, new_hash, self._max_scheduled_interval_hours
+                )
+            else:
+                _skip = await should_skip(session, market.current_signal_id, new_hash)
+            if not force and _skip:
                 # Evidence unchanged — but if price moved we can still create a
                 # new signal by cloning the current one at the new price (no LLM call).
                 cloned = await self._clone_at_price(session, market)

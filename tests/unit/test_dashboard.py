@@ -211,7 +211,11 @@ def _make_source_quality_row(**kw) -> MagicMock:
 
 
 def _signals_list_result(rows: list) -> MagicMock:
-    """Mock result for the signals list query, which returns (SignalRow, question) tuples."""
+    """Mock result for the signals list query.
+
+    Each element must be a 6-tuple:
+    (SignalRow, question, series_ticker, rag_hit_count, has_factbase, has_assessment)
+    """
     r = MagicMock()
     r.all.return_value = rows
     return r
@@ -224,7 +228,7 @@ def test_signals_endpoint_returns_paginated_list() -> None:
     session = AsyncMock()
     session.execute = _execute_side_effects(
         _scalar_result(2),                                              # count query
-        _signals_list_result([(row1, "Q1"), (row2, "Q2")]),            # data query
+        _signals_list_result([(row1, "Q1", None, 2, 0, 0), (row2, "Q2", "KXTEST", 0, 1, 1)]),  # data query
     )
 
     client = TestClient(_make_app(session))
@@ -250,7 +254,7 @@ def test_signals_endpoint_filters_by_market_id() -> None:
     session = AsyncMock()
     session.execute = _execute_side_effects(
         _scalar_result(1),
-        _signals_list_result([(row, "Will X happen?")]),
+        _signals_list_result([(row, "Will X happen?", None, 0, 0, 0)]),
     )
 
     client = TestClient(_make_app(session))
@@ -268,7 +272,7 @@ def test_signals_endpoint_market_question_none_when_market_missing() -> None:
     session = AsyncMock()
     session.execute = _execute_side_effects(
         _scalar_result(1),
-        _signals_list_result([(row, None)]),
+        _signals_list_result([(row, None, None, 0, 0, 0)]),
     )
 
     client = TestClient(_make_app(session))
@@ -303,14 +307,15 @@ def test_signal_detail_returns_assessment_null_when_absent() -> None:
     signal_row = _make_signal_row(id=signal_id)
 
     signal_result = MagicMock()
-    signal_result.one_or_none.return_value = (signal_row, "Will X happen?")
+    signal_result.one_or_none.return_value = (signal_row, "Will X happen?", None)
 
     docs_result = _all_result([])
     assessment_result = MagicMock()
     assessment_result.scalar_one_or_none.return_value = None
+    factbase_result = _scalar_result(0)
 
     session = AsyncMock()
-    session.execute = _execute_side_effects(signal_result, docs_result, assessment_result)
+    session.execute = _execute_side_effects(signal_result, docs_result, assessment_result, factbase_result)
 
     client = TestClient(_make_app(session))
     resp = client.get(f"/api/signals/{signal_id}")
@@ -327,14 +332,15 @@ def test_signal_detail_returns_serialized_assessment_when_present() -> None:
     assessment_row = _make_signal_assessment_row(signal_id=signal_id)
 
     signal_result = MagicMock()
-    signal_result.one_or_none.return_value = (signal_row, "Will X happen?")
+    signal_result.one_or_none.return_value = (signal_row, "Will X happen?", None)
 
     docs_result = _all_result([])
     assessment_result = MagicMock()
     assessment_result.scalar_one_or_none.return_value = assessment_row
+    factbase_result = _scalar_result(0)
 
     session = AsyncMock()
-    session.execute = _execute_side_effects(signal_result, docs_result, assessment_result)
+    session.execute = _execute_side_effects(signal_result, docs_result, assessment_result, factbase_result)
 
     client = TestClient(_make_app(session))
     resp = client.get(f"/api/signals/{signal_id}")
@@ -359,7 +365,7 @@ def test_positions_endpoint_filters_by_status() -> None:
     session.execute = _execute_side_effects(
         _mode_result(),              # _get_mode
         _scalar_result(1),
-        _all_result([(open_pos, 0.20, 0.18, 0.22, 0.20)]),   # (PositionRow, mid_price, yes_bid, yes_ask, last_price)
+        _all_result([(open_pos, 0.20, 0.18, 0.22, 0.20, None, 0)]),   # (PositionRow, mid_price, yes_bid, yes_ask, last_price, series_ticker, has_factbase)
     )
 
     client = TestClient(_make_app(session))
@@ -381,7 +387,7 @@ def test_positions_endpoint_all_statuses() -> None:
     session.execute = _execute_side_effects(
         _mode_result(),              # _get_mode
         _scalar_result(2),
-        _all_result([(r, 0.50, 0.48, 0.52, 0.50) for r in rows]),   # (PositionRow, mid_price, yes_bid, yes_ask, last_price)
+        _all_result([(r, 0.50, 0.48, 0.52, 0.50, None, 0) for r in rows]),   # (PositionRow, mid_price, yes_bid, yes_ask, last_price, series_ticker, has_factbase)
     )
 
     client = TestClient(_make_app(session))
@@ -415,6 +421,7 @@ def test_position_detail_includes_entry_signal_assessment() -> None:
     market_row.yes_bid = 0.54
     market_row.yes_ask = 0.56
     market_row.last_price = 0.55
+    market_row.series_ticker = None
     signal_row = _make_signal_row(id=signal_id)
     assessment_row = _make_signal_assessment_row(signal_id=signal_id)
 
@@ -427,6 +434,7 @@ def test_position_detail_includes_entry_signal_assessment() -> None:
     docs_result = _all_result([])
     assessment_result = MagicMock()
     assessment_result.scalar_one_or_none.return_value = assessment_row
+    factbase_result = _scalar_result(0)
     market_signals_result = _scalars_result([signal_row])
 
     session = AsyncMock()
@@ -436,6 +444,7 @@ def test_position_detail_includes_entry_signal_assessment() -> None:
         signal_result,
         docs_result,
         assessment_result,
+        factbase_result,
         market_signals_result,
     )
 

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.signal.cache import should_skip
+from freqpred.signal.cache import should_skip, should_skip_scheduled
 from freqpred.signal.llm import SYSTEM_PROMPT, build_prompt, parse_signal_response
 from freqpred.signal.pipeline import SignalPipeline
 from freqpred.signal.models import Signal
@@ -190,6 +190,92 @@ class TestShouldSkip:
         """If the stored hash is None for some reason, treat as no prior evidence."""
         session = _make_session_scalar(None)
         assert await should_skip(session, FAKE_SIGNAL_ID, FAKE_HASH) is False
+
+
+# ---------------------------------------------------------------------------
+# cache.should_skip_scheduled
+# ---------------------------------------------------------------------------
+
+
+def _make_scheduled_session(
+    last_hash: str | None,
+    last_created_at: datetime | None,
+    fb_last_fetched_at: datetime | None = None,
+) -> AsyncMock:
+    """Mock session for should_skip_scheduled.
+
+    First execute() → last scheduled signal row (hash, created_at) or None.
+    Second execute() → FactBase row (last_fetched_at,) or None.
+    """
+    session = AsyncMock()
+
+    sig_result = MagicMock()
+    if last_hash is None or last_created_at is None:
+        sig_result.one_or_none.return_value = None
+    else:
+        sig_result.one_or_none.return_value = (last_hash, last_created_at)
+
+    fb_result = MagicMock()
+    if fb_last_fetched_at is None:
+        fb_result.one_or_none.return_value = None
+    else:
+        fb_result.one_or_none.return_value = (fb_last_fetched_at,)
+
+    session.execute = AsyncMock(side_effect=[sig_result, fb_result])
+    return session
+
+
+class TestShouldSkipScheduled:
+    MIN_HOURS = 24.0
+    RECENT = datetime(2026, 3, 17, 0, 0, 0, tzinfo=timezone.utc)   # 12 h before NOW
+    OLD    = datetime(2026, 3, 16, 0, 0, 0, tzinfo=timezone.utc)   # 36 h before NOW
+
+    @pytest.mark.asyncio
+    async def test_no_prior_signal_returns_false(self) -> None:
+        session = _make_scheduled_session(None, None)
+        assert await should_skip_scheduled(session, FAKE_MARKET_ID, FAKE_HASH, self.MIN_HOURS) is False
+
+    @pytest.mark.asyncio
+    async def test_within_window_same_hash_no_factbase_returns_true(self) -> None:
+        session = _make_scheduled_session(FAKE_HASH, self.RECENT)
+        with patch("freqpred.signal.cache.datetime") as mock_dt:
+            mock_dt.now.return_value = NOW
+            result = await should_skip_scheduled(session, FAKE_MARKET_ID, FAKE_HASH, self.MIN_HOURS)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_interval_elapsed_returns_false(self) -> None:
+        session = _make_scheduled_session(FAKE_HASH, self.OLD)
+        with patch("freqpred.signal.cache.datetime") as mock_dt:
+            mock_dt.now.return_value = NOW
+            result = await should_skip_scheduled(session, FAKE_MARKET_ID, FAKE_HASH, self.MIN_HOURS)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_hash_changed_returns_false(self) -> None:
+        session = _make_scheduled_session("b" * 64, self.RECENT)
+        with patch("freqpred.signal.cache.datetime") as mock_dt:
+            mock_dt.now.return_value = NOW
+            result = await should_skip_scheduled(session, FAKE_MARKET_ID, FAKE_HASH, self.MIN_HOURS)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_factbase_updated_since_last_signal_returns_false(self) -> None:
+        fb_updated = datetime(2026, 3, 17, 6, 0, 0, tzinfo=timezone.utc)  # after RECENT
+        session = _make_scheduled_session(FAKE_HASH, self.RECENT, fb_last_fetched_at=fb_updated)
+        with patch("freqpred.signal.cache.datetime") as mock_dt:
+            mock_dt.now.return_value = NOW
+            result = await should_skip_scheduled(session, FAKE_MARKET_ID, FAKE_HASH, self.MIN_HOURS)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_factbase_older_than_last_signal_returns_true(self) -> None:
+        fb_stale = datetime(2026, 3, 16, 20, 0, 0, tzinfo=timezone.utc)  # before RECENT
+        session = _make_scheduled_session(FAKE_HASH, self.RECENT, fb_last_fetched_at=fb_stale)
+        with patch("freqpred.signal.cache.datetime") as mock_dt:
+            mock_dt.now.return_value = NOW
+            result = await should_skip_scheduled(session, FAKE_MARKET_ID, FAKE_HASH, self.MIN_HOURS)
+        assert result is True
 
 
 # ---------------------------------------------------------------------------

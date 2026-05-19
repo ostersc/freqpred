@@ -16,6 +16,10 @@ export interface SignalOut {
   created_at: string
   social_sentiment_summary: string | null
   llm_query_id: number | null
+  rag_hit_count: number
+  has_factbase: boolean
+  series_ticker: string | null
+  has_assessment: boolean
 }
 
 export interface DocumentLinkOut {
@@ -81,6 +85,8 @@ export interface PositionOut {
   unrealized_pnl_pct: number | null
   current_mid: number | null
   created_at: string
+  has_factbase: boolean
+  series_ticker: string | null
 }
 
 export interface StrategyDecisionOut extends PositionOut {

@@ -314,12 +314,11 @@ class Signal:
 ```
 
 **Signal refresh triggers** (any of these causes a new Signal to be created):
-1. **Scheduled** — re-analyze every N hours (configurable per strategy, e.g. every 12h for markets closing in >7 days, every 2h for markets closing in <48h)
-2. **Price moved** — market mid-price shifted by more than a configurable threshold (e.g. ±5 cents) since the last signal; our edge may have changed materially
-3. **New evidence detected** — retrieval hash differs from the last signal's hash, meaning new articles/posts were found
-4. **Manual** — operator triggers re-analysis via CLI or dashboard
+1. **Scheduled** — the signal loop runs every `signal.interval_seconds` (default 30 min) and fires an LLM call when **any** of the following is true: the retrieval hash has changed since the last scheduled signal (new docs), FactBase data was refreshed since the last scheduled signal, or `signal.max_scheduled_interval_hours` (default 24h) have elapsed (temporal reasoning). All three must be false to skip the LLM call.
+2. **Price moved** — when the LLM call is skipped but the market mid has shifted by more than the price-move threshold (default 5¢) since the last signal, a clone of the current signal is written at the new price without an LLM call, keeping edge calculations current.
+3. **Manual** — operator triggers re-analysis via CLI (`freqpred signal analyze`) or the dashboard Analyze button; bypasses all dedup and cooldown checks (`force=True`).
 
-**What does NOT trigger a new signal:** a scheduled poll that returns the same retrieval hash as the last signal. If nothing new was retrieved, the LLM would produce the same output — no point calling the API.
+**What does NOT trigger a scheduled LLM call:** a 30-minute poll where the retrieval hash is unchanged, FactBase has not been refreshed, and the last scheduled LLM call is less than `signal.max_scheduled_interval_hours` old. The loop still runs; it just skips the LLM and optionally creates a price clone if the market mid moved.
 
 ### Position
 ```python
@@ -894,9 +893,13 @@ flowchart TD
     GC -->|pass| CQ[Load active catalyst queries for market]
     CQ --> HS[Hybrid Search - market question core set]
     HS --> CS[Catalyst supplemental - top-1 per query not in core]
-    CS --> RH{Retrieval Hash Check}
-    RH -->|no new evidence| SKIP([Skip - no LLM call])
-    RH -->|hash changed| BR[Load series base-rate history]
+    CS --> TRG{Trigger type}
+    TRG -->|non-scheduled| HC{Hash changed?}
+    HC -->|no change| SKIP([Skip - price clone only])
+    HC -->|changed| BR
+    TRG -->|scheduled| SG{New docs, FactBase updated, or min interval elapsed?}
+    SG -->|none of the above| SKIP
+    SG -->|yes| BR[Load series base-rate history]
     BR --> LLM[LLM Analysis - Claude Sonnet]
     LLM --> SC[Signal Creation]
 ```
@@ -1013,7 +1016,7 @@ This two-pass approach keeps social signal cost-efficient: a cheap summarization
 - **judgment_model:** trade sizing and future trade-override judgment tasks (default `claude-opus-4-6`)
 - **Output format:** Structured JSON via tool use (not free-form text parsing)
 - **Prompt versioning:** Prompts are versioned and stored; every signal logs the prompt version used
-- **Caching:** Signal results cached by `(market_id, prompt_version, retrieval_hash)` — same market won't be re-analyzed unless new evidence is retrieved
+- **Deduplication:** Non-scheduled triggers skip the LLM when the retrieval hash matches the last signal (same docs → same output). Scheduled triggers use a three-part gate: skip only when hash is unchanged AND FactBase has not been refreshed AND fewer than `signal.max_scheduled_interval_hours` (default 24h) have passed since the last scheduled LLM call. This guarantees at least one temporal-reasoning re-run per day while reacting immediately to new evidence or new FactBase data.
 
 ### Structured Output Schema (LLM response)
 

@@ -102,6 +102,13 @@ class SignalConfig(BaseModel):
     # Separate from the watcher poll interval — no need to embed market
     # questions every 5 minutes when the ingestion scheduler only runs every 30.
     interval_seconds: int = Field(default=1800)
+    # Minimum hours between scheduled LLM calls for the same market.
+    # Scheduled signals are gated by a three-part check (hash, FactBase,
+    # elapsed time). This is the maximum gap allowed without a temporal-
+    # reasoning re-run — the LLM fires at least once per this interval
+    # regardless of whether docs or FactBase changed.
+    # Low-confidence cooldowns (4h / 12h) still apply on top of this cap.
+    max_scheduled_interval_hours: float = Field(default=24.0)
 
 
 class RiskConfig(BaseModel):
@@ -184,6 +191,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "KALSHI_WS_URL": ("kalshi", "ws_url"),
     "KALSHI_WS_DEMO_URL": ("kalshi", "ws_demo_url"),
     "SIGNAL_INTERVAL_SECONDS": ("signal", "interval_seconds"),
+    "SIGNAL_MAX_SCHEDULED_INTERVAL_HOURS": ("signal", "max_scheduled_interval_hours"),
     "ANTHROPIC_API_KEY": ("anthropic", "api_key"),
     "ANTHROPIC_PRIMARY_MODEL": ("anthropic", "primary_model"),
     "ANTHROPIC_CHEAP_MODEL": ("anthropic", "cheap_model"),

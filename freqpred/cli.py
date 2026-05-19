@@ -225,6 +225,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         model=config.anthropic.primary_model,
         top_k=config.signal.top_k_documents,
         factbase_series_allowlist=_factbase_allowlist,
+        max_scheduled_interval_hours=config.signal.max_scheduled_interval_hours,
     )
 
     from freqpred.alerts.telegram import TelegramSender
@@ -1337,6 +1338,7 @@ async def _signal_analyze(config: object, market_id: str, *, force: bool = False
             model=config.anthropic.primary_model,
             top_k=config.signal.top_k_documents,
             factbase_series_allowlist=_cli_factbase_allowlist,
+            max_scheduled_interval_hours=config.signal.max_scheduled_interval_hours,
         )
 
         signal = await pipeline.analyze(market, trigger="manual", force=force)
