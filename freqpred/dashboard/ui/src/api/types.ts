@@ -171,6 +171,46 @@ export interface CalibrationResponse {
   available_series_tickers: string[]
 }
 
+export interface CalibrationTimeSeriesPoint {
+  date: string
+  brier_score: number | null
+  market_brier_score: number | null
+  n_samples: number
+}
+
+export interface CalibrationTimeSeriesResponse {
+  series: CalibrationTimeSeriesPoint[]
+  prompt_version_starts: { version: string; date: string }[]
+  available_categories: string[]
+  available_models: string[]
+  available_prompt_versions: string[]
+  available_directions: string[]
+  available_series_tickers: string[]
+}
+
+export interface CalibrationHeatmapCell {
+  brier_score: number | null
+  market_brier_score: number | null
+  n_samples: number
+  delta: number | null
+}
+
+export interface CalibrationHeatmapRow {
+  series_ticker: string
+  option_code: string
+  option_label: string
+  cells: Record<string, CalibrationHeatmapCell>
+}
+
+export interface CalibrationHeatmapResponse {
+  rows: CalibrationHeatmapRow[]
+  prompt_versions: string[]
+  available_categories: string[]
+  available_models: string[]
+  available_directions: string[]
+  available_series_tickers: string[]
+}
+
 export interface SourceQualityScoreOut {
   source_name: string
   market_category: string | null

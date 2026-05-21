@@ -19,7 +19,12 @@ from freqpred.llm.models import LLMQueryRow
 from freqpred.ingestion.models import FactbasePhraseRow
 from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import MarketRow, PositionRow
-from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
+from freqpred.metrics.calibration import (
+    compute_calibration,
+    compute_calibration_heatmap,
+    compute_calibration_time_series,
+    compute_source_brier_scores,
+)
 from freqpred.metrics.models import SignalAssessmentRow, SourceQualityScoreRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.runtime.models import RuntimeEventRow
@@ -36,7 +41,12 @@ from .schemas import (
     AnalyzeResponse,
     ApiErrorStateOut,
     CalibrationBucketOut,
+    CalibrationHeatmapCellOut,
+    CalibrationHeatmapResponse,
+    CalibrationHeatmapRowOut,
     CalibrationResponse,
+    CalibrationTimeSeriesPointOut,
+    CalibrationTimeSeriesResponse,
     CircuitBreakerStateOut,
     DocumentLinkOut,
     HealthResponse,
@@ -1027,6 +1037,176 @@ async def get_ledger(
 # ---------------------------------------------------------------------------
 # Calibration
 # ---------------------------------------------------------------------------
+
+
+@router.get("/calibration/time-series", response_model=CalibrationTimeSeriesResponse)
+async def get_calibration_time_series(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    lookback_days: Annotated[int | None, Query(ge=1)] = None,
+    category: str | None = Query(default=None),
+    ticker_prefix: str | None = Query(default=None),
+    direction: str | None = Query(default=None),
+    model_used: str | None = Query(default=None),
+    prompt_version: str | None = Query(default=None),
+    series_ticker: str | None = Query(default=None),
+    min_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+    max_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+) -> CalibrationTimeSeriesResponse:
+    app_mode = await _get_mode(session)
+    ts = await compute_calibration_time_series(
+        session,
+        mode=app_mode,
+        lookback_days=lookback_days,
+        market_category=category,
+        ticker_prefix=ticker_prefix,
+        direction=direction,
+        model_used=model_used,
+        prompt_version=prompt_version,
+        series_ticker=series_ticker,
+        min_confidence=min_confidence,
+        max_confidence=max_confidence,
+    )
+
+    # prompt_version_starts: first signal date per prompt version
+    pv_starts_result = await session.execute(
+        select(
+            SignalRow.prompt_version,
+            func.min(func.date(SignalRow.created_at)).label("first_date"),
+        )
+        .where(
+            SignalRow.model_used != "demo_harness",
+            SignalRow.prompt_version != "demo",
+        )
+        .group_by(SignalRow.prompt_version)
+        .order_by(func.min(func.date(SignalRow.created_at)))
+    )
+    prompt_version_starts = [
+        PromptVersionStart(version=row[0], date=str(row[1]))
+        for row in pv_starts_result.all()
+        if row[0] is not None
+    ]
+
+    _base_where = [
+        MarketRow.status == "finalized",
+        MarketRow.result.is_not(None),
+        SignalRow.model_used != "demo_harness",
+        SignalRow.prompt_version != "demo",
+    ]
+
+    async def _distinct(col):  # type: ignore[no-untyped-def]
+        res = await session.execute(
+            select(col)
+            .select_from(MarketRow)
+            .join(SignalRow, SignalRow.market_id == MarketRow.id)
+            .where(*_base_where)
+            .distinct()
+            .order_by(col)
+        )
+        return [row[0] for row in res.all() if row[0] is not None]
+
+    available_categories = await _distinct(MarketRow.category)
+    available_models = await _distinct(SignalRow.model_used)
+    available_prompt_versions = await _distinct(SignalRow.prompt_version)
+    available_directions = await _distinct(SignalRow.direction)
+    available_series_tickers = await _distinct(MarketRow.series_ticker)
+
+    return CalibrationTimeSeriesResponse(
+        series=[
+            CalibrationTimeSeriesPointOut(
+                date=pt.date,
+                brier_score=pt.brier_score,
+                market_brier_score=pt.market_brier_score,
+                n_samples=pt.n_samples,
+            )
+            for pt in ts.points
+        ],
+        prompt_version_starts=prompt_version_starts,
+        available_categories=available_categories,
+        available_models=available_models,
+        available_prompt_versions=available_prompt_versions,
+        available_directions=available_directions,
+        available_series_tickers=available_series_tickers,
+    )
+
+
+@router.get("/calibration/by-option", response_model=CalibrationHeatmapResponse)
+async def get_calibration_by_option(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    lookback_days: Annotated[int | None, Query(ge=1)] = None,
+    category: str | None = Query(default=None),
+    ticker_prefix: str | None = Query(default=None),
+    direction: str | None = Query(default=None),
+    model_used: str | None = Query(default=None),
+    series_ticker: str | None = Query(default=None),
+    min_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+    max_confidence: Annotated[float | None, Query(ge=0.0, le=1.0)] = None,
+) -> CalibrationHeatmapResponse:
+    app_mode = await _get_mode(session)
+    report = await compute_calibration_heatmap(
+        session,
+        mode=app_mode,
+        lookback_days=lookback_days,
+        market_category=category,
+        ticker_prefix=ticker_prefix,
+        direction=direction,
+        model_used=model_used,
+        series_ticker=series_ticker,
+        min_confidence=min_confidence,
+        max_confidence=max_confidence,
+    )
+
+    _base_where = [
+        MarketRow.status == "finalized",
+        MarketRow.result.is_not(None),
+        SignalRow.model_used != "demo_harness",
+        SignalRow.prompt_version != "demo",
+    ]
+
+    async def _distinct(col):  # type: ignore[no-untyped-def]
+        res = await session.execute(
+            select(col)
+            .select_from(MarketRow)
+            .join(SignalRow, SignalRow.market_id == MarketRow.id)
+            .where(*_base_where)
+            .distinct()
+            .order_by(col)
+        )
+        return [row[0] for row in res.all() if row[0] is not None]
+
+    available_categories = await _distinct(MarketRow.category)
+    available_models = await _distinct(SignalRow.model_used)
+    available_directions = await _distinct(SignalRow.direction)
+    available_series_tickers = await _distinct(MarketRow.series_ticker)
+
+    def _map_cells(
+        cells: dict,
+    ) -> dict[str, CalibrationHeatmapCellOut]:
+        return {
+            k: CalibrationHeatmapCellOut(
+                brier_score=c.brier_score,
+                market_brier_score=c.market_brier_score,
+                n_samples=c.n_samples,
+                delta=c.delta,
+            )
+            for k, c in cells.items()
+        }
+
+    return CalibrationHeatmapResponse(
+        rows=[
+            CalibrationHeatmapRowOut(
+                series_ticker=r.series_ticker,
+                option_code=r.option_code,
+                option_label=r.option_label,
+                cells=_map_cells(r.cells),
+            )
+            for r in report.rows
+        ],
+        prompt_versions=report.prompt_versions,
+        available_categories=available_categories,
+        available_models=available_models,
+        available_directions=available_directions,
+        available_series_tickers=available_series_tickers,
+    )
 
 
 @router.get("/calibration", response_model=CalibrationResponse)

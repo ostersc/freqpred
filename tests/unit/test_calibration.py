@@ -4,6 +4,7 @@ All DB interactions are mocked — no external dependencies.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,6 +13,8 @@ from freqpred.metrics.calibration import (
     CalibrationReport,
     SourceBrierScore,
     compute_calibration,
+    compute_calibration_heatmap,
+    compute_calibration_time_series,
     compute_source_brier_scores,
     refresh_source_quality_scores,
 )
@@ -436,3 +439,141 @@ async def test_source_brier_min_docs_zero_includes_all() -> None:
     session = _make_source_session(rows)
     scores = await compute_source_brier_scores(session, min_docs=0)
     assert len(scores) == 2
+
+
+# ---------------------------------------------------------------------------
+# compute_calibration_time_series tests
+# ---------------------------------------------------------------------------
+
+
+def _make_ts_session(rows: list[tuple]) -> AsyncMock:
+    mock_result = MagicMock()
+    mock_result.all.return_value = rows
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=mock_result)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_time_series_groups_by_day() -> None:
+    """Two signals on different days produce two points with correct dates."""
+    day1 = datetime(2025, 1, 15)
+    day2 = datetime(2025, 1, 16)
+    rows = [
+        (day1, 0.8, 0.5, 1),
+        (day2, 0.6, 0.5, 0),
+    ]
+    session = _make_ts_session(rows)
+    ts = await compute_calibration_time_series(session)
+    assert len(ts.points) == 2
+    assert ts.points[0].date == "2025-01-15"
+    assert ts.points[1].date == "2025-01-16"
+
+
+@pytest.mark.asyncio
+async def test_time_series_brier_per_day() -> None:
+    """Per-day Brier formula is correct.
+
+    Day 2025-01-15: (0.8-1)^2 = 0.04 and (0.6-0)^2 = 0.36 → mean=0.20
+    """
+    day = datetime(2025, 1, 15)
+    rows = [
+        (day, 0.8, 0.5, 1),   # (0.8-1)^2 = 0.04
+        (day, 0.6, 0.5, 0),   # (0.6-0)^2 = 0.36
+    ]
+    session = _make_ts_session(rows)
+    ts = await compute_calibration_time_series(session)
+    assert len(ts.points) == 1
+    assert ts.points[0].n_samples == 2
+    assert ts.points[0].brier_score == pytest.approx(0.20, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_time_series_empty() -> None:
+    """Zero rows returns empty points list."""
+    session = _make_ts_session([])
+    ts = await compute_calibration_time_series(session)
+    assert ts.points == []
+
+
+# ---------------------------------------------------------------------------
+# compute_calibration_heatmap tests
+# ---------------------------------------------------------------------------
+
+
+def _make_heatmap_session(
+    main_rows: list[tuple],
+    label_rows: list[tuple] | None = None,
+) -> AsyncMock:
+    """Mock session returning main_rows for first execute, label_rows for second."""
+    main_result = MagicMock()
+    main_result.all.return_value = main_rows
+
+    label_result = MagicMock()
+    label_result.all.return_value = label_rows or []
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[main_result, label_result])
+    return session
+
+
+@pytest.mark.asyncio
+async def test_heatmap_all_row_aggregates_correctly() -> None:
+    """'All' row 'All' cell matches overall Brier across all options/versions."""
+    # market KXBTC-25JUN-T30000 / series KXBTC / pv v1: (0.8-1)^2=0.04, (0.6-0)^2=0.36 → 0.20
+    rows = [
+        ("KXBTC-25JUN-T30000", "KXBTC", "v1", 0.8, 0.5, 1),
+        ("KXBTC-25JUN-T30000", "KXBTC", "v1", 0.6, 0.5, 0),
+    ]
+    session = _make_heatmap_session(rows)
+    report = await compute_calibration_heatmap(session)
+
+    # "All Options" row, "All" column should equal overall brier = 0.20
+    all_row = report.rows[0]
+    assert all_row.option_code == "All"
+    all_cell = all_row.cells["All"]
+    assert all_cell.brier_score == pytest.approx(0.20, rel=1e-6)
+    assert all_cell.n_samples == 2
+
+
+@pytest.mark.asyncio
+async def test_heatmap_delta_positive_when_model_beats_market() -> None:
+    """delta = market_brier - model_brier is positive when model outperforms market."""
+    # model brier: (0.9-1)^2 = 0.01  market brier: (0.5-1)^2 = 0.25 → delta=0.24
+    rows = [("KXBTC-25JUN-T30000", "KXBTC", "v1", 0.9, 0.5, 1)]
+    session = _make_heatmap_session(rows)
+    report = await compute_calibration_heatmap(session)
+
+    all_row = report.rows[0]
+    cell = all_row.cells["All"]
+    assert cell.delta is not None
+    assert cell.delta > 0
+    assert cell.delta == pytest.approx(0.25 - 0.01, rel=1e-5)
+
+
+@pytest.mark.asyncio
+async def test_heatmap_option_code_derived_from_market_id() -> None:
+    """KXBTC-25JUN-T30000 → option_code T30000."""
+    rows = [("KXBTC-25JUN-T30000", "KXBTC", "v1", 0.7, 0.5, 1)]
+    session = _make_heatmap_session(rows)
+    report = await compute_calibration_heatmap(session)
+
+    data_row = report.rows[1]  # rows[0] is "All Options"
+    assert data_row.option_code == "T30000"
+    assert data_row.series_ticker == "KXBTC"
+
+
+@pytest.mark.asyncio
+async def test_heatmap_empty() -> None:
+    """Zero rows returns single 'All' row with null cells."""
+    main_result = MagicMock()
+    main_result.all.return_value = []
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=main_result)
+    report = await compute_calibration_heatmap(session)
+
+    assert report.prompt_versions == []
+    assert len(report.rows) == 1
+    assert report.rows[0].option_code == "All"
+    assert report.rows[0].cells["All"].brier_score is None
+    assert report.rows[0].cells["All"].n_samples == 0

@@ -8,7 +8,7 @@ from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.markets.models import MarketRow
-from freqpred.metrics.models import SourceQualityScoreRow
+from freqpred.metrics.models import SeriesOptionHistoryRow, SourceQualityScoreRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
 
@@ -377,6 +377,321 @@ async def refresh_source_quality_scores(
 
     await session.flush()
     return rows_written
+
+
+@dataclass
+class CalibrationTimeSeriesPoint:
+    date: str
+    brier_score: float | None
+    market_brier_score: float | None
+    n_samples: int
+
+
+@dataclass
+class CalibrationTimeSeries:
+    points: list[CalibrationTimeSeriesPoint]
+
+
+async def compute_calibration_time_series(
+    session: AsyncSession,
+    mode: str = "paper",
+    lookback_days: int | None = None,
+    market_category: str | None = None,
+    ticker_prefix: str | None = None,
+    direction: str | None = None,
+    model_used: str | None = None,
+    prompt_version: str | None = None,
+    series_ticker: str | None = None,
+    min_confidence: float | None = None,
+    max_confidence: float | None = None,
+) -> CalibrationTimeSeries:
+    """Compute per-day Brier scores for the calibration over-time chart.
+
+    Groups qualifying signals by the day they were created and computes a
+    Brier score for each day.  Days with zero qualifying samples are omitted
+    (sparse output).
+    """
+    resolution_expr = case((MarketRow.result == "yes", 1), else_=0).label("resolution")
+
+    where_clauses: list = [
+        MarketRow.status == "finalized",
+        MarketRow.result.is_not(None),
+        SignalRow.model_used != "demo_harness",
+        SignalRow.prompt_version != "demo",
+        SignalRow.trigger != "price_moved",
+    ]
+    if lookback_days is not None:
+        cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+        where_clauses.append(SignalRow.created_at >= cutoff)
+    if market_category is not None:
+        where_clauses.append(MarketRow.category == market_category)
+    if ticker_prefix is not None:
+        where_clauses.append(MarketRow.id.ilike(f"{ticker_prefix}%"))
+    if direction is not None:
+        where_clauses.append(SignalRow.direction == direction)
+    if model_used is not None:
+        where_clauses.append(SignalRow.model_used == model_used)
+    if prompt_version is not None:
+        where_clauses.append(SignalRow.prompt_version == prompt_version)
+    if series_ticker is not None:
+        where_clauses.append(MarketRow.series_ticker == series_ticker)
+    if min_confidence is not None:
+        where_clauses.append(SignalRow.confidence >= min_confidence)
+    if max_confidence is not None:
+        where_clauses.append(SignalRow.confidence <= max_confidence)
+
+    # Keep only the latest signal per (market_id, day) — superseded estimates
+    # on the same day for the same market are excluded.
+    day_expr = func.date_trunc("day", SignalRow.created_at)
+    subq = (
+        select(
+            day_expr.label("day"),
+            SignalRow.estimated_probability,
+            SignalRow.market_mid_at_signal,
+            resolution_expr,
+            func.row_number()
+            .over(
+                partition_by=[SignalRow.market_id, day_expr],
+                order_by=SignalRow.created_at.desc(),
+            )
+            .label("rn"),
+        )
+        .join(MarketRow, MarketRow.id == SignalRow.market_id)
+        .where(and_(*where_clauses))
+        .subquery()
+    )
+    stmt = (
+        select(subq.c.day, subq.c.estimated_probability, subq.c.market_mid_at_signal, subq.c.resolution)
+        .where(subq.c.rn == 1)
+        .order_by(subq.c.day)
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return CalibrationTimeSeries(points=[])
+
+    day_accum: dict[str, list] = {}
+    for day, estimated_prob, market_mid, resolution in rows:
+        day_str = day.strftime("%Y-%m-%d") if hasattr(day, "strftime") else str(day)[:10]
+        if day_str not in day_accum:
+            day_accum[day_str] = [0.0, 0.0, 0]
+        p = float(estimated_prob)
+        mid = float(market_mid)
+        y = float(resolution)
+        day_accum[day_str][0] += (p - y) ** 2
+        day_accum[day_str][1] += (mid - y) ** 2
+        day_accum[day_str][2] += 1
+
+    points = [
+        CalibrationTimeSeriesPoint(
+            date=day_str,
+            brier_score=acc[0] / acc[2] if acc[2] > 0 else None,
+            market_brier_score=acc[1] / acc[2] if acc[2] > 0 else None,
+            n_samples=acc[2],
+        )
+        for day_str, acc in sorted(day_accum.items())
+    ]
+    return CalibrationTimeSeries(points=points)
+
+
+@dataclass
+class CalibrationHeatmapCell:
+    brier_score: float | None
+    market_brier_score: float | None
+    n_samples: int
+    delta: float | None  # market_brier - model_brier; positive = model beats market
+
+
+@dataclass
+class CalibrationHeatmapRow:
+    series_ticker: str   # "" for the synthetic "All Options" aggregate row
+    option_code: str     # "All" for the aggregate row
+    option_label: str
+    cells: dict[str, CalibrationHeatmapCell]  # keyed by prompt_version or "All"
+
+
+@dataclass
+class CalibrationHeatmapReport:
+    rows: list[CalibrationHeatmapRow]
+    prompt_versions: list[str]  # sorted distinct prompt versions (excludes "All")
+
+
+def _make_heatmap_cell(brier_sum: float, naive_sum: float, n: int) -> CalibrationHeatmapCell:
+    if n == 0:
+        return CalibrationHeatmapCell(
+            brier_score=None, market_brier_score=None, n_samples=0, delta=None
+        )
+    bs = brier_sum / n
+    mbs = naive_sum / n
+    return CalibrationHeatmapCell(
+        brier_score=bs, market_brier_score=mbs, n_samples=n, delta=mbs - bs
+    )
+
+
+async def compute_calibration_heatmap(
+    session: AsyncSession,
+    mode: str = "paper",
+    lookback_days: int | None = None,
+    market_category: str | None = None,
+    ticker_prefix: str | None = None,
+    direction: str | None = None,
+    model_used: str | None = None,
+    series_ticker: str | None = None,
+    min_confidence: float | None = None,
+    max_confidence: float | None = None,
+) -> CalibrationHeatmapReport:
+    """Compute Brier-score heatmap grouped by (series_ticker, option_code) × prompt_version.
+
+    prompt_version is intentionally not a filter here — it is the column dimension of
+    the heatmap.  Only markets with a non-null series_ticker are included.
+    """
+    resolution_expr = case((MarketRow.result == "yes", 1), else_=0).label("resolution")
+
+    where_clauses: list = [
+        MarketRow.status == "finalized",
+        MarketRow.result.is_not(None),
+        SignalRow.model_used != "demo_harness",
+        SignalRow.prompt_version != "demo",
+        SignalRow.trigger != "price_moved",
+        MarketRow.series_ticker.is_not(None),
+    ]
+    if lookback_days is not None:
+        cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
+        where_clauses.append(SignalRow.created_at >= cutoff)
+    if market_category is not None:
+        where_clauses.append(MarketRow.category == market_category)
+    if ticker_prefix is not None:
+        where_clauses.append(MarketRow.id.ilike(f"{ticker_prefix}%"))
+    if direction is not None:
+        where_clauses.append(SignalRow.direction == direction)
+    if model_used is not None:
+        where_clauses.append(SignalRow.model_used == model_used)
+    if series_ticker is not None:
+        where_clauses.append(MarketRow.series_ticker == series_ticker)
+    if min_confidence is not None:
+        where_clauses.append(SignalRow.confidence >= min_confidence)
+    if max_confidence is not None:
+        where_clauses.append(SignalRow.confidence <= max_confidence)
+
+    stmt = (
+        select(
+            MarketRow.id.label("market_id"),
+            MarketRow.series_ticker,
+            SignalRow.prompt_version,
+            SignalRow.estimated_probability,
+            SignalRow.market_mid_at_signal,
+            resolution_expr,
+        )
+        .join(MarketRow, MarketRow.id == SignalRow.market_id)
+        .where(and_(*where_clauses))
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    _empty_cell = CalibrationHeatmapCell(
+        brier_score=None, market_brier_score=None, n_samples=0, delta=None
+    )
+
+    if not rows:
+        return CalibrationHeatmapReport(
+            rows=[
+                CalibrationHeatmapRow(
+                    series_ticker="",
+                    option_code="All",
+                    option_label="All Options",
+                    cells={"All": _empty_cell},
+                )
+            ],
+            prompt_versions=[],
+        )
+
+    # Accumulate: {(series_ticker, option_code, prompt_version): [brier_sum, naive_sum, n]}
+    per_cell: dict[tuple[str, str, str], list] = {}
+    for market_id, series_ticker_val, prompt_version, estimated_prob, market_mid, resolution in rows:
+        if not series_ticker_val:
+            continue
+        option_code = market_id.rsplit("-", 1)[-1] if "-" in market_id else market_id
+        p = float(estimated_prob)
+        mid = float(market_mid)
+        y = float(resolution)
+        key = (series_ticker_val, option_code, prompt_version)
+        if key not in per_cell:
+            per_cell[key] = [0.0, 0.0, 0]
+        per_cell[key][0] += (p - y) ** 2
+        per_cell[key][1] += (mid - y) ** 2
+        per_cell[key][2] += 1
+
+    option_pairs: set[tuple[str, str]] = {(s, o) for s, o, _ in per_cell}
+    prompt_versions = sorted({pv for _, _, pv in per_cell})
+
+    # Fetch option labels
+    option_label_map: dict[tuple[str, str], str] = {}
+    if option_pairs:
+        series_in = list({s for s, _ in option_pairs})
+        label_result = await session.execute(
+            select(
+                SeriesOptionHistoryRow.series_ticker,
+                SeriesOptionHistoryRow.option_code,
+                SeriesOptionHistoryRow.option_label,
+            ).where(SeriesOptionHistoryRow.series_ticker.in_(series_in))
+        )
+        for lrow in label_result.all():
+            option_label_map[(lrow[0], lrow[1])] = lrow[2]
+
+    # Build per-(series_ticker, option_code) row cells
+    row_cells: dict[tuple[str, str], dict[str, CalibrationHeatmapCell]] = {}
+    for s, o in sorted(option_pairs, key=lambda t: (t[0], t[1])):
+        cells: dict[str, CalibrationHeatmapCell] = {}
+        all_b, all_nb, all_n = 0.0, 0.0, 0
+        for pv in prompt_versions:
+            if (s, o, pv) in per_cell:
+                b, nb, n = per_cell[(s, o, pv)]
+                cells[pv] = _make_heatmap_cell(b, nb, n)
+                all_b += b
+                all_nb += nb
+                all_n += n
+            else:
+                cells[pv] = _empty_cell
+        cells["All"] = _make_heatmap_cell(all_b, all_nb, all_n)
+        row_cells[(s, o)] = cells
+
+    # Build "All Options" aggregate row
+    all_row_cells: dict[str, CalibrationHeatmapCell] = {}
+    total_b, total_nb, total_n = 0.0, 0.0, 0
+    for pv in prompt_versions:
+        pv_b, pv_nb, pv_n = 0.0, 0.0, 0
+        for s, o in option_pairs:
+            if (s, o, pv) in per_cell:
+                b, nb, n = per_cell[(s, o, pv)]
+                pv_b += b
+                pv_nb += nb
+                pv_n += n
+        all_row_cells[pv] = _make_heatmap_cell(pv_b, pv_nb, pv_n)
+        total_b += pv_b
+        total_nb += pv_nb
+        total_n += pv_n
+    all_row_cells["All"] = _make_heatmap_cell(total_b, total_nb, total_n)
+
+    result_rows: list[CalibrationHeatmapRow] = [
+        CalibrationHeatmapRow(
+            series_ticker="",
+            option_code="All",
+            option_label="All Options",
+            cells=all_row_cells,
+        )
+    ]
+    for s, o in sorted(option_pairs, key=lambda t: (t[0], t[1])):
+        result_rows.append(
+            CalibrationHeatmapRow(
+                series_ticker=s,
+                option_code=o,
+                option_label=option_label_map.get((s, o), o),
+                cells=row_cells[(s, o)],
+            )
+        )
+
+    return CalibrationHeatmapReport(rows=result_rows, prompt_versions=prompt_versions)
 
 
 def _empty_buckets() -> list[CalibrationBucket]:

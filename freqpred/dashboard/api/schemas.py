@@ -196,6 +196,46 @@ class CalibrationResponse(BaseModel):
     available_series_tickers: list[str]
 
 
+class CalibrationTimeSeriesPointOut(BaseModel):
+    date: str
+    brier_score: float | None
+    market_brier_score: float | None
+    n_samples: int
+
+
+class CalibrationTimeSeriesResponse(BaseModel):
+    series: list[CalibrationTimeSeriesPointOut]
+    prompt_version_starts: list[PromptVersionStart]
+    available_categories: list[str]
+    available_models: list[str]
+    available_prompt_versions: list[str]
+    available_directions: list[str]
+    available_series_tickers: list[str]
+
+
+class CalibrationHeatmapCellOut(BaseModel):
+    brier_score: float | None
+    market_brier_score: float | None
+    n_samples: int
+    delta: float | None
+
+
+class CalibrationHeatmapRowOut(BaseModel):
+    series_ticker: str
+    option_code: str
+    option_label: str
+    cells: dict[str, CalibrationHeatmapCellOut]
+
+
+class CalibrationHeatmapResponse(BaseModel):
+    rows: list[CalibrationHeatmapRowOut]
+    prompt_versions: list[str]
+    available_categories: list[str]
+    available_models: list[str]
+    available_directions: list[str]
+    available_series_tickers: list[str]
+
+
 class SourceQualityScoreOut(BaseModel):
     source_name: str
     market_category: str | None
