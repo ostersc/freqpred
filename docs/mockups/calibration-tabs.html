@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Calibration — Tab Mockup</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0c0f1d;
+    --panel: #141828;
+    --panel2: #1a1f32;
+    --border: #2a3050;
+    --text: #e2e8f0;
+    --text-2: #8892a4;
+    --text-3: #566070;
+    --blue: #3b82f6;
+    --green: #22c55e;
+    --red: #ef4444;
+    --amber: #f59e0b;
+    --orange: #f97316;
+    --indigo: #6366f1;
+    --seg-bg: #1e2440;
+    --seg-active: #2d3a6a;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; min-height: 100vh; }
+
+  nav { display: flex; align-items: center; gap: 2px; padding: 0 16px; height: 44px; background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+  nav .logo { font-weight: 700; font-size: 14px; color: var(--blue); margin-right: 16px; }
+  nav a { padding: 4px 10px; border-radius: 4px; color: var(--text-2); text-decoration: none; font-size: 12px; cursor: pointer; }
+  nav a.active { color: var(--text); background: var(--seg-bg); }
+  nav .right { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text-2); }
+  nav .badge { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px; background: #0d2e1a; border: 1px solid #166534; color: #4ade80; font-size: 11px; }
+  nav .dot { width: 6px; height: 6px; border-radius: 50%; background: #4ade80; }
+
+  .page { padding: 20px 24px; max-width: 1400px; }
+  .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 16px; }
+  .page-title h1 { font-size: 22px; font-weight: 600; }
+  .page-title p { color: var(--text-2); font-size: 12px; margin-top: 2px; }
+  .page-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+  .seg { display: flex; background: var(--seg-bg); border-radius: 6px; padding: 2px; gap: 2px; }
+  .seg button { padding: 4px 10px; border: none; border-radius: 4px; background: transparent; color: var(--text-2); font-size: 12px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+  .seg button.active { background: var(--seg-active); color: var(--text); }
+  .seg button:hover:not(.active) { color: var(--text); }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 12px; }
+  .panel-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--text-2); margin-bottom: 12px; }
+
+  .filter-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--text-3); }
+  .field select, .field input { background: var(--panel2); border: 1px solid var(--border); border-radius: 5px; color: var(--text); padding: 5px 8px; font-size: 12px; min-width: 120px; outline: none; }
+  .field input { min-width: 80px; }
+  .reset-btn { padding: 5px 10px; background: transparent; border: 1px solid var(--border); border-radius: 5px; color: var(--text-2); font-size: 12px; cursor: pointer; align-self: flex-end; }
+
+  .stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 12px; }
+  .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .stat-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--text-2); margin-bottom: 8px; }
+  .stat-value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat-sub { font-size: 11px; color: var(--text-2); margin-top: 3px; }
+
+  .chart-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .chart-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+
+  .axis-label { font-size: 10px; fill: #566070; font-family: -apple-system, sans-serif; }
+  .axis-tick { font-size: 9px; fill: #566070; font-family: -apple-system, sans-serif; }
+  .grid-line { stroke: #1e2440; stroke-width: 1; }
+
+  .legend { display: flex; gap: 16px; margin-top: 10px; justify-content: center; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-2); }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+  .tab-content { display: none; }
+  .tab-content.visible { display: block; }
+
+  /* Heatmap */
+  .heatmap-wrap { overflow-x: auto; }
+  table.heatmap { border-collapse: collapse; width: 100%; }
+  table.heatmap th, table.heatmap td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; font-size: 12px; }
+  table.heatmap thead th { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--text-2); background: var(--panel); }
+  table.heatmap thead th.pv-col { text-align: center; cursor: pointer; transition: color .15s; user-select: none; }
+  table.heatmap thead th.pv-col:hover { color: var(--blue); }
+  table.heatmap thead th.pv-col span.click-hint { font-size: 9px; opacity: .6; display: block; font-weight: 400; text-transform: none; letter-spacing: 0; margin-top: 1px; }
+  table.heatmap tbody tr.all-row td { font-weight: 600; border-bottom: 2px solid var(--border); }
+  td.clickable { cursor: pointer; }
+  td.clickable:hover { outline: 1px solid rgba(99,102,241,.5); outline-offset: -1px; }
+  td.opt-label-cell { cursor: pointer; }
+  td.opt-label-cell:hover .opt-label { color: var(--blue); text-decoration: underline; }
+  table.heatmap tbody tr.series-header td { background: var(--panel2); color: var(--text-2); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 5px 10px; cursor: pointer; }
+  table.heatmap tbody tr.series-header:hover td { color: var(--blue); }
+  table.heatmap tbody tr:not(.series-header):hover td { background: rgba(255,255,255,.025); }
+  .cell-inner { display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 88px; }
+  .cell-brier { font-size: 12px; font-variant-numeric: tabular-nums; }
+  .cell-delta { font-size: 10px; font-variant-numeric: tabular-nums; }
+  .cell-vs-avg { font-size: 9px; font-variant-numeric: tabular-nums; opacity: .75; }
+  .cell-empty { color: var(--text-3); text-align: center; font-size: 12px; width: 88px; display: block; }
+  .n-bar-outer { width: 80%; height: 3px; background: rgba(255,255,255,.07); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+  .n-bar-fill  { height: 100%; border-radius: 2px; background: rgba(99,102,241,.45); }
+  .opt-label { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+  .opt-meta { color: var(--text-3); font-size: 10px; margin-top: 1px; }
+  .mkt-bar-wrap { display: flex; align-items: center; gap: 5px; margin-top: 5px; }
+  .mkt-bar-outer { position: relative; width: 72px; height: 4px; background: rgba(255,255,255,.07); border-radius: 2px; overflow: visible; flex-shrink: 0; }
+  .mkt-bar-fill  { height: 100%; border-radius: 2px; background: rgba(245,158,11,.55); }
+  .mkt-bar-ref   { position: absolute; top: -2px; width: 1px; height: 8px; background: rgba(245,158,11,.9); }
+  .mkt-bar-label { font-size: 9px; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.heatmap th.trend-col { text-align: center; min-width: 72px; }
+  td.trend-cell { text-align: center; padding: 6px 8px; }
+
+  #tooltip { position: fixed; background: #1e2440; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 11px; pointer-events: none; display: none; z-index: 100; max-width: 220px; line-height: 1.7; }
+  #pv-nav-note { display:none; font-size:11px; color:var(--amber); padding:3px 8px; background:rgba(245,158,11,.1); border-radius:4px; border:1px solid rgba(245,158,11,.3); }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">freqpred.</span>
+  <a>Markets</a><a>Signal Feed</a><a>Positions</a><a>Decisions</a><a>P&amp;L History</a>
+  <a class="active">Calibration</a>
+  <a>Source Quality</a><a>LLM Cost</a><a>Strategy Config</a><a>System Health</a>
+  <div class="right">
+    <div class="badge"><span class="dot"></span>RUNNING · PAPER</div>
+    <span>p&amp;l +$0.00 &nbsp; all-time -$1031.59</span>
+  </div>
+</nav>
+
+<div class="page">
+  <div class="page-header">
+    <div class="page-title">
+      <h1>Calibration</h1>
+      <p>How well our signals track the world. Lower Brier score → better.</p>
+    </div>
+    <div class="page-controls">
+      <div class="seg" id="tab-seg">
+        <button class="active" onclick="switchTab('distribution')">Distribution</button>
+        <button onclick="switchTab('over-time')">Over Time</button>
+        <button onclick="switchTab('by-option')">By Option</button>
+      </div>
+      <div class="seg" id="preset-seg">
+        <button onclick="setPreset(this)">7d</button>
+        <button onclick="setPreset(this)">30d</button>
+        <button onclick="setPreset(this)">90d</button>
+        <button class="active" onclick="setPreset(this)">All time</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shared filters -->
+  <div class="panel" id="filter-panel">
+    <div class="filter-row">
+      <div class="field"><label>Category</label><select><option>All</option><option>Crypto</option><option>Economy</option><option>Politics</option></select></div>
+      <div class="field"><label>Series Ticker</label><select id="series-select"><option>All</option><option>KXBTC</option><option>KXINFL</option><option>KXETH</option><option>KXPOL</option></select></div>
+      <div class="field"><label>Ticker Prefix</label><input type="text" placeholder="e.g. KXBTC" /></div>
+      <div class="field"><label>Direction</label><select><option>All</option><option>YES</option><option>NO</option><option>SKIP</option></select></div>
+      <div class="field"><label>Model</label><select><option>All</option><option>claude-sonnet-4-6</option><option>claude-opus-4-7</option></select></div>
+      <div class="field" id="pv-filter">
+        <label>Prompt Version</label>
+        <select id="pv-select"><option>All</option><option>vsignal-v7</option><option>vsignal-v8</option><option>vsignal-v9</option></select>
+      </div>
+      <div class="field"><label>Min Confidence %</label><input type="number" value="60" /></div>
+      <div class="field"><label>Max Confidence %</label><input type="number" value="100" /></div>
+      <button class="reset-btn">Reset</button>
+      <span id="pv-nav-note"></span>
+    </div>
+  </div>
+
+  <!-- ── DISTRIBUTION ── -->
+  <div class="tab-content visible" id="tab-distribution">
+    <div class="stats-row">
+      <div class="stat-card"><div class="stat-label">Brier Score (Ours)</div><div class="stat-value">0.3264</div><div class="stat-sub">lower is better</div></div>
+      <div class="stat-card"><div class="stat-label">Brier Score (Market)</div><div class="stat-value">0.1287</div><div class="stat-sub">baseline: market mid at signal time</div></div>
+      <div class="stat-card"><div class="stat-label">Samples</div><div class="stat-value">3,109</div><div class="stat-sub">resolved signals</div></div>
+    </div>
+    <div class="chart-panel">
+      <div class="panel-title">Calibration curve — estimated probability vs. actual resolution rate</div>
+      <svg id="dist-chart" width="100%" height="420" viewBox="0 0 900 420" style="display:block"></svg>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>Model</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ca8a04"></div>Market</div>
+        <div class="legend-item"><div style="width:20px;border-top:1px dashed #4b5563;margin-top:5px"></div><span style="margin-left:5px">Perfect calibration</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── OVER TIME ── -->
+  <div class="tab-content" id="tab-over-time">
+    <div class="stats-row">
+      <div class="stat-card"><div class="stat-label">Brier Score (Ours)</div><div class="stat-value">0.3264</div><div class="stat-sub">lower is better</div></div>
+      <div class="stat-card"><div class="stat-label">Brier Score (Market)</div><div class="stat-value">0.1287</div><div class="stat-sub">baseline: market mid at signal time</div></div>
+      <div class="stat-card"><div class="stat-label">Samples</div><div class="stat-value">3,109</div><div class="stat-sub">resolved signals</div></div>
+    </div>
+    <div class="chart-panel">
+      <div class="chart-header">
+        <div class="panel-title">Daily Brier score — model vs. market baseline over time</div>
+        <div class="seg" id="ema-seg">
+          <button class="active" onclick="setEMA(this,7)">7d EMA</button>
+          <button onclick="setEMA(this,14)">14d EMA</button>
+          <button onclick="setEMA(this,30)">30d EMA</button>
+        </div>
+      </div>
+      <svg id="ot-chart" width="100%" height="400" viewBox="0 0 900 400" style="display:block"></svg>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#6b7280;border-radius:2px;width:12px;height:8px"></div>Daily Model Brier</div>
+        <div class="legend-item"><div style="width:20px;height:2px;background:#f59e0b;margin-top:5px"></div><span style="margin-left:5px">Market Brier</span></div>
+        <div class="legend-item"><div style="width:20px;border-top:2px dashed #f97316;margin-top:5px"></div><span style="margin-left:5px">EMA</span></div>
+        <div class="legend-item"><div style="width:2px;height:14px;background:#6366f1;opacity:.7"></div><span style="margin-left:5px">Prompt version</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── BY OPTION ── -->
+  <div class="tab-content" id="tab-by-option">
+    <div class="panel" style="margin-bottom:10px;display:flex;align-items:center;gap:8px;padding:9px 14px">
+      <span style="font-size:11px;color:var(--text-2)">Rows = series options (repeating strike/threshold across contracts). Columns = prompt versions. Click a prompt version header to open Distribution filtered to that version.</span>
+    </div>
+    <div class="chart-panel" style="padding:0;overflow:hidden">
+      <div class="heatmap-wrap">
+        <table class="heatmap" id="heatmap-table"></table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="tooltip"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let activeTab = 'distribution'
+let emaPeriod = 7
+
+// ── Tab switching ──────────────────────────────────────────────────────────────
+// filters = { pv: string|null, series: string|null }
+function switchTab(tab, filters = {}) {
+  activeTab = tab
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('visible'))
+  document.getElementById('tab-' + tab).classList.add('visible')
+  const tabIds = ['distribution','over-time','by-option']
+  document.querySelectorAll('#tab-seg button').forEach((btn, i) => btn.classList.toggle('active', tabIds[i] === tab))
+  document.getElementById('pv-filter').style.display = tab === 'by-option' ? 'none' : ''
+
+  const { pv, series } = filters
+  const parts = []
+  if (pv)     { document.getElementById('pv-select').value = pv;         parts.push(pv) }
+  if (series) { document.getElementById('series-select').value = series;  parts.push(series) }
+
+  if (parts.length) {
+    const note = document.getElementById('pv-nav-note')
+    note.textContent = 'Filtered to: ' + parts.join(' × ')
+    note.style.display = 'inline'
+    setTimeout(() => { note.style.display = 'none' }, 4000)
+  }
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function setPreset(btn) {
+  document.querySelectorAll('#preset-seg button').forEach(b => b.classList.remove('active'))
+  btn.classList.add('active')
+}
+
+function setEMA(btn, p) {
+  emaPeriod = p
+  document.querySelectorAll('#ema-seg button').forEach(b => b.classList.remove('active'))
+  btn.classList.add('active')
+  drawOverTime()
+}
+
+// ── Tooltip ────────────────────────────────────────────────────────────────────
+const tooltipEl = document.getElementById('tooltip')
+function showTip(html, e) {
+  tooltipEl.innerHTML = html; tooltipEl.style.display = 'block'; moveTip(e)
+}
+function moveTip(e) {
+  const x = e.clientX + 14, y = e.clientY - 10
+  tooltipEl.style.left = (x + tooltipEl.offsetWidth > window.innerWidth ? x - tooltipEl.offsetWidth - 28 : x) + 'px'
+  tooltipEl.style.top = y + 'px'
+}
+function hideTip() { tooltipEl.style.display = 'none' }
+
+// ── Distribution ───────────────────────────────────────────────────────────────
+const distData = {
+  model:  [{x:.15,y:.08,n:28},{x:.25,y:.17,n:44},{x:.35,y:.29,n:81},{x:.45,y:.36,n:112},{x:.55,y:.48,n:198},{x:.65,y:.61,n:287},{x:.72,y:.68,n:340},{x:.78,y:.78,n:512},{x:.85,y:.89,n:623},{x:.92,y:.94,n:884}],
+  market: [{x:.12,y:.10,n:22},{x:.22,y:.19,n:38},{x:.33,y:.32,n:76},{x:.43,y:.41,n:105},{x:.53,y:.52,n:188},{x:.63,y:.63,n:271},{x:.73,y:.72,n:328},{x:.80,y:.81,n:497},{x:.87,y:.87,n:609},{x:.93,y:.95,n:875}]
+}
+
+function drawDistribution() {
+  const svg = document.getElementById('dist-chart')
+  const W=900,H=420,pl=50,pr=20,pt=20,pb=40
+  const cW=W-pl-pr, cH=H-pt-pb
+  const tx = v => pl + v*cW, ty = v => pt + (1-v)*cH
+  let h = ''
+  for (let i=0;i<=4;i++) {
+    const v=i/4, x=tx(v), y=ty(v)
+    h+=`<line class="grid-line" x1="${pl}" y1="${y}" x2="${pl+cW}" y2="${y}"/>`
+    h+=`<line class="grid-line" x1="${x}" y1="${pt}" x2="${x}" y2="${pt+cH}"/>`
+    h+=`<text class="axis-tick" x="${pl-6}" y="${y+4}" text-anchor="end">${Math.round(v*100)}%</text>`
+    h+=`<text class="axis-tick" x="${x}" y="${pt+cH+14}" text-anchor="middle">${Math.round(v*100)}%</text>`
+  }
+  h+=`<line x1="${pl}" y1="${pt}" x2="${pl}" y2="${pt+cH}" stroke="#2a3050" stroke-width="1"/>`
+  h+=`<line x1="${pl}" y1="${pt+cH}" x2="${pl+cW}" y2="${pt+cH}" stroke="#2a3050" stroke-width="1"/>`
+  h+=`<text class="axis-label" x="${pl+cW/2}" y="${H-2}" text-anchor="middle">Estimated probability</text>`
+  h+=`<text class="axis-label" x="12" y="${pt+cH/2}" text-anchor="middle" transform="rotate(-90,12,${pt+cH/2})">Actual resolution rate</text>`
+  h+=`<line stroke="#4b5563" stroke-width="1" stroke-dasharray="4 3" x1="${tx(0)}" y1="${ty(0)}" x2="${tx(1)}" y2="${ty(1)}"/>`
+  for (const p of distData.market) { const r=4+Math.sqrt(p.n)*.7; h+=`<circle cx="${tx(p.x)}" cy="${ty(p.y)}" r="${r}" fill="#ca8a04" opacity=".75" class="tip-dot" data-html="<b>Market</b><br>Est: ${(p.x*100).toFixed(0)}%&nbsp;→&nbsp;Actual: ${(p.y*100).toFixed(0)}%<br>n=${p.n}"/>` }
+  for (const p of distData.model)  { const r=4+Math.sqrt(p.n)*.7; h+=`<circle cx="${tx(p.x)}" cy="${ty(p.y)}" r="${r}" fill="#3b82f6" opacity=".75" class="tip-dot" data-html="<b>Model</b><br>Est: ${(p.x*100).toFixed(0)}%&nbsp;→&nbsp;Actual: ${(p.y*100).toFixed(0)}%<br>n=${p.n}"/>` }
+  svg.innerHTML = h
+  svg.querySelectorAll('.tip-dot').forEach(el => {
+    el.addEventListener('mousemove', e => showTip(el.dataset.html, e))
+    el.addEventListener('mouseleave', hideTip)
+  })
+}
+
+// ── Over Time ──────────────────────────────────────────────────────────────────
+// Prompt version milestones: first signal date per version
+const pvFlags = [
+  { version: 'vsignal-v7', date: '2026-03-05' },
+  { version: 'vsignal-v8', date: '2026-04-02' },
+  { version: 'vsignal-v9', date: '2026-05-01' },
+]
+
+// Generate daily data starting Feb 1 2026
+function genOTData() {
+  const pts = [], start = new Date('2026-02-01')
+  let brier = 0.38
+  for (let d = 0; d < 110; d++) {
+    const dt = new Date(start); dt.setDate(start.getDate() + d)
+    if (Math.random() < 0.1) continue
+    // Model improves with each new prompt version
+    const ds = dt.toISOString().slice(0,10)
+    let trend = -0.0008
+    if (ds >= '2026-04-02') trend = -0.0014  // v8 improved faster
+    if (ds >= '2026-05-01') trend = -0.0020  // v9 even faster
+    brier = Math.max(0.15, brier + trend + (Math.random()-.52)*.035)
+    pts.push({ date: ds, brier, market: 0.118 + (Math.random()-.5)*.02, n: Math.floor(Math.random()*35+8) })
+  }
+  return pts
+}
+const otRaw = genOTData()
+
+function computeEMA(data, period) {
+  const alpha = 2 / (period + 1); let ema = null
+  return data.map(pt => { ema = ema === null ? pt.brier : alpha*pt.brier + (1-alpha)*ema; return {...pt, ema} })
+}
+
+function drawOverTime() {
+  const data = computeEMA(otRaw, emaPeriod)
+  const svg = document.getElementById('ot-chart')
+  const W=900,H=400,pl=55,pr=20,pt=28,pb=40
+  const cW=W-pl-pr, cH=H-pt-pb
+  const n = data.length
+  const maxY = 0.55
+  const tx = i => pl + (i/(n-1))*cW
+  const ty = v => pt + (1-Math.min(v/maxY,1))*cH
+  // Map date string to x position
+  const dateRange = [new Date(data[0].date), new Date(data[n-1].date)]
+  const totalMs = dateRange[1] - dateRange[0]
+  const txDate = dateStr => {
+    const ms = new Date(dateStr) - dateRange[0]
+    return pl + (ms/totalMs)*cW
+  }
+
+  let h = ''
+  for (let i=0;i<=5;i++) {
+    const v=(i/5)*maxY, y=ty(v)
+    h+=`<line class="grid-line" x1="${pl}" y1="${y}" x2="${pl+cW}" y2="${y}"/>`
+    h+=`<text class="axis-tick" x="${pl-6}" y="${y+4}" text-anchor="end">${v.toFixed(2)}</text>`
+  }
+  h+=`<line x1="${pl}" y1="${pt}" x2="${pl}" y2="${pt+cH}" stroke="#2a3050" stroke-width="1"/>`
+  h+=`<line x1="${pl}" y1="${pt+cH}" x2="${pl+cW}" y2="${pt+cH}" stroke="#2a3050" stroke-width="1"/>`
+  h+=`<text class="axis-label" x="${pl+cW/2}" y="${H-2}" text-anchor="middle">Signal date</text>`
+  h+=`<text class="axis-label" x="14" y="${pt+cH/2}" text-anchor="middle" transform="rotate(-90,14,${pt+cH/2})">Brier score (lower = better)</text>`
+
+  // Date labels
+  const ev = Math.max(1,Math.floor(n/8))
+  data.forEach((pt2,i) => {
+    if (i%ev===0) {
+      const d=new Date(pt2.date), label=d.toLocaleDateString('en-US',{month:'short',day:'numeric'})
+      h+=`<text class="axis-tick" x="${tx(i)}" y="${pt+cH+14}" text-anchor="middle">${label}</text>`
+    }
+  })
+
+  // Prompt version flags (vertical dashed lines with labels)
+  pvFlags.forEach((pv, i) => {
+    const x = txDate(pv.date)
+    if (x < pl || x > pl+cW) return
+    h+=`<line x1="${x}" y1="${pt}" x2="${x}" y2="${pt+cH}" stroke="#6366f1" stroke-width="1" stroke-dasharray="3 3" opacity=".7"/>`
+    // Alternating label heights to avoid overlap
+    const labelY = pt + (i%2===0 ? 8 : 20)
+    h+=`<text font-size="9" fill="#6366f1" x="${x+3}" y="${labelY}" opacity=".9">${pv.version}</text>`
+  })
+
+  // Bars
+  const barW = Math.max(2, cW/n - 1)
+  data.forEach((pt2, i) => {
+    const x=tx(i)-barW/2, y=ty(pt2.brier), barH=(pt+cH)-y
+    h+=`<rect x="${x}" y="${y}" width="${barW}" height="${barH}" fill="#6b7280" opacity=".55" class="ot-bar" data-i="${i}"/>`
+  })
+
+  // Market line
+  h+=`<path d="${data.map((p,i)=>(i===0?'M':'L')+`${tx(i)},${ty(p.market)}`).join('')}" stroke="#f59e0b" stroke-width="1.5" fill="none"/>`
+
+  // EMA line
+  let ep=''; data.forEach((p,i)=>{ if(p.ema!==null) ep+=(ep===''?'M':'L')+`${tx(i)},${ty(p.ema)}` })
+  h+=`<path d="${ep}" stroke="#f97316" stroke-width="1.8" stroke-dasharray="5 3" fill="none"/>`
+
+  // Hit targets
+  data.forEach((pt2,i) => { h+=`<rect x="${tx(i)-6}" y="${pt}" width="12" height="${cH}" fill="transparent" class="ot-hit" data-i="${i}"/>` })
+
+  svg.innerHTML = h
+  svg.querySelectorAll('.ot-hit').forEach(el => {
+    el.addEventListener('mousemove', e => { const p=data[+el.dataset.i]; showTip(`<b>${p.date}</b><br>Model Brier: <b>${p.brier.toFixed(4)}</b><br>Market Brier: <b>${p.market.toFixed(4)}</b><br>EMA (${emaPeriod}d): <b>${p.ema.toFixed(4)}</b><br>n=${p.n}`,e) })
+    el.addEventListener('mousemove', moveTip)
+    el.addEventListener('mouseleave', hideTip)
+  })
+}
+
+// ── By Option heatmap ──────────────────────────────────────────────────────────
+// option_code = last segment of market_id after final '-'
+// e.g. KXBTC-25JUN-T30000 → T30000
+// Rows: (series_ticker, option_code) pairs with option_label
+// Columns: All + prompt versions
+// Green cells = model beats market (delta > 0)
+// Red cells = market beats model (delta < 0)
+
+const pvCols = ['vsignal-v7', 'vsignal-v8', 'vsignal-v9']
+
+// cell: {brier, market, n}   delta computed as market-brier (positive = we win)
+const optionRows = [
+  // "All" aggregate
+  { series: null, code: null, label: 'All Options', meta: null,
+    cells: { 'All':{brier:.326,market:.129,n:3109}, 'vsignal-v7':{brier:.348,market:.131,n:812}, 'vsignal-v8':{brier:.319,market:.127,n:1042}, 'vsignal-v9':{brier:.302,market:.128,n:1255} }
+  },
+  // KXBTC options
+  { series:'KXBTC', code:'T30000', label:'BTC above $30,000', meta:'T30000',
+    cells: { 'All':{brier:.104,market:.152,n:218}, 'vsignal-v7':{brier:.118,market:.156,n:54}, 'vsignal-v8':{brier:.099,market:.148,n:82}, 'vsignal-v9':{brier:.091,market:.151,n:82} }
+  },
+  { series:'KXBTC', code:'T40000', label:'BTC above $40,000', meta:'T40000',
+    cells: { 'All':{brier:.138,market:.131,n:196}, 'vsignal-v7':{brier:.152,market:.129,n:48}, 'vsignal-v8':{brier:.131,market:.130,n:74}, 'vsignal-v9':{brier:.122,market:.133,n:74} }
+  },
+  { series:'KXBTC', code:'T50000', label:'BTC above $50,000', meta:'T50000',
+    cells: { 'All':{brier:.289,market:.124,n:144}, 'vsignal-v7':{brier:.318,market:.128,n:38}, 'vsignal-v8':{brier:.271,market:.121,n:54}, 'vsignal-v9':{brier:.253,market:.122,n:52} }
+  },
+  { series:'KXBTC', code:'T60000', label:'BTC above $60,000', meta:'T60000',
+    cells: { 'All':{brier:.397,market:.138,n:112}, 'vsignal-v7':{brier:.421,market:.141,n:28}, 'vsignal-v8':{brier:.384,market:.135,n:42}, 'vsignal-v9':{brier:.369,market:.137,n:42} }
+  },
+  // KXINFL options
+  { series:'KXINFL', code:'T03', label:'CPI ≥ 3.0%', meta:'T03',
+    cells: { 'All':{brier:.092,market:.148,n:284}, 'vsignal-v7':{brier:.099,market:.151,n:76}, 'vsignal-v8':{brier:.088,market:.146,n:98}, 'vsignal-v9':{brier:.083,market:.147,n:110} }
+  },
+  { series:'KXINFL', code:'T04', label:'CPI ≥ 4.0%', meta:'T04',
+    cells: { 'All':{brier:.418,market:.142,n:244}, 'vsignal-v7':{brier:.444,market:.145,n:62}, 'vsignal-v8':{brier:.403,market:.139,n:88}, 'vsignal-v9':{brier:.389,market:.141,n:94} }
+  },
+  // KXETH options
+  { series:'KXETH', code:'T2000', label:'ETH above $2,000', meta:'T2000',
+    cells: { 'All':{brier:.116,market:.139,n:188}, 'vsignal-v7':{brier:.128,market:.143,n:48}, 'vsignal-v8':{brier:.109,market:.136,n:68}, 'vsignal-v9':{brier:.101,market:.137,n:72} }
+  },
+  { series:'KXETH', code:'T3000', label:'ETH above $3,000', meta:'T3000',
+    cells: { 'All':{brier:.341,market:.133,n:158}, 'vsignal-v7':{brier:.367,market:.138,n:40}, 'vsignal-v8':{brier:.329,market:.130,n:58}, 'vsignal-v9':{brier:.315,market:.130,n:60} }
+  },
+  // KXPOL options — sparse, v7 missing on one
+  { series:'KXPOL', code:'DWIN', label:'Democrat wins presidency', meta:'DWIN',
+    cells: { 'All':{brier:.322,market:.128,n:94}, 'vsignal-v7':{brier:null,market:null,n:0}, 'vsignal-v8':{brier:.316,market:.126,n:44}, 'vsignal-v9':{brier:.309,market:.129,n:50} }
+  },
+  { series:'KXPOL', code:'RWIN', label:'Republican wins presidency', meta:'RWIN',
+    cells: { 'All':{brier:.108,market:.157,n:78}, 'vsignal-v7':{brier:.121,market:.161,n:20}, 'vsignal-v8':{brier:.102,market:.154,n:28}, 'vsignal-v9':{brier:.096,market:.155,n:30} }
+  },
+]
+
+// Color: delta = market_brier - model_brier. Positive = green (we beat market).
+function cellColor(delta) {
+  if (delta === null) return { bg: 'transparent', fg: 'var(--text)' }
+  const clamped = Math.max(-0.15, Math.min(0.15, delta))
+  if (clamped > 0.005) {
+    // Green: intensity by magnitude, max at delta=0.12
+    const t = Math.min(clamped / 0.12, 1)
+    const bg = `rgba(22,101,52,${t*0.7+0.05})`
+    const fg = t > 0.4 ? '#4ade80' : '#86efac'
+    return { bg, fg }
+  } else if (clamped < -0.005) {
+    // Red
+    const t = Math.min(-clamped / 0.12, 1)
+    const bg = `rgba(127,29,29,${t*0.65+0.05})`
+    const fg = t > 0.4 ? '#f87171' : '#fca5a5'
+    return { bg, fg }
+  }
+  return { bg: 'transparent', fg: 'var(--text)' }
+}
+
+// ── Sparkline SVG ──────────────────────────────────────────────────────────────
+function sparklineSVG(row) {
+  const W = 64, H = 26, pad = 3
+  const vals = pvCols.map(col => row.cells[col]?.brier ?? null)
+  const valid = vals.filter(v => v !== null)
+  if (valid.length < 2) return `<svg width="${W}" height="${H}"></svg>`
+
+  // Local scale with a bit of padding so flat rows still show
+  const lo = Math.min(...valid), hi = Math.max(...valid)
+  const span = Math.max(hi - lo, 0.02)
+  const rMin = lo - span * 0.15, rMax = hi + span * 0.15
+
+  const toX = i  => pad + (i / (pvCols.length - 1)) * (W - 2 * pad)
+  const toY = v  => H - pad - ((v - rMin) / (rMax - rMin)) * (H - 2 * pad)
+
+  let d = '', dots = ''
+  vals.forEach((v, i) => {
+    if (v === null) return
+    const x = toX(i), y = toY(v)
+    d += (d === '' ? `M${x},${y}` : `L${x},${y}`)
+    dots += `<circle cx="${x}" cy="${y}" r="2" fill="#6366f1"/>`
+  })
+
+  // Color line green if last valid < first valid (improving), red otherwise
+  const first = vals.find(v => v !== null)
+  const last  = [...vals].reverse().find(v => v !== null)
+  const lineColor = last <= first ? '#4ade80' : '#f87171'
+
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+    <path d="${d}" stroke="${lineColor}" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
+    ${dots.replace(/fill="#6366f1"/g, `fill="${lineColor}"`)}
+  </svg>`
+}
+
+function buildHeatmap() {
+  const table = document.getElementById('heatmap-table')
+  const allRow = optionRows[0]
+  const cols = ['All', ...pvCols]
+
+  // Precompute per-column stats
+  const colAllBrier = {}   // brier of "All Options" row for each col
+  const colMaxN = {}       // max n in each col (excluding All row)
+  for (const col of cols) {
+    colAllBrier[col] = allRow.cells[col]?.brier ?? null
+    colMaxN[col] = Math.max(...optionRows.slice(1).map(r => r.cells[col]?.n ?? 0))
+  }
+  // Global avg market brier (All row, All col) — reference line on market bar
+  const globalMktBrier = allRow.cells['All'].market  // 0.129
+  const mktBarMax = 0.22   // bar is full at this value
+
+  let h = '<thead><tr>'
+  h += '<th style="min-width:220px">Option</th>'
+  for (const col of cols) {
+    if (col === 'All') h += `<th style="text-align:center;min-width:90px">All</th>`
+    else               h += `<th class="pv-col" style="min-width:90px" data-pv="${col}">${col}</th>`
+  }
+  h += '<th class="trend-col">Trend</th>'
+  h += '</tr></thead><tbody>'
+
+  let lastSeries = undefined
+  for (let ri = 0; ri < optionRows.length; ri++) {
+    const row = optionRows[ri]
+    const isAll = row.code === null
+    if (!isAll && row.series !== lastSeries) {
+      h += `<tr class="series-header" data-series="${row.series}" title="Filter Distribution to ${row.series}"><td colspan="${cols.length + 2}">${row.series}</td></tr>`
+      lastSeries = row.series
+    }
+    h += `<tr class="${isAll ? 'all-row' : ''}" data-ri="${ri}">`
+
+    // ── Option label cell ──────────────────────────────────────────────────────
+    if (isAll) {
+      h += `<td><span style="font-weight:700">${row.label}</span></td>`
+    } else {
+      // Market difficulty bar using the "All" column market brier for this option
+      const mktBrier = row.cells['All']?.market ?? null
+      let mktBarHtml = ''
+      if (mktBrier !== null) {
+        const fillPct  = Math.min(mktBrier / mktBarMax, 1) * 100
+        const refPct   = Math.min(globalMktBrier / mktBarMax, 1) * 100
+        const mktDelta = mktBrier - globalMktBrier
+        const mktDeltaStr = (mktDelta >= 0 ? '+' : '') + mktDelta.toFixed(3)
+        const mktDeltaColor = mktDelta > 0.005 ? '#f59e0b' : mktDelta < -0.005 ? '#94a3b8' : 'var(--text-3)'
+        mktBarHtml = `
+          <div class="mkt-bar-wrap">
+            <div class="mkt-bar-outer">
+              <div class="mkt-bar-fill" style="width:${fillPct}%"></div>
+              <div class="mkt-bar-ref"  style="left:${refPct}%"></div>
+            </div>
+            <span class="mkt-bar-label" style="color:${mktDeltaColor}" title="Market Brier for this option vs global avg (${globalMktBrier.toFixed(3)}). Higher = harder for market.">mkt ${mktBrier.toFixed(3)} <span style="opacity:.7">(${mktDeltaStr})</span></span>
+          </div>`
+      }
+      h += `<td class="opt-label-cell" data-ri="${ri}" title="Filter Distribution to ${row.series}">
+        <div class="opt-label">${row.label}</div>
+        <div class="opt-meta">${row.meta}</div>
+        ${mktBarHtml}
+      </td>`
+    }
+
+    // ── Data cells ─────────────────────────────────────────────────────────────
+    for (let ci = 0; ci < cols.length; ci++) {
+      const col  = cols[ci]
+      const cell = row.cells[col]
+      if (!cell || cell.n === 0) {
+        h += `<td style="text-align:center"><span class="cell-empty">—</span></td>`
+        continue
+      }
+      const delta  = (cell.brier !== null && cell.market !== null) ? cell.market - cell.brier : null
+      const { bg, fg } = cellColor(delta)
+      const dStr = delta !== null ? (delta >= 0 ? `+${delta.toFixed(3)}` : delta.toFixed(3)) : ''
+
+      // vs column "All Options" brier
+      const colRef = colAllBrier[col]
+      let vsAvgHtml = ''
+      if (!isAll && colRef !== null && cell.brier !== null) {
+        const vsAvg = cell.brier - colRef
+        const vsStr = (vsAvg >= 0 ? '+' : '') + vsAvg.toFixed(3)
+        const vsColor = vsAvg < -0.005 ? '#4ade80' : vsAvg > 0.005 ? '#f87171' : 'var(--text-3)'
+        vsAvgHtml = `<span class="cell-vs-avg" style="color:${vsColor}" title="Model Brier vs column average (${colRef.toFixed(3)})">${vsStr} vs avg</span>`
+      }
+
+      // n-bar
+      const maxN = colMaxN[col] || 1
+      const nPct = (cell.n / maxN) * 100
+      const nBarHtml = !isAll
+        ? `<div class="n-bar-outer"><div class="n-bar-fill" style="width:${nPct}%"></div></div>`
+        : ''
+
+      const hasFilter = !isAll || col !== 'All'
+      const clickCls  = hasFilter ? 'clickable' : ''
+      const clickData = hasFilter ? `data-ri="${ri}" data-col="${col}"` : ''
+      const tipParts  = [col !== 'All' ? col : null, !isAll ? row.series : null].filter(Boolean)
+      const titleStr  = tipParts.length ? `Filter to: ${tipParts.join(' × ')}` : ''
+
+      h += `<td class="${clickCls}" style="background:${bg};text-align:center" ${clickData} title="${titleStr}">`
+      h += `<div class="cell-inner" style="color:${fg}">`
+      h += `<span class="cell-brier">${cell.brier !== null ? cell.brier.toFixed(3) : '—'}</span>`
+      if (delta !== null) h += `<span class="cell-delta">Δ${dStr}</span>`
+      h += vsAvgHtml
+      h += nBarHtml
+      h += `</div></td>`
+    }
+
+    // ── Trend sparkline ────────────────────────────────────────────────────────
+    h += `<td class="trend-cell">${sparklineSVG(row)}</td>`
+
+    h += '</tr>'
+  }
+  h += '</tbody>'
+  table.innerHTML = h
+
+  // Event wiring
+  table.querySelectorAll('tr.series-header[data-series]').forEach(tr =>
+    tr.addEventListener('click', () => switchTab('distribution', { series: tr.dataset.series }))
+  )
+  table.querySelectorAll('thead th[data-pv]').forEach(th =>
+    th.addEventListener('click', () => switchTab('distribution', { pv: th.dataset.pv }))
+  )
+  table.querySelectorAll('td.opt-label-cell').forEach(td =>
+    td.addEventListener('click', () => switchTab('distribution', { series: optionRows[+td.dataset.ri].series }))
+  )
+  table.querySelectorAll('td.clickable[data-col]').forEach(td => {
+    td.addEventListener('click', () => {
+      const row = optionRows[+td.dataset.ri]
+      const col = td.dataset.col
+      const filters = {}
+      if (col !== 'All')  filters.pv     = col
+      if (row.series)     filters.series = row.series
+      switchTab('distribution', filters)
+    })
+  })
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────────
+drawDistribution()
+drawOverTime()
+buildHeatmap()
+window.addEventListener('resize', () => { drawDistribution(); drawOverTime() })
+</script>
+</body>
+</html>
