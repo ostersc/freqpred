@@ -75,6 +75,7 @@ from .schemas import (
     StrategyConfigUpdateRequest,
     StrategyDecisionListResponse,
     StrategyDecisionOut,
+    ExchangeStatusOut,
     ServiceFreshnessOut,
     SystemHealthResponse,
     WebSocketStateOut,
@@ -133,6 +134,10 @@ def _get_order_manager(request: Request) -> object | None:
 
 def _started_at(request: Request) -> datetime:
     return request.app.state.started_at
+
+
+def _kalshi_base_url(request: Request) -> str:
+    return getattr(request.app.state, "kalshi_base_url", "https://api.elections.kalshi.com/trade-api/v2")
 
 
 def _runtime_telemetry(request: Request) -> RuntimeTelemetry | None:
@@ -1735,7 +1740,9 @@ async def get_system_health(
     risk_cfg: Annotated[object | None, Depends(_risk_config)],
     started_at: Annotated[datetime, Depends(_started_at)],
     runtime_telemetry: Annotated[RuntimeTelemetry | None, Depends(_runtime_telemetry)],
+    kalshi_base_url: Annotated[str, Depends(_kalshi_base_url)],
 ) -> SystemHealthResponse:
+    import httpx as _httpx  # noqa: PLC0415
     import freqpred.alerts.models  # noqa: F401 — ensure RunStateRow is registered  # noqa: PLC0415
     from freqpred.alerts.models import RunStateRow as _RunStateRow  # noqa: PLC0415
     from freqpred.trading.ledger import get_net_bankroll  # noqa: PLC0415
@@ -1758,6 +1765,22 @@ async def get_system_health(
     websocket_state = (
         runtime_telemetry.websocket_state() if runtime_telemetry is not None else {}
     )
+    exchange_status = ExchangeStatusOut(
+        exchange_active=None, trading_active=None, fetched_at=None
+    )
+
+    try:
+        async with _httpx.AsyncClient(timeout=5.0) as _hc:
+            _ex_resp = await _hc.get(f"{kalshi_base_url}/exchange/status")
+            _ex_resp.raise_for_status()
+            _ex_data = _ex_resp.json()
+        exchange_status = ExchangeStatusOut(
+            exchange_active=bool(_ex_data.get("exchange_active")),
+            trading_active=bool(_ex_data.get("trading_active")),
+            fetched_at=datetime.now(UTC),
+        )
+    except Exception:
+        log.warning("system_health.exchange_status_fetch_failed")
 
     today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     hour_ago = datetime.now(UTC) - timedelta(hours=1)
@@ -1904,6 +1927,7 @@ async def get_system_health(
             consecutive_llm_errors=None,
         ),
         services=service_rows,
+        exchange=exchange_status,
         pending_orders=pending_orders,
         oldest_pending_order_age_seconds=oldest_pending_order_age_seconds,
         open_positions=open_positions,

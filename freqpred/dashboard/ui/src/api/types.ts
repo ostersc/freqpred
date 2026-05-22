@@ -319,6 +319,12 @@ export interface ApiErrorStateOut {
   consecutive_llm_errors: number | null
 }
 
+export interface ExchangeStatusOut {
+  exchange_active: boolean | null
+  trading_active: boolean | null
+  fetched_at: string | null
+}
+
 export interface SystemHealthResponse {
   run_state: string
   mode: string
@@ -326,6 +332,7 @@ export interface SystemHealthResponse {
   websocket: WebSocketStateOut
   api_errors: ApiErrorStateOut
   services: ServiceFreshnessOut[]
+  exchange: ExchangeStatusOut
   pending_orders: number
   oldest_pending_order_age_seconds: number | null
   open_positions: number

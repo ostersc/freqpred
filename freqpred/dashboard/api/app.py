@@ -26,6 +26,7 @@ def create_app(
     signal_pipeline: object | None = None,
     order_manager: "OrderManager | None" = None,
     runtime_telemetry: "RuntimeTelemetry | None" = None,
+    kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2",
 ) -> FastAPI:
     """Create and configure the dashboard FastAPI application.
 
@@ -59,6 +60,7 @@ def create_app(
     app.state.signal_pipeline = signal_pipeline
     app.state.order_manager = order_manager
     app.state.runtime_telemetry = runtime_telemetry
+    app.state.kalshi_base_url = kalshi_base_url.rstrip("/")
 
     app.include_router(router, prefix="/api")
 

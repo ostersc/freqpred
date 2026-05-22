@@ -167,6 +167,10 @@ def run(ctx: click.Context, strategy: str, mode: str) -> None:
 
 
 async def _run_main(config: object, strategy_name: str, mode: str) -> None:
+    from datetime import UTC, datetime as _datetime  # noqa: PLC0415
+
+    _process_started_at = _datetime.now(UTC)
+
     import anthropic
 
     import freqpred.ingestion.models  # noqa: F401
@@ -677,6 +681,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 signal_pipeline=pipeline,
                 order_manager=order_manager,
                 runtime_telemetry=runtime_telemetry,
+                kalshi_base_url=config.kalshi.base_url,
             )
             _dash_server = _uvicorn.Server(
                 _uvicorn.Config(
@@ -803,6 +808,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     session_factory=session_factory,
                     telemetry=runtime_telemetry,
                     alert_dispatcher=alert_dispatcher,
+                    started_at=_process_started_at,
                 ),
                 name="stale_service_watchdog",
             )

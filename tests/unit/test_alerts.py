@@ -313,6 +313,10 @@ async def test_stale_service_alert_edge_triggered() -> None:
 
     telemetry.evaluate_service_states = MagicMock(side_effect=_evaluate)
 
+    from datetime import UTC, datetime, timedelta
+
+    past_started_at = datetime.now(UTC) - timedelta(seconds=300)
+
     with patch("freqpred.alerts.run_state.get_run_state", new=AsyncMock(return_value="running")), patch(
         "freqpred.runtime.telemetry.list_service_heartbeats",
         new=AsyncMock(return_value={}),
@@ -323,6 +327,71 @@ async def test_stale_service_alert_edge_triggered() -> None:
                 telemetry=telemetry,
                 alert_dispatcher=dispatcher,
                 interval_seconds=1,
+                started_at=past_started_at,
             )
 
     dispatcher.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_service_alert_suppressed_during_startup_grace() -> None:
+    """Stale alerts must not fire while the process is within the per-service grace window."""
+    from datetime import UTC, datetime
+
+    telemetry = RuntimeTelemetry(
+        session_factory=MagicMock(),
+        freshness_specs={
+            "signal_loop": FreshnessSpec(
+                service_name="signal_loop",
+                label="Signal loop",
+                stale_after_seconds=300,
+            )
+        },
+    )
+    stale_state = ServiceFreshnessState(
+        service_name="signal_loop",
+        label="Signal loop",
+        status="stale",
+        last_success_at=None,
+        last_error_at=None,
+        last_error_message=None,
+        stale_after_seconds=300,
+        age_seconds=600,
+        alertable=True,
+    )
+
+    dispatcher = MagicMock()
+    dispatcher.send = AsyncMock()
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.commit = AsyncMock()
+    session_factory = MagicMock(return_value=session)
+
+    states = [[stale_state]]
+
+    async def _sleep(_: float) -> None:
+        raise asyncio.CancelledError
+
+    def _evaluate(*args, **kwargs):
+        return states.pop(0)
+
+    telemetry.evaluate_service_states = MagicMock(side_effect=_evaluate)
+
+    # started_at is now — process just launched, still within the 300s grace window
+    just_started_at = datetime.now(UTC)
+
+    with patch("freqpred.alerts.run_state.get_run_state", new=AsyncMock(return_value="running")), patch(
+        "freqpred.runtime.telemetry.list_service_heartbeats",
+        new=AsyncMock(return_value={}),
+    ), patch("asyncio.sleep", new=_sleep):
+        with pytest.raises(asyncio.CancelledError):
+            await run_stale_service_watchdog(
+                session_factory=session_factory,
+                telemetry=telemetry,
+                alert_dispatcher=dispatcher,
+                interval_seconds=1,
+                started_at=just_started_at,
+            )
+
+    dispatcher.send.assert_not_awaited()

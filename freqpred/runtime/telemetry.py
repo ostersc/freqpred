@@ -385,15 +385,27 @@ async def run_stale_service_watchdog(
     alert_dispatcher: Any,
     *,
     interval_seconds: int = 60,
+    started_at: datetime | None = None,
 ) -> None:
-    """Periodically send bounded alerts when a critical service becomes stale."""
+    """Periodically send bounded alerts when a critical service becomes stale.
+
+    After a restart the existing heartbeat rows are stale by definition — every
+    service needs at least one full interval to complete its first run.  We
+    suppress alerts for any service whose ``stale_after_seconds`` has not yet
+    elapsed since ``started_at``, giving each service a per-service grace window
+    before it can page anyone.
+    """
     from freqpred.alerts.run_state import get_run_state  # noqa: PLC0415
 
+    process_started_at = started_at or datetime.now(UTC)
     active_alerts: set[str] = set()
     log.info("runtime_telemetry.watchdog_started", interval_seconds=interval_seconds)
 
     while True:
         try:
+            now = datetime.now(UTC)
+            uptime_seconds = (now - process_started_at).total_seconds()
+
             async with session_factory() as session:
                 run_state = await get_run_state(session)
                 heartbeats = await list_service_heartbeats(session)
@@ -401,6 +413,7 @@ async def run_stale_service_watchdog(
             stale_states = telemetry.evaluate_service_states(
                 heartbeats,
                 run_state=run_state,
+                now=now,
             )
             if run_state != "running":
                 active_alerts.clear()
@@ -411,7 +424,11 @@ async def run_stale_service_watchdog(
                         and state.age_seconds is not None
                         and state.age_seconds > state.stale_after_seconds
                     )
-                    if truly_stale and state.alertable:
+                    # Suppress alerts during the per-service startup grace window.
+                    # Each service is allowed one full stale_after_seconds interval
+                    # after process start before it can fire an alert.
+                    in_grace_period = uptime_seconds < state.stale_after_seconds
+                    if truly_stale and state.alertable and not in_grace_period:
                         if state.service_name not in active_alerts:
                             reason = (
                                 f"{state.label} stale: no successful progress for "

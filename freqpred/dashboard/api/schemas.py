@@ -449,6 +449,12 @@ class ApiErrorStateOut(BaseModel):
     consecutive_llm_errors: int | None  # null = not available in standalone mode
 
 
+class ExchangeStatusOut(BaseModel):
+    exchange_active: bool | None    # None = fetch failed
+    trading_active: bool | None
+    fetched_at: datetime | None
+
+
 class SystemHealthResponse(BaseModel):
     run_state: str                  # "running" | "paused" | "stopped"
     mode: str                       # "paper" | "live"
@@ -456,6 +462,7 @@ class SystemHealthResponse(BaseModel):
     websocket: WebSocketStateOut
     api_errors: ApiErrorStateOut
     services: list[ServiceFreshnessOut]
+    exchange: ExchangeStatusOut
     pending_orders: int
     oldest_pending_order_age_seconds: int | None
     open_positions: int

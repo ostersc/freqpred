@@ -117,7 +117,7 @@ export default function SystemHealth() {
             </div>
           </div>
 
-          <div className="grid grid-2" style={{ marginBottom: 12 }}>
+          <div className="grid grid-3" style={{ marginBottom: 12 }}>
             <Panel title="Circuit breaker" action={<Badge kind={data.circuit_breakers.trading_halted ? 'neg' : 'pos'} dot>{data.circuit_breakers.trading_halted ? 'halted' : 'ok'}</Badge>}>
               <table className="tbl" style={{ fontSize: 12.5 }}>
                 <tbody>
@@ -190,6 +190,49 @@ export default function SystemHealth() {
                 </tbody>
               </table>
             </Panel>
+
+            {(() => {
+              const ex = data.exchange
+              const overallOk = ex.exchange_active === true && ex.trading_active === true
+              const unavailable = ex.exchange_active === null
+              const badge = unavailable
+                ? <Badge kind="muted">unavailable</Badge>
+                : <Badge kind={overallOk ? 'pos' : 'neg'} dot>{overallOk ? 'ok' : 'degraded'}</Badge>
+              return (
+                <Panel
+                  title="Kalshi exchange"
+                  action={<a href="https://kalshistatus.com/" target="_blank" rel="noreferrer" className="dim" style={{ fontSize: 11 }}>kalshistatus.com ↗</a>}
+                >
+                  <div style={{ marginBottom: 8 }}>{badge}</div>
+                  <table className="tbl" style={{ fontSize: 12.5 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ padding: '8px 0', border: 'none' }}>Exchange active</td>
+                        <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }}>
+                          {ex.exchange_active === null
+                            ? <span className="muted">—</span>
+                            : <Badge kind={ex.exchange_active ? 'pos' : 'neg'} dot>{String(ex.exchange_active)}</Badge>}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: '8px 0', border: 'none' }}>Trading active</td>
+                        <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }}>
+                          {ex.trading_active === null
+                            ? <span className="muted">—</span>
+                            : <Badge kind={ex.trading_active ? 'pos' : 'neg'} dot>{String(ex.trading_active)}</Badge>}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: '8px 0', border: 'none' }}>Checked at</td>
+                        <td style={{ padding: '8px 0', border: 'none', textAlign: 'right', fontSize: 11 }} className="mono dim">
+                          {ex.fetched_at ? new Date(ex.fetched_at).toLocaleString() : '—'}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </Panel>
+              )
+            })()}
           </div>
 
           <Panel title="Service heartbeats" flush action={<span className="dim" style={{ fontSize: 11 }}>one row per service · from service_heartbeats</span>}>
@@ -230,9 +273,17 @@ export default function SystemHealth() {
                           </div>
                         </td>
                         <td>
-                          {s.last_error_message
-                            ? <span className="neg mono" style={{ fontSize: 11.5 }}>{s.last_error_message}</span>
-                            : <span className="muted">—</span>}
+                          {(() => {
+                            if (!s.last_error_message || !s.last_error_at) return <span className="muted">—</span>
+                            const errorAge = (Date.now() - new Date(s.last_error_at).getTime()) / 1000
+                            if (errorAge > 86400) return <span className="muted">—</span>
+                            return (
+                              <div>
+                                <div className="neg mono" style={{ fontSize: 11.5 }}>{s.last_error_message}</div>
+                                <div className="dim mono" style={{ fontSize: 10.5, marginTop: 2 }}>{new Date(s.last_error_at).toLocaleString()}</div>
+                              </div>
+                            )
+                          })()}
                         </td>
                         <td className="c">
                           <Badge kind={ok ? 'pos' : 'neg'} dot>{ok ? 'ok' : s.status}</Badge>
