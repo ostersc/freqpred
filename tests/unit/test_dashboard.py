@@ -918,7 +918,8 @@ def _make_system_health_session(
     # 7. open positions COUNT
     # 8. LLM errors COUNT
     # 9. Kalshi runtime errors COUNT
-    # 10. service_heartbeats list (only when runtime telemetry is provided)
+    # 10. kalshi_changelog_state → scalar_one_or_none
+    # 11. service_heartbeats list (only when runtime telemetry is provided)
 
     run_state_row = MagicMock()
     run_state_row.state = run_state
@@ -942,11 +943,14 @@ def _make_system_health_session(
     kalshi_errors_result = _scalar_result(kalshi_errors)
     heartbeats_result = _scalars_result(heartbeat_rows or [])
 
+    changelog_state_result = MagicMock()
+    changelog_state_result.scalar_one_or_none.return_value = None
+
     session = AsyncMock()
     session.execute = _execute_side_effects(
-        run_state_result,    # _get_mode
-        run_state_result,    # select(RunStateRow) for CB state
-        all_time_pnl_result, # get_net_bankroll
+        run_state_result,       # _get_mode
+        run_state_result,       # select(RunStateRow) for CB state
+        all_time_pnl_result,    # get_net_bankroll
         daily_pnl_result,
         llm_spend_result,
         pending_result,
@@ -954,7 +958,8 @@ def _make_system_health_session(
         open_result,
         llm_errors_result,
         kalshi_errors_result,
-        heartbeats_result,
+        changelog_state_result, # kalshi_changelog_state
+        heartbeats_result,      # service_heartbeats (only when runtime_telemetry is not None)
     )
     return session
 

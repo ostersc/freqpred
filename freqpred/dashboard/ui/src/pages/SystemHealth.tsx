@@ -59,7 +59,7 @@ export default function SystemHealth() {
             </div>
           )}
 
-          <div className="grid grid-4" style={{ marginBottom: 12 }}>
+          <div className="grid" style={{ gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr 1fr 1fr', marginBottom: 8 }}>
             <div className="stat">
               <div className="stat-label">Run state</div>
               <div style={{ marginBottom: 10 }}>
@@ -97,14 +97,11 @@ export default function SystemHealth() {
             <Stat label="Mode" value={<Badge kind={statusKind(data.mode)}>{data.mode}</Badge>} sub={data.mode === 'paper' ? 'no real orders sent' : 'live trading'} />
             <Stat label="Database" value={<Badge kind={data.db_ok ? 'pos' : 'neg'} dot>{data.db_ok ? 'connected' : 'error'}</Badge>} sub="primary" />
             <Stat label="Uptime" value={fmtUptime(data.uptime_seconds)} />
-          </div>
-
-          <div className="grid grid-3" style={{ marginBottom: 12 }}>
             <Stat label="Open positions" value={String(data.open_positions)} />
             <Stat label="Pending orders" value={String(data.pending_orders)} sub={`Oldest age: ${fmtAgeSecs(data.oldest_pending_order_age_seconds)}`} />
             <div className="stat">
               <div className="stat-label">API errors (last hour)</div>
-              <div style={{ display: 'flex', gap: 24, marginTop: 6 }}>
+              <div style={{ display: 'flex', gap: 20, marginTop: 6 }}>
                 <div>
                   <div className="dim" style={{ fontSize: 11 }}>Kalshi</div>
                   <div className={`mono ${data.api_errors.kalshi_errors_last_hour > 0 ? 'neg' : 'pos'}`} style={{ fontSize: 20, fontWeight: 600 }}>{data.api_errors.kalshi_errors_last_hour}</div>
@@ -117,7 +114,7 @@ export default function SystemHealth() {
             </div>
           </div>
 
-          <div className="grid grid-3" style={{ marginBottom: 12 }}>
+          <div className="grid grid-3" style={{ marginBottom: 8 }}>
             <Panel title="Circuit breaker" action={<Badge kind={data.circuit_breakers.trading_halted ? 'neg' : 'pos'} dot>{data.circuit_breakers.trading_halted ? 'halted' : 'ok'}</Badge>}>
               <table className="tbl" style={{ fontSize: 12.5 }}>
                 <tbody>
@@ -158,32 +155,29 @@ export default function SystemHealth() {
               <table className="tbl" style={{ fontSize: 12.5 }}>
                 <tbody>
                   <tr>
-                    <td style={{ padding: '8px 0', border: 'none' }}>Feed status</td>
-                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }}>
-                      <Badge kind={statusKind(data.websocket.status)} dot>{data.websocket.status}</Badge>
+                    <td style={{ padding: '5px 0', border: 'none' }}>Feed</td>
+                    <td style={{ padding: '5px 0', border: 'none', textAlign: 'right' }}>
+                      <span style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                        <Badge kind={statusKind(data.websocket.status)} dot>{data.websocket.status}</Badge>
+                        {data.websocket.connected !== null && (
+                          <Badge kind={data.websocket.connected ? 'pos' : 'neg'} dot>{data.websocket.connected ? 'connected' : 'disconnected'}</Badge>
+                        )}
+                      </span>
                     </td>
                   </tr>
                   <tr>
-                    <td style={{ padding: '8px 0', border: 'none' }}>Connected</td>
-                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }}>
-                      {data.websocket.connected === null
-                        ? <span className="muted">n/a</span>
-                        : <Badge kind={data.websocket.connected ? 'pos' : 'neg'} dot>{data.websocket.connected ? 'connected' : 'disconnected'}</Badge>}
-                    </td>
+                    <td style={{ padding: '5px 0', border: 'none' }}>Subscribed markets</td>
+                    <td style={{ padding: '5px 0', border: 'none', textAlign: 'right' }} className="mono">{data.websocket.subscribed_markets ?? '—'}</td>
                   </tr>
                   <tr>
-                    <td style={{ padding: '8px 0', border: 'none' }}>Subscribed markets</td>
-                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }} className="mono">{data.websocket.subscribed_markets ?? '—'}</td>
-                  </tr>
-                  <tr>
-                    <td style={{ padding: '8px 0', border: 'none' }}>Last message</td>
-                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right', fontSize: 11 }} className="mono dim">
+                    <td style={{ padding: '5px 0', border: 'none' }}>Last message</td>
+                    <td style={{ padding: '5px 0', border: 'none', textAlign: 'right', fontSize: 11 }} className="mono dim">
                       {data.websocket.last_message_at ? new Date(data.websocket.last_message_at).toLocaleString() : '—'}
                     </td>
                   </tr>
                   <tr>
-                    <td style={{ padding: '8px 0', border: 'none' }}>Last reconcile</td>
-                    <td style={{ padding: '8px 0', border: 'none', textAlign: 'right', fontSize: 11 }} className="mono dim">
+                    <td style={{ padding: '5px 0', border: 'none' }}>Last reconcile</td>
+                    <td style={{ padding: '5px 0', border: 'none', textAlign: 'right', fontSize: 11 }} className="mono dim">
                       {data.websocket.last_reconcile_at ? new Date(data.websocket.last_reconcile_at).toLocaleString() : '—'}
                     </td>
                   </tr>
@@ -193,41 +187,57 @@ export default function SystemHealth() {
 
             {(() => {
               const ex = data.exchange
+              const cl = data.changelog
               const overallOk = ex.exchange_active === true && ex.trading_active === true
               const unavailable = ex.exchange_active === null
-              const badge = unavailable
+              const exchangeBadge = unavailable
                 ? <Badge kind="muted">unavailable</Badge>
                 : <Badge kind={overallOk ? 'pos' : 'neg'} dot>{overallOk ? 'ok' : 'degraded'}</Badge>
+
+              const clBadge = cl == null ? null
+                : cl.has_unreviewed_breaking_change
+                  ? <Badge kind="neg">⚠ {cl.unreviewed_count} breaking</Badge>
+                  : cl.unreviewed_count > 0
+                    ? <Badge kind="warn">{cl.unreviewed_count} unreviewed</Badge>
+                    : <Badge kind="pos">up to date</Badge>
+
+              const R = ({ label, children }: { label: string; children: React.ReactNode }) => (
+                <tr>
+                  <td style={{ padding: '5px 0', border: 'none', fontSize: 12.5 }}>{label}</td>
+                  <td style={{ padding: '5px 0', border: 'none', textAlign: 'right' }}>{children}</td>
+                </tr>
+              )
+
               return (
                 <Panel
                   title="Kalshi exchange"
                   action={<a href="https://kalshistatus.com/" target="_blank" rel="noreferrer" className="dim" style={{ fontSize: 11 }}>kalshistatus.com ↗</a>}
                 >
-                  <div style={{ marginBottom: 8 }}>{badge}</div>
-                  <table className="tbl" style={{ fontSize: 12.5 }}>
+                  <table className="tbl" style={{ fontSize: 12.5, marginTop: 2 }}>
                     <tbody>
-                      <tr>
-                        <td style={{ padding: '8px 0', border: 'none' }}>Exchange active</td>
-                        <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }}>
+                      <R label="Status">{exchangeBadge}</R>
+                      <R label="Exchange / Trading">
+                        <span style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
                           {ex.exchange_active === null
                             ? <span className="muted">—</span>
-                            : <Badge kind={ex.exchange_active ? 'pos' : 'neg'} dot>{String(ex.exchange_active)}</Badge>}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td style={{ padding: '8px 0', border: 'none' }}>Trading active</td>
-                        <td style={{ padding: '8px 0', border: 'none', textAlign: 'right' }}>
-                          {ex.trading_active === null
-                            ? <span className="muted">—</span>
-                            : <Badge kind={ex.trading_active ? 'pos' : 'neg'} dot>{String(ex.trading_active)}</Badge>}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td style={{ padding: '8px 0', border: 'none' }}>Checked at</td>
-                        <td style={{ padding: '8px 0', border: 'none', textAlign: 'right', fontSize: 11 }} className="mono dim">
-                          {ex.fetched_at ? new Date(ex.fetched_at).toLocaleString() : '—'}
-                        </td>
-                      </tr>
+                            : <><Badge kind={ex.exchange_active ? 'pos' : 'neg'} dot>exchange</Badge><Badge kind={ex.trading_active ? 'pos' : 'neg'} dot>trading</Badge></>}
+                        </span>
+                      </R>
+                      <R label="Checked">
+                        <span className="mono dim" style={{ fontSize: 11 }}>
+                          {ex.fetched_at ? new Date(ex.fetched_at).toLocaleTimeString() : '—'}
+                        </span>
+                      </R>
+                      {cl != null && (
+                        <R label="API changelog">
+                          <span style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end' }}>
+                            {clBadge}
+                            {cl.unreviewed_count > 0
+                              ? <a href="https://docs.kalshi.com/changelog" target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>view ↗</a>
+                              : <span className="mono dim" style={{ fontSize: 11 }}>{cl.last_reviewed_at ?? '—'}</span>}
+                          </span>
+                        </R>
+                      )}
                     </tbody>
                   </table>
                 </Panel>

@@ -24,6 +24,7 @@ SERVICE_FACTBASE_SCHEDULER = "factbase_scheduler"
 SERVICE_POSITION_WATCHER_LAST_MESSAGE = "position_watcher_last_message"
 SERVICE_POSITION_WATCHER_RECONCILE = "position_watcher_reconcile"
 SERVICE_MARKET_WATCHER = "market_watcher"
+SERVICE_KALSHI_CHANGELOG = "kalshi_changelog"
 
 EVENT_CATEGORY_KALSHI_API = "kalshi_api"
 EVENT_CATEGORY_STALE_SERVICE = "stale_service"
@@ -99,6 +100,11 @@ def build_freshness_specs(
             service_name=SERVICE_MARKET_WATCHER,
             label="Market watcher",
             stale_after_seconds=max(market_watcher_interval_seconds * 2, 900),
+        ),
+        SERVICE_KALSHI_CHANGELOG: FreshnessSpec(
+            service_name=SERVICE_KALSHI_CHANGELOG,
+            label="Kalshi changelog monitor",
+            stale_after_seconds=36 * 3600,
         ),
     }
 

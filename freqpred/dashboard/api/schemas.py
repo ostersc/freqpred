@@ -1,7 +1,7 @@
 """Pydantic response schemas for the dashboard API."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -455,6 +455,13 @@ class ExchangeStatusOut(BaseModel):
     fetched_at: datetime | None
 
 
+class ChangelogStatusOut(BaseModel):
+    unreviewed_count: int
+    has_unreviewed_breaking_change: bool
+    last_reviewed_at: date | None
+    last_checked_at: datetime | None
+
+
 class SystemHealthResponse(BaseModel):
     run_state: str                  # "running" | "paused" | "stopped"
     mode: str                       # "paper" | "live"
@@ -463,6 +470,7 @@ class SystemHealthResponse(BaseModel):
     api_errors: ApiErrorStateOut
     services: list[ServiceFreshnessOut]
     exchange: ExchangeStatusOut
+    changelog: ChangelogStatusOut
     pending_orders: int
     oldest_pending_order_age_seconds: int | None
     open_positions: int

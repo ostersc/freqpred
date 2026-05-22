@@ -75,6 +75,7 @@ from .schemas import (
     StrategyConfigUpdateRequest,
     StrategyDecisionListResponse,
     StrategyDecisionOut,
+    ChangelogStatusOut,
     ExchangeStatusOut,
     ServiceFreshnessOut,
     SystemHealthResponse,
@@ -1762,6 +1763,12 @@ async def get_system_health(
     llm_errors_last_hour: int = 0
     kalshi_errors_last_hour: int = 0
     service_rows: list[ServiceFreshnessOut] = []
+    changelog_status = ChangelogStatusOut(
+        unreviewed_count=0,
+        has_unreviewed_breaking_change=False,
+        last_reviewed_at=None,
+        last_checked_at=None,
+    )
     websocket_state = (
         runtime_telemetry.websocket_state() if runtime_telemetry is not None else {}
     )
@@ -1860,6 +1867,17 @@ async def get_system_health(
         )
         kalshi_errors_last_hour = int(kalshi_errors_result.scalar_one())
 
+        from freqpred.runtime.models import KalshiChangelogStateRow as _ChangelogRow  # noqa: PLC0415
+        _cl_result = await session.execute(select(_ChangelogRow).where(_ChangelogRow.id == 1))
+        _cl_row = _cl_result.scalar_one_or_none()
+        if _cl_row is not None:
+            changelog_status = ChangelogStatusOut(
+                unreviewed_count=_cl_row.unreviewed_count,
+                has_unreviewed_breaking_change=_cl_row.has_unreviewed_breaking_change,
+                last_reviewed_at=_cl_row.last_reviewed_at,
+                last_checked_at=_cl_row.last_checked_at,
+            )
+
         if runtime_telemetry is not None:
             heartbeats = await list_service_heartbeats(session)
             service_states = runtime_telemetry.evaluate_service_states(
@@ -1928,6 +1946,7 @@ async def get_system_health(
         ),
         services=service_rows,
         exchange=exchange_status,
+        changelog=changelog_status,
         pending_orders=pending_orders,
         oldest_pending_order_age_seconds=oldest_pending_order_age_seconds,
         open_positions=open_positions,

@@ -813,6 +813,17 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 name="stale_service_watchdog",
             )
         )
+        from freqpred.ingestion.kalshi_changelog import run_changelog_monitor  # noqa: PLC0415
+        tasks.append(
+            asyncio.create_task(
+                run_changelog_monitor(
+                    session_factory=session_factory,
+                    dispatcher=alert_dispatcher,
+                    telemetry=runtime_telemetry,
+                ),
+                name="kalshi_changelog_monitor",
+            )
+        )
 
         async with session_factory() as _startup_session:
             _startup_state = await get_run_state(_startup_session)

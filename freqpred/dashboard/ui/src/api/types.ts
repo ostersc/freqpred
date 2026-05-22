@@ -325,6 +325,13 @@ export interface ExchangeStatusOut {
   fetched_at: string | null
 }
 
+export interface ChangelogStatusOut {
+  unreviewed_count: number
+  has_unreviewed_breaking_change: boolean
+  last_reviewed_at: string | null   // YYYY-MM-DD
+  last_checked_at: string | null
+}
+
 export interface SystemHealthResponse {
   run_state: string
   mode: string
@@ -333,6 +340,7 @@ export interface SystemHealthResponse {
   api_errors: ApiErrorStateOut
   services: ServiceFreshnessOut[]
   exchange: ExchangeStatusOut
+  changelog: ChangelogStatusOut
   pending_orders: number
   oldest_pending_order_age_seconds: number | null
   open_positions: number

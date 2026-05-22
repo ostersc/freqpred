@@ -76,6 +76,9 @@ def _make_session(
     hb_result = MagicMock()
     hb_result.scalars.return_value.all.return_value = service_heartbeats or []
 
+    changelog_result = MagicMock()
+    changelog_result.scalar_one_or_none.return_value = None
+
     session = AsyncMock()
     session.execute = _execute_side_effects(
         rs_result,                 # _get_mode
@@ -88,7 +91,8 @@ def _make_session(
         _scalar_result(open_count),      # open count
         _scalar_result(llm_errors),      # llm errors
         _scalar_result(kalshi_errors),   # kalshi errors
-        hb_result,                       # list_service_heartbeats
+        changelog_result,                # kalshi_changelog_state
+        hb_result,                       # list_service_heartbeats (only with runtime_telemetry)
     )
     return session
 

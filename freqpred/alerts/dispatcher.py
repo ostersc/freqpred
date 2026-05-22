@@ -1,11 +1,16 @@
 """Alert dispatcher — fans out to all configured senders."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import structlog
 
 from freqpred.alerts.base import AlertSender
 from freqpred.markets.models import Market, Position
 from freqpred.signal.models import Signal
+
+if TYPE_CHECKING:
+    from freqpred.ingestion.kalshi_changelog import ChangelogEntry
 
 log = structlog.get_logger(__name__)
 
@@ -96,3 +101,19 @@ class AlertDispatcher:
         if open_positions > 0:
             msg += f"\nWARNING: {open_positions} open live position(s) will be unmonitored until restart."
         await self.send(msg)
+
+    async def changelog_warning_alert(self, entries: list[ChangelogEntry]) -> None:
+        lines = [f"WARNING: {len(entries)} unreviewed Kalshi changelog entr{'y' if len(entries) == 1 else 'ies'}:"]
+        for e in entries:
+            cats = f" [{', '.join(e.categories)}]" if e.categories else ""
+            lines.append(f"  • {e.pub_date} — {e.title}{cats}")
+        lines.append("Review at https://docs.kalshi.com/changelog then update last_reviewed_at via migration.")
+        await self.send("\n".join(lines))
+
+    async def changelog_critical_alert(self, entries: list[ChangelogEntry]) -> None:
+        lines = [f"CRITICAL: {len(entries)} unreviewed BREAKING CHANGE(S) in Kalshi changelog:"]
+        for e in entries:
+            cats = f" [{', '.join(e.categories)}]" if e.categories else ""
+            lines.append(f"  *** {e.pub_date} — {e.title}{cats}")
+        lines.append("Review at https://docs.kalshi.com/changelog — code changes may be required.")
+        await self.send("\n".join(lines))

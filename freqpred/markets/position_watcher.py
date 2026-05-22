@@ -570,6 +570,12 @@ class PositionWatcher:
     # Subscription helpers
     # ------------------------------------------------------------------
 
+    # event_type values on market_lifecycle_v2 that represent actual market lifecycle
+    # transitions and are safe to persist as the market status. Other event types
+    # (metadata_updated, fractional_trading_updated, price_level_structure_updated, …)
+    # carry field-update notifications, not status changes, and must not overwrite status.
+    _LIFECYCLE_STATUSES: frozenset[str] = frozenset({"active", "determined", "settled"})
+
     async def _update_market_status(
         self, market_id: str, status: str, result: str | None,
         settlement_value: float | None = None,
@@ -577,12 +583,18 @@ class PositionWatcher:
         """Persist market status/result/settlement_value from a market_lifecycle_v2 event.
 
         Silently skips if the market has no DB row (markets we don't monitor).
+        Only writes status when event_type is a known lifecycle transition — non-lifecycle
+        event types (e.g. metadata_updated) must not overwrite the market's current status.
         """
-        values: dict = {"status": status}
+        values: dict = {}
+        if status in self._LIFECYCLE_STATUSES:
+            values["status"] = status
         if result is not None:
             values["result"] = result
         if settlement_value is not None:
             values["settlement_value"] = settlement_value
+        if not values:
+            return
         async with self._session_factory() as session:
             await session.execute(
                 update(MarketRow).where(MarketRow.id == market_id).values(**values)

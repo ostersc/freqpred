@@ -66,6 +66,7 @@ def test_all_tables_registered():
         "service_heartbeats",
         "runtime_events",
         "series_option_history",
+        "kalshi_changelog_state",
     }
     registered = set(Base.metadata.tables.keys())
     assert expected == registered
