@@ -85,43 +85,17 @@ function linearTrend(values: number[]): { slope: number; intercept: number } {
   return { slope, intercept: yBar - slope * xBar }
 }
 
-function computeCAGR(
-  initialBankroll: number,
-  allTimePnl: number,
-  firstDate: string,
-  lastDate: string,
-): number | null {
-  if (allTimePnl <= 0 || initialBankroll <= 0) return null
-  const msPerYear = 365.25 * 24 * 3600 * 1000
-  const years = (new Date(lastDate).getTime() - new Date(firstDate).getTime()) / msPerYear
-  if (years < 1 / 365) return null
-  return Math.pow((initialBankroll + allTimePnl) / initialBankroll, 1 / years) - 1
-}
-
-function computeDaysUntilBroke(
-  initialBankroll: number,
-  lastCumPnl: number,
-  lastCumLlm: number,
-  pnlTrend: { slope: number; intercept: number },
-  llmTrend: { slope: number; intercept: number },
-  nPnlDays: number,
-  nLlmDays: number,
-): number | null {
-  // Already broke?
-  if (initialBankroll + lastCumPnl - lastCumLlm <= 0) return 0
-
-  const maxDays = 3650
-  let cumPnl = lastCumPnl
-  let cumLlm = lastCumLlm
-
-  for (let d = 1; d <= maxDays; d++) {
-    const projPnl = pnlTrend.intercept + pnlTrend.slope * (nPnlDays - 1 + d)
-    const projLlm = Math.max(0, llmTrend.intercept + llmTrend.slope * (nLlmDays - 1 + d))
-    cumPnl += projPnl
-    cumLlm += projLlm
-    if (initialBankroll + cumPnl - cumLlm <= 0) return d
+function computeGBMParams(bankrollSeries: number[]): { mu: number; sigma: number } | null {
+  const logReturns: number[] = []
+  for (let i = 1; i < bankrollSeries.length; i++) {
+    if (bankrollSeries[i] > 0 && bankrollSeries[i - 1] > 0) {
+      logReturns.push(Math.log(bankrollSeries[i] / bankrollSeries[i - 1]))
+    }
   }
-  return null // ∞
+  if (logReturns.length < 2) return null
+  const mu = logReturns.reduce((a, b) => a + b, 0) / logReturns.length
+  const variance = logReturns.reduce((a, r) => a + (r - mu) ** 2, 0) / (logReturns.length - 1)
+  return { mu, sigma: Math.sqrt(variance) }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,10 +115,14 @@ interface ChartPoint {
 interface ProjPoint {
   ts: number
   date: string
-  proj_bankroll: number | null
-  proj_llm_spend: number | null
   hist_bankroll: number | null
   hist_llm_spend: number | null
+  proj_central: number | null
+  proj_1s_lo: number | null
+  proj_1s_spread: number | null
+  proj_2s_lo: number | null
+  proj_2s_spread: number | null
+  proj_llm_spend: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -173,19 +151,35 @@ function HistoryTooltip({ active, payload, label }: {
 
 function ProjTooltip({ active, payload, label }: {
   active?: boolean
-  payload?: { name: string; value: number | null; color: string }[]
+  payload?: { name: string; value: number | null; color: string; payload: ProjPoint }[]
   label?: number
 }) {
   if (!active || !payload?.length) return null
+  const pt = payload[0].payload
   return (
     <div className="tooltip-box">
       <div className="tooltip-title">{label != null ? fmtDateFull(label) : ''}</div>
-      {payload.map((p) =>
-        p.value != null ? (
-          <div key={p.name} style={{ color: p.color, fontSize: 12 }}>
-            {p.name}: {fmtSignedMoney(p.value)}
-          </div>
-        ) : null
+      {pt.hist_bankroll != null && (
+        <div style={{ fontSize: 12 }}>Bankroll: {fmtSignedMoney(pt.hist_bankroll)}</div>
+      )}
+      {pt.proj_central != null && (
+        <div style={{ fontSize: 12 }}>Projection: {fmtSignedMoney(pt.proj_central)}</div>
+      )}
+      {pt.proj_1s_lo != null && pt.proj_1s_spread != null && (
+        <div style={{ fontSize: 12, opacity: 0.75 }}>
+          ±1σ: {fmtSignedMoney(pt.proj_1s_lo)} – {fmtSignedMoney(pt.proj_1s_lo + pt.proj_1s_spread)}
+        </div>
+      )}
+      {pt.proj_2s_lo != null && pt.proj_2s_spread != null && (
+        <div style={{ fontSize: 12, opacity: 0.55 }}>
+          ±2σ: {fmtSignedMoney(pt.proj_2s_lo)} – {fmtSignedMoney(pt.proj_2s_lo + pt.proj_2s_spread)}
+        </div>
+      )}
+      {pt.hist_llm_spend != null && (
+        <div style={{ color: '#dc2626', fontSize: 12 }}>LLM spend: {fmtMoney(pt.hist_llm_spend, 4)}</div>
+      )}
+      {pt.proj_llm_spend != null && (
+        <div style={{ color: '#dc2626', fontSize: 12, opacity: 0.7 }}>LLM spend (proj): {fmtMoney(pt.proj_llm_spend, 4)}</div>
       )}
     </div>
   )
@@ -301,10 +295,7 @@ export default function PLOverTime() {
   const projection = useMemo(() => {
     if (!data || data.pnl_series.length === 0) return null
 
-    const dailyPnlValues = data.pnl_series.map((d) => d.daily_pnl)
     const dailyLlmValues = data.llm_series.map((d) => d.daily_spend)
-
-    const pnlTrend = linearTrend(dailyPnlValues)
     const llmTrend = linearTrend(dailyLlmValues.length > 0 ? dailyLlmValues : [0])
 
     const lastPnlPoint = data.pnl_series[data.pnl_series.length - 1]
@@ -315,32 +306,35 @@ export default function PLOverTime() {
     const initialBankroll = data.initial_bankroll
     const netBankrollNow = initialBankroll + lastCumPnl - lastCumLlm
 
-    const cagr = computeCAGR(
-      initialBankroll,
-      data.all_time_pnl,
-      data.pnl_series[0].date,
-      lastPnlPoint.date,
-    )
+    // GBM parameters estimated from the P&L bankroll series (log-returns)
+    const bankrollSeries = data.pnl_series.map((d) => initialBankroll + d.cumulative_pnl)
+    const gbm = computeGBMParams(bankrollSeries)
 
-    const daysUntilBroke = computeDaysUntilBroke(
-      initialBankroll,
-      lastCumPnl,
-      lastCumLlm,
-      pnlTrend,
-      llmTrend,
-      dailyPnlValues.length,
-      dailyLlmValues.length > 0 ? dailyLlmValues.length : 1,
-    )
+    // CAGR = geometric mean daily log-return annualized (e^(μ·365) − 1)
+    const cagr = gbm ? Math.exp(gbm.mu * 365) - 1 : null
 
-    // Projected 30-day LLM burn
+    // Days until broke: GBM central path minus projected LLM spend
+    const daysUntilBroke = (() => {
+      if (netBankrollNow <= 0) return 0
+      if (!gbm) return null
+      let addlLlm = 0
+      for (let d = 1; d <= 3650; d++) {
+        const projBankroll = netBankrollNow * Math.exp(gbm.mu * d)
+        addlLlm += Math.max(0, llmTrend.intercept + llmTrend.slope * (dailyLlmValues.length - 1 + d))
+        if (projBankroll - addlLlm <= 0) return d
+      }
+      return null
+    })()
+
+    // Projected 30-day LLM burn (linear trend, unchanged)
     let proj30LlmBurn = 0
     for (let d = 1; d <= 30; d++) {
       proj30LlmBurn += Math.max(0, llmTrend.intercept + llmTrend.slope * (dailyLlmValues.length - 1 + d))
     }
 
-    // Build projection chart points: 90 days history + 90 days forward
+    // Build projection chart points: history + forward window sized to the selected preset
     const HISTORY_DAYS = 90
-    const FORWARD_DAYS = 90
+    const FORWARD_DAYS = preset === 'all' ? data.pnl_series.length : Number(preset)
     const today = new Date()
     today.setHours(0, 0, 0, 0)
     const todayTs = today.getTime()
@@ -349,8 +343,6 @@ export default function PLOverTime() {
     const projPoints: ProjPoint[] = []
 
     // Historical bankroll curve (last HISTORY_DAYS of data).
-    // Emit null for days with no closed positions (LLM-only days) so connectNulls
-    // interpolates them, matching the main history chart's behaviour.
     const histSlice = chartData.slice(-HISTORY_DAYS)
     for (const pt of histSlice) {
       projPoints.push({
@@ -360,42 +352,57 @@ export default function PLOverTime() {
           ? Math.max(0, initialBankroll + pt.cumulative_pnl)
           : null,
         hist_llm_spend: pt.cumulative_spend ?? null,
-        proj_bankroll: null,
+        proj_central: null,
+        proj_1s_lo: null,
+        proj_1s_spread: null,
+        proj_2s_lo: null,
+        proj_2s_spread: null,
         proj_llm_spend: null,
       })
     }
 
-    // Forward projection — stop when gross trading bankroll (initial + cumPnl) hits 0.
-    let fwdCumPnl = lastCumPnl
-    let fwdCumLlm = lastCumLlm
-    for (let d = 1; d <= FORWARD_DAYS; d++) {
-      const projPnl = pnlTrend.intercept + pnlTrend.slope * (dailyPnlValues.length - 1 + d)
-      const projLlm = Math.max(0, llmTrend.intercept + llmTrend.slope * (dailyLlmValues.length - 1 + d))
-      fwdCumPnl += projPnl
-      fwdCumLlm += projLlm
-      const projBankroll = initialBankroll + fwdCumPnl
-      const ts = todayTs + d * msPerDay
-      const date = new Date(ts).toISOString().slice(0, 10)
-      projPoints.push({
-        ts,
-        date,
-        proj_bankroll: Math.max(0, projBankroll),
-        proj_llm_spend: fwdCumLlm,
-        hist_bankroll: null,
-        hist_llm_spend: null,
-      })
-      if (projBankroll <= 0) break
+    // GBM fan projection forward
+    if (gbm && netBankrollNow > 0) {
+      let fwdCumLlm = lastCumLlm
+      for (let d = 1; d <= FORWARD_DAYS; d++) {
+        const sqrtD = Math.sqrt(d)
+        const central = netBankrollNow * Math.exp(gbm.mu * d)
+        const lo1 = netBankrollNow * Math.exp(gbm.mu * d - gbm.sigma * sqrtD)
+        const hi1 = netBankrollNow * Math.exp(gbm.mu * d + gbm.sigma * sqrtD)
+        const lo2 = netBankrollNow * Math.exp(gbm.mu * d - 2 * gbm.sigma * sqrtD)
+        const hi2 = netBankrollNow * Math.exp(gbm.mu * d + 2 * gbm.sigma * sqrtD)
+        fwdCumLlm += Math.max(0, llmTrend.intercept + llmTrend.slope * (dailyLlmValues.length - 1 + d))
+        const lo2c = Math.max(0, lo2)
+        const lo1c = Math.max(0, lo1)
+        const ts = todayTs + d * msPerDay
+        projPoints.push({
+          ts,
+          date: new Date(ts).toISOString().slice(0, 10),
+          hist_bankroll: null,
+          hist_llm_spend: null,
+          proj_central: Math.max(0, central),
+          proj_1s_lo: lo1c,
+          proj_1s_spread: Math.max(0, Math.max(0, hi1) - lo1c),
+          proj_2s_lo: lo2c,
+          proj_2s_spread: Math.max(0, Math.max(0, hi2) - lo2c),
+          proj_llm_spend: fwdCumLlm,
+        })
+      }
     }
 
-    // Bridge history→projection at the last point that has real P&L data.
+    // Bridge history→projection: pin the fan to the last known bankroll value.
     const lastHistWithData = [...projPoints].reverse().find(p => p.hist_bankroll != null)
-    if (lastHistWithData) {
-      lastHistWithData.proj_bankroll = lastHistWithData.hist_bankroll
+    if (lastHistWithData && gbm && netBankrollNow > 0) {
+      const b = lastHistWithData.hist_bankroll!
+      lastHistWithData.proj_central = b
+      lastHistWithData.proj_1s_lo = b
+      lastHistWithData.proj_1s_spread = 0
+      lastHistWithData.proj_2s_lo = b
+      lastHistWithData.proj_2s_spread = 0
       lastHistWithData.proj_llm_spend = lastHistWithData.hist_llm_spend
     }
 
-    // Gradient stop from TOP (0%=hi, 100%=lo). ref (initialBankroll) is included
-    // in the range as the baseValue, so the bounding box always spans to ref.
+    // Gradient stop from TOP (0%=hi, 100%=lo)
     function bankrollGradStop(vals: (number | null)[], ref: number): string {
       const nums = vals.filter((v): v is number => v != null)
       if (nums.length === 0) return '0%'
@@ -405,19 +412,21 @@ export default function PLOverTime() {
       return `${(((hi - ref) / (hi - lo)) * 100).toFixed(2)}%`
     }
     const histBankrollGradPct = bankrollGradStop(projPoints.map(p => p.hist_bankroll), initialBankroll)
-    const projBankrollGradPct = bankrollGradStop(projPoints.map(p => p.proj_bankroll), initialBankroll)
+    const projBankrollGradPct = bankrollGradStop(projPoints.map(p => p.proj_central), initialBankroll)
 
     return {
       netBankrollNow,
       cagr,
+      gbm,
       proj30LlmBurn,
       daysUntilBroke,
       projPoints,
       todayTs,
       histBankrollGradPct,
       projBankrollGradPct,
+      FORWARD_DAYS,
     }
-  }, [data, chartData])
+  }, [data, chartData, preset])
 
   // ---------------------------------------------------------------------------
   // Filter option builders
@@ -673,13 +682,17 @@ export default function PLOverTime() {
               })()}
             />
             <Stat
-              label="CAGR (if P&L > 0)"
+              label="Proj. CAGR"
               value={
                 projection.cagr != null
                   ? <span className={projection.cagr >= 0 ? 'pos' : 'neg'}>{fmtSignedPct(projection.cagr)}</span>
                   : 'N/A'
               }
-              sub={projection.cagr == null ? 'P&L not positive' : 'annualized'}
+              sub={
+                projection.cagr == null
+                  ? 'insufficient data'
+                  : `GBM μ=${(projection.gbm!.mu * 100).toFixed(3)}% σ=${(projection.gbm!.sigma * 100).toFixed(3)}%/d`
+              }
             />
             <Stat
               label="Proj. 30d LLM burn"
@@ -688,7 +701,7 @@ export default function PLOverTime() {
             <Stat
               label="Days until broke"
               value={projection.daysUntilBroke == null ? '∞' : String(projection.daysUntilBroke)}
-              sub={projection.daysUntilBroke == null ? 'P&L outpaces LLM spend' : 'at current trend'}
+              sub={projection.daysUntilBroke == null ? 'GBM central path positive' : 'GBM central path'}
               deltaKind={projection.daysUntilBroke == null ? 'pos' : projection.daysUntilBroke < 90 ? 'neg' : 'warn'}
             />
           </div>
@@ -751,9 +764,17 @@ export default function PLOverTime() {
                   dot={false}
                   connectNulls
                 />
+                {/* ±2σ fan band — stacked: transparent base + visible spread */}
+                <Area type="monotone" stackId="band2" dataKey="proj_2s_lo"     fill="transparent" stroke="none" legendType="none" dot={false} />
+                <Area type="monotone" stackId="band2" dataKey="proj_2s_spread" fill="#3b82f6" fillOpacity={0.08} stroke="none" name="±2σ band" dot={false} />
+                {/* ±1σ fan band */}
+                <Area type="monotone" stackId="band1" dataKey="proj_1s_lo"     fill="transparent" stroke="none" legendType="none" dot={false} />
+                <Area type="monotone" stackId="band1" dataKey="proj_1s_spread" fill="#3b82f6" fillOpacity={0.16} stroke="none" name="±1σ band" dot={false} />
+                {/* GBM central path */}
                 <Line
-                  dataKey="proj_bankroll"
-                  name="Bankroll (projected)"
+                  type="monotone"
+                  dataKey="proj_central"
+                  name="Projection"
                   stroke="url(#projBankrollLineGrad)"
                   strokeWidth={1.5}
                   strokeDasharray="5 3"
