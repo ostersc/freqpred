@@ -68,3 +68,9 @@ class StrategyConfig:
     # cached in DB. Haiku extracts the search terms once per market lifetime.
     # Only meaningful for KXTRUMPSAY-style "will he say X" markets.
     factbase_series_allowlist: list[str] = field(default_factory=list)
+
+    # Live-mode only. After this many seconds in 'pending', cancel_order is called.
+    # Reconcile sweeps (startup, periodic, WS reconnect) check the age and cancel
+    # any pending row whose created_at exceeds the cutoff. Future limit-order
+    # entries (T47/T48) may tighten this knob's effective behaviour.
+    pending_order_timeout_seconds: float = 900.0

@@ -16,6 +16,7 @@ uv run freqpred run --strategy <name|path> --mode <signal-only|paper|live>
 |---|---|---|
 | `--strategy` | required | Strategy class name (`ConservativeDefault`) or path to a `.py` file |
 | `--mode` | `paper` | `signal-only` — no orders; `paper` — simulated orders; `live` — real orders (requires `LIVE_TRADING_ENABLED=true`) |
+| `--bankroll` | _(from config)_ | Override `trading.bankroll_usd` for this run (useful for demo env where balance < prod bankroll) |
 
 Starts the trading loop plus the embedded API server (port 8000 by default, controlled by `dashboard.port` in `config.yaml`). The API server runs inside this process so it shares the live `OrderManager` — required for force-exit from the dashboard or Telegram. Press **Ctrl+C** to stop all tasks cleanly.
 

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from freqpred.signal.models import Signal
     from freqpred.strategy.base import IPredictionStrategy
     from freqpred.strategy.config import StrategyConfig
+    from freqpred.trading.order_manager import OrderManager
 
 logger = structlog.get_logger(__name__)
 
@@ -56,6 +57,8 @@ class PositionMonitor:
         mode: str = "paper",
         kalshi_client: "KalshiClient | None" = None,
         runtime_telemetry: "RuntimeTelemetry | None" = None,
+        order_manager: "OrderManager | None" = None,
+        reconcile_interval_seconds: float = 30.0,
     ) -> None:
         self._session_factory = session_factory
         self._strategies = strategies
@@ -64,6 +67,9 @@ class PositionMonitor:
         self._mode = mode
         self._kalshi_client = kalshi_client
         self._runtime_telemetry = runtime_telemetry
+        self._order_manager = order_manager
+        self._reconcile_interval = reconcile_interval_seconds
+        self._last_reconcile_at: float = 0.0
         # position_id → best mid_price seen since entry (used by trailing stop)
         self._peak_prices: dict[str, float] = {}
         # position_id → best/worst effective P&L delta seen (for MAE/MFE)
@@ -94,14 +100,57 @@ class PositionMonitor:
                 strategy.ingest_tick(market_id, yes_bid, yes_ask, ts)
 
     async def run(self) -> None:
-        """Async background loop. Runs until cancelled."""
-        logger.info("position_monitor.started", poll_interval=self._poll_interval)
+        """Async background loop. Runs until cancelled.
+
+        Each tick checks open positions for exits and, on the
+        ``reconcile_interval_seconds`` cadence, drives
+        ``order_manager.reconcile_pending_orders`` so pending live orders
+        receive periodic REST-side coverage independent of WS reconnects.
+        """
+        logger.info(
+            "position_monitor.started",
+            poll_interval=self._poll_interval,
+            reconcile_interval=self._reconcile_interval,
+            order_manager_wired=self._order_manager is not None,
+        )
         while True:
             try:
                 await self.check_all_positions()
             except Exception:
                 logger.exception("position_monitor.check_error")
+
+            await self._maybe_run_periodic_reconcile()
+
             await asyncio.sleep(self._poll_interval)
+
+    async def _maybe_run_periodic_reconcile(self) -> None:
+        """Run the pending-orders reconcile if the configured interval has elapsed."""
+        if self._order_manager is None or self._mode != "live":
+            return
+        now_mono = asyncio.get_event_loop().time()
+        if (now_mono - self._last_reconcile_at) < self._reconcile_interval:
+            return
+        self._last_reconcile_at = now_mono
+        try:
+            async with self._session_factory() as session:
+                await self._order_manager.reconcile_pending_orders(session)
+            if self._runtime_telemetry is not None:
+                from freqpred.runtime.telemetry import (  # noqa: PLC0415
+                    SERVICE_PENDING_ORDER_RECONCILE,
+                )
+                await self._runtime_telemetry.mark_success(
+                    SERVICE_PENDING_ORDER_RECONCILE,
+                )
+        except Exception as exc:
+            logger.exception("position_monitor.reconcile_error")
+            if self._runtime_telemetry is not None:
+                from freqpred.runtime.telemetry import (  # noqa: PLC0415
+                    SERVICE_PENDING_ORDER_RECONCILE,
+                )
+                await self._runtime_telemetry.mark_error(
+                    SERVICE_PENDING_ORDER_RECONCILE,
+                    f"periodic reconcile failed: {exc}",
+                )
 
     async def check_all_positions(
         self,

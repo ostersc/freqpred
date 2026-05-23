@@ -5,6 +5,7 @@ import asyncio
 import logging
 import signal as _signal
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import click
 import structlog
@@ -118,6 +119,18 @@ def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int 
 _log_buffer: "LogBuffer | None" = None
 
 
+def _kalshi_credentials(config: "Any") -> tuple[str, str]:
+    """Return (api_key, private_key_path) for the active Kalshi endpoint.
+
+    When base_url contains "demo", uses demo_api_key / demo_private_key_path so
+    that prod and demo credentials can coexist in the environment without
+    overwriting each other.
+    """
+    if "demo" in config.kalshi.base_url.lower():
+        return config.kalshi.demo_api_key, config.kalshi.demo_private_key_path
+    return config.kalshi.api_key, config.kalshi.private_key_path
+
+
 def _get_or_create_log_buffer() -> "LogBuffer":
     from freqpred.alerts.command_handlers import LogBuffer, install_log_buffer
 
@@ -152,10 +165,18 @@ def main(ctx: click.Context) -> None:
     show_default=True,
     help="Trading mode.",
 )
+@click.option(
+    "--bankroll",
+    type=float,
+    default=None,
+    help="Override config trading.bankroll_usd for this run.",
+)
 @click.pass_context
-def run(ctx: click.Context, strategy: str, mode: str) -> None:
+def run(ctx: click.Context, strategy: str, mode: str, bankroll: float | None) -> None:
     """Start market watcher, ingestion scheduler, and signal pipeline."""
     config = ctx.obj["config"]
+    if bankroll is not None:
+        config.trading.bankroll_usd = bankroll
     if config.database.url:
         from freqpred.db import run_migrations
         click.echo("Applying pending migrations...")
@@ -326,6 +347,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         mode=mode,
         kalshi_client=None,  # set to kalshi_client below once the client is open
         runtime_telemetry=runtime_telemetry,
+        order_manager=order_manager,  # may be None in live mode pre-startup; set below
     )
 
     async def signal_loop() -> None:
@@ -583,10 +605,11 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
 
     tasks: list[asyncio.Task] = []
 
+    _kalshi_api_key, _kalshi_pk_path = _kalshi_credentials(config)
     async with KalshiClient(
-        api_key=config.kalshi.api_key,
+        api_key=_kalshi_api_key,
         base_url=config.kalshi.base_url,
-        private_key_path=config.kalshi.private_key_path,
+        private_key_path=_kalshi_pk_path,
     ) as kalshi_client:
         if mode == "live":
             import structlog as _sl
@@ -624,9 +647,14 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 llm_client=llm_client,
                 judgment_model=config.anthropic.judgment_model,
                 runtime_telemetry=runtime_telemetry,
+                strategies=all_strategies,
+                pending_order_timeout_seconds=strategy.config.pending_order_timeout_seconds,
             )
 
         position_monitor._kalshi_client = kalshi_client
+        # Wire the (now-instantiated) live order_manager into position_monitor so
+        # the periodic reconcile loop has a target. Paper mode wires it earlier.
+        position_monitor._order_manager = order_manager
 
         # PositionWatcher runs in ALL modes — paper positions need the same
         # sub-second WS tick feed as live positions so TA/algo exits work.
@@ -935,10 +963,11 @@ async def _markets_list(
     import freqpred.signal.models  # noqa: F401 — register SignalRow with SQLAlchemy mapper
     import freqpred.rag.models  # noqa: F401 — register DocumentMarketLinkRow with SQLAlchemy mapper
 
+    _kalshi_api_key, _kalshi_pk_path = _kalshi_credentials(config)
     async with KalshiClient(
-        api_key=config.kalshi.api_key,
+        api_key=_kalshi_api_key,
         base_url=config.kalshi.base_url,
-        private_key_path=config.kalshi.private_key_path,
+        private_key_path=_kalshi_pk_path,
     ) as client:
         click.echo(
             f"Fetching markets from Kalshi"

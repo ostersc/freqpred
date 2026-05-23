@@ -59,6 +59,7 @@ class DemoHarness(IAlgoStrategy):
         min_edge=0.0,
         min_confidence=0.0,
         max_exposure_per_market=1.0,  # $1 position always fits; never let cap kill contracts
+        max_spread=1.0,               # bypass spread gate — demo doesn't care about spread
         kelly_fraction=0.01,
         categories=[],
         min_volume_24h=0.0,

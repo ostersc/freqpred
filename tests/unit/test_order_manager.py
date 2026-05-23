@@ -1139,36 +1139,297 @@ def _mock_mkt_row(
     return row
 
 
-@pytest.mark.asyncio
-async def test_reconcile_pending_orders_commits_status_updates() -> None:
-    """Pending live orders that flip status are committed."""
-    pending_open = MagicMock()
-    pending_open.id = uuid.uuid4()
-    pending_open.market_id = "MKT-OPEN"
-    pending_open.status = "pending"
+def _make_pending_row(
+    *,
+    pos_id: uuid.UUID | None = None,
+    market_id: str = "MKT-PEND",
+    contracts: int = 10,
+    requested_contracts: int | None = 10,
+    exchange_order_id: str | None = "ORD-PEND",
+    strategy_name: str = "TestStrategy",
+    created_at: datetime | None = None,
+) -> MagicMock:
+    row = MagicMock(spec=[
+        "id", "market_id", "contracts", "requested_contracts",
+        "exchange_order_id", "status", "strategy_name", "created_at",
+        "exchange_order_status", "last_exchange_sync_at", "entry_price",
+    ])
+    row.id = pos_id or uuid.uuid4()
+    row.market_id = market_id
+    row.contracts = contracts
+    row.requested_contracts = requested_contracts
+    row.exchange_order_id = exchange_order_id
+    row.status = "pending"
+    row.strategy_name = strategy_name
+    row.created_at = created_at or NOW
+    row.exchange_order_status = "resting"
+    row.last_exchange_sync_at = None
+    row.entry_price = 0.50
+    return row
 
-    pending_cancelled = MagicMock()
-    pending_cancelled.id = uuid.uuid4()
-    pending_cancelled.market_id = "MKT-CANCELLED"
-    pending_cancelled.status = "pending"
 
+def _make_pending_session(rows: list[MagicMock]) -> AsyncMock:
     session = AsyncMock()
     result = MagicMock()
-    result.scalars.return_value.all.return_value = [pending_open, pending_cancelled]
+    result.scalars.return_value.all.return_value = rows
     session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+    return session
 
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_order_partial_fill() -> None:
+    """Kalshi 'partial' with fills < requested → DB row.status='open', contracts=filled."""
+    row = _make_pending_row(contracts=10, requested_contracts=10)
+    session = _make_pending_session([row])
+
+    partial_order = Order(
+        market_id=row.market_id,
+        direction="YES",
+        contracts=3,
+        price=0.50,
+        mode="live",
+        exchange_order_id="ORD-PEND",
+        status="partial",
+        requested_count=10,
+        filled_yes_count=3,
+        filled_no_count=0,
+        remaining_count=7,
+    )
     mock_kalshi = AsyncMock()
-    exchange_pos = MagicMock()
-    exchange_pos.market_id = "MKT-OPEN"
-    exchange_pos.contracts = 3
-    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+    mock_kalshi.get_order = AsyncMock(return_value=partial_order)
 
     om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
-    await om.reconcile_pending_orders(session)
+    await om.reconcile_pending_orders(session, _now=NOW)
 
-    assert pending_open.status == "open"
-    assert pending_cancelled.status == "cancelled"
-    session.commit.assert_awaited_once()
+    assert row.status == "open"
+    assert row.contracts == 3
+    assert row.exchange_order_status == "partial"
+    assert row.last_exchange_sync_at == NOW
+    session.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_order_cancelled_on_exchange() -> None:
+    """Kalshi 'canceled' with 0 fills → DB row.status='cancelled'."""
+    row = _make_pending_row()
+    session = _make_pending_session([row])
+
+    cancelled_order = Order(
+        market_id=row.market_id,
+        direction="YES",
+        contracts=0,
+        price=0.50,
+        mode="live",
+        exchange_order_id="ORD-PEND",
+        status="canceled",
+        requested_count=10,
+        filled_yes_count=0,
+        filled_no_count=0,
+        remaining_count=10,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_order = AsyncMock(return_value=cancelled_order)
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    await om.reconcile_pending_orders(session, _now=NOW)
+
+    assert row.status == "cancelled"
+    assert row.exchange_order_status == "canceled"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_skips_null_exchange_order_id() -> None:
+    """Pending live rows with NULL exchange_order_id are filtered out at query time.
+
+    The query uses .where(exchange_order_id.is_not(None)) so the legacy row
+    never makes it into the loop. We verify get_order is never called.
+    """
+    session = _make_pending_session([])  # filtered query returns no rows
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_order = AsyncMock()
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    await om.reconcile_pending_orders(session, _now=NOW)
+
+    mock_kalshi.get_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_live_timeout_cancels_resting_order() -> None:
+    """Pending order age > timeout AND still pending after status check → cancel_order called."""
+    timeout = 60.0
+    aged_created = NOW - timedelta(seconds=120)
+    row = _make_pending_row(created_at=aged_created)
+    session = _make_pending_session([row])
+
+    resting_order = Order(
+        market_id=row.market_id,
+        direction="YES",
+        contracts=0,
+        price=0.50,
+        mode="live",
+        exchange_order_id="ORD-PEND",
+        status="resting",
+        requested_count=10,
+        filled_yes_count=0,
+        filled_no_count=0,
+        remaining_count=10,
+    )
+    cancelled_order = Order(
+        market_id=row.market_id,
+        direction="YES",
+        contracts=0,
+        price=0.50,
+        mode="live",
+        exchange_order_id="ORD-PEND",
+        status="canceled",
+        requested_count=10,
+        filled_yes_count=0,
+        filled_no_count=0,
+        remaining_count=10,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_order = AsyncMock(return_value=resting_order)
+    mock_kalshi.cancel_order = AsyncMock(return_value=cancelled_order)
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    om._default_pending_timeout_seconds = timeout
+    await om.reconcile_pending_orders(session, _now=NOW)
+
+    mock_kalshi.cancel_order.assert_awaited_once_with("ORD-PEND")
+    assert row.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_timeout_uses_position_created_at_not_service_uptime() -> None:
+    """Timeout is computed against row.created_at, not the OrderManager uptime.
+
+    This protects against the "restart resets the timer" bug.
+    """
+    # Created 10 minutes before _now; timeout 60s → should expire.
+    row = _make_pending_row(created_at=NOW - timedelta(minutes=10))
+    session = _make_pending_session([row])
+
+    resting_order = Order(
+        market_id=row.market_id,
+        direction="YES",
+        contracts=0,
+        price=0.50,
+        mode="live",
+        exchange_order_id="ORD-PEND",
+        status="resting",
+        requested_count=10,
+        filled_yes_count=0,
+        filled_no_count=0,
+        remaining_count=10,
+    )
+    cancelled_order = Order(
+        market_id=row.market_id,
+        direction="YES",
+        contracts=0,
+        price=0.50,
+        mode="live",
+        exchange_order_id="ORD-PEND",
+        status="canceled",
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_order = AsyncMock(return_value=resting_order)
+    mock_kalshi.cancel_order = AsyncMock(return_value=cancelled_order)
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    om._default_pending_timeout_seconds = 60.0
+    await om.reconcile_pending_orders(session, _now=NOW)
+
+    mock_kalshi.cancel_order.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_catches_expired_timeout_from_prior_run() -> None:
+    """A row aged past timeout from prior process run → startup pass cancels it."""
+    row = _make_pending_row(created_at=NOW - timedelta(hours=1))
+    session = _make_pending_session([row])
+
+    resting_order = Order(
+        market_id=row.market_id, direction="YES", contracts=0, price=0.5, mode="live",
+        exchange_order_id="ORD-PEND", status="resting",
+        requested_count=10, filled_yes_count=0, filled_no_count=0, remaining_count=10,
+    )
+    cancelled_order = Order(
+        market_id=row.market_id, direction="YES", contracts=0, price=0.5, mode="live",
+        exchange_order_id="ORD-PEND", status="canceled",
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_order = AsyncMock(return_value=resting_order)
+    mock_kalshi.cancel_order = AsyncMock(return_value=cancelled_order)
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    om._default_pending_timeout_seconds = 900.0
+    await om.reconcile_pending_orders(session, _now=NOW)
+
+    mock_kalshi.cancel_order.assert_awaited_once_with("ORD-PEND")
+
+
+@pytest.mark.asyncio
+async def test_live_entry_records_requested_and_filled_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_submit_live persists requested_contracts via ledger.open_position kwargs."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    # $100 raw size / $0.55 entry → floor(181.81) = 181 contracts
+    expected_contracts = math.floor(100.0 / 0.55)
+    mock_kalshi = AsyncMock()
+    filled_order = Order(
+        market_id=MARKET_ID, direction="YES", contracts=expected_contracts,
+        price=0.55, mode="live",
+        exchange_order_id="ORD-OK", status="resting",
+        requested_count=expected_contracts,
+        filled_yes_count=0, filled_no_count=0, remaining_count=expected_contracts,
+    )
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+
+    expected = _make_position(contracts=expected_contracts, entry_price=0.55)
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as mock_ledger:
+        await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.55, yes_bid=0.52), strategy)
+
+    call_kwargs = mock_ledger.call_args.kwargs
+    assert call_kwargs["requested_contracts"] == expected_contracts
+    assert call_kwargs["exchange_order_status"] == "resting"
+    assert "last_exchange_sync_at" in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_live_entry_orphan_cancels_on_ledger_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB write fails after place_order succeeds → cancel_order is invoked."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    filled_order = Order(
+        market_id=MARKET_ID, direction="YES", contracts=10, price=0.55, mode="live",
+        exchange_order_id="ORD-ORPHAN", status="resting",
+        requested_count=10, filled_yes_count=0, filled_no_count=0, remaining_count=10,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+    mock_kalshi.cancel_order = AsyncMock(return_value=filled_order)
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("DB write blew up"),
+    ):
+        with pytest.raises(RuntimeError):
+            await om.submit(_make_signal(direction="YES"), _make_market(yes_ask=0.55, yes_bid=0.52), strategy)
+
+    mock_kalshi.cancel_order.assert_awaited_once_with("ORD-ORPHAN")
 
 
 @pytest.mark.asyncio
@@ -1241,6 +1502,48 @@ async def test_force_exit_already_closed_raises() -> None:
 
     with pytest.raises(PositionNotOpenError):
         await om.force_exit(str(pos_id))
+
+
+@pytest.mark.asyncio
+async def test_force_exit_on_pending_cancels_instead_of_selling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live force_exit on status='pending' → cancel_order, not place_order(sell)."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="pending", direction="YES", mode="live")
+    pos.exchange_order_id = "ORD-PEND-FX"
+    pos.requested_contracts = 5
+    pos.exchange_order_status = "resting"
+    pos.last_exchange_sync_at = None
+    pos.entry_price = 0.5
+    mkt = _mock_mkt_row()
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    cancelled_order = Order(
+        market_id=pos.market_id, direction="YES", contracts=0, price=0.5, mode="live",
+        exchange_order_id="ORD-PEND-FX", status="canceled",
+        requested_count=5, filled_yes_count=0, filled_no_count=0, remaining_count=5,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.cancel_order = AsyncMock(return_value=cancelled_order)
+    mock_kalshi.place_order = AsyncMock()
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    result = await om.force_exit(str(pos_id))
+
+    mock_kalshi.cancel_order.assert_awaited_once_with("ORD-PEND-FX")
+    mock_kalshi.place_order.assert_not_called()
+    assert pos.status == "cancelled"
+    assert result is not None
 
 
 @pytest.mark.asyncio

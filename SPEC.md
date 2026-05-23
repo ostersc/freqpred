@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-05-17
+**Last updated:** 2026-05-23
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -179,10 +179,14 @@ The **Position Watcher** maintains a persistent Kalshi WebSocket connection and 
 
 ### WebSocket channels used
 
-| Channel | Payload | Action |
-|---|---|---|
-| `ticker` | Real-time best bid/ask update | Update `MarketRow` price fields + `price_updated_at`; emit `price_moved` signal trigger if Δmid ≥ threshold |
-| `market_lifecycle_v2` | Global broadcast (market_ticker filter not supported). `determined` carries `settlement_value`; `settled` does not. | On `determined`: close positions at $1/$0; on `settled` with no cached result: REST fallback |
+| Channel | Scope | Payload | Action |
+|---|---|---|---|
+| `ticker` | market-filtered | Real-time best bid/ask update | Update `MarketRow` price fields + `price_updated_at`; emit `price_moved` signal trigger if Δmid ≥ threshold |
+| `market_lifecycle_v2` | global broadcast (filter not supported) | `determined` carries `settlement_value`; `settled` does not. | On `determined`: close positions at $1/$0; on `settled` with no cached result: REST fallback |
+| `user_orders` | user-scoped | Order state change for an order this account placed (resting → executed/canceled/partial) | Look up the matching `PositionRow.exchange_order_id`, route through `OrderManager.apply_ws_event` (shared status mapping) |
+| `fill` | user-scoped | Per-fill notification on one of this account's orders | Same handler as `user_orders` — re-apply exchange state to the matching row |
+
+`user_orders` and `fill` are user-scoped (no `market_tickers` filter) and are re-subscribed on every reconnect alongside the market-scoped channels.
 
 ### Connection lifecycle
 
@@ -221,13 +225,32 @@ Markets **without** open positions are REST-only. The WebSocket subscription set
 - Uses the `websockets` dependency for the Kalshi WebSocket client.
 - In paper mode, the WebSocket is still useful for accurate price tracking even though no real orders are submitted.
 
-### Kalshi ↔ DB position reconciliation
+### Kalshi ↔ DB reconciliation — split responsibilities
 
-The operator may place manual trades on Kalshi outside freqpred (e.g. hedging, manual signals). Kalshi returns **net** contracts per ticker from `get_positions()` — there is no per-order breakdown, so manually-added contracts are indistinguishable from freqpred's. The reconciliation strategy accepts this:
+Reconciliation lives in two single-responsibility components with **disjoint row scopes**: they never both touch the same row.
 
-**Triggered at startup and on WebSocket reconnect:**
+| Component | Owns | Row scope | Mechanism | Triggers |
+|---|---|---|---|---|
+| `OrderManager.reconcile_pending_orders` | Order lifecycle — "did the order we placed fill?" | `status='pending'` AND `mode='live'` AND `exchange_order_id IS NOT NULL` | `get_order(exchange_order_id)` per row | Startup, WS reconnect, periodic (30s default), WS `user_orders`/`fill` event |
+| `PositionWatcher._detect_external_drift` | External-trade drift — "did anyone touch our position outside freqpred?" | `status='open'` AND `mode='live'` | `get_positions()` net-position diff | Startup, WS reconnect |
 
-| DB (open/pending live position) | Kalshi net | Action |
+Reconciliation always runs pending first (so rows reach a terminal state) before external drift detection surveys open-only rows.
+
+**Pending-order reconciliation (`OrderManager`):** uses `SELECT … FOR UPDATE SKIP LOCKED` so concurrent calls (e.g. WS event landing while the periodic sweep runs) don't double-process the same row. Every code path that reads exchange order state — REST polling, WS events, place_order response — funnels through the same status-mapping helper:
+
+| Kalshi status | Fills | DB outcome |
+|---|---|---|
+| `executed` | any | `status='open'`, `contracts = filled` |
+| `resting` / `partial` | 0 fills | stay `pending` |
+| `resting` / `partial` | partial | `status='open'`, `contracts = filled` (partial substate: `requested_contracts > contracts`) |
+| `canceled` | 0 fills | `status='cancelled'` |
+| `canceled` | with fills | `status='open'`, `contracts = filled` (partial substate) |
+
+Rows still `pending` after status check past `StrategyConfig.pending_order_timeout_seconds` (default 900s) are cancelled via `cancel_order` and re-polled.
+
+**External drift detection (`PositionWatcher`):** the operator may place manual trades on Kalshi outside freqpred. Kalshi returns **net** contracts per ticker from `get_positions()` — manually-added contracts are indistinguishable from freqpred's. The detector accepts this:
+
+| DB (open live position) | Kalshi net | Action |
 |---|---|---|
 | `contracts = N` | `position = M`, M ≠ N | Update `PositionRow.contracts` to M and log |
 | `contracts = N` | not present / 0 | Auto-close position in DB at current mid price; log warning |
@@ -236,6 +259,8 @@ The operator may place manual trades on Kalshi outside freqpred (e.g. hedging, m
 **At exit time:** the exit order is submitted for the Kalshi net position size (from the most recent reconciliation snapshot), not the DB `contracts` value. This ensures a manually-augmented position is fully closed.
 
 **P&L note:** entry price is taken from the DB (freqpred's original entry). If the operator manually added contracts at a different price, the average entry will be slightly wrong. This is accepted — the DB is not a full order blotter, just a position tracker.
+
+**Orphan order safety:** if `place_order` succeeds but the DB write fails inside `_submit_live`, the order is auto-cancelled on the exchange before the exception is re-raised — preventing a permanently orphaned resting order.
 
 ---
 
@@ -348,10 +373,19 @@ class Position:
 
     # --- Lifecycle ---
     status: str                      # "pending" | "open" | "closed" | "cancelled"
+    # Live-mode lifecycle: pending → open → closed | cancelled
+    # Partial-fill substate: status='open' AND requested_contracts > contracts
+    # Paper-mode lifecycle: positions enter directly as 'open' (no pending phase).
     # pending:   order submitted, awaiting fill confirmation from Kalshi
-    # open:      position filled and active
+    # open:      position filled and active (fully or partially)
     # closed:    market resolved or manually exited
-    # cancelled: order submitted but cancelled before fill
+    # cancelled: order submitted but cancelled before any fill
+
+    # --- Exchange-confirmed order state (live mode only; NULL for paper / legacy rows) ---
+    exchange_order_id: str | None
+    requested_contracts: int | None      # original request size; > contracts during partial fills
+    exchange_order_status: str | None    # raw Kalshi status (executed/resting/partial/canceled/...)
+    last_exchange_sync_at: datetime | None
 
     # --- Filled after resolution ---
     exit_price: float | None
@@ -437,6 +471,13 @@ class StrategyConfig:
     # T57 maps a trust_score from the judgment model into this multiplier range.
     # Similar-market history is only considered available once at least one of
     # these minimums is met for the matched market family.
+
+    # --- Live-mode pending-order timeout ---
+    pending_order_timeout_seconds: float = 900.0
+    # Live mode only. After this many seconds in 'pending', reconcile sweeps
+    # call cancel_order on the exchange order so we don't sit forever on a
+    # resting order that never fills. Future limit-order entries (T47/T48) may
+    # tighten this knob's effective behaviour.
 ```
 
 ### Document (RAG Store)
@@ -1045,9 +1086,11 @@ If `data_quality` is `"low"` (insufficient news context), the signal is discarde
 |---|---|---|
 | Max position size | 5% of bankroll | Per market |
 | Max daily loss | 15% of bankroll | Triggers circuit breaker |
-| Max total exposure | 30% of bankroll | Sum of all open positions |
+| Max total exposure | 30% of bankroll | Sum of all active positions |
 | Min edge to trade | 10% | Absolute floor; strategy can raise, not lower |
-| Max open positions | 20 | Prevents overextension |
+| Max open positions | 20 | Prevents overextension; counts active positions |
+
+**Pending orders count toward all capacity caps.** All three sites (max open positions, total exposure, per-market exposure) include rows in `status IN ('open', 'pending')`, and exposure sums use `COALESCE(requested_contracts, contracts) * entry_price` so a resting limit order reserves the capital it asked for — preventing a stack of in-flight orders from blowing past a cap before any fill. Log payloads (`risk.max_open_positions_reached`, `risk.total_exposure_exceeded`, `risk.market_exposure_exceeded`) split counts/exposure between `open` and `pending` for diagnostics.
 
 ### Bankroll vs. Kalshi Account Balance
 
@@ -1325,7 +1368,8 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T64** [#64](https://github.com/ostersc/freqpred/issues/64) — Dashboard: strategy decision analysis page; `GET /api/strategy-decisions` with filters (strategy, exit_reason prefix, ticker_prefix ILIKE, date_from/to) and pagination; per-row exit counterfactual P&L (`our_side_win_value − entry_price`) and exit Δ vs hold (`exit_price − our_side_win_value`); entry efficiency loss vs best prior signal with `edge > 0` (`best_prior_ask − entry_price`); symmetric for YES/NO via side-specific `signals.market_ask_at_signal`. Extracts `PriceTimeline` + `SignalDetail` + `SelectedSignalPanel` into shared components and adds exit-event reference lines (vertical at `exit_time`, horizontal at exit price, NO-flipped) — benefit flows back to Positions page closed rows. Adds `exit_reason` to `PositionOut`.
 - [x] **T65** [#65](https://github.com/ostersc/freqpred/issues/65) — Dashboard: signal assessment visibility for source quality + similar-market trust; expose persisted assessment summary and `llm_query_id` on signal/position detail APIs; add dashboard card showing trust score, implied size effect, source-quality summary, similar-market summary, warnings, and a link to the existing LLM audit detail. Depends on: T57.
 - [ ] **T66** [#66](https://github.com/ostersc/freqpred/issues/66) — Deterministic replay/regression harness: record time-locked market/document fixtures and replay signal-generation decisions offline to catch prompt/model/config regressions without introducing a historical backtesting engine. Depends on: T11.
-- [ ] **T67** [#67](https://github.com/ostersc/freqpred/issues/67) — Live order-state hardening: explicit exchange order status/cancel support in `KalshiClient`; partial-fill and average-fill reconciliation for live entries/exits; pending-order timeout/cancel workflow; ledger updates from confirmed exchange state instead of binary pending/open assumptions. Depends on: T36, T37, T39.
+- [x] **T67** [#67](https://github.com/ostersc/freqpred/issues/67) — Live order-state hardening (entry side): `KalshiClient.get_order`/`cancel_order`; `Order` + `PositionRow` carry exchange-confirmed fill metadata (`requested_contracts`, `exchange_order_status`, `last_exchange_sync_at`); `OrderManager.reconcile_pending_orders` rewritten to per-order `get_order` polling with shared status-mapping helper, `SELECT … FOR UPDATE SKIP LOCKED` concurrency guard, configurable `pending_order_timeout_seconds`, and `place_order → ledger` orphan cancel; `PositionWatcher` subscribes to `user_orders`/`fill` WS channels and renames `_reconcile_positions` → `_detect_external_drift` (open-only scope); `position_monitor` drives reconcile every 30s; risk engine counts pending orders as committed exposure (max positions, total exposure, per-market exposure); dashboard exposes new fields + `pending_orders_detail` table. Depends on: T36, T37, T39, T68.
+- [ ] **T76** — Live order-state hardening (exit side): exit-side partial-fill handling + new ledger primitive for partial close. Tracked separately from T67.
 - [x] **T68** [#68](https://github.com/ostersc/freqpred/issues/68) — Ops freshness telemetry: persist heartbeat/freshness timestamps for ingestion, signal, source-quality, and WebSocket loops; expose real websocket connectivity + last-message telemetry and stale-loop indicators in System Health; optional alerts when critical loops stop making progress. Depends on: T41.
 - [ ] **T69** [#69](https://github.com/ostersc/freqpred/issues/69) — Correlated exposure caps: enforce series/category/event-family risk limits so multiple related markets cannot collectively exceed configured exposure even when per-market limits pass. Depends on: T17.
 - [ ] **T70** [#70](https://github.com/ostersc/freqpred/issues/70) — Series option base-rate history: `series_option_history` table keyed by `(series_ticker, option_code)`; background refresh fetches all settled markets per active series from Kalshi API and upserts YES/NO counts + label; signal prompt receives a base-rate context block when `n >= 3`; Type B single-option series degrade gracefully via low counts.

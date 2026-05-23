@@ -79,6 +79,9 @@ def _make_session(
     changelog_result = MagicMock()
     changelog_result.scalar_one_or_none.return_value = None
 
+    pending_detail_result = MagicMock()
+    pending_detail_result.all.return_value = []
+
     session = AsyncMock()
     session.execute = _execute_side_effects(
         rs_result,                 # _get_mode
@@ -88,6 +91,7 @@ def _make_session(
         _scalar_result(1.0),       # llm_spend
         _scalar_result(pending_count),   # pending count
         _scalar_result(None),            # oldest pending entry_time
+        pending_detail_result,           # pending orders detail
         _scalar_result(open_count),      # open count
         _scalar_result(llm_errors),      # llm errors
         _scalar_result(kalshi_errors),   # kalshi errors
@@ -217,6 +221,69 @@ def test_system_health_marks_stale_services() -> None:
 
     ingestion_svc = next(s for s in services if s["service_name"] == "ingestion_scheduler")
     assert ingestion_svc["status"] == "ok"
+
+
+def test_system_health_returns_pending_orders_detail() -> None:
+    """pending_orders_detail surfaces each pending row, oldest first."""
+    import uuid as _uuid
+    older_id = _uuid.uuid4()
+    newer_id = _uuid.uuid4()
+    now = datetime.now(UTC)
+    from datetime import timedelta
+    older_entry = now - timedelta(seconds=600)
+    newer_entry = now - timedelta(seconds=120)
+
+    pending_detail_result = MagicMock()
+    pending_detail_result.all.return_value = [
+        (older_id, "MKT-A", 10, 0, "resting", older_entry, now),
+        (newer_id, "MKT-B", 5, 0, "resting", newer_entry, now),
+    ]
+
+    rs_row = MagicMock()
+    rs_row.state = "running"
+    rs_row.mode = "paper"
+    rs_row.cb_active = False
+    rs_row.cb_reason = None
+    rs_row.daily_loss_ack_at = None
+    rs_result = MagicMock()
+    rs_result.scalar_one_or_none.return_value = rs_row
+
+    hb_result = MagicMock()
+    hb_result.scalars.return_value.all.return_value = []
+
+    changelog_result = MagicMock()
+    changelog_result.scalar_one_or_none.return_value = None
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        rs_result,                       # _get_mode
+        rs_result,                       # RunStateRow
+        _scalar_result(1000.0),          # get_net_bankroll
+        _scalar_result(0.0),             # daily_pnl
+        _scalar_result(0.0),             # llm_spend
+        _scalar_result(2),               # pending count
+        _scalar_result(older_entry),     # oldest pending entry_time
+        pending_detail_result,           # pending orders detail
+        _scalar_result(0),               # open count
+        _scalar_result(0),               # llm errors
+        _scalar_result(0),               # kalshi errors
+        changelog_result,                # changelog
+        hb_result,                       # heartbeats
+    )
+
+    telemetry = RuntimeTelemetry(session_factory=MagicMock(), freshness_specs={})
+    app = _make_app(session, runtime_telemetry=telemetry)
+    client = TestClient(app)
+
+    resp = client.get("/api/system/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    detail = data["pending_orders_detail"]
+    assert len(detail) == 2
+    # oldest first
+    assert detail[0]["market_id"] == "MKT-A"
+    assert detail[1]["market_id"] == "MKT-B"
+    assert detail[0]["age_seconds"] >= detail[1]["age_seconds"]
 
 
 def test_system_health_without_telemetry_returns_empty_services() -> None:

@@ -570,6 +570,81 @@ class TestPlaceOrder:
 
 
 # ---------------------------------------------------------------------------
+# get_order / cancel_order
+# ---------------------------------------------------------------------------
+
+
+class TestGetOrder:
+    @pytest.mark.asyncio
+    async def test_get_order_parses_fill_fields(self) -> None:
+        """get_order() parses status, requested, filled, remaining, fees, timestamps."""
+        client = _make_client()
+        resp_data = {
+            "order": {
+                "order_id": "ORD-123",
+                "ticker": "KXPRES-25-DEM",
+                "side": "yes",
+                "status": "partial",
+                "place_count": 10,
+                "yes_count": 3,
+                "no_count": 0,
+                "remaining_count": 7,
+                "yes_price": 45,
+                "maker_fees": 12,
+                "taker_fees": 0,
+                "created_time": "2026-05-23T10:00:00Z",
+                "last_update_time": "2026-05-23T10:00:05Z",
+            }
+        }
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_order("ORD-123")
+
+        assert result.exchange_order_id == "ORD-123"
+        assert result.status == "partial"
+        assert result.requested_count == 10
+        assert result.filled_yes_count == 3
+        assert result.filled_no_count == 0
+        assert result.remaining_count == 7
+        assert result.fee_usd == pytest.approx(0.12)
+        assert result.contracts == 3  # filled total
+        assert result.created_time is not None
+        assert result.last_update_time is not None
+
+
+class TestCancelOrder:
+    @pytest.mark.asyncio
+    async def test_cancel_order_success(self) -> None:
+        """cancel_order() issues DELETE and parses the returned order."""
+        client = _make_client()
+        resp_data = {
+            "order": {
+                "order_id": "ORD-9",
+                "ticker": "KX",
+                "side": "yes",
+                "status": "canceled",
+                "place_count": 5,
+                "yes_count": 0,
+                "no_count": 0,
+                "remaining_count": 5,
+                "yes_price": 50,
+            }
+        }
+        with patch.object(client._http, "delete", new_callable=AsyncMock) as mock_delete:
+            mock_delete.return_value = _mock_response(resp_data)
+            result = await client.cancel_order("ORD-9")
+
+        assert mock_delete.await_count == 1
+        call_args, call_kwargs = mock_delete.call_args
+        assert "/portfolio/orders/ORD-9" in str(call_args[0])
+        assert result.exchange_order_id == "ORD-9"
+        assert result.status == "canceled"
+        assert result.requested_count == 5
+        assert result.remaining_count == 5
+
+
+# ---------------------------------------------------------------------------
 # get_balance
 # ---------------------------------------------------------------------------
 

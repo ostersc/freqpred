@@ -221,7 +221,14 @@ export default function Positions() {
                       <td className="c">
                         <Badge kind={p.direction === 'YES' ? 'pos' : 'neg'}>{p.direction}</Badge>
                       </td>
-                      <td className="r">{p.contracts}</td>
+                      <td className="r">
+                        {p.contracts}
+                        {p.requested_contracts !== undefined && p.requested_contracts !== null && p.requested_contracts > p.contracts && (
+                          <span title={`Partial fill: filled ${p.contracts} of ${p.requested_contracts} requested`} style={{ marginLeft: 4, fontSize: 10, color: 'var(--warn)' }}>
+                            ◐
+                          </span>
+                        )}
+                      </td>
                       <td className="r">${p.entry_price.toFixed(2)}</td>
                       <td className="r dim">
                         {p.status === 'open'

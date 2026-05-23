@@ -79,7 +79,14 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
         </div>
         <div style={miniCard}>
           <div style={miniLabel}>Contracts</div>
-          <div className="mono" style={{ fontWeight: 600 }}>{d.contracts}</div>
+          <div className="mono" style={{ fontWeight: 600 }}>
+            {d.contracts}
+            {d.requested_contracts !== undefined && d.requested_contracts !== null && d.requested_contracts > d.contracts && (
+              <span style={{ marginLeft: 6, fontSize: 10.5, color: 'var(--warn)' }}>
+                (partial · req {d.requested_contracts})
+              </span>
+            )}
+          </div>
         </div>
         <div style={miniCard}>
           <div style={miniLabel}>{d.status === 'open' ? 'Unrealized P&L' : 'P&L'}</div>
@@ -88,6 +95,27 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
           </div>
         </div>
       </div>
+
+      {d.mode === 'live' && (d.exchange_order_id || d.exchange_order_status) && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+          <div style={miniCard}>
+            <div style={miniLabel}>Exchange order</div>
+            <div className="mono" style={{ fontSize: 11.5 }}>{d.exchange_order_id ?? '—'}</div>
+          </div>
+          <div style={miniCard}>
+            <div style={miniLabel}>Exchange status</div>
+            <div className="mono" style={{ fontWeight: 600 }}>{d.exchange_order_status ?? '—'}</div>
+          </div>
+          <div style={miniCard}>
+            <div style={miniLabel}>Last exchange sync</div>
+            <div className="mono dim" style={{ fontSize: 11.5 }}>
+              {d.last_exchange_sync_at
+                ? new Date(d.last_exchange_sync_at).toLocaleString()
+                : '—'}
+            </div>
+          </div>
+        </div>
+      )}
 
       <PriceTimeline
         signals={d.market_signals}

@@ -59,6 +59,7 @@ from .schemas import (
     MarketDetailOut,
     MarketListResponse,
     MarketOut,
+    PendingOrderSummary,
     PositionDetailOut,
     PositionListResponse,
     PositionOut,
@@ -254,6 +255,10 @@ def _position_row_to_out(
         created_at=row.created_at,
         has_factbase=has_factbase,
         series_ticker=series_ticker,
+        exchange_order_id=row.exchange_order_id,
+        requested_contracts=row.requested_contracts,
+        exchange_order_status=row.exchange_order_status,
+        last_exchange_sync_at=row.last_exchange_sync_at,
     )
 
 
@@ -1759,6 +1764,7 @@ async def get_system_health(
     llm_budget_used: float = 0.0
     pending_orders: int = 0
     oldest_pending_order_age_seconds: int | None = None
+    pending_orders_detail: list[PendingOrderSummary] = []
     open_positions: int = 0
     llm_errors_last_hour: int = 0
     kalshi_errors_last_hour: int = 0
@@ -1787,7 +1793,7 @@ async def get_system_health(
             fetched_at=datetime.now(UTC),
         )
     except Exception:
-        log.warning("system_health.exchange_status_fetch_failed")
+        log.warning("system_health.exchange_status_fetch_failed", base_url=kalshi_base_url)
 
     today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     hour_ago = datetime.now(UTC) - timedelta(hours=1)
@@ -1841,6 +1847,39 @@ async def get_system_health(
         if isinstance(oldest_pending_entry_time, datetime):
             oldest_pending_order_age_seconds = int(
                 (datetime.now(UTC) - oldest_pending_entry_time).total_seconds()
+            )
+
+        # Per-pending-order detail, oldest-first so the first row matches
+        # oldest_pending_order_age_seconds.
+        pending_detail_result = await session.execute(
+            select(
+                PositionRow.id,
+                PositionRow.market_id,
+                PositionRow.requested_contracts,
+                PositionRow.contracts,
+                PositionRow.exchange_order_status,
+                PositionRow.entry_time,
+                PositionRow.last_exchange_sync_at,
+            )
+            .where(
+                PositionRow.status == "pending",
+                PositionRow.mode == app_mode,
+            )
+            .order_by(PositionRow.entry_time.asc())
+        )
+        now_ts = datetime.now(UTC)
+        for pid, mid_, req_c, filled_c, ex_status, entry_t, sync_at in pending_detail_result.all():
+            entry_norm = entry_t if entry_t.tzinfo else entry_t.replace(tzinfo=UTC)
+            pending_orders_detail.append(
+                PendingOrderSummary(
+                    position_id=str(pid),
+                    market_id=mid_,
+                    requested_contracts=req_c,
+                    filled_contracts=filled_c,
+                    exchange_order_status=ex_status,
+                    age_seconds=int((now_ts - entry_norm).total_seconds()),
+                    last_exchange_sync_at=sync_at,
+                )
             )
 
         open_result = await session.execute(
@@ -1949,6 +1988,7 @@ async def get_system_health(
         changelog=changelog_status,
         pending_orders=pending_orders,
         oldest_pending_order_age_seconds=oldest_pending_order_age_seconds,
+        pending_orders_detail=pending_orders_detail,
         open_positions=open_positions,
         db_ok=db_ok,
         uptime_seconds=uptime_seconds,

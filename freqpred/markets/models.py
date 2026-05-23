@@ -151,6 +151,16 @@ class PositionRow(Base):
     # Exchange order reference (live mode only)
     exchange_order_id: Mapped[str | None] = mapped_column(VARCHAR(255), nullable=True)
 
+    # Exchange-confirmed order state (live mode only; NULL for paper or legacy rows).
+    # requested_contracts: count we asked the exchange to fill (may exceed contracts during partial fills).
+    # exchange_order_status: latest raw Kalshi status string (executed/resting/partial/canceled/...).
+    # last_exchange_sync_at: when reconcile last successfully queried get_order for this row.
+    requested_contracts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exchange_order_status: Mapped[str | None] = mapped_column(VARCHAR(50), nullable=True)
+    last_exchange_sync_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
     # Exchange fee paid on fill (live mode only; 0.0 for paper)
     entry_fee_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0", default=0.0)
 
@@ -350,6 +360,15 @@ class Order:
     fee_usd: float = 0.0  # Exchange fee paid on fill (live mode only)
     time_in_force: str = "GTC"  # "GTC" | "fill_or_kill"
     action: str = "buy"  # "buy" | "sell"
+    # Exchange-confirmed fill metadata (populated by get_order / cancel_order responses).
+    # Kalshi v2 reports both YES and NO fill counts; the sum is the total filled count
+    # against requested_count. remaining_count = requested_count - filled total.
+    requested_count: int | None = None
+    filled_yes_count: int | None = None
+    filled_no_count: int | None = None
+    remaining_count: int | None = None
+    created_time: datetime | None = None
+    last_update_time: datetime | None = None
 
 
 @dataclass

@@ -23,6 +23,7 @@ SERVICE_SERIES_HISTORY_SCHEDULER = "series_history_scheduler"
 SERVICE_FACTBASE_SCHEDULER = "factbase_scheduler"
 SERVICE_POSITION_WATCHER_LAST_MESSAGE = "position_watcher_last_message"
 SERVICE_POSITION_WATCHER_RECONCILE = "position_watcher_reconcile"
+SERVICE_PENDING_ORDER_RECONCILE = "pending_order_reconcile"
 SERVICE_MARKET_WATCHER = "market_watcher"
 SERVICE_KALSHI_CHANGELOG = "kalshi_changelog"
 
@@ -95,6 +96,13 @@ def build_freshness_specs(
             service_name=SERVICE_POSITION_WATCHER_LAST_MESSAGE,
             label="Position watcher feed",
             stale_after_seconds=10 * 60,
+        ),
+        SERVICE_PENDING_ORDER_RECONCILE: FreshnessSpec(
+            service_name=SERVICE_PENDING_ORDER_RECONCILE,
+            label="Pending-order reconcile",
+            # Reconcile runs every 30s by default; tolerate 4x the interval
+            # before flagging stale so a brief Kalshi outage doesn't page.
+            stale_after_seconds=4 * 60,
         ),
         SERVICE_MARKET_WATCHER: FreshnessSpec(
             service_name=SERVICE_MARKET_WATCHER,

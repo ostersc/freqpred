@@ -4,6 +4,8 @@ from __future__ import annotations
 import inspect
 import math
 import os
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -26,12 +28,89 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+DEFAULT_PENDING_ORDER_TIMEOUT_SECONDS = 900.0
+
+
 class PositionNotFoundError(ValueError):
     """Raised by force_exit when the position does not exist in the current mode."""
 
 
 class PositionNotOpenError(ValueError):
     """Raised by force_exit when the position is not open (already closed/cancelled)."""
+
+
+@dataclass
+class ReconciledStatus:
+    """Mapped DB-side outcome for a single Kalshi order state."""
+
+    db_status: str                # "open" | "pending" | "cancelled"
+    contracts: int                # filled-side count (0 when still resting)
+    exchange_status: str          # raw Kalshi status string
+    is_partial: bool              # filled > 0 but < requested
+
+
+def map_order_to_status(
+    exchange_order: Order,
+    requested_contracts: int | None,
+) -> ReconciledStatus:
+    """Translate a Kalshi Order state into freqpred's DB position state.
+
+    Kalshi status     filled vs requested        → DB status   notes
+    -----------------------------------------------------------------
+    executed          all filled                 → open        terminal fill
+    resting/partial   filled = 0                 → pending     no DB change
+    resting/partial   0 < filled < requested     → open        partial substate
+    canceled          filled = 0                 → cancelled   terminal cancel
+    canceled          filled > 0                 → open        terminal partial
+    anything else     filled > 0                 → open        treat as filled
+    anything else     filled = 0                 → pending     leave alone
+    """
+    raw = (exchange_order.status or "").lower()
+    filled_total = (exchange_order.filled_yes_count or 0) + (
+        exchange_order.filled_no_count or 0
+    )
+    requested = (
+        requested_contracts
+        if requested_contracts is not None
+        else (exchange_order.requested_count or filled_total)
+    )
+
+    if raw == "executed":
+        db_status = "open"
+        contracts = filled_total if filled_total > 0 else (requested or 0)
+    elif raw == "canceled":
+        if filled_total > 0:
+            db_status = "open"
+            contracts = filled_total
+        else:
+            db_status = "cancelled"
+            contracts = 0
+    elif raw in ("resting", "partial"):
+        if filled_total > 0:
+            db_status = "open"
+            contracts = filled_total
+        else:
+            db_status = "pending"
+            contracts = 0
+    else:
+        if filled_total > 0:
+            db_status = "open"
+            contracts = filled_total
+        else:
+            db_status = "pending"
+            contracts = 0
+
+    is_partial = (
+        db_status == "open"
+        and requested is not None
+        and contracts < requested
+    )
+    return ReconciledStatus(
+        db_status=db_status,
+        contracts=contracts,
+        exchange_status=raw or "unknown",
+        is_partial=is_partial,
+    )
 
 
 class OrderManager:
@@ -46,6 +125,8 @@ class OrderManager:
         llm_client: LLMClient | None = None,
         judgment_model: str | None = None,
         runtime_telemetry: "RuntimeTelemetry | None" = None,
+        strategies: dict[str, IPredictionStrategy] | None = None,
+        pending_order_timeout_seconds: float = DEFAULT_PENDING_ORDER_TIMEOUT_SECONDS,
     ) -> None:
         self._risk = risk
         self._session_factory = session_factory
@@ -56,6 +137,15 @@ class OrderManager:
         self._llm_client = llm_client
         self._judgment_model = judgment_model
         self._runtime_telemetry = runtime_telemetry
+        self._strategies = strategies or {}
+        self._default_pending_timeout_seconds = pending_order_timeout_seconds
+
+    def _pending_timeout_for(self, strategy_name: str | None) -> float:
+        if strategy_name is not None:
+            strat = self._strategies.get(strategy_name)
+            if strat is not None and hasattr(strat.config, "pending_order_timeout_seconds"):
+                return float(strat.config.pending_order_timeout_seconds)
+        return self._default_pending_timeout_seconds
 
     @staticmethod
     def _call_position_size(
@@ -387,7 +477,12 @@ class OrderManager:
         """Submit order to Kalshi REST API.
 
         Records position as status='pending' immediately (before fill confirmation).
-        PositionWatcher (T39) will update status to 'open' once the exchange confirms a fill.
+        Reconciliation flips status to 'open' once Kalshi confirms a fill.
+        Persists requested_contracts (= original request size) and the raw
+        exchange status so partial-fill state is recoverable.
+
+        Orphan path: if place_order succeeds but the DB write fails, we cancel
+        the exchange-side order so it doesn't sit there permanently.
         """
         assert self._kalshi_client is not None, "kalshi_client required for live mode"
         try:
@@ -409,8 +504,8 @@ class OrderManager:
                     details={"market_id": order.market_id, "status_code": exc.status_code},
                 )
             return None
-        # "executed" means immediately filled; "resting" means GTC order sitting on the book.
-        position_status = "open" if filled_order.status == "executed" else "pending"
+
+        mapped = map_order_to_status(filled_order, order.contracts)
         # Effective entry cost per contract including exchange fee.
         effective_entry = order.price + (filled_order.fee_usd / order.contracts if order.contracts else 0)
         logger.info(
@@ -419,71 +514,266 @@ class OrderManager:
             market_id=order.market_id,
             direction=order.direction,
             contracts=order.contracts,
+            requested_contracts=order.contracts,
+            filled_contracts=mapped.contracts,
             price=order.price,
             fee_usd=filled_order.fee_usd,
             effective_entry_price=round(effective_entry, 6),
-            position_status=position_status,
-        )
-        return await ledger.open_position(
-            session,
-            market=market,
-            signal=signal,
-            strategy_name=strategy_name,
-            strategy_version=self._strategy_version,
-            direction=order.direction,
-            contracts=order.contracts,
-            entry_price=order.price,
-            mode=self._mode,
-            status=position_status,
-            exchange_order_id=filled_order.exchange_order_id,
-            entry_fee_usd=filled_order.fee_usd,
+            position_status=mapped.db_status,
+            exchange_order_status=mapped.exchange_status,
+            is_partial=mapped.is_partial,
         )
 
-    async def reconcile_pending_orders(self, session: AsyncSession) -> None:
-        """Query Kalshi for status of all pending live orders; update positions.
+        # Persisted contracts = filled when known (open), else request size (pending).
+        persisted_contracts = (
+            mapped.contracts if mapped.db_status == "open" else order.contracts
+        )
 
-        For each 'pending' live PositionRow:
-          - If Kalshi holds a non-zero net position for that market → flip to 'open'.
-          - Otherwise → mark 'cancelled' (order did not fill).
+        try:
+            return await ledger.open_position(
+                session,
+                market=market,
+                signal=signal,
+                strategy_name=strategy_name,
+                strategy_version=self._strategy_version,
+                direction=order.direction,
+                contracts=persisted_contracts,
+                entry_price=order.price,
+                mode=self._mode,
+                status=mapped.db_status,
+                exchange_order_id=filled_order.exchange_order_id,
+                entry_fee_usd=filled_order.fee_usd,
+                requested_contracts=order.contracts,
+                exchange_order_status=mapped.exchange_status,
+                last_exchange_sync_at=datetime.now(UTC),
+            )
+        except Exception:
+            logger.exception(
+                "order_manager.live_orphan_cancel",
+                exchange_order_id=filled_order.exchange_order_id,
+                market_id=order.market_id,
+            )
+            # Best-effort cancel of the exchange-side order so it doesn't sit
+            # forever after the DB write blows up.  We swallow secondary errors
+            # here — the original failure is the meaningful one to re-raise.
+            if filled_order.exchange_order_id is not None:
+                try:
+                    await self._kalshi_client.cancel_order(filled_order.exchange_order_id)
+                except Exception:
+                    logger.exception(
+                        "order_manager.live_orphan_cancel_failed",
+                        exchange_order_id=filled_order.exchange_order_id,
+                    )
+                if self._runtime_telemetry is not None:
+                    await self._runtime_telemetry.record_kalshi_error(
+                        "order_manager",
+                        f"orphan order auto-cancelled after ledger failure: "
+                        f"{filled_order.exchange_order_id} on {order.market_id}",
+                        details={
+                            "market_id": order.market_id,
+                            "exchange_order_id": filled_order.exchange_order_id,
+                        },
+                    )
+            raise
 
-        Called by PositionWatcher on startup and after every reconnect.
+    async def reconcile_pending_orders(
+        self,
+        session: AsyncSession,
+        *,
+        _now: datetime | None = None,
+    ) -> None:
+        """Per-order reconciliation for live pending positions.
+
+        For each live PositionRow in 'pending' with a non-null exchange_order_id:
+          1. Call kalshi.get_order(exchange_order_id) for exchange-confirmed state.
+          2. Map status via ``map_order_to_status``.
+          3. If still pending and age > pending_order_timeout_seconds → cancel_order.
+          4. Persist db_status, contracts, exchange_order_status, last_exchange_sync_at.
+
+        Rows with NULL exchange_order_id (legacy pre-migration rows) are skipped.
+        Uses SELECT FOR UPDATE SKIP LOCKED so concurrent reconcile passes from
+        WS events + periodic + startup don't double-process the same row.
+        ``_now`` is injectable for tests; defaults to datetime.now(UTC).
         """
         if self._kalshi_client is None:
             return
 
+        now = _now or datetime.now(UTC)
+
         result = await session.execute(
-            select(PositionRow).where(
+            select(PositionRow)
+            .where(
                 PositionRow.status == "pending",
                 PositionRow.mode == "live",
+                PositionRow.exchange_order_id.is_not(None),
             )
+            .with_for_update(skip_locked=True)
         )
         pending = result.scalars().all()
         if not pending:
             return
 
-        kalshi_positions = await self._kalshi_client.get_positions()
-        kalshi_by_market: dict[str, int] = {
-            p.market_id: p.contracts for p in kalshi_positions
-        }
-
         for row in pending:
-            if kalshi_by_market.get(row.market_id, 0) > 0:
-                row.status = "open"
-                logger.info(
-                    "order_manager.pending_filled",
-                    position_id=str(row.id),
-                    market_id=row.market_id,
-                    kalshi_contracts=kalshi_by_market[row.market_id],
-                )
-            else:
-                row.status = "cancelled"
-                logger.warning(
-                    "order_manager.pending_not_filled",
-                    position_id=str(row.id),
-                    market_id=row.market_id,
-                )
+            await self._reconcile_one(session, row, now=now)
 
         await session.commit()
+
+    async def _reconcile_one(
+        self,
+        session: AsyncSession,
+        row: PositionRow,
+        *,
+        now: datetime,
+    ) -> None:
+        """Reconcile a single pending position row. Caller commits."""
+        assert self._kalshi_client is not None
+        order_id = row.exchange_order_id
+        if order_id is None:
+            return
+
+        try:
+            exchange_order = await self._kalshi_client.get_order(order_id)
+        except KalshiAPIError as exc:
+            logger.warning(
+                "order_manager.get_order_failed",
+                position_id=str(row.id),
+                exchange_order_id=order_id,
+                status_code=exc.status_code,
+            )
+            if self._runtime_telemetry is not None:
+                await self._runtime_telemetry.record_kalshi_error(
+                    "order_manager",
+                    f"get_order failed for {order_id}: {exc}",
+                    details={"exchange_order_id": order_id, "status_code": exc.status_code},
+                )
+            return
+
+        await self._apply_exchange_state(session, row, exchange_order, now=now)
+
+        # Timeout: if still pending after the status check and we've exceeded
+        # the configured timeout, cancel the order and re-poll its final state.
+        if row.status == "pending":
+            timeout = self._pending_timeout_for(row.strategy_name)
+            row_created = row.created_at
+            if row_created is not None and row_created.tzinfo is None:
+                row_created = row_created.replace(tzinfo=UTC)
+            age = (now - row_created).total_seconds() if row_created else 0.0
+            if timeout > 0 and age > timeout:
+                logger.warning(
+                    "order_manager.pending_timeout",
+                    position_id=str(row.id),
+                    exchange_order_id=order_id,
+                    age_seconds=age,
+                    timeout_seconds=timeout,
+                )
+                try:
+                    cancelled_order = await self._kalshi_client.cancel_order(order_id)
+                except KalshiAPIError as exc:
+                    logger.warning(
+                        "order_manager.cancel_order_failed",
+                        position_id=str(row.id),
+                        exchange_order_id=order_id,
+                        status_code=exc.status_code,
+                    )
+                    return
+                await self._apply_exchange_state(session, row, cancelled_order, now=now)
+
+    async def _apply_exchange_state(
+        self,
+        session: AsyncSession,
+        row: PositionRow,
+        exchange_order: Order,
+        *,
+        now: datetime,
+    ) -> None:
+        """Apply a status mapping to a PositionRow.
+
+        Shared by reconcile (REST polling), WS user_orders/fill handlers, and
+        the periodic loop — every code path that reads exchange order state must
+        funnel through this helper so the substate rules stay consistent.
+        """
+        requested = row.requested_contracts
+        if requested is None:
+            requested = exchange_order.requested_count or row.contracts
+        mapped = map_order_to_status(exchange_order, requested)
+
+        prev_status = row.status
+        # Never downgrade exchange_order_status once an order is confirmed executed.
+        # WS fill/user_orders events can arrive with stale state (e.g. fill channel
+        # sends status=resting immediately after place_order returned executed).
+        _status_rank = {"resting": 0, "partial": 1, "executed": 2, "canceled": 2}
+        _current_rank = _status_rank.get(row.exchange_order_status or "", -1)
+        _incoming_rank = _status_rank.get(mapped.exchange_status or "", -1)
+        if _incoming_rank >= _current_rank:
+            row.exchange_order_status = mapped.exchange_status
+        row.last_exchange_sync_at = now
+        if row.requested_contracts is None and exchange_order.requested_count is not None:
+            row.requested_contracts = exchange_order.requested_count
+
+        if mapped.db_status == "open":
+            row.status = "open"
+            if mapped.contracts > 0:
+                row.contracts = mapped.contracts
+            logger.info(
+                "order_manager.pending_to_open",
+                position_id=str(row.id),
+                exchange_order_id=row.exchange_order_id,
+                filled_contracts=mapped.contracts,
+                requested_contracts=row.requested_contracts,
+                is_partial=mapped.is_partial,
+                prev_status=prev_status,
+            )
+        elif mapped.db_status == "cancelled":
+            row.status = "cancelled"
+            logger.info(
+                "order_manager.pending_cancelled",
+                position_id=str(row.id),
+                exchange_order_id=row.exchange_order_id,
+                prev_status=prev_status,
+            )
+        else:
+            logger.debug(
+                "order_manager.pending_still_resting",
+                position_id=str(row.id),
+                exchange_order_id=row.exchange_order_id,
+                exchange_status=mapped.exchange_status,
+            )
+
+    async def apply_ws_event(
+        self,
+        order_id: str,
+        exchange_order: Order,
+        *,
+        _now: datetime | None = None,
+    ) -> bool:
+        """Apply a WS-delivered order state to the matching pending row.
+
+        Returns True if a row was found and updated, False otherwise.
+        Looks up the position by exchange_order_id and routes through the same
+        ``_apply_exchange_state`` helper as REST reconcile. No timeout check —
+        WS events are real-time.
+        """
+        now = _now or datetime.now(UTC)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(PositionRow)
+                .where(
+                    PositionRow.exchange_order_id == order_id,
+                    PositionRow.mode == "live",
+                    PositionRow.status.in_(("pending", "open")),
+                )
+                .with_for_update(skip_locked=True)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                logger.debug(
+                    "order_manager.ws_event_no_row",
+                    exchange_order_id=order_id,
+                )
+                return False
+            await self._apply_exchange_state(session, row, exchange_order, now=now)
+            await session.commit()
+            return True
 
     async def force_exit(self, position_id: str, *, exit_reason: str = "force_exit:manual") -> Position:
         """Close an open position manually.
@@ -531,6 +821,40 @@ class OrderManager:
                 )
 
             pos_row, mkt_row = row
+
+            # Pending live positions are cancelled (no resting order to sell)
+            # rather than treated as open. Route to cancel_order then reconcile.
+            if pos_row.status == "pending":
+                if self._mode != "live":
+                    raise PositionNotOpenError(
+                        f"Position {position_id!r} is not open (status={pos_row.status!r})"
+                    )
+                if self._kalshi_client is None:
+                    raise ValueError(
+                        f"Live force exit for {position_id!r} requires a KalshiClient; "
+                        "none was wired into this OrderManager"
+                    )
+                if pos_row.exchange_order_id is None:
+                    raise ValueError(
+                        f"Pending position {position_id!r} has no exchange_order_id; "
+                        "cannot cancel — reconciliation required first"
+                    )
+                cancelled = await self._kalshi_client.cancel_order(pos_row.exchange_order_id)
+                await self._apply_exchange_state(session, pos_row, cancelled, now=datetime.now(UTC))
+                await session.commit()
+                # If the cancel race-condition'd into a partial fill the row is
+                # now 'open'. Close it at the cancelled-fill price so the
+                # operator's force_exit intent is honoured end-to-end.
+                if pos_row.status == "open":
+                    return await ledger.close_position(
+                        session,
+                        position_id,
+                        exit_price=pos_row.entry_price,
+                        exit_reason=exit_reason,
+                    )
+                from freqpred.trading.ledger import _row_to_position  # noqa: PLC0415
+                return _row_to_position(pos_row)
+
             if pos_row.status != "open":
                 raise PositionNotOpenError(
                     f"Position {position_id!r} is not open (status={pos_row.status!r})"

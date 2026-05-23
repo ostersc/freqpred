@@ -157,6 +157,19 @@ class KalshiClient(IMarketClient):
             raise KalshiAPIError(resp.status_code, resp.text)
         return resp.json()
 
+    async def _delete(self, path: str) -> Any:
+        """Authenticated DELETE request to Kalshi API.
+
+        Uses the same RSA-PSS signing as _get() — method="DELETE".
+        Raises KalshiAPIError on non-2xx response.
+        """
+        url = self._base_url + path
+        headers = self._make_auth_headers("DELETE", self._base_path + path)
+        resp = await self._http.delete(url, headers=headers)
+        if resp.status_code >= 400:
+            raise KalshiAPIError(resp.status_code, resp.text)
+        return resp.json()
+
     async def _paginate_events(self) -> list[KalshiEventSchema]:
         """Fetch all open events with nested markets from GET /events.
 
@@ -418,27 +431,140 @@ class KalshiClient(IMarketClient):
             body["time_in_force"] = order.time_in_force
         data = await self._post("/portfolio/orders", body)
         exchange_order = data.get("order", data)
-        fee_cents = (exchange_order.get("maker_fees") or 0) + (exchange_order.get("taker_fees") or 0)
-        fee_usd = fee_cents / 100
+        return self._order_from_exchange_payload(order, exchange_order)
+
+    async def get_order(self, order_id: str) -> Order:
+        """Fetch the exchange-confirmed state of a single order.
+
+        Returns an Order with status, requested_count, filled_yes/no_count,
+        remaining_count, fee_usd, and timestamps populated from Kalshi's
+        per-order response.  The returned Order mirrors the original side and
+        price but the freqpred-level ``contracts`` field reflects the total
+        filled across both sides (yes + no).
+        """
+        data = await self._get(f"/portfolio/orders/{order_id}")
+        exchange_order = data.get("order", data)
+        return self._order_from_exchange_payload(None, exchange_order)
+
+    async def cancel_order(self, order_id: str) -> Order:
+        """Cancel a resting order on the exchange.
+
+        Returns the final order state from Kalshi (the cancel response includes
+        the order object reflecting any fills that landed before cancellation).
+        """
+        data = await self._delete(f"/portfolio/orders/{order_id}")
+        exchange_order = data.get("order", data)
         log.info(
-            "kalshi.place_order",
-            market_id=order.market_id,
-            direction=order.direction,
-            contracts=order.contracts,
-            exchange_order_id=exchange_order.get("order_id"),
+            "kalshi.cancel_order",
+            order_id=order_id,
             status=exchange_order.get("status"),
+        )
+        return self._order_from_exchange_payload(None, exchange_order)
+
+    @staticmethod
+    def _parse_kalshi_ts(value: Any) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+    def _order_from_exchange_payload(
+        self,
+        request: Order | None,
+        exchange_order: dict[str, Any],
+    ) -> Order:
+        """Build an Order from a Kalshi order response payload.
+
+        Used by place_order, get_order, and cancel_order to share parsing.
+        ``request`` is the originating Order (place_order only) — get_order and
+        cancel_order pass None and the returned Order reflects exchange state.
+        """
+        fee_cents = (
+            (exchange_order.get("maker_fees") or 0)
+            + (exchange_order.get("taker_fees") or 0)
+        )
+        fee_usd = fee_cents / 100
+
+        # Kalshi reports counts per side: yes_count / no_count are the filled
+        # counts; place_count (or count) is the requested amount.  For a
+        # single-side buy these mirror each other but partial fills only touch
+        # the side actually filled.
+        requested = exchange_order.get("place_count")
+        if requested is None:
+            requested = exchange_order.get("count")
+        filled_yes = exchange_order.get("yes_count")
+        filled_no = exchange_order.get("no_count")
+        filled_yes = int(filled_yes) if filled_yes is not None else None
+        filled_no = int(filled_no) if filled_no is not None else None
+        requested_int = int(requested) if requested is not None else None
+        total_filled = (filled_yes or 0) + (filled_no or 0)
+        remaining = exchange_order.get("remaining_count")
+        if remaining is None and requested_int is not None:
+            remaining = max(0, requested_int - total_filled)
+        else:
+            remaining = int(remaining) if remaining is not None else None
+
+        # Direction mirrors the request when present; otherwise infer from side.
+        if request is not None:
+            direction = request.direction
+            price = request.price
+            mode = request.mode
+            original_contracts = request.contracts
+            order_id = request.id
+        else:
+            side = (exchange_order.get("side") or "").lower()
+            direction = "YES" if side == "yes" else "NO"
+            # Kalshi prices are integer cents on the relevant side.
+            price_cents = (
+                exchange_order.get("yes_price")
+                if direction == "YES"
+                else exchange_order.get("no_price")
+            )
+            price = (
+                float(price_cents) / 100.0 if price_cents is not None else 0.0
+            )
+            mode = "live"
+            original_contracts = requested_int or 0
+            order_id = None
+
+        # For partial fills, ``contracts`` reflects what actually filled so
+        # downstream sizing/accounting reads the exchange truth.
+        effective_contracts = total_filled if total_filled > 0 else original_contracts
+
+        status_str = exchange_order.get("status", "resting")
+        log.info(
+            "kalshi.order_payload",
+            exchange_order_id=exchange_order.get("order_id"),
+            direction=direction,
+            requested=requested_int,
+            filled_yes=filled_yes,
+            filled_no=filled_no,
+            remaining=remaining,
+            status=status_str,
             fee_usd=fee_usd,
         )
+
         return Order(
-            market_id=order.market_id,
-            direction=order.direction,
-            contracts=order.contracts,
-            price=order.price,
-            mode=order.mode,
-            id=order.id,
+            market_id=exchange_order.get("ticker", request.market_id if request else ""),
+            direction=direction,
+            contracts=effective_contracts,
+            price=price,
+            mode=mode,
+            id=order_id,
             exchange_order_id=exchange_order.get("order_id"),
-            status=exchange_order.get("status", "resting"),
+            status=status_str,
             fee_usd=fee_usd,
+            requested_count=requested_int,
+            filled_yes_count=filled_yes,
+            filled_no_count=filled_no,
+            remaining_count=remaining,
+            created_time=self._parse_kalshi_ts(exchange_order.get("created_time")),
+            last_update_time=self._parse_kalshi_ts(
+                exchange_order.get("last_update_time")
+                or exchange_order.get("updated_time")
+            ),
         )
 
     async def get_positions(self) -> list[Position]:

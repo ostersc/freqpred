@@ -106,6 +106,11 @@ class PositionOut(BaseModel):
     created_at: datetime
     has_factbase: bool
     series_ticker: str | None
+    # Exchange-confirmed order state (live mode only; NULL for paper).
+    exchange_order_id: str | None = None
+    requested_contracts: int | None = None
+    exchange_order_status: str | None = None
+    last_exchange_sync_at: datetime | None = None
 
 
 class PositionListResponse(BaseModel):
@@ -462,6 +467,22 @@ class ChangelogStatusOut(BaseModel):
     last_checked_at: datetime | None
 
 
+class PendingOrderSummary(BaseModel):
+    """Per-pending-order detail surfaced on the System Health page.
+
+    Ordered oldest-first by the route so the existing
+    ``oldest_pending_order_age_seconds`` aggregate matches the first row.
+    """
+
+    position_id: str
+    market_id: str
+    requested_contracts: int | None
+    filled_contracts: int               # current PositionRow.contracts
+    exchange_order_status: str | None
+    age_seconds: int
+    last_exchange_sync_at: datetime | None
+
+
 class SystemHealthResponse(BaseModel):
     run_state: str                  # "running" | "paused" | "stopped"
     mode: str                       # "paper" | "live"
@@ -473,6 +494,7 @@ class SystemHealthResponse(BaseModel):
     changelog: ChangelogStatusOut
     pending_orders: int
     oldest_pending_order_age_seconds: int | None
+    pending_orders_detail: list[PendingOrderSummary] = []
     open_positions: int
     db_ok: bool
     uptime_seconds: int

@@ -414,7 +414,7 @@ async def test_reconcile_updates_contracts_when_kalshi_differs() -> None:
     )
 
     async with session_factory() as session:
-        await watcher._reconcile_positions(session)
+        await watcher._detect_external_drift(session)
 
     assert db_row.contracts == 8
 
@@ -448,7 +448,7 @@ async def test_reconcile_closes_position_when_kalshi_has_zero() -> None:
         mock_ledger.close_position = AsyncMock()
 
         async with session_factory() as session:
-            await watcher._reconcile_positions(session)
+            await watcher._detect_external_drift(session)
 
     mock_ledger.close_position.assert_awaited_once()
     call_kwargs = mock_ledger.close_position.call_args_list[0].kwargs
@@ -686,7 +686,7 @@ async def test_reconcile_ignores_kalshi_only_positions() -> None:
     with patch("freqpred.markets.position_watcher.log") as mock_log:
         mock_log.info = MagicMock()
         async with session_factory() as session:
-            await watcher._reconcile_positions(session)
+            await watcher._detect_external_drift(session)
 
     # No commit for auto-close (no DB positions to process).
     # The kalshi-only market should be logged.
@@ -695,3 +695,147 @@ async def test_reconcile_ignores_kalshi_only_positions() -> None:
 
     # No DB row should be created (add/insert never called).
     mock_session.add.assert_not_called() if hasattr(mock_session, "add") else None
+
+
+# ---------------------------------------------------------------------------
+# T67: user_orders/fill subscription + handlers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subscribes_to_user_orders_and_fill_channels() -> None:
+    """Reconnect path sends a separate subscribe for user_orders + fill channels."""
+    watcher, _, _, _, _ = _make_watcher()
+    ws = AsyncMock()
+    await watcher._send_subscribe_user_channels(ws)
+
+    ws.send.assert_awaited_once()
+    sent = ws.send.call_args.args[0]
+    import json as _json
+    payload = _json.loads(sent)
+    assert payload["cmd"] == "subscribe"
+    assert set(payload["params"]["channels"]) == {"user_orders", "fill"}
+    # user-scoped channels must NOT carry market_tickers filter
+    assert "market_tickers" not in payload["params"]
+
+
+@pytest.mark.asyncio
+async def test_user_orders_event_updates_position_status() -> None:
+    """A user_orders WS event is forwarded to OrderManager.apply_ws_event."""
+    watcher, kalshi_client, _, _, order_manager = _make_watcher()
+    order_manager.apply_ws_event = AsyncMock(return_value=True)
+
+    # Make the parser succeed by stubbing out _order_from_exchange_payload.
+    from freqpred.markets.models import Order as _Order
+    fake_order = _Order(
+        market_id="MKT-1", direction="YES", contracts=5, price=0.5, mode="live",
+        exchange_order_id="ORD-9", status="executed",
+        requested_count=5, filled_yes_count=5, filled_no_count=0, remaining_count=0,
+    )
+    kalshi_client._order_from_exchange_payload = MagicMock(return_value=fake_order)
+
+    await watcher._on_user_order_event(
+        "user_orders",
+        {"order_id": "ORD-9", "status": "executed"},
+    )
+
+    order_manager.apply_ws_event.assert_awaited_once()
+    assert order_manager.apply_ws_event.call_args.args[0] == "ORD-9"
+
+
+@pytest.mark.asyncio
+async def test_user_event_missing_order_id_is_noop() -> None:
+    """Payload without order_id is silently skipped, no parse, no apply."""
+    watcher, kalshi_client, _, _, order_manager = _make_watcher()
+    order_manager.apply_ws_event = AsyncMock()
+    kalshi_client._order_from_exchange_payload = MagicMock()
+
+    await watcher._on_user_order_event("fill", {"foo": "bar"})
+
+    order_manager.apply_ws_event.assert_not_called()
+    kalshi_client._order_from_exchange_payload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_detect_external_drift_skips_pending_rows() -> None:
+    """_detect_external_drift query is scoped to status='open' only.
+
+    We assert the query filter by inspecting the SQL expression that
+    _detect_external_drift constructs — pending rows must not appear.
+    """
+    watcher, kalshi_client, session_factory, _, _ = _make_watcher()
+    mock_session = session_factory.return_value.__aenter__.return_value
+
+    # DB returns no rows; pending rows in the schema are filtered out by WHERE.
+    mock_session.execute = AsyncMock(return_value=_make_db_result([]))
+    kalshi_client.get_positions = AsyncMock(return_value=[])
+
+    async with session_factory() as session:
+        await watcher._detect_external_drift(session)
+
+    # The first call (DB position load) should issue a select that filters on
+    # status == "open" (not status.in_(["open", "pending"])).
+    stmt = mock_session.execute.await_args_list[0].args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "'open'" in sql
+    assert "'pending'" not in sql
+
+
+@pytest.mark.asyncio
+async def test_detect_external_drift_auto_closes_open_position_at_zero() -> None:
+    """An open DB row whose Kalshi net is zero is auto-closed (external manual sell)."""
+    watcher, kalshi_client, session_factory, _, _ = _make_watcher()
+    db_row = _make_position_row(market_id="MKT-EX", contracts=10, status="open")
+    market_row = MagicMock()
+    market_row.id = "MKT-EX"
+    market_row.mid_price = 0.55
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _make_db_result([db_row])
+        return _make_db_result([market_row])
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+    kalshi_client.get_positions = AsyncMock(return_value=[])
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        mock_ledger.close_position = AsyncMock()
+        async with session_factory() as session:
+            await watcher._detect_external_drift(session)
+
+    mock_ledger.close_position.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_orders_called_on_startup() -> None:
+    """Wiring: PositionWatcher.connect path calls order_manager.reconcile_pending_orders.
+
+    Drives _connect_and_subscribe via a mocked websocket and asserts the
+    reconcile call lands before the WS loop reads any messages.
+    """
+    watcher, kalshi_client, session_factory, _, order_manager = _make_watcher(
+        open_market_ids=set()
+    )
+
+    # Mock websocket that returns immediately so we don't block.
+    mock_ws = AsyncMock()
+    mock_ws.send = AsyncMock()
+    mock_ws.__aenter__ = AsyncMock(return_value=mock_ws)
+    mock_ws.__aexit__ = AsyncMock(return_value=False)
+
+    async def _iter():
+        return
+        yield  # pragma: no cover
+
+    mock_ws.__aiter__ = lambda self: _iter()
+
+    with patch("freqpred.markets.position_watcher.websockets") as mock_ws_lib:
+        mock_ws_lib.connect = MagicMock(return_value=mock_ws)
+        await watcher._connect_and_subscribe()
+
+    order_manager.reconcile_pending_orders.assert_awaited()

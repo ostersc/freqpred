@@ -189,6 +189,10 @@ def _make_position_row(**kw) -> MagicMock:
     row.pnl = kw.get("pnl", None)
     row.pnl_pct = kw.get("pnl_pct", None)
     row.created_at = kw.get("created_at", datetime(2026, 1, 1, tzinfo=UTC))
+    row.exchange_order_id = kw.get("exchange_order_id", None)
+    row.requested_contracts = kw.get("requested_contracts", None)
+    row.exchange_order_status = kw.get("exchange_order_status", None)
+    row.last_exchange_sync_at = kw.get("last_exchange_sync_at", None)
     return row
 
 
@@ -938,6 +942,8 @@ def _make_system_health_session(
     llm_spend_result = _scalar_result(llm_spend)
     pending_result = _scalar_result(pending_count)
     pending_min_result = _scalar_result(oldest_pending_entry_time)
+    pending_detail_result = MagicMock()
+    pending_detail_result.all.return_value = []
     open_result = _scalar_result(open_count)
     llm_errors_result = _scalar_result(llm_errors)
     kalshi_errors_result = _scalar_result(kalshi_errors)
@@ -955,6 +961,7 @@ def _make_system_health_session(
         llm_spend_result,
         pending_result,
         pending_min_result,
+        pending_detail_result,
         open_result,
         llm_errors_result,
         kalshi_errors_result,

@@ -26,12 +26,18 @@ async def open_position(
     status: str = "open",
     exchange_order_id: str | None = None,
     entry_fee_usd: float = 0.0,
+    requested_contracts: int | None = None,
+    exchange_order_status: str | None = None,
+    last_exchange_sync_at: datetime | None = None,
 ) -> Position:
     """Insert a new Position row. Commits the session.
 
     ``status`` is "open" for paper trades and immediately-filled live orders;
-    "pending" for live GTC orders awaiting fill confirmation (T39 will flip these).
-    ``exchange_order_id`` and ``entry_fee_usd`` are populated for live orders.
+    "pending" for live GTC orders awaiting fill confirmation. Reconcile flips
+    pending → open / cancelled based on Kalshi's get_order response.
+    ``exchange_order_id``, ``entry_fee_usd``, ``requested_contracts``,
+    ``exchange_order_status``, and ``last_exchange_sync_at`` are populated for
+    live orders only.
     """
     row = PositionRow(
         id=uuid.uuid4(),
@@ -50,6 +56,9 @@ async def open_position(
         status=status,
         exchange_order_id=exchange_order_id,
         entry_fee_usd=entry_fee_usd,
+        requested_contracts=requested_contracts,
+        exchange_order_status=exchange_order_status,
+        last_exchange_sync_at=last_exchange_sync_at,
     )
     session.add(row)
     await session.commit()

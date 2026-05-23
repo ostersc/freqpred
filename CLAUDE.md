@@ -176,6 +176,8 @@ All trading defaults to `mode="paper"`. Live trading requires explicit `--mode l
 
 **Never hardcode dates or timestamps in tests.** Any test that makes assertions about time windows (7d, 30d, 365d, age in hours, etc.) must control the clock — either by accepting a `_now: datetime | None = None` parameter in the production function (defaulting to `datetime.now(UTC)`) and passing a fixed value in the test, or by using `freezegun`. A hardcoded `_NOW = datetime(2026, 5, 16, ...)` combined with a function that calls `datetime.now()` internally will silently become incorrect as calendar time advances. This has happened repeatedly. The rule: if a function uses `datetime.now()` and a test makes time-relative assertions, the function must accept an injectable clock.
 
+**Always test both YES and NO position directions.** Any test that covers position entry, exit, P&L calculation, risk checks, order sizing, or signal-driven behavior must include cases for both `side="yes"` and `side="no"`. Kalshi NO positions have inverted payout logic (cost = `(1 - price) * contracts`), and bugs that only affect one direction are common. A test suite that only exercises YES positions provides false confidence. If a function's behavior is genuinely symmetric and the test already proves symmetry (e.g. by parameterizing over both sides), one parameterized test is sufficient — but both directions must be covered.
+
 ---
 
 ## Database conventions

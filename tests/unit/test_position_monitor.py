@@ -1141,3 +1141,52 @@ class TestLiveExit:
 
         assert result is None
         kalshi_client.place_order.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# T67: periodic reconcile wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconcile_called_from_tick_loop() -> None:
+    """PositionMonitor's tick loop drives order_manager.reconcile_pending_orders."""
+    from freqpred.trading.position_monitor import PositionMonitor as _PM
+
+    session_factory = MagicMock()
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    session_factory.return_value = mock_session
+
+    order_manager = MagicMock()
+    order_manager.reconcile_pending_orders = AsyncMock()
+
+    monitor = _PM(
+        session_factory=session_factory,
+        strategies={},
+        mode="live",
+        order_manager=order_manager,
+        reconcile_interval_seconds=0.0,  # always fire
+    )
+
+    await monitor._maybe_run_periodic_reconcile()
+    order_manager.reconcile_pending_orders.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconcile_noop_in_paper_mode() -> None:
+    """Paper mode never drives reconcile, even if order_manager is wired."""
+    from freqpred.trading.position_monitor import PositionMonitor as _PM
+
+    order_manager = MagicMock()
+    order_manager.reconcile_pending_orders = AsyncMock()
+    monitor = _PM(
+        session_factory=MagicMock(),
+        strategies={},
+        mode="paper",
+        order_manager=order_manager,
+        reconcile_interval_seconds=0.0,
+    )
+    await monitor._maybe_run_periodic_reconcile()
+    order_manager.reconcile_pending_orders.assert_not_called()

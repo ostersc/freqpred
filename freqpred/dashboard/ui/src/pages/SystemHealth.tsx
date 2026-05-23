@@ -110,6 +110,40 @@ export default function SystemHealth() {
             <Stat label="Uptime" value={fmtUptime(data.uptime_seconds)} />
             <Stat label="Open positions" value={String(data.open_positions)} />
             <Stat label="Pending orders" value={String(data.pending_orders)} sub={`Oldest age: ${fmtAgeSecs(data.oldest_pending_order_age_seconds)}`} />
+            {data.pending_orders_detail && data.pending_orders_detail.length > 0 && (
+              <div style={{ gridColumn: '1 / -1' }}>
+                <Panel title="Pending order detail">
+                  <table className="tbl" style={{ fontSize: 12 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: 'left' }}>Market</th>
+                        <th style={{ textAlign: 'right' }}>Age</th>
+                        <th style={{ textAlign: 'left' }}>Exchange status</th>
+                        <th style={{ textAlign: 'right' }}>Filled / Requested</th>
+                        <th style={{ textAlign: 'right' }}>Last sync</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.pending_orders_detail.map((p) => (
+                        <tr key={p.position_id}>
+                          <td className="mono">{p.market_id}</td>
+                          <td className="mono" style={{ textAlign: 'right' }}>{fmtUptime(p.age_seconds)}</td>
+                          <td className="mono">{p.exchange_order_status ?? '—'}</td>
+                          <td className="mono" style={{ textAlign: 'right' }}>
+                            {p.filled_contracts} / {p.requested_contracts ?? '—'}
+                          </td>
+                          <td className="mono dim" style={{ textAlign: 'right' }}>
+                            {p.last_exchange_sync_at
+                              ? new Date(p.last_exchange_sync_at).toLocaleTimeString()
+                              : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </Panel>
+              </div>
+            )}
             <div className="stat">
               <div className="stat-label">API errors (last hour)</div>
               <div style={{ display: 'flex', gap: 20, marginTop: 6 }}>

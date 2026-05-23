@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.config import RiskConfig
@@ -92,40 +92,96 @@ class RiskEngine:
         """Return (blocked, reason, total_exposure) from global position cap checks.
 
         Checks max_open_positions then max_total_exposure_pct.
+        Pending live orders count as committed exposure — they reserve capital
+        on the exchange until they fill or are cancelled.
         Returns (False, "", total_exposure) when capacity remains.
         Callers that only need (blocked, reason) should use check_entry_capacity().
         """
-        open_count_result = await session.execute(
-            select(func.count()).select_from(PositionRow).where(
-                PositionRow.status == "open",
+        active_statuses = ("open", "pending")
+        count_result = await session.execute(
+            select(
+                func.sum(
+                    case((PositionRow.status == "open", 1), else_=0)
+                ).label("open_count"),
+                func.sum(
+                    case((PositionRow.status == "pending", 1), else_=0)
+                ).label("pending_count"),
+            )
+            .select_from(PositionRow)
+            .where(
+                PositionRow.status.in_(active_statuses),
                 PositionRow.mode == mode,
             )
         )
-        open_count: int = open_count_result.scalar_one()
-        if open_count >= self._config.max_open_positions:
+        counts = count_result.one()
+        open_count = int(counts.open_count or 0)
+        pending_count = int(counts.pending_count or 0)
+        total_active = open_count + pending_count
+        if total_active >= self._config.max_open_positions:
             logger.info(
                 "risk.max_open_positions_reached",
                 open_count=open_count,
+                pending_count=pending_count,
+                total_active=total_active,
                 max=self._config.max_open_positions,
             )
-            return True, f"open positions {open_count} >= max {self._config.max_open_positions}", 0.0
+            return (
+                True,
+                (
+                    f"active positions {total_active} (open={open_count}, "
+                    f"pending={pending_count}) >= max {self._config.max_open_positions}"
+                ),
+                0.0,
+            )
 
+        # COALESCE(requested_contracts, contracts) so pending rows count their
+        # request size (the exchange has reserved that capital) while legacy
+        # rows missing requested_contracts fall back to their fill count.
+        exposure_expr = (
+            func.coalesce(PositionRow.requested_contracts, PositionRow.contracts)
+            * PositionRow.entry_price
+        )
         exposure_result = await session.execute(
-            select(func.sum(PositionRow.contracts * PositionRow.entry_price)).where(
-                PositionRow.status == "open",
+            select(
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (PositionRow.status == "open", exposure_expr),
+                            else_=0.0,
+                        )
+                    ),
+                    0.0,
+                ).label("open_exposure"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (PositionRow.status == "pending", exposure_expr),
+                            else_=0.0,
+                        )
+                    ),
+                    0.0,
+                ).label("pending_exposure"),
+            ).where(
+                PositionRow.status.in_(active_statuses),
                 PositionRow.mode == mode,
             )
         )
-        total_exposure: float = exposure_result.scalar_one() or 0.0
+        exposure_row = exposure_result.one()
+        open_exposure = float(exposure_row.open_exposure or 0.0)
+        pending_exposure = float(exposure_row.pending_exposure or 0.0)
+        total_exposure = open_exposure + pending_exposure
         max_exposure = bankroll * self._config.max_total_exposure_pct
         if total_exposure >= max_exposure:
             logger.info(
                 "risk.total_exposure_exceeded",
                 exposure=total_exposure,
+                open_exposure=open_exposure,
+                pending_exposure=pending_exposure,
                 max_exposure=max_exposure,
             )
             return True, (
-                f"total exposure {total_exposure:.2f} >= max {max_exposure:.2f} "
+                f"total exposure {total_exposure:.2f} (open={open_exposure:.2f}, "
+                f"pending={pending_exposure:.2f}) >= max {max_exposure:.2f} "
                 f"({self._config.max_total_exposure_pct:.0%} of bankroll)"
             ), total_exposure
         return False, "", total_exposure
@@ -221,28 +277,59 @@ class RiskEngine:
         capped_size = min(requested_size, max_size)
 
         # 4. Per-market cumulative exposure check.
-        # Counts existing open positions on this market so that multiple signals
-        # on the same market cannot stack exposure beyond the strategy limit.
+        # Counts open AND pending positions on this market so that multiple
+        # signals cannot stack exposure beyond the strategy limit while an
+        # order is still resting on the exchange.
+        per_market_exposure_expr = (
+            func.coalesce(PositionRow.requested_contracts, PositionRow.contracts)
+            * PositionRow.entry_price
+        )
         market_exposure_result = await session.execute(
-            select(func.sum(PositionRow.contracts * PositionRow.entry_price)).where(
-                PositionRow.status == "open",
+            select(
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (PositionRow.status == "open", per_market_exposure_expr),
+                            else_=0.0,
+                        )
+                    ),
+                    0.0,
+                ).label("open_exposure"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (PositionRow.status == "pending", per_market_exposure_expr),
+                            else_=0.0,
+                        )
+                    ),
+                    0.0,
+                ).label("pending_exposure"),
+            ).where(
+                PositionRow.status.in_(("open", "pending")),
                 PositionRow.market_id == market_id,
                 PositionRow.mode == mode,
             )
         )
-        existing_market_exposure: float = market_exposure_result.scalar_one() or 0.0
+        market_row = market_exposure_result.one()
+        open_market_exposure = float(market_row.open_exposure or 0.0)
+        pending_market_exposure = float(market_row.pending_exposure or 0.0)
+        existing_market_exposure = open_market_exposure + pending_market_exposure
         remaining_market_capacity = max_market_exposure - existing_market_exposure
         if remaining_market_capacity <= 0.0:
             logger.info(
                 "risk.market_exposure_exceeded",
                 market_id=market_id,
                 existing_exposure=existing_market_exposure,
+                open_exposure=open_market_exposure,
+                pending_exposure=pending_market_exposure,
                 max_market_exposure=max_market_exposure,
             )
             return RiskDecision(
                 allowed=False,
                 reason=(
-                    f"market {market_id} exposure {existing_market_exposure:.2f} >= "
+                    f"market {market_id} exposure {existing_market_exposure:.2f} "
+                    f"(open={open_market_exposure:.2f}, "
+                    f"pending={pending_market_exposure:.2f}) >= "
                     f"max {max_market_exposure:.2f} per market"
                 ),
                 capped_size=0.0,

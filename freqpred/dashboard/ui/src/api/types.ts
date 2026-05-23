@@ -87,6 +87,10 @@ export interface PositionOut {
   created_at: string
   has_factbase: boolean
   series_ticker: string | null
+  exchange_order_id?: string | null
+  requested_contracts?: number | null
+  exchange_order_status?: string | null
+  last_exchange_sync_at?: string | null
 }
 
 export interface StrategyDecisionOut extends PositionOut {
@@ -332,6 +336,16 @@ export interface ChangelogStatusOut {
   last_checked_at: string | null
 }
 
+export interface PendingOrderSummary {
+  position_id: string
+  market_id: string
+  requested_contracts: number | null
+  filled_contracts: number
+  exchange_order_status: string | null
+  age_seconds: number
+  last_exchange_sync_at: string | null
+}
+
 export interface SystemHealthResponse {
   run_state: string
   mode: string
@@ -343,6 +357,7 @@ export interface SystemHealthResponse {
   changelog: ChangelogStatusOut
   pending_orders: number
   oldest_pending_order_age_seconds: number | null
+  pending_orders_detail?: PendingOrderSummary[]
   open_positions: number
   db_ok: boolean
   uptime_seconds: number

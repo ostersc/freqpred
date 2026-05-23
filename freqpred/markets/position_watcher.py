@@ -25,7 +25,7 @@ import websockets
 from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from freqpred.markets.models import MarketRow, PositionRow
+from freqpred.markets.models import MarketRow, Order, PositionRow
 from freqpred.trading import ledger
 
 if TYPE_CHECKING:
@@ -181,15 +181,18 @@ class PositionWatcher:
                 )
 
             try:
-                # Reconcile DB positions vs Kalshi on every connect.
-                async with self._session_factory() as session:
-                    await self._reconcile_positions(session)
-                if self._runtime_telemetry is not None:
-                    await self._runtime_telemetry.note_websocket_reconcile()
-
-                # Flip any pending positions that filled while disconnected.
+                # Flip any pending positions that filled/cancelled while disconnected.
+                # Order matters: reconcile pending rows first so they reach a
+                # terminal state (open/cancelled) before _detect_external_drift
+                # surveys only-open rows.
                 async with self._session_factory() as session:
                     await self._order_manager.reconcile_pending_orders(session)
+
+                # Reconcile DB open positions vs Kalshi net.
+                async with self._session_factory() as session:
+                    await self._detect_external_drift(session)
+                if self._runtime_telemetry is not None:
+                    await self._runtime_telemetry.note_websocket_reconcile()
 
                 # Re-build subscription set from DB (no stale in-memory state).
                 async with self._session_factory() as session:
@@ -201,6 +204,11 @@ class PositionWatcher:
                     await self._send_subscribe(ws, list(self._subscribed))
                 else:
                     log.info("position_watcher.no_open_positions", hint="no ticker subscriptions sent")
+
+                # user_orders + fill are user-scoped (no market_tickers); subscribe
+                # unconditionally so we receive real-time order state for every
+                # live order regardless of whether the market is in _subscribed.
+                await self._send_subscribe_user_channels(ws)
 
                 async for raw in ws:
                     await self._handle_message(json.loads(raw))
@@ -295,6 +303,9 @@ class PositionWatcher:
                 return
             await self._on_market_lifecycle(market_id, status, result, settlement_value)
 
+        elif msg_type in ("user_orders", "fill"):
+            await self._on_user_order_event(msg_type, msg.get("msg", {}))
+
         elif msg_type == "error":
             code = msg.get("msg", {}).get("code")
             error_msg = msg.get("msg", {}).get("msg")
@@ -309,6 +320,48 @@ class PositionWatcher:
 
         else:
             log.debug("position_watcher.unhandled_message", type=msg_type)
+
+    async def _on_user_order_event(self, channel: str, payload: dict) -> None:
+        """Handle a user_orders or fill event by re-applying exchange order state.
+
+        Looks up the position by exchange_order_id and routes through the
+        shared status-mapping helper on ``OrderManager``. The payload includes
+        enough order metadata that we don't need to re-query the REST endpoint.
+        """
+        order_id = payload.get("order_id")
+        if not order_id:
+            log.debug("position_watcher.user_event_missing_order_id", channel=channel)
+            return
+
+        # Reconstruct an Order from the WS payload using the same parsing
+        # logic as place_order/get_order responses.
+        try:
+            exchange_order = self._kalshi_client._order_from_exchange_payload(None, payload)
+        except Exception:
+            log.exception(
+                "position_watcher.user_event_parse_failed",
+                channel=channel,
+                payload=str(payload)[:300],
+            )
+            return
+
+        try:
+            updated = await self._order_manager.apply_ws_event(order_id, exchange_order)
+        except Exception:
+            log.exception(
+                "position_watcher.apply_ws_event_failed",
+                channel=channel,
+                order_id=order_id,
+            )
+            return
+
+        log.info(
+            "position_watcher.user_event_applied",
+            channel=channel,
+            order_id=order_id,
+            updated=updated,
+            status=exchange_order.status,
+        )
 
     async def _on_ticker_update(
         self, market_id: str, yes_bid: float, yes_ask: float, last_price: float = 0.0
@@ -484,10 +537,16 @@ class PositionWatcher:
     # Position reconciliation
     # ------------------------------------------------------------------
 
-    async def _reconcile_positions(self, session: AsyncSession) -> None:
-        """Sync DB open/pending live positions against Kalshi get_positions().
+    async def _detect_external_drift(self, session: AsyncSession) -> None:
+        """Detect drift between DB open live positions and Kalshi net positions.
 
-        For each open/pending live PositionRow in DB:
+        Pending rows are excluded — they are owned exclusively by
+        OrderManager.reconcile_pending_orders (per-order get_order polling).
+        This sweep answers a different question: "did the operator (or any
+        external actor) touch our position outside freqpred?" — for which only
+        the net Kalshi position is informative.
+
+        For each open live PositionRow in DB:
           - If Kalshi net contracts differ from DB contracts: update DB, log warning.
           - If Kalshi has no position for this market (net=0): auto-close at
             current market mid_price, log warning.
@@ -499,7 +558,7 @@ class PositionWatcher:
         result = await session.execute(
             select(PositionRow).where(
                 PositionRow.mode == "live",
-                PositionRow.status.in_(["open", "pending"]),
+                PositionRow.status == "open",
             )
         )
         db_rows = {row.market_id: row for row in result.scalars().all()}
@@ -638,6 +697,27 @@ class PositionWatcher:
                     "params": {
                         "channels": ["ticker", "market_lifecycle_v2"],
                         "market_tickers": market_ids,
+                    },
+                }
+            )
+        )
+
+    async def _send_subscribe_user_channels(
+        self, ws: websockets.WebSocketClientProtocol
+    ) -> None:
+        """Subscribe to user-scoped order/fill channels.
+
+        ``user_orders`` and ``fill`` are global per-account subscriptions and
+        do not accept ``market_tickers`` filters. Always re-issued on reconnect.
+        """
+        log.info("position_watcher.subscribing_user_channels")
+        await ws.send(
+            json.dumps(
+                {
+                    "id": self._next_id(),
+                    "cmd": "subscribe",
+                    "params": {
+                        "channels": ["user_orders", "fill"],
                     },
                 }
             )
