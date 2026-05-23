@@ -17,6 +17,17 @@ function fmtAgeSecs(s: number | null): string {
   return fmtUptime(s)
 }
 
+// Interpolates: red (fresh) → yellow (mid) → grey (near 24h expiry)
+function errorTextColor(ageSeconds: number): string {
+  const t = Math.min(1, ageSeconds / 86400)
+  if (t < 0.5) {
+    const pct = (1 - t / 0.5) * 100
+    return `color-mix(in oklch, var(--neg) ${pct.toFixed(1)}%, var(--warn))`
+  }
+  const pct = (1 - (t - 0.5) / 0.5) * 100
+  return `color-mix(in oklch, var(--warn) ${pct.toFixed(1)}%, var(--fg-3))`
+}
+
 export default function SystemHealth() {
   const queryClient = useQueryClient()
 
@@ -252,7 +263,7 @@ export default function SystemHealth() {
                   <th>Service</th>
                   <th>Last success</th>
                   <th className="r">Age</th>
-                  <th style={{ width: 200 }}>Freshness</th>
+                  <th style={{ width: 200 }}>Staleness</th>
                   <th>Last error</th>
                   <th className="c">Status</th>
                 </tr>
@@ -260,9 +271,18 @@ export default function SystemHealth() {
               <tbody>
                 {data.services.map((s) => {
                   const ageSec = s.age_seconds ?? 0
-                  const pct = Math.min(100, (ageSec / s.stale_after_seconds) * 100)
                   const ok = s.status === 'ok'
-                  const barColor = pct > 90 ? 'var(--neg)' : pct > 60 ? 'var(--warn)' : 'var(--pos)'
+                  // Approximate scheduled interval as half the stale threshold
+                  // (matches build_freshness_specs which sets stale_after = interval * 2)
+                  const intervalSec = s.stale_after_seconds / 2
+                  const totalRange = s.stale_after_seconds * 2
+                  const fillPct = Math.min(100, (ageSec / totalRange) * 100)
+                  const intervalBp = (intervalSec / totalRange) * 100   // 25%
+                  const staleBp = (s.stale_after_seconds / totalRange) * 100  // 50%
+                  // Blend over ±20% of each boundary point for soft transitions
+                  const blend = intervalBp * 0.20  // ~5 percentage points
+                  const gradientBg = `linear-gradient(to right, var(--pos) 0%, var(--pos) ${intervalBp - blend}%, var(--warn) ${intervalBp + blend}%, var(--warn) ${staleBp - blend * 1.2}%, var(--neg) ${staleBp + blend * 1.2}%, var(--neg) 100%)`
+                  const displayPct = (ageSec / s.stale_after_seconds) * 100
                   return (
                     <React.Fragment key={s.service_name}>
                       <tr>
@@ -276,10 +296,11 @@ export default function SystemHealth() {
                         <td className="r mono">{fmtAgeSecs(s.age_seconds)}</td>
                         <td>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <div style={{ flex: 1, height: 4, background: 'var(--bg-3)', borderRadius: 2, overflow: 'hidden' }}>
-                              <div style={{ width: `${pct}%`, height: '100%', background: barColor, transition: 'width 0.3s' }} />
+                            <div style={{ position: 'relative', flex: 1, height: 4, borderRadius: 2, overflow: 'hidden' }}>
+                              <div style={{ position: 'absolute', inset: 0, background: gradientBg }} />
+                              <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: `${100 - fillPct}%`, background: 'var(--bg-3)', transition: 'width 0.3s' }} />
                             </div>
-                            <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-2)', minWidth: 32, textAlign: 'right' }}>{pct.toFixed(0)}%</span>
+                            <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-2)', minWidth: 36, textAlign: 'right' }}>{displayPct.toFixed(0)}%</span>
                           </div>
                         </td>
                         <td>
@@ -289,7 +310,7 @@ export default function SystemHealth() {
                             if (errorAge > 86400) return <span className="muted">—</span>
                             return (
                               <div>
-                                <div className="neg mono" style={{ fontSize: 11.5 }}>{s.last_error_message}</div>
+                                <div className="mono" style={{ fontSize: 11.5, color: errorTextColor(errorAge) }}>{s.last_error_message}</div>
                                 <div className="dim mono" style={{ fontSize: 10.5, marginTop: 2 }}>{new Date(s.last_error_at).toLocaleString()}</div>
                               </div>
                             )
