@@ -10,6 +10,7 @@ import {
   Bar,
   CartesianGrid,
   ComposedChart,
+  Customized,
   Legend,
   Line,
   ReferenceLine,
@@ -76,6 +77,7 @@ interface TimeChartPoint {
   brier: number | null
   market_brier: number | null
   ema: number | null
+  market_ema: number | null
   control: number
 }
 
@@ -496,6 +498,78 @@ function HeatmapTable({
 }
 
 // ---------------------------------------------------------------------------
+// EMA band fill — custom SVG component used via Recharts <Customized>
+// Draws per-segment trapezoids / triangles that exactly follow the two EMA curves.
+// Green when market_ema > system ema (market Brier higher = market worse = we win).
+// ---------------------------------------------------------------------------
+
+interface EmaFillBandProps {
+  xAxisMap?: Record<string, { scale: (v: number) => number }>
+  yAxisMap?: Record<string, { scale: (v: number) => number }>
+  points?: TimeChartPoint[]
+  [key: string]: unknown
+}
+
+function EmaFillBand({ xAxisMap, yAxisMap, points }: EmaFillBandProps) {
+  if (!xAxisMap || !yAxisMap || !points) return null
+  const xAxis = Object.values(xAxisMap)[0]
+  const yAxis = Object.values(yAxisMap)[0]
+  if (!xAxis?.scale || !yAxis?.scale) return null
+
+  const px = (ts: number) => xAxis.scale(ts)
+  const py = (v: number) => yAxis.scale(v)
+
+  type ValidPt = TimeChartPoint & { ema: number; market_ema: number }
+  const valid = points.filter(
+    (pt): pt is ValidPt => pt.ema != null && pt.market_ema != null,
+  )
+  if (valid.length < 2) return null
+
+  const shapes: { pts: string; green: boolean; gap: number }[] = []
+
+  for (let i = 0; i < valid.length - 1; i++) {
+    const a = valid[i], b = valid[i + 1]
+    const xa = px(a.ts), xb = px(b.ts)
+    const aDiff = a.market_ema - a.ema
+    const bDiff = b.market_ema - b.ema
+    const aGreen = aDiff > 0
+    const bGreen = bDiff > 0
+
+    if (aGreen === bGreen) {
+      const coords = [
+        [xa, py(a.ema)], [xb, py(b.ema)],
+        [xb, py(b.market_ema)], [xa, py(a.market_ema)],
+      ]
+      shapes.push({
+        pts: coords.map(([x, y]) => `${x},${y}`).join(' '),
+        green: aGreen,
+        gap: (Math.abs(aDiff) + Math.abs(bDiff)) / 2,
+      })
+    } else {
+      const t = aDiff / (aDiff - bDiff)
+      const xc = xa + t * (xb - xa)
+      const yc = py(a.ema + t * (b.ema - a.ema))
+      shapes.push({ pts: `${xa},${py(a.ema)} ${xa},${py(a.market_ema)} ${xc},${yc}`, green: aGreen, gap: Math.abs(aDiff) / 2 })
+      shapes.push({ pts: `${xc},${yc} ${xb},${py(b.ema)} ${xb},${py(b.market_ema)}`, green: bGreen, gap: Math.abs(bDiff) / 2 })
+    }
+  }
+
+  const maxGap = Math.max(...shapes.map((s) => s.gap), 0.001)
+
+  return (
+    <g>
+      {shapes.map((s, i) => {
+        const norm = s.gap / maxGap
+        const opacity = 0.03 + norm * 0.30
+        return (
+          <polygon key={i} points={s.pts} fill={s.green ? '#22c55e' : '#ef4444'} fillOpacity={opacity} stroke="none" />
+        )
+      })}
+    </g>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
 
@@ -584,19 +658,26 @@ export default function Calibration() {
     const N = Number(emaPeriod)
     const alpha = 2 / (N + 1)
     let emaVal: number | null = null
+    let mktEmaVal: number | null = null
     return tsData.series.map((pt) => {
       const b = pt.brier_score ?? 0
       emaVal = emaVal === null ? b : alpha * b + (1 - alpha) * emaVal
+      const mb = pt.market_brier_score
+      if (mb != null) {
+        mktEmaVal = mktEmaVal === null ? mb : alpha * mb + (1 - alpha) * mktEmaVal
+      }
       return {
         ts: new Date(pt.date).getTime(),
         date: pt.date,
         brier: pt.brier_score,
         market_brier: pt.market_brier_score,
         ema: emaVal,
+        market_ema: mktEmaVal,
         control: 0.25,
       }
     })
   }, [tsData, emaPeriod])
+
 
   // ---------------------------------------------------------------------------
   // Tooltip for distribution
@@ -829,6 +910,7 @@ export default function Calibration() {
                     />
                   ))}
 
+                  <Customized component={EmaFillBand} points={timeChartData} />
                   <Bar dataKey="brier" name="Daily Brier (model)" maxBarSize={16} fill="var(--accent, #6366f1)" fillOpacity={0.65} />
                   <Line
                     dataKey="market_brier"
@@ -842,6 +924,15 @@ export default function Calibration() {
                     dataKey="ema"
                     name={`${emaPeriod}d EMA`}
                     stroke="var(--accent, #6366f1)"
+                    strokeWidth={2}
+                    strokeDasharray="4 2"
+                    dot={false}
+                    connectNulls
+                  />
+                  <Line
+                    dataKey="market_ema"
+                    name={`${emaPeriod}d EMA (market)`}
+                    stroke="var(--warn, #f59e0b)"
                     strokeWidth={2}
                     strokeDasharray="4 2"
                     dot={false}
