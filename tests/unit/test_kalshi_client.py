@@ -650,8 +650,19 @@ class TestCancelOrder:
 
 class TestGetBalance:
     @pytest.mark.asyncio
-    async def test_get_balance_returns_float(self) -> None:
-        """get_balance() converts cents integer to USD float."""
+    async def test_get_balance_prefers_balance_dollars(self) -> None:
+        """Prefers balance_dollars (centi-cent precision) when present."""
+        client = _make_client()
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response({"balance": 1523, "balance_dollars": "15.2312"})
+            result = await client.get_balance()
+
+        assert result == pytest.approx(15.2312)
+
+    @pytest.mark.asyncio
+    async def test_get_balance_falls_back_to_cents(self) -> None:
+        """Falls back to legacy balance (cents) when balance_dollars absent."""
         client = _make_client()
 
         with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:

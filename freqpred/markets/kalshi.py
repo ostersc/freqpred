@@ -604,11 +604,15 @@ class KalshiClient(IMarketClient):
     async def get_balance(self) -> float:
         """Return current available balance in USD.
 
-        Kalshi returns the balance as an integer number of cents.
+        Prefers ``balance_dollars`` (centi-cent precision, added May 2026) and
+        falls back to legacy ``balance`` (integer cents) for older responses.
         """
         data = await self._get("/portfolio/balance")
-        cents: int = data.get("balance", 0)
-        balance_usd = cents / 100.0
+        if "balance_dollars" in data:
+            balance_usd = float(data["balance_dollars"])
+        else:
+            cents: int = data.get("balance", 0)
+            balance_usd = cents / 100.0
         log.info("kalshi.get_balance", balance_usd=balance_usd)
         return balance_usd
 
