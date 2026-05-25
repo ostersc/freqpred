@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-05-23
+**Last updated:** 2026-05-23 (T76)
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -387,13 +387,23 @@ class Position:
     exchange_order_status: str | None    # raw Kalshi status (executed/resting/partial/canceled/...)
     last_exchange_sync_at: datetime | None
 
+    # --- Exit-side order state (live mode only; NULL/0 for paper or pre-T76 rows) ---
+    exit_order_id: str | None            # Kalshi order ID of the sell order
+    exit_fee_usd: float                  # cumulative fees paid across all exit orders (default 0)
+    exit_requested_contracts: int | None # contracts the latest exit order asked to fill
+    exit_filled_contracts: int | None    # cumulative contracts closed via exit orders so far
+    realized_pnl_accumulator: float      # Σ (fill_price_i − entry_price) × contracts_i; used to
+                                         # derive weighted-avg exit_price on final close (default 0)
+
     # --- Filled after resolution ---
-    exit_price: float | None
+    exit_price: float | None             # weighted-avg exit price (set on full close)
     exit_time: datetime | None
     resolution: int | None           # 1 = YES won, 0 = NO won
-    pnl: float | None
+    pnl: float | None                    # net P&L after all entry + exit fees
     pnl_pct: float | None
 ```
+
+**Mid-exit substate:** a live position is *mid-exit* when `exit_requested_contracts > exit_filled_contracts` and `status = 'open'`. This means an IOC sell partially filled; the residual contracts remain open and the position monitor will re-attempt the exit on the next tick if the original exit-trigger condition still holds.
 
 **On snapshotting signal fields into Position:** The signal that triggered a trade may be superseded before the market resolves — a `price_moved` trigger could create a new Signal with a different estimate. Snapshotting `confidence`, `edge`, and `estimated_prob` at entry time means the Position record is a self-contained record of *why* the trade was placed, independent of subsequent re-evaluations. This is essential for honest P&L attribution: did the trades placed at high confidence actually outperform low confidence trades?
 
@@ -872,6 +882,8 @@ The position monitor evaluates exit conditions in this order on every price poll
 6. **Market resolution** — market closes, position settled at $1.00 or $0.00
 
 If none of these conditions fire, the position is held.
+
+**Partial-fill detection and residual sizing:** before evaluating any exit condition, the position's `contracts` field already reflects only the residual (unfilled) contracts. When an IOC exit partially fills, `ledger.partial_close_position` decrements `contracts` to the residual count and leaves `status = 'open'`. On the next tick, stoploss/trailing/ROI/force-exit thresholds are evaluated against the residual size — not the original position size. If the original exit-trigger condition still holds, the monitor submits a new IOC sell for the residual; if it no longer holds (e.g. price recovered above stoploss), the residual remains open and continues to be managed normally.
 
 ### Exit Reason Tagging
 
@@ -1369,7 +1381,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T65** [#65](https://github.com/ostersc/freqpred/issues/65) — Dashboard: signal assessment visibility for source quality + similar-market trust; expose persisted assessment summary and `llm_query_id` on signal/position detail APIs; add dashboard card showing trust score, implied size effect, source-quality summary, similar-market summary, warnings, and a link to the existing LLM audit detail. Depends on: T57.
 - [ ] **T66** [#66](https://github.com/ostersc/freqpred/issues/66) — Deterministic replay/regression harness: record time-locked market/document fixtures and replay signal-generation decisions offline to catch prompt/model/config regressions without introducing a historical backtesting engine. Depends on: T11.
 - [x] **T67** [#67](https://github.com/ostersc/freqpred/issues/67) — Live order-state hardening (entry side): `KalshiClient.get_order`/`cancel_order`; `Order` + `PositionRow` carry exchange-confirmed fill metadata (`requested_contracts`, `exchange_order_status`, `last_exchange_sync_at`); `OrderManager.reconcile_pending_orders` rewritten to per-order `get_order` polling with shared status-mapping helper, `SELECT … FOR UPDATE SKIP LOCKED` concurrency guard, configurable `pending_order_timeout_seconds`, and `place_order → ledger` orphan cancel; `PositionWatcher` subscribes to `user_orders`/`fill` WS channels and renames `_reconcile_positions` → `_detect_external_drift` (open-only scope); `position_monitor` drives reconcile every 30s; risk engine counts pending orders as committed exposure (max positions, total exposure, per-market exposure); dashboard exposes new fields + `pending_orders_detail` table. Depends on: T36, T37, T39, T68.
-- [ ] **T76** — Live order-state hardening (exit side): exit-side partial-fill handling + new ledger primitive for partial close. Tracked separately from T67.
+- [x] **T76** [#76](https://github.com/ostersc/freqpred/issues/76) — Live order-state hardening (exit side): `_execute_live_exit` polls `get_order` until terminal; `ledger.partial_close_position` handles partial IOC fills (residual stays open, weighted-avg exit_price on final close); exit-side columns on `PositionRow` (`exit_order_id`, `exit_fee_usd`, `exit_requested_contracts`, `exit_filled_contracts`, `realized_pnl_accumulator`); `force_exit` uses same polling + `partial_close_position`; dashboard `PositionOut` exposes exit fields; Positions page shows "mid-exit" status indicator. Depends on: T67.
 - [x] **T68** [#68](https://github.com/ostersc/freqpred/issues/68) — Ops freshness telemetry: persist heartbeat/freshness timestamps for ingestion, signal, source-quality, and WebSocket loops; expose real websocket connectivity + last-message telemetry and stale-loop indicators in System Health; optional alerts when critical loops stop making progress. Depends on: T41.
 - [ ] **T69** [#69](https://github.com/ostersc/freqpred/issues/69) — Correlated exposure caps: enforce series/category/event-family risk limits so multiple related markets cannot collectively exceed configured exposure even when per-market limits pass. Depends on: T17.
 - [ ] **T70** [#70](https://github.com/ostersc/freqpred/issues/70) — Series option base-rate history: `series_option_history` table keyed by `(series_ticker, option_code)`; background refresh fetches all settled markets per active series from Kalshi API and upserts YES/NO counts + label; signal prompt receives a base-rate context block when `n >= 3`; Type B single-option series degrade gracefully via low counts.

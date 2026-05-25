@@ -228,6 +228,11 @@ export default function Positions() {
                             ◐
                           </span>
                         )}
+                        {p.exit_requested_contracts != null && p.exit_filled_contracts != null && p.exit_filled_contracts < p.exit_requested_contracts && p.status === 'open' && (
+                          <span title={`Mid-exit: closed ${p.exit_filled_contracts} of ${p.exit_requested_contracts} contracts`} style={{ marginLeft: 4, fontSize: 10, color: 'var(--warn)' }}>
+                            ↘
+                          </span>
+                        )}
                       </td>
                       <td className="r">${p.entry_price.toFixed(2)}</td>
                       <td className="r dim">
@@ -286,7 +291,9 @@ export default function Positions() {
                       </td>
                       <td className="c">
                         <Badge kind={p.status === 'open' ? 'pos' : p.status === 'closed' ? 'muted' : 'warn'} dot>
-                          {p.status}
+                          {p.status === 'open' && p.exit_requested_contracts != null && p.exit_filled_contracts != null && p.exit_filled_contracts < p.exit_requested_contracts
+                            ? 'mid-exit'
+                            : p.status}
                         </Badge>
                       </td>
                       <td><span className="positions-strategy" style={{ fontSize: 11, color: 'var(--fg-2)' }} title={p.strategy_name}>{p.strategy_name}</span></td>

@@ -164,6 +164,14 @@ class PositionRow(Base):
     # Exchange fee paid on fill (live mode only; 0.0 for paper)
     entry_fee_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0", default=0.0)
 
+    # Exit-side order state (live mode only; NULL/0 for paper or pre-T76 rows)
+    exit_order_id: Mapped[str | None] = mapped_column(VARCHAR(255), nullable=True)
+    exit_fee_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default="0", default=0.0)
+    exit_requested_contracts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exit_filled_contracts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Running realized P&L for partial closes; finalized into pnl on full close
+    realized_pnl_accumulator: Mapped[float] = mapped_column(Float, nullable=False, server_default="0", default=0.0)
+
     # Excursion tracking — signed price deltas (multiply by contracts for $ impact)
     mae: Mapped[float | None] = mapped_column(Float, nullable=True)  # max adverse excursion
     mfe: Mapped[float | None] = mapped_column(Float, nullable=True)  # max favorable excursion
@@ -407,3 +415,9 @@ class Position:
     mfe: float | None = None  # max favorable excursion (signed price delta)
     exchange_order_id: str | None = None  # Kalshi order ID (live mode only)
     entry_fee_usd: float = 0.0  # Exchange fee paid on fill (live mode only)
+    # Exit-side order state (live mode only)
+    exit_order_id: str | None = None
+    exit_fee_usd: float = 0.0
+    exit_requested_contracts: int | None = None
+    exit_filled_contracts: int | None = None
+    realized_pnl_accumulator: float = 0.0

@@ -99,7 +99,7 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
       {d.mode === 'live' && (d.exchange_order_id || d.exchange_order_status) && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
           <div style={miniCard}>
-            <div style={miniLabel}>Exchange order</div>
+            <div style={miniLabel}>Entry order</div>
             <div className="mono" style={{ fontSize: 11.5 }}>{d.exchange_order_id ?? '—'}</div>
           </div>
           <div style={miniCard}>
@@ -113,6 +113,28 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
                 ? new Date(d.last_exchange_sync_at).toLocaleString()
                 : '—'}
             </div>
+          </div>
+        </div>
+      )}
+
+      {d.mode === 'live' && d.exit_order_id != null && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+          <div style={miniCard}>
+            <div style={miniLabel}>Exit order</div>
+            <div className="mono" style={{ fontSize: 11.5 }}>{d.exit_order_id}</div>
+          </div>
+          <div style={miniCard}>
+            <div style={miniLabel}>Exit fill</div>
+            <div className="mono" style={{ fontWeight: 600, color: (d.exit_filled_contracts ?? 0) < (d.exit_requested_contracts ?? 0) ? 'var(--warn)' : 'inherit' }}>
+              {d.exit_filled_contracts ?? 0} / {d.exit_requested_contracts ?? '—'} contracts
+              {(d.exit_filled_contracts ?? 0) < (d.exit_requested_contracts ?? 0) && d.status === 'open' && (
+                <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--warn)' }}>mid-exit</span>
+              )}
+            </div>
+          </div>
+          <div style={miniCard}>
+            <div style={miniLabel}>Exit fee</div>
+            <div className="mono dim">${((d.exit_fee_usd ?? 0)).toFixed(4)}</div>
           </div>
         </div>
       )}

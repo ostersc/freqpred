@@ -452,15 +452,16 @@ class PositionMonitor:
         exit_reason: str,
         resolution: int | None,
     ) -> Position | None:
-        """Submit an IOC sell order to Kalshi, then close the position in the ledger.
+        """Submit an IOC sell, poll until terminal state, then record the fill.
 
-        Submits a sell order for the same side as the position (sell YES to exit a YES
-        position, sell NO to exit a NO position).  The order is IOC so it either fills
-        immediately or is cancelled — no resting exit orders are left.
+        Handles partial IOC fills without prematurely closing the ledger:
+        - Full fill → position transitions to 'closed' via partial_close_position
+        - Partial fill → position.contracts decremented; status stays 'open';
+          the next monitor tick will re-attempt the exit for the residual
+        - Zero fill → position left fully open for next tick
 
-        On KalshiAPIError:
-        - Position stays open in DB (caller skips ledger close).
-        - Telegram alert is sent so the operator can intervene manually.
+        On KalshiAPIError placing the order or during polling:
+        - Position stays open; Telegram alert sent for operator intervention.
         """
         assert self._kalshi_client is not None, "kalshi_client required for live exits"
 
@@ -492,7 +493,7 @@ class PositionMonitor:
         )
 
         try:
-            filled_order = await self._kalshi_client.place_order(exit_order)
+            placed_order = await self._kalshi_client.place_order(exit_order)
         except KalshiAPIError as exc:
             logger.error(
                 "position_monitor.live_exit_failed",
@@ -508,28 +509,146 @@ class PositionMonitor:
                     f"exit order failed for {position.market_id}: {exc}",
                     details={"market_id": position.market_id, "status_code": exc.status_code},
                 )
-            if self._alert_dispatcher is not None:
-                try:
-                    await self._alert_dispatcher.send(
-                        f"Failed to submit exit order for {market.question} "
-                        f"(position {position.id}, reason: {exit_reason}). "
-                        "Manual intervention required."
-                    )
-                except Exception:
-                    logger.exception(
-                        "position_monitor.alert_failed", position_id=position.id
-                    )
+            await self._send_exit_alert(
+                market=market,
+                position=position,
+                exit_reason=exit_reason,
+                detail="Failed to submit exit order",
+            )
             return None
 
-        # Use the confirmed fill price from the exchange response
-        confirmed_exit_price = filled_order.price
-        return await ledger.close_position(
-            session,
-            position.id,
-            exit_price=confirmed_exit_price,
+        # IOC orders resolve nearly instantly, but poll for terminal state as a
+        # safety net in case the first response is still transitioning.
+        terminal_order = await self._poll_order_terminal(
+            placed_order,
+            market_id=position.market_id,
+            position_id=position.id,
+        )
+        if terminal_order is None:
+            # Polling timed out — alert and leave open for next tick.
+            await self._send_exit_alert(
+                market=market,
+                position=position,
+                exit_reason=exit_reason,
+                detail="Exit order polling timed out; manual intervention required",
+            )
+            return None
+
+        from freqpred.trading.order_manager import map_order_to_status  # noqa: PLC0415
+
+        mapped = map_order_to_status(terminal_order, position.contracts)
+        filled_count = mapped.contracts
+
+        if filled_count <= 0:
+            # IOC fully cancelled with no fill — leave position open for retry
+            logger.info(
+                "position_monitor.live_exit_no_fill",
+                position_id=position.id,
+                market_id=position.market_id,
+                exit_reason=exit_reason,
+                exchange_order_id=terminal_order.exchange_order_id,
+            )
+            return None
+
+        fill_price = terminal_order.price
+        fee_usd = terminal_order.fee_usd or 0.0
+
+        logger.info(
+            "position_monitor.live_exit_fill",
+            position_id=position.id,
+            market_id=position.market_id,
             exit_reason=exit_reason,
+            requested_contracts=position.contracts,
+            filled_contracts=filled_count,
+            fill_price=fill_price,
+            is_partial=mapped.is_partial,
+            exchange_order_id=terminal_order.exchange_order_id,
+        )
+
+        return await ledger.partial_close_position(
+            session,
+            position,
+            filled_contracts=filled_count,
+            fill_price=fill_price,
+            fee_usd=fee_usd,
+            exit_reason=exit_reason,
+            exit_order_id=terminal_order.exchange_order_id,
+            exit_requested_contracts=position.contracts,
             resolution=resolution,
         )
+
+    async def _poll_order_terminal(
+        self,
+        initial_order: "Order",
+        *,
+        market_id: str,
+        position_id: str,
+        max_polls: int = 5,
+        poll_interval_seconds: float = 0.5,
+    ) -> "Order | None":
+        """Poll get_order until the order reaches a terminal state.
+
+        IOC orders should resolve almost immediately; this is a safety net for
+        race conditions between place_order returning and Kalshi confirming.
+
+        Returns the terminal Order, or None on timeout.
+        """
+        assert self._kalshi_client is not None
+
+        def _is_terminal(order: "Order") -> bool:
+            raw = (order.status or "").lower()
+            return raw in ("executed", "canceled")
+
+        if _is_terminal(initial_order):
+            return initial_order
+
+        order_id = initial_order.exchange_order_id
+        if order_id is None:
+            return initial_order  # no ID to poll — use what we have
+
+        for attempt in range(max_polls):
+            await asyncio.sleep(poll_interval_seconds)
+            try:
+                polled = await self._kalshi_client.get_order(order_id)
+            except KalshiAPIError as exc:
+                logger.warning(
+                    "position_monitor.exit_poll_failed",
+                    position_id=position_id,
+                    market_id=market_id,
+                    exchange_order_id=order_id,
+                    attempt=attempt,
+                    status_code=exc.status_code,
+                )
+                continue
+            if _is_terminal(polled):
+                return polled
+
+        logger.warning(
+            "position_monitor.exit_poll_timeout",
+            position_id=position_id,
+            market_id=market_id,
+            exchange_order_id=order_id,
+            max_polls=max_polls,
+        )
+        return None
+
+    async def _send_exit_alert(
+        self,
+        *,
+        market: Market,
+        position: Position,
+        exit_reason: str,
+        detail: str,
+    ) -> None:
+        if self._alert_dispatcher is None:
+            return
+        try:
+            await self._alert_dispatcher.send(
+                f"{detail} for {market.question} "
+                f"(position {position.id}, reason: {exit_reason})."
+            )
+        except Exception:
+            logger.exception("position_monitor.alert_failed", position_id=position.id)
 
     def _update_peak(self, position: Position, current_price: float) -> None:
         """Advance peak price if current_price is better than recorded peak."""

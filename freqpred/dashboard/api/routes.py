@@ -259,6 +259,10 @@ def _position_row_to_out(
         requested_contracts=row.requested_contracts,
         exchange_order_status=row.exchange_order_status,
         last_exchange_sync_at=row.last_exchange_sync_at,
+        exit_order_id=row.exit_order_id,
+        exit_fee_usd=row.exit_fee_usd or 0.0,
+        exit_requested_contracts=row.exit_requested_contracts,
+        exit_filled_contracts=row.exit_filled_contracts,
     )
 
 

@@ -193,6 +193,10 @@ def _make_position_row(**kw) -> MagicMock:
     row.requested_contracts = kw.get("requested_contracts", None)
     row.exchange_order_status = kw.get("exchange_order_status", None)
     row.last_exchange_sync_at = kw.get("last_exchange_sync_at", None)
+    row.exit_order_id = kw.get("exit_order_id", None)
+    row.exit_fee_usd = kw.get("exit_fee_usd", 0.0)
+    row.exit_requested_contracts = kw.get("exit_requested_contracts", None)
+    row.exit_filled_contracts = kw.get("exit_filled_contracts", None)
     return row
 
 
@@ -1853,3 +1857,32 @@ def test_force_exit_endpoint_502_exchange_error() -> None:
     resp = client.post(f"/api/positions/{pos_id}/force-exit")
 
     assert resp.status_code == 502
+
+
+def test_position_out_exposes_exit_fields_for_live_only() -> None:
+    """PositionOut serializes exit-side fields; non-null values from a live mid-exit row."""
+    pos_row = _make_position_row(
+        mode="live",
+        status="open",
+        exit_order_id="exit-order-99",
+        exit_fee_usd=0.02,
+        exit_requested_contracts=10,
+        exit_filled_contracts=6,
+    )
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _mode_result("live"),
+        _scalar_result(1),
+        _all_result([(pos_row, 0.55, 0.53, 0.57, 0.55, None, 0)]),
+    )
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/positions?status=open")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["exit_order_id"] == "exit-order-99"
+    assert item["exit_fee_usd"] == pytest.approx(0.02)
+    assert item["exit_requested_contracts"] == 10
+    assert item["exit_filled_contracts"] == 6

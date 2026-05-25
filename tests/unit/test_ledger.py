@@ -18,6 +18,7 @@ from freqpred.trading.ledger import (
     get_open_positions,
     get_portfolio_summary,
     open_position,
+    partial_close_position,
     update_position_excursions,
 )
 
@@ -359,3 +360,236 @@ async def test_daily_pnl_excludes_yesterday() -> None:
     assert pnl == pytest.approx(30.0)
     # Verify that execute was called (the filtering happens inside the ORM query)
     session.execute.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# T76: partial_close_position
+# ---------------------------------------------------------------------------
+
+
+def _make_open_row_with_defaults(
+    *,
+    contracts: int = 10,
+    entry_price: float = 0.50,
+    direction: str = "YES",
+    position_id: uuid.UUID | None = None,
+    entry_fee_usd: float = 0.05,
+) -> PositionRow:
+    row = PositionRow(
+        id=position_id or uuid.uuid4(),
+        market_id=MARKET_ID,
+        signal_id=uuid.UUID(SIGNAL_ID),
+        strategy_name="ConservativeDefault",
+        strategy_version="1.0",
+        signal_confidence=0.80,
+        signal_edge=0.15,
+        signal_estimated_prob=0.65,
+        direction=direction,
+        contracts=contracts,
+        entry_price=entry_price,
+        entry_time=NOW,
+        mode="live",
+        status="open",
+        entry_fee_usd=entry_fee_usd,
+        realized_pnl_accumulator=0.0,
+        exit_fee_usd=0.0,
+        exit_filled_contracts=0,
+        exit_requested_contracts=None,
+        exit_order_id=None,
+    )
+    return row
+
+
+def _make_position_from_row(row: PositionRow) -> Position:
+    """Build a minimal Position dataclass from a PositionRow for passing to partial_close."""
+    return Position(
+        id=str(row.id),
+        market_id=row.market_id,
+        signal_id=str(row.signal_id),
+        strategy_name=row.strategy_name,
+        strategy_version=row.strategy_version,
+        signal_confidence=row.signal_confidence,
+        signal_edge=row.signal_edge,
+        signal_estimated_prob=row.signal_estimated_prob,
+        direction=row.direction,
+        contracts=row.contracts,
+        entry_price=row.entry_price,
+        entry_time=row.entry_time,
+        mode=row.mode,
+        status=row.status,
+        entry_fee_usd=row.entry_fee_usd or 0.0,
+        realized_pnl_accumulator=row.realized_pnl_accumulator or 0.0,
+    )
+
+
+def _mock_session_for_row(row: PositionRow) -> MagicMock:
+    result_mock = MagicMock()
+    result_mock.scalar_one.return_value = row
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result_mock)
+    session.commit = AsyncMock()
+    return session
+
+
+@pytest.mark.asyncio
+async def test_partial_close_position_decrements_contracts_and_records_realized_pnl() -> None:
+    """Partial close decrements contracts and accumulates gross P&L (no entry-fee)."""
+    pid = uuid.uuid4()
+    row = _make_open_row_with_defaults(contracts=10, entry_price=0.50, position_id=pid)
+    pos = _make_position_from_row(row)
+    session = _mock_session_for_row(row)
+
+    result = await partial_close_position(
+        session, pos,
+        filled_contracts=6,
+        fill_price=0.55,
+        fee_usd=0.01,
+        exit_reason="stoploss",
+    )
+
+    # 6 contracts closed; 4 remain
+    assert row.contracts == 4
+    # gross accumulator = (0.55 - 0.50) * 6 = 0.30
+    assert row.realized_pnl_accumulator == pytest.approx(0.30)
+    # exit_fee_usd accumulated
+    assert row.exit_fee_usd == pytest.approx(0.01)
+    # exit_filled_contracts running total
+    assert row.exit_filled_contracts == 6
+    # status stays open
+    assert result.status == "open"
+    assert row.exit_time is None
+
+
+@pytest.mark.asyncio
+async def test_partial_close_keeps_status_open_when_residual_remains() -> None:
+    """When residual contracts remain after close, status stays 'open'."""
+    row = _make_open_row_with_defaults(contracts=10, entry_price=0.50)
+    pos = _make_position_from_row(row)
+    session = _mock_session_for_row(row)
+
+    result = await partial_close_position(
+        session, pos,
+        filled_contracts=3,
+        fill_price=0.60,
+        fee_usd=0.005,
+        exit_reason="trailing_stop",
+    )
+
+    assert result.status == "open"
+    assert row.contracts == 7
+
+
+@pytest.mark.asyncio
+async def test_partial_close_transitions_to_closed_when_residual_zero_yes() -> None:
+    """Final close (residual=0, YES direction): weighted-avg exit_price, net pnl, pnl_pct correct."""
+    pid = uuid.uuid4()
+    entry_price = 0.50
+    entry_fee = 0.05
+    row = _make_open_row_with_defaults(
+        contracts=4,
+        entry_price=entry_price,
+        direction="YES",
+        position_id=pid,
+        entry_fee_usd=entry_fee,
+    )
+    # Simulate a prior partial close of 6 contracts at 0.55 with fee=0.01 having occurred
+    # (accumulated into the row before this test simulates "now"):
+    row.realized_pnl_accumulator = (0.55 - 0.50) * 6  # = 0.30
+    row.exit_fee_usd = 0.01
+    row.exit_filled_contracts = 6
+    row.contracts = 4
+
+    pos = _make_position_from_row(row)
+    session = _mock_session_for_row(row)
+
+    result = await partial_close_position(
+        session, pos,
+        filled_contracts=4,
+        fill_price=0.60,
+        fee_usd=0.01,
+        exit_reason="stoploss",
+        exit_order_id="exit-order-2",
+        exit_requested_contracts=4,
+    )
+
+    # After final close:
+    # total_closed = 10, accumulator = 0.30 + (0.60-0.50)*4 = 0.30 + 0.40 = 0.70
+    # weighted_avg_exit = 0.70 / 10 + 0.50 = 0.57
+    # pnl = 0.70 - entry_fee - total_exit_fees = 0.70 - 0.05 - 0.02 = 0.63
+    assert result.status == "closed"
+    assert row.exit_price == pytest.approx(0.57, abs=1e-5)
+    assert row.pnl == pytest.approx(0.63, abs=1e-4)
+    assert row.exit_time is not None
+    assert row.exit_reason == "stoploss"
+    assert row.exit_order_id == "exit-order-2"
+
+
+@pytest.mark.asyncio
+async def test_partial_close_transitions_to_closed_when_residual_zero_no() -> None:
+    """Final close works correctly for a NO direction position."""
+    entry_price = 0.40   # cost per NO contract (1 - yes_ask = 0.40)
+    entry_fee = 0.04
+    row = _make_open_row_with_defaults(
+        contracts=5,
+        entry_price=entry_price,
+        direction="NO",
+        entry_fee_usd=entry_fee,
+    )
+    row.realized_pnl_accumulator = 0.0
+    row.exit_fee_usd = 0.0
+    row.exit_filled_contracts = 0
+
+    pos = _make_position_from_row(row)
+    session = _mock_session_for_row(row)
+
+    # Single full close
+    fill_price = 0.55  # selling NO at 0.55 per contract
+    exit_fee = 0.02
+    result = await partial_close_position(
+        session, pos,
+        filled_contracts=5,
+        fill_price=fill_price,
+        fee_usd=exit_fee,
+        exit_reason="signal",
+    )
+
+    # pnl = (0.55-0.40)*5 - entry_fee - exit_fee = 0.75 - 0.04 - 0.02 = 0.69
+    assert result.status == "closed"
+    assert row.exit_price == pytest.approx(fill_price, abs=1e-5)
+    assert row.pnl == pytest.approx(0.69, abs=1e-4)
+
+
+@pytest.mark.asyncio
+async def test_partial_close_single_tranche_equals_close_position_behavior() -> None:
+    """A single full-fill via partial_close_position yields same pnl as close_position."""
+    pid = uuid.uuid4()
+    entry_price = 0.54
+    entry_fee = 0.0  # no fee for clean comparison
+    row = _make_open_row_with_defaults(
+        contracts=100,
+        entry_price=entry_price,
+        direction="YES",
+        position_id=pid,
+        entry_fee_usd=entry_fee,
+    )
+    row.realized_pnl_accumulator = 0.0
+    row.exit_fee_usd = 0.0
+    row.exit_filled_contracts = 0
+
+    pos = _make_position_from_row(row)
+    session = _mock_session_for_row(row)
+
+    exit_price = 1.0
+    result = await partial_close_position(
+        session, pos,
+        filled_contracts=100,
+        fill_price=exit_price,
+        fee_usd=0.0,
+        exit_reason="market_resolved",
+        resolution=1,
+    )
+
+    # gross = (1.0 - 0.54) * 100 = 46.0; pnl = 46.0 - 0.0 - 0.0 = 46.0
+    assert result.status == "closed"
+    assert row.pnl == pytest.approx(46.0, abs=1e-4)
+    assert row.resolution == 1

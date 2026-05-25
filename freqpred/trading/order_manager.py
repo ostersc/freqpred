@@ -1,6 +1,7 @@
 """Order manager: paper and live trade execution with risk enforcement."""
 from __future__ import annotations
 
+import asyncio
 import inspect
 import math
 import os
@@ -17,6 +18,7 @@ from freqpred.markets.models import Market, MarketRow, Order, Position, Position
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.trading import ledger
+from freqpred.trading.ledger import _row_to_position as _row_to_position_local
 from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
 
 if TYPE_CHECKING:
@@ -111,6 +113,51 @@ def map_order_to_status(
         exchange_status=raw or "unknown",
         is_partial=is_partial,
     )
+
+
+async def _poll_order_terminal(
+    kalshi_client: "KalshiClient",
+    initial_order: Order,
+    *,
+    max_polls: int = 5,
+    poll_interval_seconds: float = 0.5,
+) -> Order | None:
+    """Poll get_order until the order reaches a terminal state (executed/canceled).
+
+    IOC orders resolve nearly instantly; this is a safety net for the small
+    window between place_order returning and Kalshi confirming the final state.
+
+    Returns the terminal Order on success, or None if polling times out.
+    """
+    def _is_terminal(order: Order) -> bool:
+        return (order.status or "").lower() in ("executed", "canceled")
+
+    if _is_terminal(initial_order):
+        return initial_order
+
+    order_id = initial_order.exchange_order_id
+    if order_id is None:
+        return initial_order
+
+    for _ in range(max_polls):
+        await asyncio.sleep(poll_interval_seconds)
+        try:
+            polled = await kalshi_client.get_order(order_id)
+        except KalshiAPIError:
+            logger.warning(
+                "order_manager.exit_poll_get_order_failed",
+                exchange_order_id=order_id,
+            )
+            continue
+        if _is_terminal(polled):
+            return polled
+
+    logger.warning(
+        "order_manager.exit_poll_timeout",
+        exchange_order_id=order_id,
+        max_polls=max_polls,
+    )
+    return None
 
 
 class OrderManager:
@@ -920,8 +967,37 @@ class OrderManager:
                     time_in_force="fill_or_kill",
                     action="sell",
                 )
-                filled = await self._kalshi_client.place_order(exit_order)
-                exit_price = filled.price
+                placed = await self._kalshi_client.place_order(exit_order)
+
+                # Poll until terminal; IOC orders resolve near-instantly.
+                terminal = await _poll_order_terminal(
+                    self._kalshi_client, placed, max_polls=5, poll_interval_seconds=0.5
+                )
+                if terminal is None:
+                    raise KalshiAPIError(
+                        503,
+                        f"Exit order polling timed out for {position_id!r}",
+                    )
+
+                mapped = map_order_to_status(terminal, pos_row.contracts)
+                filled_count = mapped.contracts
+                if filled_count <= 0:
+                    raise ValueError(
+                        f"Force exit IOC for {position_id!r} filled 0 contracts; "
+                        "position left open — retry required"
+                    )
+
+                pos = _row_to_position_local(pos_row)
+                return await ledger.partial_close_position(
+                    session,
+                    pos,
+                    filled_contracts=filled_count,
+                    fill_price=terminal.price,
+                    fee_usd=terminal.fee_usd or 0.0,
+                    exit_reason=exit_reason,
+                    exit_order_id=terminal.exchange_order_id,
+                    exit_requested_contracts=pos_row.contracts,
+                )
 
             return await ledger.close_position(
                 session,

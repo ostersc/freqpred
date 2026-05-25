@@ -111,6 +111,11 @@ class PositionOut(BaseModel):
     requested_contracts: int | None = None
     exchange_order_status: str | None = None
     last_exchange_sync_at: datetime | None = None
+    # Exit-side order state (live mode only; NULL for paper or pre-T76 rows).
+    exit_order_id: str | None = None
+    exit_fee_usd: float = 0.0
+    exit_requested_contracts: int | None = None
+    exit_filled_contracts: int | None = None
 
 
 class PositionListResponse(BaseModel):

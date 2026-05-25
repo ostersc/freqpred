@@ -91,6 +91,11 @@ export interface PositionOut {
   requested_contracts?: number | null
   exchange_order_status?: string | null
   last_exchange_sync_at?: string | null
+  // Exit-side order state (live mode only)
+  exit_order_id?: string | null
+  exit_fee_usd?: number
+  exit_requested_contracts?: number | null
+  exit_filled_contracts?: number | null
 }
 
 export interface StrategyDecisionOut extends PositionOut {

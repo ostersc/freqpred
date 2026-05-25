@@ -1718,7 +1718,7 @@ async def test_force_exit_live_uses_reconciled_net_size(monkeypatch: pytest.Monk
 
     closed_pos = _make_position()
     with patch(
-        "freqpred.trading.order_manager.ledger.close_position",
+        "freqpred.trading.order_manager.ledger.partial_close_position",
         new_callable=AsyncMock,
         return_value=closed_pos,
     ):

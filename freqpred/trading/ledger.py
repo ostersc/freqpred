@@ -97,6 +97,82 @@ async def close_position(
     return _row_to_position(row)
 
 
+async def partial_close_position(
+    session: AsyncSession,
+    position: "Position",
+    *,
+    filled_contracts: int,
+    fill_price: float,
+    fee_usd: float,
+    exit_reason: str,
+    exit_order_id: str | None = None,
+    exit_requested_contracts: int | None = None,
+    resolution: int | None = None,
+    _now: datetime | None = None,
+) -> "Position":
+    """Realize P&L on a subset of contracts; leave the residual open.
+
+    Accumulates gross P&L (without entry fee) into realized_pnl_accumulator
+    and exit fees into exit_fee_usd. When the last contract closes (contracts
+    drops to 0) the position is transitioned to 'closed' with a weighted-avg
+    exit_price and net P&L that includes both entry and all exit fees.
+    """
+    now = _now or datetime.now(tz=timezone.utc)
+
+    result = await session.execute(
+        select(PositionRow).where(PositionRow.id == uuid.UUID(str(position.id)))
+    )
+    row: PositionRow = result.scalar_one()
+
+    # Accumulate gross P&L contribution for this tranche (no entry-fee deduction;
+    # that happens once on final close). This lets us derive weighted-avg exit_price
+    # purely from the accumulator + entry_price on final close.
+    partial_gross = (fill_price - row.entry_price) * filled_contracts
+    row.realized_pnl_accumulator = (row.realized_pnl_accumulator or 0.0) + partial_gross
+
+    # Accumulate exit fees across all IOC orders so final pnl net of all fees.
+    row.exit_fee_usd = (row.exit_fee_usd or 0.0) + fee_usd
+
+    # Running total of contracts closed via exit orders (used for weighted-avg
+    # on final close and the dashboard's exit fill breakdown).
+    prev_filled = row.exit_filled_contracts or 0
+    row.exit_filled_contracts = prev_filled + filled_contracts
+
+    # Per-order metadata: latest order ID + requested count for the dashboard.
+    if exit_order_id is not None:
+        row.exit_order_id = exit_order_id
+    if exit_requested_contracts is not None:
+        row.exit_requested_contracts = exit_requested_contracts
+
+    row.contracts -= filled_contracts
+
+    if row.contracts <= 0:
+        # Final close: derive weighted-avg exit_price and net P&L.
+        total_closed = row.exit_filled_contracts  # fully accumulated at this point
+        if total_closed and total_closed > 0:
+            weighted_avg_exit = (row.realized_pnl_accumulator / total_closed) + row.entry_price
+        else:
+            weighted_avg_exit = fill_price
+
+        entry_fee = row.entry_fee_usd or 0.0
+        total_exit_fee = row.exit_fee_usd or 0.0
+        pnl = row.realized_pnl_accumulator - entry_fee - total_exit_fee
+        cost_basis = row.entry_price * (total_closed or 0) + entry_fee
+        pnl_pct = pnl / cost_basis if cost_basis else 0.0
+
+        row.exit_price = round(weighted_avg_exit, 6)
+        row.exit_time = now
+        row.exit_reason = exit_reason
+        row.resolution = resolution
+        row.status = "closed"
+        row.pnl = round(pnl, 4)
+        row.pnl_pct = round(pnl_pct, 6)
+        row.contracts = 0
+
+    await session.commit()
+    return _row_to_position(row)
+
+
 async def update_position_excursions(
     session: AsyncSession,
     position_id: str,
@@ -402,4 +478,9 @@ def _row_to_position(row: PositionRow) -> Position:
         mfe=row.mfe,
         exchange_order_id=row.exchange_order_id,
         entry_fee_usd=row.entry_fee_usd or 0.0,
+        exit_order_id=row.exit_order_id,
+        exit_fee_usd=row.exit_fee_usd or 0.0,
+        exit_requested_contracts=row.exit_requested_contracts,
+        exit_filled_contracts=row.exit_filled_contracts,
+        realized_pnl_accumulator=row.realized_pnl_accumulator or 0.0,
     )

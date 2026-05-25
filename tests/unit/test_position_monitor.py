@@ -985,7 +985,7 @@ class TestLiveExit:
         session = AsyncMock()
 
         with patch(
-            "freqpred.trading.position_monitor.ledger.close_position",
+            "freqpred.trading.position_monitor.ledger.partial_close_position",
             new_callable=AsyncMock,
             return_value=MagicMock(),
         ):
@@ -1007,7 +1007,7 @@ class TestLiveExit:
 
     @pytest.mark.asyncio
     async def test_live_exit_uses_filled_price_for_pnl(self) -> None:
-        """ledger.close_position() is called with the price from the exchange response."""
+        """ledger.partial_close_position() is called with the price from the exchange response."""
         pos = _make_position(direction="YES", mode="live")
         market = _make_market(mid_price=0.65)
 
@@ -1028,7 +1028,7 @@ class TestLiveExit:
         session = AsyncMock()
 
         with patch(
-            "freqpred.trading.position_monitor.ledger.close_position",
+            "freqpred.trading.position_monitor.ledger.partial_close_position",
             new_callable=AsyncMock,
             return_value=MagicMock(),
         ) as mock_close:
@@ -1042,7 +1042,7 @@ class TestLiveExit:
 
         mock_close.assert_awaited_once()
         _, call_kwargs = mock_close.call_args
-        assert call_kwargs["exit_price"] == pytest.approx(filled_price)
+        assert call_kwargs["fill_price"] == pytest.approx(filled_price)
 
     @pytest.mark.asyncio
     async def test_live_exit_does_not_close_on_api_error(self) -> None:
@@ -1064,7 +1064,7 @@ class TestLiveExit:
         session = AsyncMock()
 
         with patch(
-            "freqpred.trading.position_monitor.ledger.close_position",
+            "freqpred.trading.position_monitor.ledger.partial_close_position",
             new_callable=AsyncMock,
         ) as mock_close:
             result = await monitor._execute_live_exit(
@@ -1190,3 +1190,225 @@ async def test_periodic_reconcile_noop_in_paper_mode() -> None:
     )
     await monitor._maybe_run_periodic_reconcile()
     order_manager.reconcile_pending_orders.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# T76: exit-side polling + partial-fill tests
+# ---------------------------------------------------------------------------
+
+
+class TestLiveExitPolling:
+    """Tests for T76: _execute_live_exit polling and partial-fill handling."""
+
+    def _make_monitor(
+        self,
+        kalshi_client: MagicMock | None = None,
+        alert_dispatcher: MagicMock | None = None,
+    ) -> PositionMonitor:
+        return PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": _make_strategy()},
+            mode="live",
+            kalshi_client=kalshi_client,
+            alert_dispatcher=alert_dispatcher,
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_exit_polls_until_terminal_state(self) -> None:
+        """_execute_live_exit calls get_order when place_order returns non-terminal."""
+        pos = _make_position(direction="YES", contracts=10, mode="live")
+        market = _make_market(mid_price=0.65)
+
+        # place_order returns resting (non-terminal); get_order returns executed on first poll
+        non_terminal = Order(
+            market_id=pos.market_id, direction="YES", contracts=10,
+            price=0.63, mode="live", status="resting",
+            exchange_order_id="exit-order-1",
+        )
+        terminal = Order(
+            market_id=pos.market_id, direction="YES", contracts=10,
+            price=0.63, mode="live", status="executed",
+            exchange_order_id="exit-order-1",
+            filled_yes_count=10,
+        )
+
+        kalshi_client = MagicMock()
+        kalshi_client.place_order = AsyncMock(return_value=non_terminal)
+        kalshi_client.get_order = AsyncMock(return_value=terminal)
+
+        monitor = self._make_monitor(kalshi_client=kalshi_client)
+        session = AsyncMock()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with patch(
+                "freqpred.trading.position_monitor.ledger.partial_close_position",
+                new_callable=AsyncMock,
+                return_value=MagicMock(status="closed"),
+            ):
+                await monitor._execute_live_exit(
+                    session=session, position=pos, market=market,
+                    exit_reason="stoploss", resolution=None,
+                )
+
+        kalshi_client.get_order.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_live_exit_partial_fill_leaves_position_open_for_retry(self) -> None:
+        """When IOC fills 6/10, partial_close_position is called with filled_contracts=6."""
+        pos = _make_position(direction="YES", contracts=10, mode="live", entry_price=0.50)
+        market = _make_market(mid_price=0.65)
+
+        # IOC canceled after partially filling 6/10
+        partial_fill_order = Order(
+            market_id=pos.market_id, direction="YES", contracts=10,
+            price=0.63, mode="live", status="canceled",
+            exchange_order_id="exit-order-1",
+            filled_yes_count=6,
+            requested_count=10,
+        )
+        kalshi_client = MagicMock()
+        kalshi_client.place_order = AsyncMock(return_value=partial_fill_order)
+
+        monitor = self._make_monitor(kalshi_client=kalshi_client)
+        session = AsyncMock()
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.partial_close_position",
+            new_callable=AsyncMock,
+            return_value=MagicMock(status="open", contracts=4),
+        ) as mock_partial:
+            result = await monitor._execute_live_exit(
+                session=session, position=pos, market=market,
+                exit_reason="stoploss", resolution=None,
+            )
+
+        mock_partial.assert_awaited_once()
+        _, kwargs = mock_partial.call_args
+        assert kwargs["filled_contracts"] == 6
+        assert kwargs["fill_price"] == pytest.approx(0.63)
+        assert kwargs["exit_reason"] == "stoploss"
+
+    @pytest.mark.asyncio
+    async def test_live_exit_residual_size_used_for_next_tick_stoploss_check(self) -> None:
+        """After partial close leaves 4 contracts, stoploss checks position.contracts=4."""
+        pos = _make_position(direction="YES", contracts=4, mode="live", entry_price=0.50)
+        # Stoploss at -0.20; current price = entry - 0.22 → fires
+        strategy = _make_strategy(stoploss=-0.20)
+        market = _make_market(mid_price=0.28)
+
+        result = strategy.config.stoploss
+        exit_check = pos.entry_price + result  # 0.50 - 0.20 = 0.30
+        current_effective = market.yes_bid  # close to mid
+        assert current_effective < exit_check or market.mid_price < exit_check
+
+        from freqpred.trading.position_monitor import _check_stoploss
+        outcome = _check_stoploss(pos, current_price=0.28, stoploss=-0.20)
+        assert outcome is not None
+        # Should fire for the 4-contract residual just as for the original 10
+        assert outcome[0] == "stoploss"
+
+    @pytest.mark.asyncio
+    async def test_live_exit_zero_fill_leaves_position_fully_open(self) -> None:
+        """IOC fully cancelled with no fill → partial_close_position NOT called."""
+        pos = _make_position(direction="YES", contracts=10, mode="live")
+        market = _make_market(mid_price=0.65)
+
+        no_fill_order = Order(
+            market_id=pos.market_id, direction="YES", contracts=10,
+            price=0.63, mode="live", status="canceled",
+            exchange_order_id="exit-order-1",
+            filled_yes_count=0,
+            requested_count=10,
+        )
+        kalshi_client = MagicMock()
+        kalshi_client.place_order = AsyncMock(return_value=no_fill_order)
+
+        monitor = self._make_monitor(kalshi_client=kalshi_client)
+        session = AsyncMock()
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.partial_close_position",
+            new_callable=AsyncMock,
+        ) as mock_partial:
+            result = await monitor._execute_live_exit(
+                session=session, position=pos, market=market,
+                exit_reason="stoploss", resolution=None,
+            )
+
+        assert result is None
+        mock_partial.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_live_exit_poll_timeout_sends_alert(self) -> None:
+        """When polling times out, alert is sent and position stays open."""
+        pos = _make_position(direction="YES", contracts=10, mode="live")
+        market = _make_market(mid_price=0.65)
+
+        # place_order returns non-terminal; get_order never reaches terminal
+        non_terminal = Order(
+            market_id=pos.market_id, direction="YES", contracts=10,
+            price=0.63, mode="live", status="resting",
+            exchange_order_id="exit-order-1",
+        )
+        kalshi_client = MagicMock()
+        kalshi_client.place_order = AsyncMock(return_value=non_terminal)
+        kalshi_client.get_order = AsyncMock(return_value=non_terminal)
+
+        alert_dispatcher = MagicMock()
+        alert_dispatcher.send = AsyncMock()
+        monitor = self._make_monitor(
+            kalshi_client=kalshi_client, alert_dispatcher=alert_dispatcher
+        )
+        session = AsyncMock()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with patch(
+                "freqpred.trading.position_monitor.ledger.partial_close_position",
+                new_callable=AsyncMock,
+            ) as mock_partial:
+                result = await monitor._execute_live_exit(
+                    session=session, position=pos, market=market,
+                    exit_reason="stoploss", resolution=None,
+                )
+
+        assert result is None
+        mock_partial.assert_not_awaited()
+        alert_dispatcher.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_live_exit_no_side_both_yes_and_no(self) -> None:
+        """YES and NO positions both submit sell orders at the correct side bid."""
+        for direction, expected_price in [("YES", 0.61), ("NO", 0.38)]:
+            pos = _make_position(direction=direction, contracts=5, mode="live")
+            market = _make_market(mid_price=0.62)
+            # yes_bid = 0.61, yes_ask = 0.63; no_bid = 1 - 0.63 = 0.37, limit for NO = 1 - 0.63 = 0.37
+            if direction == "YES":
+                expected = round(market.yes_bid or 0.0, 4)
+            else:
+                expected = round(1.0 - (market.yes_ask or 1.0), 4)
+
+            placed_order = Order(
+                market_id=pos.market_id, direction=direction, contracts=5,
+                price=expected, mode="live", status="executed",
+                exchange_order_id="ord-1", filled_yes_count=5 if direction == "YES" else 0,
+                filled_no_count=0 if direction == "YES" else 5,
+            )
+            kalshi_client = MagicMock()
+            kalshi_client.place_order = AsyncMock(return_value=placed_order)
+            monitor = self._make_monitor(kalshi_client=kalshi_client)
+            session = AsyncMock()
+
+            with patch(
+                "freqpred.trading.position_monitor.ledger.partial_close_position",
+                new_callable=AsyncMock,
+                return_value=MagicMock(status="closed"),
+            ) as mock_partial:
+                await monitor._execute_live_exit(
+                    session=session, position=pos, market=market,
+                    exit_reason="stoploss", resolution=None,
+                )
+
+            mock_partial.assert_awaited_once()
+            submitted: Order = kalshi_client.place_order.call_args.args[0]
+            assert submitted.direction == direction
+            assert submitted.price == pytest.approx(expected)

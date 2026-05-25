@@ -126,7 +126,7 @@ export default function StrategyDecisions() {
                   <th>Exited</th>
                   <th>Market</th>
                   <th className="c">Dir</th>
-                  <th className="r">Ctr</th>
+                  <th className="r">Contracts</th>
                   <th className="r">Entry</th>
                   <th className="r">Exit</th>
                   <th className="c">Result</th>
@@ -159,7 +159,7 @@ export default function StrategyDecisions() {
                         <td className="c">
                           <Badge kind={row.direction === 'YES' ? 'pos' : 'neg'}>{row.direction}</Badge>
                         </td>
-                        <td className="r">{row.contracts}</td>
+                        <td className="r">{row.exit_filled_contracts ?? row.contracts}</td>
                         <td className="r">${fmt(row.entry_price)}</td>
                         <td className="r">{row.exit_price !== null ? `$${fmt(row.exit_price)}` : <span className="muted">—</span>}</td>
                         <td className="c">
