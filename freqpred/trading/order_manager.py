@@ -450,6 +450,7 @@ class OrderManager:
 
             order = Order(
                 market_id=market.id,
+                event_ticker=market.metadata.get("event_ticker", ""),
                 direction=signal.direction,
                 contracts=contracts,
                 price=entry_price,
@@ -960,6 +961,7 @@ class OrderManager:
 
                 exit_order = Order(
                     market_id=pos_row.market_id,
+                    event_ticker=mkt_row.metadata_.get("event_ticker", ""),
                     direction=pos_row.direction,
                     contracts=pos_row.contracts,
                     price=limit_price,

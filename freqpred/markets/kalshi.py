@@ -412,24 +412,42 @@ class KalshiClient(IMarketClient):
     async def place_order(self, order: Order) -> Order:
         """Submit a limit order to Kalshi.
 
-        Maps Order fields to the Kalshi API request format and returns the Order
-        with exchange_order_id and status populated from the response.
+        Uses the V2 /portfolio/events/orders path when order.event_ticker is set.
+        Falls back to legacy /portfolio/orders with a warning when event_ticker is
+        empty (e.g. position opened before event_ticker was reliably stored).
         """
         price_cents = int(round(order.price * 100))
-        body: dict[str, Any] = {
-            "ticker": order.market_id,
-            "action": order.action,  # "buy" | "sell"
-            "side": order.direction.lower(),  # "yes" | "no"
-            "type": "limit",
-            "count": order.contracts,
-            # Kalshi requires exactly one of yes_price/no_price (integer cents).
-            "yes_price" if order.direction == "YES" else "no_price": price_cents,
-        }
+        if order.event_ticker:
+            path = "/portfolio/events/orders"
+            body: dict[str, Any] = {
+                "event_ticker": order.event_ticker,
+                "market_ticker": order.market_id,
+                "action": order.action,
+                "side": order.direction.lower(),
+                "type": "limit",
+                "count": order.contracts,
+                "yes_price" if order.direction == "YES" else "no_price": price_cents,
+            }
+        else:
+            log.warning(
+                "kalshi.place_order.legacy_fallback",
+                market_id=order.market_id,
+                reason="event_ticker empty; using legacy endpoint",
+            )
+            path = "/portfolio/orders"
+            body = {
+                "ticker": order.market_id,
+                "action": order.action,
+                "side": order.direction.lower(),
+                "type": "limit",
+                "count": order.contracts,
+                "yes_price" if order.direction == "YES" else "no_price": price_cents,
+            }
         # Only send time_in_force when non-default; omitting the field lets Kalshi
         # apply its default (GTC). Kalshi accepts "fill_or_kill" for immediate exits.
         if order.time_in_force.upper() != "GTC":
             body["time_in_force"] = order.time_in_force
-        data = await self._post("/portfolio/orders", body)
+        data = await self._post(path, body)
         exchange_order = data.get("order", data)
         return self._order_from_exchange_payload(order, exchange_order)
 
@@ -442,7 +460,7 @@ class KalshiClient(IMarketClient):
         price but the freqpred-level ``contracts`` field reflects the total
         filled across both sides (yes + no).
         """
-        data = await self._get(f"/portfolio/orders/{order_id}")
+        data = await self._get(f"/portfolio/events/orders/{order_id}")
         exchange_order = data.get("order", data)
         return self._order_from_exchange_payload(None, exchange_order)
 
@@ -452,7 +470,7 @@ class KalshiClient(IMarketClient):
         Returns the final order state from Kalshi (the cancel response includes
         the order object reflecting any fills that landed before cancellation).
         """
-        data = await self._delete(f"/portfolio/orders/{order_id}")
+        data = await self._delete(f"/portfolio/events/orders/{order_id}")
         exchange_order = data.get("order", data)
         log.info(
             "kalshi.cancel_order",

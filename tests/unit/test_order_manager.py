@@ -38,7 +38,7 @@ BANKROLL = 10_000.0
 # ---------------------------------------------------------------------------
 
 
-def _make_market(yes_bid: float = 0.50, yes_ask: float = 0.54) -> Market:
+def _make_market(yes_bid: float = 0.50, yes_ask: float = 0.54, event_ticker: str = "KXTEST") -> Market:
     return Market(
         id=MARKET_ID,
         platform="kalshi",
@@ -53,6 +53,7 @@ def _make_market(yes_bid: float = 0.50, yes_ask: float = 0.54) -> Market:
         last_fetched_at=NOW,
         price_updated_at=NOW,
         metadata_fetched_at=NOW,
+        metadata={"event_ticker": event_ticker},
     )
 
 
@@ -1130,12 +1131,14 @@ def _mock_mkt_row(
     yes_bid: float = 0.55,
     yes_ask: float = 0.65,
     result: str | None = None,
+    event_ticker: str = "KXTEST",
 ) -> MagicMock:
     row = MagicMock()
     row.mid_price = mid_price
     row.yes_bid = yes_bid
     row.yes_ask = yes_ask
     row.result = result
+    row.metadata_ = {"event_ticker": event_ticker}
     return row
 
 
@@ -1854,3 +1857,83 @@ async def test_force_exit_live_resolved_market_case_insensitive(monkeypatch: pyt
             f"result={result_str!r}, direction={direction}: expected {expected_price}"
         mock_kalshi.get_positions.assert_awaited_once()
         mock_kalshi.place_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# T77: event_ticker wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_entry_order_populates_event_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entry Order passed to place_order has event_ticker from market.metadata."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    filled_order = Order(
+        market_id=MARKET_ID, direction="YES", contracts=10, price=0.56,
+        mode="live", exchange_order_id="ORD-ET", status="resting",
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+
+    market = _make_market(yes_bid=0.52, yes_ask=0.56, event_ticker="KXPRES-25")
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=_make_position(contracts=math.floor(100.0 / 0.56), entry_price=0.56),
+    ):
+        await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    mock_kalshi.place_order.assert_called_once()
+    submitted: Order = mock_kalshi.place_order.call_args.args[0]
+    assert submitted.event_ticker == "KXPRES-25"
+    assert submitted.market_id == MARKET_ID
+
+
+@pytest.mark.asyncio
+async def test_force_exit_order_populates_event_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit Order in force_exit has event_ticker from mkt_row.metadata_."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live", contracts=5)
+    mkt = _mock_mkt_row(yes_bid=0.55, yes_ask=0.65, result=None, event_ticker="KXPRES-25")
+    session = _make_force_exit_session(pos, mkt)
+    sf = _make_force_exit_sf(session)
+
+    exchange_pos = MagicMock()
+    exchange_pos.market_id = MARKET_ID
+    exchange_pos.direction = "YES"
+    exchange_pos.contracts = 5
+
+    placed_order = Order(
+        market_id=MARKET_ID, direction="YES", contracts=5, price=0.55,
+        mode="live", status="executed",
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+    mock_kalshi.place_order = AsyncMock(return_value=placed_order)
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.partial_close_position",
+        new_callable=AsyncMock,
+        return_value=_make_position(),
+    ):
+        await om.force_exit(str(pos_id))
+
+    mock_kalshi.place_order.assert_called_once()
+    exit_order: Order = mock_kalshi.place_order.call_args.args[0]
+    assert exit_order.event_ticker == "KXPRES-25"
+    assert exit_order.action == "sell"

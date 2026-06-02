@@ -362,6 +362,7 @@ class Order:
     contracts: int
     price: float
     mode: str        # "paper" | "live"
+    event_ticker: str = ""  # Kalshi event ticker; required for V2 /portfolio/events/orders
     id: str | None = None
     exchange_order_id: str | None = None
     status: str = "pending"

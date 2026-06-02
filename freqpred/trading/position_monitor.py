@@ -484,6 +484,7 @@ class PositionMonitor:
 
         exit_order = Order(
             market_id=position.market_id,
+            event_ticker=market.metadata.get("event_ticker", ""),
             direction=position.direction,
             contracts=position.contracts,
             price=limit_price,

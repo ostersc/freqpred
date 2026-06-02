@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-05-23 (T76)
+**Last updated:** 2026-06-02 (T77)
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -1390,6 +1390,7 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T74** [#74](https://github.com/ostersc/freqpred/issues/74) — Calibration page tabs: Distribution (existing scatter plot), Over Time (daily Brier time-series with EMA + prompt-version flags), By Option (heatmap of `series_ticker × option_code` rows vs prompt-version columns, colored by Brier-vs-market delta, with vs-avg delta, n-bar, market-difficulty bar, and row sparkline).
 - [ ] **T75** [#75](https://github.com/ostersc/freqpred/issues/75) — Kalshi changelog monitor: daily RSS fetch of `https://docs.kalshi.com/changelog/rss.xml`, `kalshi_changelog_state` DB singleton tracking `last_reviewed_at` / `unreviewed_count` / `has_unreviewed_breaking_change`, warning/critical alerts on new entries, system health surface, telemetry heartbeat.
 - [x] **T73** [#73](https://github.com/ostersc/freqpred/issues/73) — FactBase phrase frequency gate + signal enrichment for KXTRUMPSAY markets: Haiku extracts search terms (slash variants + plurals/possessives) once per market; `factbase_phrase_frequency` table caches window counts (`in_market_count`, 7d, 30d, 365d) + top Trump quotes; `is_market_interesting()` blocks until cache is ready; signal prompt gets a `PHRASE FREQUENCY DATA` block; assessor payload gets `phrase_frequency`; `SERVICE_FACTBASE_SCHEDULER` telemetry heartbeat; bumps signal prompt to `signal-v8`. Depends on: T70, T71.
+- [ ] **T77** [#77](https://github.com/ostersc/freqpred/issues/77) — Migrate order endpoints from legacy `/portfolio/orders` to V2 `/portfolio/events/orders`: add `event_ticker` to `Order` dataclass; update `place_order`, `get_order`, `cancel_order` in `kalshi.py`; populate `event_ticker` from `market.metadata` at entry time and via `MarketRow` join at exit time; empty-ticker fallback to legacy path with warning log.
 
 **`OrderTypes` interface** (strategy-level, all fields have defaults — existing strategies unchanged):
 ```python

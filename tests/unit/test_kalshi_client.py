@@ -531,31 +531,67 @@ class TestPost:
 
 class TestPlaceOrder:
     @pytest.mark.asyncio
-    async def test_place_order_constructs_correct_payload(self) -> None:
-        """place_order() maps direction, contracts, price correctly (price in cents)."""
+    async def test_place_order_uses_v2_endpoint(self) -> None:
+        """place_order() with event_ticker uses V2 path and body shape."""
         client = _make_client()
-        order = Order(market_id="KXPRES-25-DEM", direction="YES", contracts=10, price=0.45, mode="live")
+        order = Order(
+            market_id="KXPRES-25-DEM",
+            event_ticker="KXPRES-25",
+            direction="YES",
+            contracts=10,
+            price=0.45,
+            mode="live",
+        )
         resp_data = {"order": {"order_id": "ORD-123", "status": "resting"}}
 
         with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = _mock_response(resp_data)
             await client.place_order(order)
 
-        call_kwargs = mock_post.call_args.kwargs
-        body = call_kwargs.get("json") or mock_post.call_args.args[1]
-        assert body["ticker"] == "KXPRES-25-DEM"
+        call_args = mock_post.call_args
+        url = call_args.args[0] if call_args.args else call_args.kwargs.get("url", "")
+        assert "/portfolio/events/orders" in url
+        body = call_args.kwargs.get("json") or call_args.args[1]
+        assert body["event_ticker"] == "KXPRES-25"
+        assert body["market_ticker"] == "KXPRES-25-DEM"
+        assert "ticker" not in body
         assert body["side"] == "yes"
         assert body["count"] == 10
-        assert body["yes_price"] == 45  # YES direction → yes_price in cents (0.45 → 45)
-        assert "limit_price" not in body
+        assert body["yes_price"] == 45
         assert body["action"] == "buy"
         assert body["type"] == "limit"
+
+    @pytest.mark.asyncio
+    async def test_place_order_empty_event_ticker_fallback(self) -> None:
+        """place_order() with empty event_ticker falls back to legacy path and logs a warning."""
+        client = _make_client()
+        order = Order(market_id="KXPRES-25-DEM", direction="YES", contracts=5, price=0.50, mode="live")
+        resp_data = {"order": {"order_id": "ORD-LEG", "status": "resting"}}
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(resp_data)
+            result = await client.place_order(order)
+
+        call_args = mock_post.call_args
+        url = call_args.args[0] if call_args.args else call_args.kwargs.get("url", "")
+        assert "/portfolio/orders" in url
+        assert "/events/" not in url
+        body = call_args.kwargs.get("json") or call_args.args[1]
+        assert body["ticker"] == "KXPRES-25-DEM"
+        assert result.exchange_order_id == "ORD-LEG"
 
     @pytest.mark.asyncio
     async def test_place_order_returns_order_with_exchange_id(self) -> None:
         """place_order() returns an Order with exchange_order_id and status from response."""
         client = _make_client()
-        order = Order(market_id="KXPRES-25-DEM", direction="NO", contracts=5, price=0.55, mode="live")
+        order = Order(
+            market_id="KXPRES-25-DEM",
+            event_ticker="KXPRES-25",
+            direction="NO",
+            contracts=5,
+            price=0.55,
+            mode="live",
+        )
         resp_data = {"order": {"order_id": "ORD-456", "status": "resting"}}
 
         with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
@@ -576,8 +612,8 @@ class TestPlaceOrder:
 
 class TestGetOrder:
     @pytest.mark.asyncio
-    async def test_get_order_parses_fill_fields(self) -> None:
-        """get_order() parses status, requested, filled, remaining, fees, timestamps."""
+    async def test_get_order_uses_v2_endpoint(self) -> None:
+        """get_order() calls the V2 /portfolio/events/orders/{id} path."""
         client = _make_client()
         resp_data = {
             "order": {
@@ -601,6 +637,8 @@ class TestGetOrder:
             mock_get.return_value = _mock_response(resp_data)
             result = await client.get_order("ORD-123")
 
+        call_url = mock_get.call_args.args[0] if mock_get.call_args.args else mock_get.call_args.kwargs.get("url", "")
+        assert "/portfolio/events/orders/ORD-123" in call_url
         assert result.exchange_order_id == "ORD-123"
         assert result.status == "partial"
         assert result.requested_count == 10
@@ -615,8 +653,8 @@ class TestGetOrder:
 
 class TestCancelOrder:
     @pytest.mark.asyncio
-    async def test_cancel_order_success(self) -> None:
-        """cancel_order() issues DELETE and parses the returned order."""
+    async def test_cancel_order_uses_v2_endpoint(self) -> None:
+        """cancel_order() issues DELETE to the V2 /portfolio/events/orders/{id} path."""
         client = _make_client()
         resp_data = {
             "order": {
@@ -636,8 +674,8 @@ class TestCancelOrder:
             result = await client.cancel_order("ORD-9")
 
         assert mock_delete.await_count == 1
-        call_args, call_kwargs = mock_delete.call_args
-        assert "/portfolio/orders/ORD-9" in str(call_args[0])
+        call_url = mock_delete.call_args.args[0] if mock_delete.call_args.args else mock_delete.call_args.kwargs.get("url", "")
+        assert "/portfolio/events/orders/ORD-9" in call_url
         assert result.exchange_order_id == "ORD-9"
         assert result.status == "canceled"
         assert result.requested_count == 5
