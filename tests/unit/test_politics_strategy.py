@@ -53,29 +53,29 @@ def test_passes_market_when_cache_ready() -> None:
     cache.mark_ready("KXTRUMPSAY-001")
     strategy = PoliticsEdgeStrategy(phrase_cache=cache)
     market = _make_market()
-    # Cache ready — gate passes. "Trump" is in the question, so super() should also pass.
+    # Cache ready — gate passes, allowlist matches, super() passes on price/volume.
     assert strategy.is_market_interesting(market) is True
 
 
-def test_no_gate_for_non_allowlist_series() -> None:
+def test_blocks_non_allowlist_series() -> None:
     cache = FactbasePhraseCache()
+    cache.mark_ready("KXPRES-001")
     strategy = PoliticsEdgeStrategy(phrase_cache=cache)
-    # Use a series_ticker NOT in the allowlist
+    # KXPRES is not in factbase_series_allowlist — blocked regardless of cache state
     market = _make_market(series_ticker="KXPRES", question="Will Trump win the 2028 election?")
-    # Gate doesn't apply, so falls through to base filter (Trump in question → True)
-    assert strategy.is_market_interesting(market) is True
+    assert strategy.is_market_interesting(market) is False
 
 
 def test_no_gate_when_cache_is_none() -> None:
     strategy = PoliticsEdgeStrategy(phrase_cache=None)
     market = _make_market()
-    # No cache injected → gate is bypassed entirely
+    # No cache injected → factbase gate is bypassed, allowlist still applies
     assert strategy.is_market_interesting(market) is True
 
 
-def test_no_gate_when_series_ticker_is_none() -> None:
+def test_blocks_when_series_ticker_is_none() -> None:
     cache = FactbasePhraseCache()
     strategy = PoliticsEdgeStrategy(phrase_cache=cache)
     market = _make_market(series_ticker=None)
-    # No series_ticker — gate condition isn't triggered
-    assert strategy.is_market_interesting(market) is True
+    # No series_ticker — cannot be in allowlist, always blocked
+    assert strategy.is_market_interesting(market) is False

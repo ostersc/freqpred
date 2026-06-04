@@ -64,7 +64,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         min_days_to_close=0.25,
         max_edge=0.74,
         min_mid_price=0.10,
-        stoploss=-0.30,
+        stoploss=-1.0,
         stoploss_cooldown_hours=48.0,
         trailing_stop=False,
         trailing_stop_positive=None,
@@ -132,12 +132,9 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         return df
 
     def is_market_interesting(self, market: "Market") -> bool:
-        if (
-            market.series_ticker
-            and market.series_ticker in self.config.factbase_series_allowlist
-            and self._phrase_cache is not None
-            and not self._phrase_cache.is_ready(market.id)
-        ):
+        if not market.series_ticker or market.series_ticker not in self.config.factbase_series_allowlist:
             return False
-        return "Trump" in market.question and super().is_market_interesting(market)
+        if self._phrase_cache is not None and not self._phrase_cache.is_ready(market.id):
+            return False
+        return super().is_market_interesting(market)
 
