@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-06-02 (T77)
+**Last updated:** 2026-06-03 (Polymarket §6b + Phase 4)
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -29,11 +29,12 @@ freqpred is to prediction markets what [freqtrade](https://github.com/freqtrade/
 - [ ] Execute live trades on Kalshi with hard risk controls
 - [x] Provide a web dashboard and Telegram/Discord alerts
 - [ ] Run continuously on AWS as an always-on service
+- [ ] Enrich signals and entry/exit decisions with cross-platform intelligence from Polymarket (price comparison, order-book depth, on-chain whale tracking)
 
 ## 3. Non-Goals (v1)
 
 - **No backtesting engine** — LLM training data contamination makes historical backtests unreliable; paper trading is the validation approach
-- **No non-US markets** — Polymarket is geo-blocked for US users; Kalshi is the only regulated platform in scope
+- **No non-US markets** — Kalshi is the only regulated trading platform in scope; Polymarket is geo-blocked for US users for trading, but its public APIs and the Polygon blockchain are used as read-only intelligence sources (price comparison, whale tracking — see §6b)
 - **No portfolio optimization** — Kelly sizing per market is sufficient; no cross-market correlation modeling
 - **No options/spreads** — Binary yes/no positions only in v1
 
@@ -51,6 +52,15 @@ freqpred is to prediction markets what [freqtrade](https://github.com/freqtrade/
 - Event contracts available via IBKR API
 - Adds broader market coverage without regulatory concerns
 - Requires separate adapter implementation
+
+### Intelligence sources (read-only, no trading)
+
+#### Polymarket
+- Crypto-based prediction market running on the Polygon blockchain
+- US users cannot trade on Polymarket (geo-blocked), but public data APIs require no authentication for reads
+- Used purely as a signal source: cross-platform implied probability comparison, order-book depth, and on-chain whale trade tracking
+- Three data feeds: Gamma API (market metadata + prices), CLOB API (order book + recent trades), Polygon blockchain (on-chain event history)
+- No freqpred capital is ever placed on Polymarket
 
 ### Architecture note
 All market interactions go through an abstract `IMarketClient` interface. Kalshi is the first concrete implementation. Adding IBKR or any future platform requires only a new adapter — zero changes to strategy or signal logic.
@@ -261,6 +271,214 @@ Rows still `pending` after status check past `StrategyConfig.pending_order_timeo
 **P&L note:** entry price is taken from the DB (freqpred's original entry). If the operator manually added contracts at a different price, the average entry will be slightly wrong. This is accepted — the DB is not a full order blotter, just a position tracker.
 
 **Orphan order safety:** if `place_order` succeeds but the DB write fails inside `_submit_live`, the order is auto-cancelled on the exchange before the exception is re-raised — preventing a permanently orphaned resting order.
+
+---
+
+## 6b. Cross-Platform Intelligence — Polymarket
+
+### Overview
+
+Polymarket is the largest global prediction market by volume, operating on the Polygon blockchain. While US-based trading is blocked, the platform's market data is publicly accessible without authentication. freqpred uses three Polymarket data feeds as **read-only intelligence**:
+
+| Feed | Source | Cadence | Use |
+|---|---|---|---|
+| Market prices | CLOB API (`https://clob.polymarket.com`) | 5 min | Assessment enrichment, entry/exit gates |
+| Market metadata | Gamma API (`https://gamma-api.polymarket.com`) | Daily | Market matching |
+| Trade history | CLOB API `/trades` endpoint (MVP); direct Polygon RPC deferred | 5 min | Whale tracking, smart-money alerts |
+
+### Polymarket API overview
+
+**Gamma API** — no auth required:
+- `GET /markets?active=true&closed=false&limit=100` — paginated market list; returns `condition_id`, `question`, `endDate`, `outcomePrices` (e.g. `["0.65", "0.35"]`), `volume`, `liquidity`
+- `GET /markets/{condition_id}` — single market detail
+
+**CLOB API** — no auth required for reads:
+- `GET /markets` — market list with YES/NO token IDs and mid prices
+- `GET /order-book/{token_id}` — full bid/ask order book for one outcome token
+- `GET /trades?market={condition_id}&limit=100&before={cursor}` — recent fill history with taker wallet address, outcome, price, size (USDC)
+
+**Polygon blockchain (future enhancement)**:
+- The CTF Exchange contract (`0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`) emits `OrderFilled` events on-chain
+- More complete than the CLOB API — catches direct contract interactions that bypass the CLOB
+- Queryable via Polygon RPC or The Graph subgraph; deferred to post-MVP
+
+### Market matching algorithm
+
+Mapping Kalshi markets to Polymarket markets is the core challenge (different question phrasing, different resolution criteria). The matching pipeline:
+
+1. **Daily batch fetch**: pull all active Polymarket markets via Gamma API
+2. **Embed Polymarket questions**: run through the existing local sentence-transformers embedder (`all-MiniLM-L6-v2`) — reuses `rag/embedder.py`
+3. **Determine the candidate Kalshi market set** using `config.polymarket.llm_match_scope` (see below)
+4. **Cosine similarity** between candidate Kalshi market questions and all Polymarket market questions:
+   - Score ≥ `config.polymarket.match_auto_threshold` (default 0.85) → auto-confirm
+   - Score in `[match_llm_threshold, match_auto_threshold)` (default 0.70–0.85) → LLM confirmation gate (see below)
+   - Score < `match_llm_threshold` → skip
+5. **Manual override**: `polymarket_market_links.match_method = 'manual'` is never overwritten by the pipeline
+6. Confirmed matches stored in `polymarket_market_links`; re-run daily (new markets added, expired/closed markets deactivated)
+
+Haiku LLM call for borderline matches is logged to `llm_queries` per the hard constraint.
+
+#### LLM confirmation scope — `config.polymarket.llm_match_scope`
+
+Controls which Kalshi markets get the Haiku confirmation step for borderline (0.70–0.85 similarity) candidates. Embedding-only auto-confirms (≥ 0.85) always run regardless of this setting.
+
+| Value | Behaviour |
+|---|---|
+| `"never"` | Skip LLM confirmation entirely — only auto-confirmed matches are stored |
+| `"always"` | Run Haiku confirmation for every borderline candidate |
+| `"interesting"` | Confirm only markets currently selected by at least one active strategy via `is_market_interesting()` |
+| `"categories"` | Confirm only markets whose `category` is in `config.polymarket.llm_match_categories` |
+
+Default: `"interesting"` — LLM cost proportional to markets the system is already watching.
+
+`config.polymarket.llm_match_categories` (list of strings, used when scope = `"categories"`) defaults to `[]`. An empty list with scope `"categories"` is treated as `"never"` and logs a startup warning.
+
+### Whale identification and tracking
+
+**Data source**: Polymarket CLOB API `/trades?market={condition_id}&limit=100&before={cursor}` — polled every 5 min per matched market in `realtime_scheduler.py` alongside price collection. Cursor-based dedup via `fetcher_cursors` (reuses existing mechanism). Covers the large majority of Polymarket volume.
+
+**Trade qualification** — a trade is a whale if it meets EITHER threshold (hybrid USD floor + volume % ceiling self-normalizes across market sizes):
+```
+is_whale = (size_usd >= whale_alert_min_usd) OR (size_usd >= whale_alert_pct_volume × market.volume_24h_usd)
+```
+Only qualifying trades are persisted to `polymarket_whale_trades`.
+
+**Toxic flow**: A qualifying trade's impact on available market depth. `pct_of_liquidity = size_usd / market.liquidity_usd` — a trade that exceeds 20–25% of available liquidity will materially move the price ("toxic"). Stored on `PolymarketWhaleTrade`; surfaced in the assessment prompt and dashboard.
+
+**Wallet profiling** — `polymarket_whale_wallets` table:
+- Upsert running totals on each qualifying trade: `total_volume_usd`, `trade_count`, `markets_active`
+- Win/loss tracking: when a Polymarket market resolves (detected from `is_active` state in Gamma API daily refresh), batch-score all whale trades in that market — if the taker's outcome won, increment `win_count`
+- Per-category win rates stored as JSONB (`{"politics": {"wins": 8, "losses": 3}, ...}`) — accuracy is category-specific (a sharp crypto trader may be unreliable on politics)
+- A wallet earns **"known sharp"** status when `win_rate > 0.60 AND resolved_count >= 15`; **"known whale"** when `total_volume_usd >= 100_000 OR trade_count >= 20`
+
+A known-sharp wallet buying against our signal is a much stronger exit/block trigger than an unknown first-time wallet making the same trade.
+
+**Wallet cluster detection**: Full cluster analysis (graph of shared funding sources, coordinated entry timing) is out of scope for MVP. The `polymarket_whale_wallets` table accommodates a future `cluster_id` FK.
+
+### Data models
+
+```python
+@dataclass
+class PolymarketMarketLink:
+    id: UUID
+    kalshi_market_ticker: str        # FK → markets.ticker
+    condition_id: str                # hex string, Polymarket primary key
+    yes_token_id: str                # ERC-1155 token ID for YES outcome
+    no_token_id: str                 # ERC-1155 token ID for NO outcome
+    question_text: str               # Polymarket question (stored for reference)
+    similarity_score: float          # cosine sim at match time
+    match_method: str                # 'auto' | 'llm' | 'manual'
+    is_active: bool                  # False when Polymarket market closes
+    last_verified_at: datetime       # updated on each daily re-run
+    created_at: datetime
+
+@dataclass
+class PolymarketPrice:
+    id: int                          # bigserial (high-frequency writes)
+    condition_id: str
+    yes_price: float                 # mid price for YES outcome (0–1)
+    spread: float                    # yes_ask - yes_bid
+    liquidity_usd: float             # total open interest
+    volume_24h_usd: float
+    sampled_at: datetime
+
+@dataclass
+class PolymarketWhaleTrade:
+    id: UUID
+    condition_id: str
+    wallet_address: str              # checksummed Polygon address
+    outcome: str                     # 'YES' | 'NO'
+    size_usd: float                  # position value (USDC) at execution
+    pct_of_24h_volume: float         # size_usd / volume_24h_usd at poll time
+    pct_of_liquidity: float          # size_usd / liquidity_usd — toxic flow severity
+    price: float                     # contract price (0–1)
+    clob_trade_id: str               # UNIQUE — prevents re-processing
+    trade_ts: datetime
+    created_at: datetime
+
+@dataclass
+class PolymarketWhaleWallet:
+    wallet_address: str              # PK — checksummed Polygon address
+    first_seen_at: datetime
+    last_active_at: datetime
+    total_volume_usd: float
+    trade_count: int
+    win_count: int                   # resolved markets where this wallet's outcome won
+    loss_count: int
+    win_rate: float | None           # None until >= 3 resolved trades
+    markets_active: int              # distinct condition_ids ever traded
+    category_stats: dict             # JSONB: {"politics": {"wins": 8, "losses": 3}, ...}
+    created_at: datetime
+```
+
+DB tables: `polymarket_market_links`, `polymarket_prices` (bigserial), `polymarket_whale_trades`, `polymarket_whale_wallets`.
+
+### Integration points
+
+#### Assessment prompt enrichment (T79)
+
+The signal pipeline intentionally excludes all market price data from the LLM prompt to prevent anchoring on market consensus — this applies equally to Polymarket. Polymarket prices are **not** injected into `signal/llm.py:build_prompt()`.
+
+Polymarket context IS included in the **assessment prompt** in `metrics/assessment.py:assess_signal_context()`, which already uses market-context data and runs after the signal is formed. When a `PolymarketPrice` row < 30 min old exists, the assessor payload gains a context block:
+
+```
+CROSS-PLATFORM CONTEXT
+Polymarket implied probability: 67% YES
+Kalshi mid: 55% YES  |  Cross-platform divergence: +12pp
+Polymarket 24h volume: $142,000  |  Spread: 2.1pp
+Recent whale activity: Known sharp (68% win rate, 22 resolved markets) bought YES $18k
+  4h ago — 12% of 24h volume, 8% of liquidity (toxic flow)
+```
+
+The assessment LLM (`judgment_model`) factors this into `trust_score` and `verdict`. The `signal_assessments.warnings` array can include `"polymarket_divergence_high"` or `"whale_opposing_known_sharp"`. `SignalAssessment` gains `polymarket_yes_price: float | None` (snapshotted at assessment time).
+
+Bumps assessment prompt version (independent of signal prompt version).
+
+#### Strategy hooks — `StrategyConfig` additions (T80)
+
+All fields default to disabled. All gates are **fail-open**: if no Polymarket data exists for a market, the gate passes.
+
+```python
+# Price divergence gates
+polymarket_signal_gate: bool = False
+    # Block new entries when |signal.estimated_probability - polymarket_yes_price| > polymarket_max_divergence_entry
+polymarket_max_divergence_entry: float = 0.10
+    # Max cross-platform divergence (absolute, 0–1) allowed for entry gate
+polymarket_exit_divergence_threshold: float = 0.0
+    # If > 0: flag for exit review when Polymarket price moves this many pp against our position direction
+
+# Whale alert thresholds — hybrid: qualifies as whale if meets EITHER floor OR pct
+whale_alert_min_usd: float = 0.0
+whale_alert_pct_volume: float = 0.0
+    # Single trade qualifies as whale if size_usd >= whale_alert_min_usd OR >= whale_alert_pct_volume × volume_24h
+
+# Whale exit review triggers (single opposing trade)
+whale_exit_min_usd: float = 0.0
+whale_exit_pct_volume: float = 0.0
+    # Trigger exit review if opposing whale trade meets EITHER threshold; never auto-exits
+
+# Whale entry block (aggregate opposing volume in window)
+whale_entry_block: bool = False
+whale_entry_block_min_usd: float = 10000.0
+whale_entry_block_pct_volume: float = 0.05
+    # Block entry if aggregate opposing whale volume in window meets EITHER threshold
+whale_entry_block_lookback_hours: float = 4.0
+```
+
+#### PositionMonitor integration (T80)
+
+`PositionMonitor.evaluate_exit()` gains a check after trailing-stop, before force-exit:
+- If `polymarket_exit_divergence_threshold > 0` and the latest Polymarket price diverges against our position direction by ≥ threshold → log, alert, return `("polymarket_divergence_flag", current_price)`. This is a flag, not a hard exit — `should_exit()` is still called. The `polymarket_` prefix on `exit_reason` enables dashboard filtering.
+
+#### Entry gate (T80)
+
+`OrderManager.submit()` checks before `should_trade()`:
+- **Price gate**: if `polymarket_signal_gate=True` and a fresh Polymarket price exists and `|signal.estimated_probability − polymarket_yes_price| > polymarket_max_divergence_entry` → skip entry (not logged as a risk reject; it's a gate)
+- **Whale block**: if `whale_entry_block=True` and aggregate opposing whale volume in the lookback window meets EITHER threshold → skip entry with `log.info("whale_entry_block")`
+
+### Arbitrage note
+
+When Kalshi and Polymarket diverge above a configurable threshold, freqpred logs the opportunity for dashboard visibility. **freqpred does not execute cross-platform arbitrage** — US users cannot trade on Polymarket, and simultaneous two-platform execution is out of scope. Divergence is used as directional confirmation or an entry/exit gate only.
 
 ---
 
@@ -1422,6 +1640,25 @@ def custom_exit_price(self, position: Position, signal: Signal | None, market: M
 
 ---
 
+### Phase 4: Cross-Platform Intelligence — Polymarket
+*Goal: enrich signals and entry/exit decisions with Polymarket pricing and smart-money flow data*
+
+Each task has a linked GitHub issue with full implementation scope, test plan, and acceptance criteria.
+
+- [ ] **T78** [#78](https://github.com/ostersc/freqpred/issues/78) — Polymarket market matching engine: `PolymarketClient` (Gamma + CLOB APIs, no auth) in `freqpred/markets/polymarket.py`; `polymarket_market_links` DB table + Alembic migration; `freqpred/ingestion/polymarket_matcher.py` daily batch match (embedding cosine sim + Haiku confirm for borderline per scope gate); wire into ingestion scheduler (runs once/day after market selector); config keys: `polymarket.enabled`, `polymarket.match_auto_threshold` (0.85), `polymarket.match_llm_threshold` (0.70), `polymarket.llm_match_scope` (`"never"` | `"always"` | `"interesting"` | `"categories"`, default `"interesting"`), `polymarket.llm_match_categories` (list[str], default `[]`).
+
+- [ ] **T79** [#79](https://github.com/ostersc/freqpred/issues/79) — Polymarket price collection + assessment enrichment: `freqpred/ingestion/fetchers/polymarket_prices.py` CLOB price poller; `polymarket_prices` DB table + migration; wire into `realtime_scheduler.py` (5 min cadence, only matched active markets); inject CROSS-PLATFORM CONTEXT block in `metrics/assessment.py:assess_signal_context()` — NOT the signal prompt (signals exclude market data by design); `SignalAssessment` gains `polymarket_yes_price: float | None`; `GET /api/polymarket/prices/{kalshi_ticker}` dashboard endpoint; bump assessment prompt version. Depends on: T78.
+
+- [ ] **T80** [#80](https://github.com/ostersc/freqpred/issues/80) — Strategy hooks + PositionMonitor divergence gate: 10 new `StrategyConfig` fields (price gates: `polymarket_signal_gate`, `polymarket_max_divergence_entry`, `polymarket_exit_divergence_threshold`; whale fields: `whale_alert_min_usd`, `whale_alert_pct_volume`, `whale_exit_min_usd`, `whale_exit_pct_volume`, `whale_entry_block`, `whale_entry_block_min_usd`, `whale_entry_block_pct_volume`, `whale_entry_block_lookback_hours` — hybrid USD-floor-OR-volume-pct throughout, all default disabled); entry gate in `OrderManager.submit()` (Polymarket divergence check + whale block, both fail-open when no data); exit divergence check in `PositionMonitor.evaluate_exit()` (`polymarket_` prefixed `exit_reason`); `GET /api/polymarket/divergence` endpoint. Depends on: T79, T81.
+
+- [ ] **T81** [#81](https://github.com/ostersc/freqpred/issues/81) — Whale tracking via Polymarket CLOB trades API: `polymarket_whale_trades` + `polymarket_whale_wallets` DB tables + migration; wire into `realtime_scheduler.py` (5 min cadence, cursor-based dedup via `fetcher_cursors`); whale qualification uses hybrid USD-floor-OR-volume-pct threshold; upsert `polymarket_whale_wallets` running totals per trade; daily batch win/loss scoring on resolved Polymarket markets including per-category `category_stats` JSONB; Telegram/Discord alert on qualifying trades for watched markets; `SERVICE_POLYMARKET_WHALE_TRACKER` telemetry heartbeat. Depends on: T78.
+
+- [ ] **T82** [#82](https://github.com/ostersc/freqpred/issues/82) — Cross-platform dashboard page: `GET /api/polymarket/dashboard` summary endpoint; new "Cross-Platform" React page with: divergence table (all matched markets, Kalshi vs Polymarket price, delta column, toxic-flow indicator), price comparison chart for selected market (Kalshi mid vs Polymarket mid, last 24h), whale trade feed (market, wallet short-hash with "Known sharp" / "Known whale" badge, direction, size, % of volume, pct_of_liquidity, age). Depends on: T79, T81.
+
+**Done when:** Polymarket prices are feeding the assessment prompt, matched markets appear in the dashboard, and whale alerts are firing on live markets with open positions.
+
+---
+
 ## 14. Open Questions
 
 1. **Kalshi sandbox API** ✅ — Kalshi offers a demo environment at `https://demo-api.kalshi.co/trade-api/v2` with separate credentials. Investigation found the demo API has the same 42k tickers as production but zero real liquidity (synthetic seed prices, no trades). It is not useful as a runtime mode — signals and signal calibration would be meaningless. Decision: demo credentials are stored in config (`demo_api_key`, `demo_private_key_path`) for one-off API smoke tests (e.g. verifying `place_order()` returns a valid response) but freqpred has no `--mode demo` runtime. Testing live order flow is done at small position sizes directly against production.
@@ -1444,13 +1681,15 @@ freqpred/
 │   ├── markets/
 │   │   ├── base.py              # IMarketClient abstract interface
 │   │   ├── kalshi.py            # Kalshi adapter
+│   │   ├── polymarket.py        # Polymarket adapter (Gamma + CLOB APIs, read-only; no auth)
 │   │   ├── watcher.py           # polling loop: price refresh, staleness detection
 │   │   └── models.py            # Market, Order, Position dataclasses
 │   ├── ingestion/
 │   │   ├── selector.py          # market selector: calls strategy.is_market_interesting()
 │   │   ├── catalyst_generator.py# LLM (Haiku) derives catalyst queries per market; manages CatalystRun/CatalystQuery
-│   │   ├── scheduler.py         # main ingestion scheduler (30 min): catalyst queries → Tavily/NewsAPI/Guardian/Reddit/GDELT/TV Archive
-│   │   ├── realtime_scheduler.py# fast scheduler (5 min): TV chyrons (Third Eye) + Truth Social account feeds
+│   │   ├── polymarket_matcher.py# daily batch: match Kalshi markets to Polymarket via embedding + optional Haiku confirm
+│   │   ├── scheduler.py         # main ingestion scheduler (30 min): catalyst queries → Tavily/NewsAPI/Guardian/Reddit/GDELT/TV Archive + Polymarket matching
+│   │   ├── realtime_scheduler.py# fast scheduler (5 min): TV chyrons + Truth Social + Polymarket prices + whale trades
 │   │   ├── fetchers/
 │   │   │   ├── tavily.py        # Tavily Search API fetcher
 │   │   │   ├── newsapi.py       # NewsAPI fetcher
@@ -1460,6 +1699,7 @@ freqpred/
 │   │   │   ├── tv_archive.py    # Internet Archive TV transcript search fetcher
 │   │   │   ├── tv_chyron.py     # Internet Archive Third Eye chyron fetcher (bulk-pull + local-filter)
 │   │   │   ├── truthsocial.py   # Truth Social fetcher (search + account feeds via truthbrush)
+│   │   │   ├── polymarket_prices.py  # Polymarket CLOB price poller (5 min, matched markets only)
 │   │   │   └── twitter.py       # Twitter/X API fetcher (optional)
 │   │   ├── store.py             # dedup, embed (sentence-transformers), insert into Document store
 │   │   └── social_summarizer.py # cheap LLM pre-summarizer for raw social posts
