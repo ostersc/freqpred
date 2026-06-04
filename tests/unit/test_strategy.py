@@ -115,6 +115,23 @@ class TestConservativeDefaultShouldTrade:
             _signal(edge=0.05, confidence=0.50), _market()
         )
 
+    def test_rejects_price_below_floor(self) -> None:
+        # Market was interesting at cycle start but price drifted to extreme
+        assert not self.strategy.should_trade(
+            _signal(edge=0.15, confidence=0.85), _market(mid_price=0.04)
+        )
+
+    def test_rejects_price_above_ceiling(self) -> None:
+        assert not self.strategy.should_trade(
+            _signal(edge=0.15, confidence=0.85), _market(mid_price=0.96)
+        )
+
+    def test_passes_at_price_floor_boundary(self) -> None:
+        # ConservativeDefault min_mid_price defaults to 0.05
+        assert self.strategy.should_trade(
+            _signal(edge=0.15, confidence=0.85), _market(mid_price=0.05)
+        )
+
     def test_config_values(self) -> None:
         assert self.strategy.config.min_edge == 0.12
         assert self.strategy.config.min_confidence == 0.80

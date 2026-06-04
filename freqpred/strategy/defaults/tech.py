@@ -27,8 +27,5 @@ class TechNewsStrategy(IPredictionStrategy):
     )
 
     def should_trade(self, signal: Signal, market: Market) -> bool:
-        return (
-            signal.edge >= self.config.min_edge
-            and signal.confidence >= self.config.min_confidence
-        )
+        return super().should_trade(signal, market)
 
