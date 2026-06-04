@@ -234,7 +234,7 @@ export default function Positions() {
                           </span>
                         )}
                       </td>
-                      <td className="r">${p.entry_price.toFixed(2)}</td>
+                      <td className="r">{(p.entry_price * 100).toFixed(1)}¢</td>
                       <td className="r dim">
                         {p.status === 'open'
                           ? (displayedMid !== null ? (() => {
@@ -242,7 +242,7 @@ export default function Positions() {
                               const text = `${(displayedMid * 100).toFixed(1)}¢`
                               return pill ? <span style={pill}>{text}</span> : text
                             })() : '—')
-                          : (p.exit_price !== null ? `$${p.exit_price.toFixed(2)}` : '—')}
+                          : (p.exit_price !== null ? `${(p.exit_price * 100).toFixed(1)}¢` : '—')}
                       </td>
                       <td className="r">
                         <div className="expo-cell expo-cell-inline">
@@ -326,7 +326,7 @@ export default function Positions() {
                   <td><b>TOTAL</b></td>
                   <td></td>
                   <td className="r">{totals.contracts}</td>
-                  <td className="r">${totals.contracts > 0 ? (totals.weightedEntry / totals.contracts).toFixed(2) : '—'}</td>
+                  <td className="r">{totals.contracts > 0 ? `${((totals.weightedEntry / totals.contracts) * 100).toFixed(1)}¢` : '—'}</td>
                   <td></td>
                   <td className="r"><b>${totals.exposure.toFixed(2)}</b></td>
                   <td></td>

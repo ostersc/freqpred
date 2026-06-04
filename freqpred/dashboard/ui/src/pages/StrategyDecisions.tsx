@@ -160,8 +160,8 @@ export default function StrategyDecisions() {
                           <Badge kind={row.direction === 'YES' ? 'pos' : 'neg'}>{row.direction}</Badge>
                         </td>
                         <td className="r">{row.exit_filled_contracts ?? row.contracts}</td>
-                        <td className="r">${fmt(row.entry_price)}</td>
-                        <td className="r">{row.exit_price !== null ? `$${fmt(row.exit_price)}` : <span className="muted">—</span>}</td>
+                        <td className="r">{row.entry_price !== null ? `${(row.entry_price * 100).toFixed(1)}¢` : '—'}</td>
+                        <td className="r">{row.exit_price !== null ? `${(row.exit_price * 100).toFixed(1)}¢` : <span className="muted">—</span>}</td>
                         <td className="c">
                           {row.market_result === 'yes' && <span className="pos" style={{ fontWeight: 500 }}>✓ YES</span>}
                           {row.market_result === 'no' && <span className="neg" style={{ fontWeight: 500 }}>✗ NO</span>}
