@@ -46,10 +46,14 @@ class IPredictionStrategy(ABC):
         """Return True if this signal warrants opening a position.
 
         Default implementation enforces StrategyConfig entry filters:
-        min_edge, max_edge, min_confidence, min_mid_price, and max_mid_price.
+        min_edge, max_edge, min_confidence, min_mid_price, max_mid_price, and
+        is_market_interesting (re-checked at entry time so markets kept alive
+        only for exit monitoring cannot accumulate new entries).
         Override to add custom logic; call super().should_trade() to preserve
         the base filter checks.
         """
+        if not self.is_market_interesting(market):
+            return False
         if signal.edge < self.config.min_edge:
             return False
         if self.config.max_edge is not None and signal.edge > self.config.max_edge:

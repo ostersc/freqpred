@@ -25,7 +25,7 @@ NOW = datetime.now(tz=timezone.utc)
 
 
 def _market(
-    category: str = "politics",
+    category: str = "Science and Technology",
     volume_24h: float = 1000.0,
     days_to_close: int = 14,
     mid_price: float = 0.42,
@@ -130,6 +130,15 @@ class TestConservativeDefaultShouldTrade:
         # ConservativeDefault min_mid_price defaults to 0.05
         assert self.strategy.should_trade(
             _signal(edge=0.15, confidence=0.85), _market(mid_price=0.05)
+        )
+
+    def test_rejects_market_not_interesting(self) -> None:
+        # Market no longer passes is_market_interesting (wrong category) —
+        # should_trade must block new entries even when signal thresholds are met.
+        # This guards against the open-position bypass in the signal loop allowing
+        # add-ons for markets that were kept alive only for exit monitoring.
+        assert not self.strategy.should_trade(
+            _signal(edge=0.15, confidence=0.85), _market(category="Politics")
         )
 
     def test_config_values(self) -> None:
