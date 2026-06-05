@@ -269,12 +269,14 @@ The system monitors the Kalshi API changelog daily via `freqpred/ingestion/kalsh
    ```python
    op.execute(
        "UPDATE kalshi_changelog_state"
-       " SET last_reviewed_at = CURRENT_DATE,"
+       " SET last_reviewed_at = 'YYYY-MM-DD',"  # literal review date, NOT CURRENT_DATE
        "     unreviewed_count = 0,"
        "     last_checked_at = NULL"
        " WHERE id = 1"
    )
    ```
+   **Use the literal review date** (e.g. `'2026-06-04'`), never `CURRENT_DATE`. Migrations are replayed by future developers and CI — `CURRENT_DATE` would stamp the wrong date on any replay, making `last_reviewed_at` meaningless as an audit trail.
+
    Nulling `last_checked_at` forces the monitor to re-run immediately on next startup and verify the count from RSS. Setting `unreviewed_count = 0` makes the dashboard correct right away without waiting for that re-run.
 
    Then apply:
