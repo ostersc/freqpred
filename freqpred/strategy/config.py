@@ -5,6 +5,25 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class OrderTypes:
+    """Per-strategy order type configuration.
+
+    entry="limit" posts a resting bid at estimated_probability - min_edge rather
+    than crossing the spread immediately. The position opens as status="pending"
+    and is promoted to "open" by PositionMonitor when the ask crosses the limit.
+    All fields default to "market" so existing strategies are unaffected.
+    """
+
+    entry: str = "market"                        # "limit" | "market"
+    exit: str = "market"                         # "limit" | "market"
+    emergency_exit: str = "market"               # always market — not overridable
+    stoploss: str = "market"                     # "limit" | "market"
+    stoploss_on_exchange: bool = False
+    stoploss_on_exchange_interval: int = 60
+    stoploss_on_exchange_limit_ratio: float = 0.99
+
+
+@dataclass
 class StrategyConfig:
     name: str
     min_confidence: float
@@ -69,8 +88,16 @@ class StrategyConfig:
     # Only meaningful for KXTRUMPSAY-style "will he say X" markets.
     factbase_series_allowlist: list[str] = field(default_factory=list)
 
+    # Order type configuration. Defaults to all market orders — existing strategies
+    # are unaffected. Set entry="limit" to post resting bids at
+    # estimated_probability - min_edge instead of crossing the spread immediately.
+    order_types: OrderTypes = field(default_factory=OrderTypes)
+
+    # Paper-mode only. Cancel unfilled resting limit entries after this many hours.
+    # Live-mode resting orders use pending_order_timeout_seconds (exchange-side).
+    limit_order_timeout_hours: float = 4.0
+
     # Live-mode only. After this many seconds in 'pending', cancel_order is called.
     # Reconcile sweeps (startup, periodic, WS reconnect) check the age and cancel
-    # any pending row whose created_at exceeds the cutoff. Future limit-order
-    # entries (T47/T48) may tighten this knob's effective behaviour.
+    # any pending row whose created_at exceeds the cutoff.
     pending_order_timeout_seconds: float = 900.0

@@ -156,6 +156,7 @@ class PositionMonitor:
         self,
         *,
         fresh_signals: dict[str, Signal] | None = None,
+        _now: datetime | None = None,
     ) -> list[Position]:
         """Evaluate all open positions against current market prices.
 
@@ -163,20 +164,32 @@ class PositionMonitor:
             fresh_signals: mapping of market_id → new Signal, passed in when
                 the signal pipeline has just re-analysed a market with an open
                 position.  Used for step 5 (signal exit).
+            _now: injectable clock for testing timeout checks (defaults to now()).
 
         Returns:
             List of positions that were closed during this call.
         """
+        now = _now or datetime.now(tz=timezone.utc)
         fresh_signals = fresh_signals or {}
         closed: list[Position] = []
 
         async with self._session_factory() as session:
             positions = await ledger.get_open_positions(session, mode=self._mode)
-            if not positions:
+            # Fetch paper-mode pending positions for resting-limit fill checks.
+            # Live pending orders are reconciled via reconcile_pending_orders().
+            pending_positions: list[Position] = []
+            if self._mode != "live":
+                pending_positions = await ledger.get_pending_positions(
+                    session, mode=self._mode
+                )
+
+            if not positions and not pending_positions:
                 return closed
 
             # Fetch all relevant markets in one query
-            market_ids = {p.market_id for p in positions}
+            market_ids = {p.market_id for p in positions} | {
+                p.market_id for p in pending_positions
+            }
             market_rows = await session.execute(
                 select(MarketRow).where(MarketRow.id.in_(market_ids))
             )
@@ -184,6 +197,19 @@ class PositionMonitor:
                 row.id: _market_row_to_domain(row)
                 for row in market_rows.scalars().all()
             }
+
+        # Process resting-limit pending positions first (fill or timeout).
+        for position in pending_positions:
+            market = markets.get(position.market_id)
+            if market is None:
+                logger.warning(
+                    "position_monitor.pending_market_not_found",
+                    position_id=position.id,
+                    market_id=position.market_id,
+                )
+                continue
+            strategy = self._strategies.get(position.strategy_name)
+            await self._process_pending_position(position, market, strategy, now)
 
         for position in positions:
             market = markets.get(position.market_id)
@@ -397,6 +423,76 @@ class PositionMonitor:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _process_pending_position(
+        self,
+        position: Position,
+        market: Market,
+        strategy: "IPredictionStrategy | None",
+        now: datetime,
+    ) -> None:
+        """Fill or cancel a paper-mode resting limit position.
+
+        Fill condition (price-cross):
+          YES: market.yes_ask <= position.entry_price
+          NO:  (1 - market.yes_bid) <= position.entry_price
+
+        Timeout: entry_time older than strategy.config.limit_order_timeout_hours
+        (default 4 h). Cancelled positions are closed at entry_price → zero P&L.
+        """
+        if position.direction == "YES":
+            current_ask = market.yes_ask or 1.0
+            filled = current_ask <= position.entry_price
+        else:
+            current_ask = round(1.0 - (market.yes_bid or 0.0), 4)
+            filled = current_ask <= position.entry_price
+
+        if filled:
+            # Fill at min(current_ask, limit_price): captures price improvement
+            # when the ask was already below the limit at fill time, and records
+            # the limit price when the ask just crossed it (resting order case).
+            fill_price = round(min(current_ask, position.entry_price), 4)
+            async with self._session_factory() as session:
+                await ledger.promote_pending_to_open(
+                    session, position.id, fill_price=fill_price
+                )
+            logger.info(
+                "position_monitor.limit_filled",
+                position_id=position.id,
+                market_id=position.market_id,
+                direction=position.direction,
+                limit_price=position.entry_price,
+                fill_price=fill_price,
+                ask_at_fill=current_ask,
+                mode=position.mode,
+            )
+            return
+
+        # Timeout check — fall back to 4 h if the strategy is unknown.
+        timeout_hours = (
+            strategy.config.limit_order_timeout_hours
+            if strategy is not None
+            else 4.0
+        )
+        age_hours = (now - position.entry_time).total_seconds() / 3600.0
+        if age_hours >= timeout_hours:
+            async with self._session_factory() as session:
+                await ledger.close_position(
+                    session,
+                    position.id,
+                    exit_price=position.entry_price,
+                    exit_reason="cancelled",
+                )
+            logger.info(
+                "position_monitor.limit_cancelled",
+                position_id=position.id,
+                market_id=position.market_id,
+                direction=position.direction,
+                entry_price=position.entry_price,
+                age_hours=round(age_hours, 2),
+                timeout_hours=timeout_hours,
+                mode=position.mode,
+            )
 
     async def _execute_exit(
         self,

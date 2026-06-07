@@ -17,7 +17,7 @@ import structlog
 
 from freqpred.ingestion.fetchers.factbase import FactbasePhraseCache
 from freqpred.strategy.algo_base import IAlgoStrategy
-from freqpred.strategy.config import StrategyConfig
+from freqpred.strategy.config import OrderTypes, StrategyConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -70,6 +70,11 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         trailing_stop_positive=None,
         trailing_stop_positive_offset=0.02,
         factbase_series_allowlist=["KXTRUMPSAY", "KXTRUMPSAYMONTH", "KXTRUMPSAYNICKNAME", "KXTRUMPSAYTRUMP"],
+        # Resting limit entries at estimated_probability - min_edge (0.15 below model estimate).
+        # Only fills when market comes to our price — guarantees edge at fill.
+        # exit="limit" added here when T48 (limit exits) is implemented.
+        order_types=OrderTypes(entry="limit"),
+        limit_order_timeout_hours=2.0,
     )
 
     def __init__(self, phrase_cache: FactbasePhraseCache | None = None) -> None:

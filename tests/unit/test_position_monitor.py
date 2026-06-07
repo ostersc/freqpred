@@ -765,6 +765,11 @@ class TestCheckAllPositions:
                 return_value=[pos],
             ),
             patch(
+                "freqpred.trading.position_monitor.ledger.get_pending_positions",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
                 "freqpred.trading.position_monitor.ledger.close_position",
                 new_callable=AsyncMock,
                 return_value=closed_pos,
@@ -825,6 +830,10 @@ class TestCheckAllPositions:
 
         with patch(
             "freqpred.trading.position_monitor.ledger.get_open_positions",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "freqpred.trading.position_monitor.ledger.get_pending_positions",
             new_callable=AsyncMock,
             return_value=[],
         ):
@@ -892,6 +901,11 @@ class TestCheckAllPositions:
                 "freqpred.trading.position_monitor.ledger.get_open_positions",
                 new_callable=AsyncMock,
                 return_value=[pos],
+            ),
+            patch(
+                "freqpred.trading.position_monitor.ledger.get_pending_positions",
+                new_callable=AsyncMock,
+                return_value=[],
             ),
             patch(
                 "freqpred.trading.position_monitor.ledger.close_position",
@@ -1412,3 +1426,299 @@ class TestLiveExitPolling:
             submitted: Order = kalshi_client.place_order.call_args.args[0]
             assert submitted.direction == direction
             assert submitted.price == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# T47 — paper-mode pending fill check
+# ---------------------------------------------------------------------------
+
+
+class TestPendingPositionFillCheck:
+    """Tests for PositionMonitor._process_pending_position."""
+
+    def _make_pending_position(
+        self,
+        *,
+        direction: str = "YES",
+        entry_price: float = 0.50,
+        entry_time: datetime | None = None,
+    ) -> "Position":
+        return _make_position(
+            entry_price=entry_price,
+            direction=direction,
+            entry_time=entry_time or NOW,
+            mode="paper",
+        )
+
+    def _make_strategy_with_timeout(self, timeout_hours: float = 4.0):
+        class _S(IPredictionStrategy):
+            config = StrategyConfig(
+                name="TestStrategy",
+                min_edge=0.10,
+                min_confidence=0.70,
+                max_exposure_per_market=0.05,
+                kelly_fraction=0.25,
+                categories=[],
+                min_volume_24h=0.0,
+                max_days_to_close=365,
+                min_days_to_close=0,
+                limit_order_timeout_hours=timeout_hours,
+            )
+
+            def should_trade(self, signal, market):  # type: ignore[override]
+                return True
+
+            def position_size(self, signal, bankroll):  # type: ignore[override]
+                return 0.0
+
+        return _S()
+
+    def _monitor_with_strategy(self, strategy, mode: str = "paper") -> PositionMonitor:
+        return PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": strategy},
+            mode=mode,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("direction,yes_bid,yes_ask,entry_price,should_fill", [
+        # YES: fills when yes_ask <= entry_price
+        ("YES", 0.45, 0.50, 0.50, True),   # ask == entry → fills
+        ("YES", 0.44, 0.49, 0.50, True),   # ask below entry → fills
+        ("YES", 0.45, 0.51, 0.50, False),  # ask above entry → stays pending
+        # NO: fills when (1 - yes_bid) <= entry_price
+        ("NO",  0.50, 0.55, 0.50, True),   # no_ask = 1-0.50 = 0.50 == entry → fills
+        ("NO",  0.52, 0.56, 0.50, True),   # no_ask = 1-0.52 = 0.48 < entry → fills
+        ("NO",  0.48, 0.53, 0.50, False),  # no_ask = 1-0.48 = 0.52 > entry → stays pending
+    ])
+    async def test_pending_fill_and_no_fill(
+        self,
+        direction: str,
+        yes_bid: float,
+        yes_ask: float,
+        entry_price: float,
+        should_fill: bool,
+    ) -> None:
+        strategy = self._make_strategy_with_timeout()
+        monitor = self._monitor_with_strategy(strategy)
+        pos = self._make_pending_position(direction=direction, entry_price=entry_price)
+        market = Market(
+            id="MKT-1",
+            platform="kalshi",
+            question="test",
+            category="politics",
+            close_time=NOW + timedelta(days=10),
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            mid_price=(yes_bid + yes_ask) / 2,
+            volume_24h=1000.0,
+            open_interest=500.0,
+            last_fetched_at=NOW,
+            price_updated_at=NOW,
+            metadata_fetched_at=NOW,
+        )
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.promote_pending_to_open",
+            new_callable=AsyncMock,
+        ) as mock_promote, patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+        ) as mock_close:
+            await monitor._process_pending_position(pos, market, strategy, NOW)
+
+        if should_fill:
+            mock_promote.assert_awaited_once()
+            # fill_price = min(current_ask, entry_price)
+            if direction == "YES":
+                expected_fill = min(yes_ask, entry_price)
+            else:
+                expected_fill = min(round(1.0 - yes_bid, 4), entry_price)
+            assert mock_promote.call_args.kwargs["fill_price"] == pytest.approx(expected_fill)
+            mock_close.assert_not_awaited()
+        else:
+            mock_promote.assert_not_awaited()
+            mock_close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("direction,yes_bid,yes_ask,limit_price,expected_fill", [
+        # ask already below limit → fill at ask (price improvement)
+        ("YES", 0.43, 0.45, 0.50, 0.45),
+        # ask exactly at limit → fill at limit
+        ("YES", 0.46, 0.50, 0.50, 0.50),
+        # NO: no_ask = 1 - yes_bid; below limit → fill at no_ask
+        ("NO",  0.55, 0.60, 0.50, round(1.0 - 0.55, 4)),  # no_ask=0.45 < 0.50
+        # NO: no_ask exactly at limit
+        ("NO",  0.50, 0.55, 0.50, 0.50),
+    ])
+    async def test_fill_price_reflects_price_improvement(
+        self,
+        direction: str,
+        yes_bid: float,
+        yes_ask: float,
+        limit_price: float,
+        expected_fill: float,
+    ) -> None:
+        """fill_price = min(current_ask, limit_price) — captures price improvement."""
+        strategy = self._make_strategy_with_timeout()
+        monitor = self._monitor_with_strategy(strategy)
+        pos = self._make_pending_position(direction=direction, entry_price=limit_price)
+        market = Market(
+            id="MKT-1",
+            platform="kalshi",
+            question="test",
+            category="politics",
+            close_time=NOW + timedelta(days=10),
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            mid_price=(yes_bid + yes_ask) / 2,
+            volume_24h=1000.0,
+            open_interest=500.0,
+            last_fetched_at=NOW,
+            price_updated_at=NOW,
+            metadata_fetched_at=NOW,
+        )
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.promote_pending_to_open",
+            new_callable=AsyncMock,
+        ) as mock_promote, patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+        ):
+            await monitor._process_pending_position(pos, market, strategy, NOW)
+
+        mock_promote.assert_awaited_once()
+        assert mock_promote.call_args.kwargs["fill_price"] == pytest.approx(expected_fill)
+
+    @pytest.mark.asyncio
+    async def test_pending_position_cancelled_on_timeout(self) -> None:
+        """Position older than limit_order_timeout_hours is closed with exit_reason='cancelled'."""
+        strategy = self._make_strategy_with_timeout(timeout_hours=4.0)
+        monitor = self._monitor_with_strategy(strategy)
+        old_entry_time = NOW - timedelta(hours=5)  # 5 h old > 4 h timeout
+        pos = self._make_pending_position(entry_price=0.50, entry_time=old_entry_time)
+        market = _make_market(mid_price=0.55)  # ask above limit → won't fill
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.promote_pending_to_open",
+            new_callable=AsyncMock,
+        ) as mock_promote, patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+        ) as mock_close:
+            await monitor._process_pending_position(pos, market, strategy, NOW)
+
+        mock_promote.assert_not_awaited()
+        mock_close.assert_awaited_once()
+        kwargs = mock_close.call_args.kwargs
+        assert kwargs["exit_reason"] == "cancelled"
+        assert kwargs["exit_price"] == pytest.approx(pos.entry_price)
+
+    @pytest.mark.asyncio
+    async def test_pending_position_not_cancelled_before_timeout(self) -> None:
+        """Position younger than timeout is left alone when ask is above limit."""
+        strategy = self._make_strategy_with_timeout(timeout_hours=4.0)
+        monitor = self._monitor_with_strategy(strategy)
+        recent_entry = NOW - timedelta(hours=2)  # 2 h old < 4 h timeout
+        pos = self._make_pending_position(entry_price=0.50, entry_time=recent_entry)
+        market = _make_market(mid_price=0.55)  # ask above limit → won't fill
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.promote_pending_to_open",
+            new_callable=AsyncMock,
+        ) as mock_promote, patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+        ) as mock_close:
+            await monitor._process_pending_position(pos, market, strategy, NOW)
+
+        mock_promote.assert_not_awaited()
+        mock_close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_check_all_positions_processes_pending_in_paper_mode(self) -> None:
+        """check_all_positions fetches pending positions and calls _process_pending_position."""
+        strategy = self._make_strategy_with_timeout()
+        pending_pos = self._make_pending_position(entry_price=0.50)
+        market_row = MagicMock()
+        market_row.id = "MKT-1"
+        market_row.platform = "kalshi"
+        market_row.question = "test"
+        market_row.category = "politics"
+        market_row.close_time = NOW + timedelta(days=10)
+        market_row.yes_bid = 0.45
+        market_row.yes_ask = 0.49  # below entry_price → should fill
+        market_row.mid_price = 0.47
+        market_row.last_price = 0.47
+        market_row.volume_24h = 1000.0
+        market_row.open_interest = 500.0
+        market_row.last_fetched_at = NOW
+        market_row.price_updated_at = NOW
+        market_row.metadata_fetched_at = NOW
+        market_row.yes_bid_size = None
+        market_row.yes_ask_size = None
+        market_row.result = None
+        market_row.settlement_value = None
+        market_row.status = "open"
+        market_row.open_time = None
+        market_row.series_ticker = None
+        market_row.current_signal_id = None
+        market_row.metadata_ = {}
+
+        # get_open_positions and get_pending_positions are patched at the ledger
+        # level, so session.execute is only called once — for the market query.
+        market_result = MagicMock()
+        market_result.scalars.return_value.all.return_value = [market_row]
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=market_result)
+
+        session_ctx = MagicMock()
+        session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        session_ctx.__aexit__ = AsyncMock(return_value=False)
+        session_factory = MagicMock(return_value=session_ctx)
+
+        monitor = PositionMonitor(
+            session_factory=session_factory,
+            strategies={"TestStrategy": strategy},
+            mode="paper",
+        )
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.get_open_positions",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "freqpred.trading.position_monitor.ledger.get_pending_positions",
+            new_callable=AsyncMock,
+            return_value=[pending_pos],
+        ), patch(
+            "freqpred.trading.position_monitor.ledger.promote_pending_to_open",
+            new_callable=AsyncMock,
+        ) as mock_promote:
+            await monitor.check_all_positions(_now=NOW)
+
+        mock_promote.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_check_all_positions_skips_pending_in_live_mode(self) -> None:
+        """Live mode does not call get_pending_positions (handled by reconcile)."""
+        strategy = self._make_strategy_with_timeout()
+        monitor = PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": strategy},
+            mode="live",
+        )
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.get_open_positions",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "freqpred.trading.position_monitor.ledger.get_pending_positions",
+            new_callable=AsyncMock,
+        ) as mock_pending:
+            await monitor.check_all_positions(_now=NOW)
+
+        mock_pending.assert_not_awaited()

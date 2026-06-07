@@ -1937,3 +1937,127 @@ async def test_force_exit_order_populates_event_ticker(monkeypatch: pytest.Monke
     exit_order: Order = mock_kalshi.place_order.call_args.args[0]
     assert exit_order.event_ticker == "KXPRES-25"
     assert exit_order.action == "sell"
+
+
+# ---------------------------------------------------------------------------
+# T47 — limit order entry
+# ---------------------------------------------------------------------------
+
+
+def _make_limit_strategy(
+    custom_price: float | None = None,
+    should_trade_result: bool = True,
+    position_size_result: float = 100.0,
+    min_edge: float = 0.10,
+) -> IPredictionStrategy:
+    """Concrete strategy stub with order_types.entry='limit'."""
+    from freqpred.strategy.config import OrderTypes
+
+    class _LimitStub(IPredictionStrategy):
+        config = StrategyConfig(
+            name="LimitStrategy",
+            min_edge=min_edge,
+            min_confidence=0.70,
+            max_exposure_per_market=0.10,
+            kelly_fraction=0.25,
+            categories=["politics"],
+            min_volume_24h=0.0,
+            max_days_to_close=90,
+            min_days_to_close=1,
+            order_types=OrderTypes(entry="limit"),
+        )
+        _custom_price = custom_price
+
+        def should_trade(self, signal: Signal, market: Market) -> bool:
+            return should_trade_result
+
+        def position_size(self, signal: Signal, bankroll: float, existing_market_exposure: float = 0.0) -> float:
+            return position_size_result
+
+        def custom_entry_price(self, signal: Signal, market: Market) -> float | None:
+            return self._custom_price
+
+    return _LimitStub()
+
+
+@pytest.mark.asyncio
+async def test_market_entry_unchanged() -> None:
+    """Default order_types (market) → entry_price = yes_ask, status='open'."""
+    om, _ = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+    expected = _make_position(entry_price=0.56)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as mock_open:
+        await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    kwargs = mock_open.call_args.kwargs
+    assert kwargs["entry_price"] == pytest.approx(0.56)
+    assert kwargs["status"] == "open"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction,expected_price", [
+    ("YES", 0.65 - 0.10),   # estimated_probability - min_edge
+    ("NO",  1.0 - 0.65 - 0.10),  # (1 - estimated_probability) - min_edge
+])
+async def test_limit_entry_uses_prob_minus_edge(direction: str, expected_price: float) -> None:
+    """entry='limit', no custom hook → entry_price = estimated_probability - min_edge."""
+    om, _ = _make_order_manager()
+    strategy = _make_limit_strategy(custom_price=None, min_edge=0.10)
+    # Signal: estimated_probability=0.65, edge=0.15 for YES; market won't be the price source
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+    sig = _make_signal(direction=direction, estimated_probability=0.65)
+    expected_pos = _make_position(entry_price=expected_price, direction=direction)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_pos,
+    ) as mock_open:
+        await om.submit(sig, market, strategy)
+
+    kwargs = mock_open.call_args.kwargs
+    assert kwargs["entry_price"] == pytest.approx(expected_price, abs=1e-4)
+
+
+@pytest.mark.asyncio
+async def test_limit_entry_respects_custom_price_hook() -> None:
+    """custom_entry_price() returns a price → that price is used, not prob-min_edge."""
+    om, _ = _make_order_manager()
+    strategy = _make_limit_strategy(custom_price=0.42)
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+    sig = _make_signal(direction="YES", estimated_probability=0.65)
+    expected_pos = _make_position(entry_price=0.42)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_pos,
+    ) as mock_open:
+        await om.submit(sig, market, strategy)
+
+    assert mock_open.call_args.kwargs["entry_price"] == pytest.approx(0.42)
+
+
+@pytest.mark.asyncio
+async def test_limit_entry_opens_pending() -> None:
+    """entry='limit' → ledger.open_position called with status='pending'."""
+    om, _ = _make_order_manager()
+    strategy = _make_limit_strategy()
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+    sig = _make_signal(direction="YES", estimated_probability=0.65)
+    expected_pos = _make_position(entry_price=0.55)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_pos,
+    ) as mock_open:
+        await om.submit(sig, market, strategy)
+
+    assert mock_open.call_args.kwargs["status"] == "pending"

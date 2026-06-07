@@ -25,6 +25,39 @@ def _minimal_config(**overrides) -> StrategyConfig:
     return StrategyConfig(**defaults)
 
 
+class TestOrderTypesDefaults:
+    def test_entry_default_is_market(self) -> None:
+        from freqpred.strategy.config import OrderTypes
+        assert OrderTypes().entry == "market"
+
+    def test_exit_default_is_market(self) -> None:
+        from freqpred.strategy.config import OrderTypes
+        assert OrderTypes().exit == "market"
+
+    def test_emergency_exit_default_is_market(self) -> None:
+        from freqpred.strategy.config import OrderTypes
+        assert OrderTypes().emergency_exit == "market"
+
+    def test_stoploss_on_exchange_default_false(self) -> None:
+        from freqpred.strategy.config import OrderTypes
+        assert OrderTypes().stoploss_on_exchange is False
+
+    def test_strategy_config_order_types_defaults_all_market(self) -> None:
+        config = _minimal_config()
+        assert config.order_types.entry == "market"
+        assert config.order_types.exit == "market"
+        assert config.order_types.emergency_exit == "market"
+
+    def test_strategy_config_limit_order_timeout_hours_default(self) -> None:
+        config = _minimal_config()
+        assert config.limit_order_timeout_hours == pytest.approx(4.0)
+
+    def test_strategy_config_order_types_can_be_set_to_limit(self) -> None:
+        from freqpred.strategy.config import OrderTypes
+        config = _minimal_config(order_types=OrderTypes(entry="limit"))
+        assert config.order_types.entry == "limit"
+
+
 class TestStrategyConfigDefaults:
     def test_stoploss_default_is_negative(self) -> None:
         config = _minimal_config()

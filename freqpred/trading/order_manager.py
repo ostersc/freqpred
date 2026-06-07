@@ -433,11 +433,29 @@ class OrderManager:
                 return None
 
             # Step 4: size → contracts
-            entry_price = (
-                market.yes_ask
-                if signal.direction == "YES"
-                else 1.0 - market.yes_bid
-            )
+            # "limit" posts a resting bid below the ask (fills only when the ask
+            # drops to the limit price).  "market" (default) crosses the spread
+            # immediately by submitting at the current ask/bid.
+            if strategy.config.order_types.entry == "limit":
+                custom_price = strategy.custom_entry_price(signal, market)
+                if custom_price is not None:
+                    entry_price = custom_price
+                elif signal.direction == "YES":
+                    entry_price = round(
+                        signal.estimated_probability - strategy.config.min_edge, 4
+                    )
+                else:
+                    entry_price = round(
+                        (1.0 - signal.estimated_probability) - strategy.config.min_edge, 4
+                    )
+                initial_status = "pending"
+            else:
+                entry_price = (
+                    market.yes_ask
+                    if signal.direction == "YES"
+                    else 1.0 - market.yes_bid
+                )
+                initial_status = "open"
             contracts = math.floor(decision.capped_size / entry_price)
             if contracts < 1:
                 logger.info(
@@ -470,7 +488,8 @@ class OrderManager:
                 )
             else:
                 position = await self._submit_paper(
-                    order, signal, market, session, strategy.config.name
+                    order, signal, market, session, strategy.config.name,
+                    status=initial_status,
                 )
 
         if position is None:
@@ -499,8 +518,14 @@ class OrderManager:
         market: Market,
         session: AsyncSession,
         strategy_name: str,
+        *,
+        status: str = "open",
     ) -> Position:
-        """Write position as status='open' immediately — no exchange interaction."""
+        """Write position immediately — no exchange interaction.
+
+        ``status`` is "open" for market orders and "pending" for resting limit
+        entries awaiting a price-cross fill from PositionMonitor.
+        """
         return await ledger.open_position(
             session,
             market=market,
@@ -511,7 +536,7 @@ class OrderManager:
             contracts=order.contracts,
             entry_price=order.price,
             mode=self._mode,
-            status="open",
+            status=status,
         )
 
     async def _submit_live(

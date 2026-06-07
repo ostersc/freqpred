@@ -197,6 +197,29 @@ class IPredictionStrategy(ABC):
         """
         return None
 
+    def custom_entry_price(self, signal: "Signal", market: "Market") -> float | None:
+        """Custom resting limit entry price override.
+
+        Called when order_types.entry == "limit". Return a per-contract price
+        (0–1 scale) to override the default of estimated_probability - min_edge.
+        Return None to use the framework default.
+        """
+        return None
+
+    def custom_exit_price(
+        self,
+        position: "Position",
+        signal: "Signal | None",
+        market: "Market",
+        exit_reason: str,
+    ) -> float | None:
+        """Custom limit exit price override.
+
+        Return a per-contract price (0–1 scale) or None to use the framework
+        default (ROI / trailing-stop target). Reserved for T48 (limit exits).
+        """
+        return None
+
     async def synthesize_signal(
         self, session: "AsyncSession", market: "Market"
     ) -> "Signal | None":

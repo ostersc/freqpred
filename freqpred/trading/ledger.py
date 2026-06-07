@@ -215,6 +215,38 @@ async def get_open_positions(session: AsyncSession, mode: str = "paper") -> list
     return [_row_to_position(row) for row in result.scalars().all()]
 
 
+async def get_pending_positions(session: AsyncSession, mode: str = "paper") -> list[Position]:
+    """Return all positions with status='pending' for *mode*, ordered by entry_time desc."""
+    result = await session.execute(
+        select(PositionRow)
+        .where(PositionRow.status == "pending", PositionRow.mode == mode)
+        .order_by(PositionRow.entry_time.desc())
+    )
+    return [_row_to_position(row) for row in result.scalars().all()]
+
+
+async def promote_pending_to_open(
+    session: AsyncSession,
+    position_id: str,
+    *,
+    fill_price: float | None = None,
+) -> None:
+    """Flip a pending position's status to 'open'. Commits the session.
+
+    ``fill_price``, when provided, also updates entry_price — used in paper mode
+    to record price improvement when the ask was already below the limit at fill time.
+    """
+    values: dict = {"status": "open"}
+    if fill_price is not None:
+        values["entry_price"] = fill_price
+    await session.execute(
+        update(PositionRow)
+        .where(PositionRow.id == uuid.UUID(position_id))
+        .values(**values)
+    )
+    await session.commit()
+
+
 async def get_daily_pnl(session: AsyncSession, mode: str = "paper") -> float:
     """Sum of pnl for all positions closed today (UTC) matching *mode*. Returns 0.0 if none."""
     today_start = datetime.now(tz=timezone.utc).replace(
