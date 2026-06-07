@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from freqpred.runtime.telemetry import RuntimeTelemetry
     from freqpred.signal.models import Signal
     from freqpred.strategy.base import IPredictionStrategy
-    from freqpred.strategy.config import StrategyConfig
+    from freqpred.strategy.config import OrderTypes, StrategyConfig
     from freqpred.trading.order_manager import OrderManager
 
 logger = structlog.get_logger(__name__)
@@ -75,6 +75,8 @@ class PositionMonitor:
         # position_id → best/worst effective P&L delta seen (for MAE/MFE)
         self._peak_deltas: dict[str, float] = {}    # MFE
         self._trough_deltas: dict[str, float] = {}  # MAE
+        # position_id → current exchange-hosted stoploss price (in-memory tracker for T48)
+        self._stoploss_order_levels: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -252,6 +254,7 @@ class PositionMonitor:
                 # No exit — update peak price tracker (trailing stop) + MAE/MFE.
                 # current_price is already the side bid — pass directly.
                 self._update_peak(position, current_price)
+                self._maybe_refresh_exchange_stoploss(position, strategy.config)
                 await self._update_excursions(position, current_price)
                 continue
 
@@ -288,6 +291,7 @@ class PositionMonitor:
             self._peak_prices.pop(position.id, None)
             self._peak_deltas.pop(position.id, None)
             self._trough_deltas.pop(position.id, None)
+            self._stoploss_order_levels.pop(position.id, None)
 
             logger.info(
                 "position_monitor.exit_triggered",
@@ -325,6 +329,7 @@ class PositionMonitor:
         Pure function — no I/O. Separated for unit-testability.
         """
         config = strategy.config
+        order_types = config.order_types
         # current_price is already the side-specific bid (yes_bid for YES, no_bid for NO).
         # For exit evaluation it is passed through as-is — it already represents
         # what the holder would receive when selling.
@@ -376,14 +381,20 @@ class PositionMonitor:
                 )
                 effective_price = proxy
 
-        # 1. Hard stoploss (framework-enforced)
-        result = _check_stoploss(position, effective_price, config.stoploss)
-        if result:
-            return result
+        # 1. Hard stoploss (framework-enforced — always runs even when stoploss_on_exchange=True)
+        stoploss_hit = _check_stoploss(position, effective_price, config.stoploss)
+        if stoploss_hit:
+            if order_types.stoploss_on_exchange:
+                # In-memory fallback: fill at the resting stoploss price, not current bid.
+                sl_price = _compute_exchange_stoploss_price(
+                    position, order_types, stoploss=config.stoploss
+                )
+                return ("stoploss", sl_price)
+            return stoploss_hit
 
         # 2. Trailing stoploss
         if config.trailing_stop:
-            result = _check_trailing_stop(
+            ts_hit = _check_trailing_stop(
                 position,
                 effective_price,
                 peak_price,
@@ -391,8 +402,20 @@ class PositionMonitor:
                 config.trailing_stop_positive,
                 config.trailing_stop_positive_offset,
             )
-            if result:
-                return result
+            if ts_hit:
+                if order_types.exit == "limit":
+                    # Limit exit: fill at the stop level, not current bid.
+                    stop_level = _compute_trailing_stop_level(
+                        position,
+                        peak_price,
+                        config.stoploss,
+                        config.trailing_stop_positive,
+                        config.trailing_stop_positive_offset,
+                    )
+                    custom_price = strategy.custom_exit_price(position, None, market, ts_hit[0])
+                    exit_price = custom_price if custom_price is not None else stop_level
+                    return (ts_hit[0], exit_price)
+                return ts_hit
 
         # 3. Force exit (signal-independent — strategy's own initiative)
         tag = strategy.force_exit(position, market)
@@ -747,6 +770,37 @@ class PositionMonitor:
         except Exception:
             logger.exception("position_monitor.alert_failed", position_id=position.id)
 
+    def _maybe_refresh_exchange_stoploss(
+        self,
+        position: Position,
+        config: "StrategyConfig",
+    ) -> None:
+        """Update the tracked exchange stoploss level when peak has advanced.
+
+        For stoploss_on_exchange=True with trailing_stop=True, the resting
+        stoploss trails from the peak. This method keeps _stoploss_order_levels
+        in sync with the current peak. In live mode this would trigger a
+        cancel+repost; in paper mode it updates the in-memory tracker.
+        """
+        if not config.order_types.stoploss_on_exchange:
+            return
+        peak_price = self._peak_prices.get(position.id, position.entry_price)
+        if config.trailing_stop:
+            stop_level = _compute_trailing_stop_level(
+                position,
+                peak_price,
+                config.stoploss,
+                config.trailing_stop_positive,
+                config.trailing_stop_positive_offset,
+            )
+            self._stoploss_order_levels[position.id] = round(
+                stop_level * config.order_types.stoploss_on_exchange_limit_ratio, 4
+            )
+        else:
+            self._stoploss_order_levels[position.id] = _compute_exchange_stoploss_price(
+                position, config.order_types, stoploss=config.stoploss
+            )
+
     def _update_peak(self, position: Position, current_price: float) -> None:
         """Advance peak price if current_price is better than recorded peak."""
         peak = self._peak_prices.get(position.id, position.entry_price)
@@ -783,6 +837,43 @@ class PositionMonitor:
 # ---------------------------------------------------------------------------
 # Pure exit-condition helpers (no I/O — easy to unit test independently)
 # ---------------------------------------------------------------------------
+
+
+def _compute_trailing_stop_level(
+    position: Position,
+    peak_price: float,
+    stoploss: float,
+    trailing_stop_positive: float | None,
+    trailing_stop_positive_offset: float,
+) -> float:
+    """Return the trailing stop trigger price (the posted limit level).
+
+    Mirrors the logic in _check_trailing_stop but returns the stop price
+    directly so callers can use it as a limit fill price.
+    """
+    entry = position.entry_price
+    peak_gain = peak_price - entry
+    if trailing_stop_positive is not None and peak_gain >= trailing_stop_positive:
+        trail_distance = trailing_stop_positive_offset
+    else:
+        trail_distance = -stoploss
+    return round(peak_price - trail_distance, 4)
+
+
+def _compute_exchange_stoploss_price(
+    position: Position,
+    order_types: "OrderTypes",
+    *,
+    stoploss: float,
+) -> float:
+    """Compute the resting stoploss order price for exchange-hosted stoploss.
+
+    Formula: (entry_price + stoploss) * stoploss_on_exchange_limit_ratio
+    stoploss is an absolute dollar drop (e.g. -0.15), NOT a percentage.
+    Applies to both YES and NO positions (entry_price is in contract-side terms).
+    """
+    raw = (position.entry_price + stoploss) * order_types.stoploss_on_exchange_limit_ratio
+    return max(round(raw, 4), 0.01)
 
 
 def _check_stoploss(

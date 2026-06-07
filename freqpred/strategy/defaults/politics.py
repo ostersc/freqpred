@@ -72,8 +72,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         factbase_series_allowlist=["KXTRUMPSAY", "KXTRUMPSAYMONTH", "KXTRUMPSAYNICKNAME", "KXTRUMPSAYTRUMP"],
         # Resting limit entries at estimated_probability - min_edge (0.15 below model estimate).
         # Only fills when market comes to our price — guarantees edge at fill.
-        # exit="limit" added here when T48 (limit exits) is implemented.
-        order_types=OrderTypes(entry="limit"),
+        order_types=OrderTypes(entry="limit", exit="limit"),
         limit_order_timeout_hours=2.0,
     )
 

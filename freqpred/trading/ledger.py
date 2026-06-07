@@ -515,4 +515,5 @@ def _row_to_position(row: PositionRow) -> Position:
         exit_requested_contracts=row.exit_requested_contracts,
         exit_filled_contracts=row.exit_filled_contracts,
         realized_pnl_accumulator=row.realized_pnl_accumulator or 0.0,
+        exchange_stoploss_order_id=row.exchange_stoploss_order_id,
     )

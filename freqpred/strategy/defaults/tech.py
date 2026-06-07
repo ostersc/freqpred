@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from freqpred.strategy.base import IPredictionStrategy
-from freqpred.strategy.config import StrategyConfig
+from freqpred.strategy.config import OrderTypes, StrategyConfig
 
 if False:  # TYPE_CHECKING
     from freqpred.markets.models import Market
@@ -24,6 +24,7 @@ class TechNewsStrategy(IPredictionStrategy):
         trailing_stop=True,
         trailing_stop_positive=0.10,
         trailing_stop_positive_offset=0.02,
+        order_types=OrderTypes(entry="limit", exit="limit"),
     )
 
     def should_trade(self, signal: Signal, market: Market) -> bool:

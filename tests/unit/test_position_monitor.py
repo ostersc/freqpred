@@ -24,6 +24,8 @@ from freqpred.trading.position_monitor import (
     PositionMonitor,
     _check_stoploss,
     _check_trailing_stop,
+    _compute_exchange_stoploss_price,
+    _compute_trailing_stop_level,
 )
 
 # Ensure ORM relationships resolve (needed for MarketRow joins)
@@ -1722,3 +1724,289 @@ class TestPendingPositionFillCheck:
             await monitor.check_all_positions(_now=NOW)
 
         mock_pending.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# T48 — limit exits + exchange-hosted stoploss
+# ---------------------------------------------------------------------------
+
+
+def _make_limit_strategy(
+    *,
+    stoploss: float = -0.15,
+    trailing_stop: bool = True,
+    exit_type: str = "market",
+    stoploss_on_exchange: bool = False,
+    stoploss_type: str = "market",
+    limit_ratio: float = 0.99,
+) -> IPredictionStrategy:
+    from freqpred.strategy.config import OrderTypes
+
+    class _S(IPredictionStrategy):
+        config = StrategyConfig(
+            name="TestStrategy",
+            min_edge=0.10,
+            min_confidence=0.70,
+            max_exposure_per_market=0.05,
+            kelly_fraction=0.25,
+            categories=[],
+            min_volume_24h=0.0,
+            max_days_to_close=365,
+            min_days_to_close=0,
+            stoploss=stoploss,
+            trailing_stop=trailing_stop,
+            order_types=OrderTypes(
+                exit=exit_type,
+                stoploss=stoploss_type,
+                stoploss_on_exchange=stoploss_on_exchange,
+                stoploss_on_exchange_limit_ratio=limit_ratio,
+            ),
+        )
+
+        def should_trade(self, signal, market):  # type: ignore[override]
+            return True
+
+        def position_size(self, signal, bankroll):  # type: ignore[override]
+            return 0.0
+
+    return _S()
+
+
+class TestT48LimitExits:
+    """T48: limit exit + exchange-hosted stoploss behaviour."""
+
+    def _monitor(self, strategy: IPredictionStrategy) -> PositionMonitor:
+        return PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": strategy},
+        )
+
+    # ------------------------------------------------------------------
+    # exit="limit" trailing-stop fill price
+    # ------------------------------------------------------------------
+
+    def test_limit_exit_fills_at_trailing_stop_price(self) -> None:
+        """exit="limit": trailing stop fires, fill at stop level not current bid."""
+        strategy = _make_limit_strategy(
+            stoploss=-0.20, trailing_stop=True, exit_type="limit"
+        )
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        monitor._peak_prices[pos.id] = 0.70  # peak seen at 0.70
+
+        # Trailing stop level = 0.70 - 0.20 = 0.50; current bid = 0.48 (has breached)
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.48),
+            current_price=0.48,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "trailing_stop"
+        # Fill at stop level (0.50), not current bid (0.48)
+        assert result[1] == pytest.approx(0.50)
+
+    def test_market_exit_fills_at_current_price(self) -> None:
+        """exit="market" (default): trailing stop fills at current bid — unchanged."""
+        strategy = _make_limit_strategy(
+            stoploss=-0.20, trailing_stop=True, exit_type="market"
+        )
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        monitor._peak_prices[pos.id] = 0.70  # stop level = 0.50
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.48),
+            current_price=0.48,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "trailing_stop"
+        assert result[1] == pytest.approx(0.48)  # current bid, not stop level
+
+    # ------------------------------------------------------------------
+    # custom_exit_price hook
+    # ------------------------------------------------------------------
+
+    def test_custom_exit_price_hook_used(self) -> None:
+        """custom_exit_price() returns non-None → that price is used for resting order."""
+        strategy = _make_limit_strategy(
+            stoploss=-0.20, trailing_stop=True, exit_type="limit"
+        )
+        custom_price = 0.55
+        strategy.custom_exit_price = MagicMock(return_value=custom_price)  # type: ignore[method-assign]
+
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        monitor._peak_prices[pos.id] = 0.70  # stop level = 0.50, but hook overrides
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.48),
+            current_price=0.48,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "trailing_stop"
+        assert result[1] == pytest.approx(custom_price)
+        from unittest.mock import ANY
+        strategy.custom_exit_price.assert_called_once_with(pos, None, ANY, "trailing_stop")
+
+    def test_custom_exit_price_none_falls_back_to_stop_level(self) -> None:
+        """custom_exit_price() returns None → stop level used."""
+        strategy = _make_limit_strategy(
+            stoploss=-0.20, trailing_stop=True, exit_type="limit"
+        )
+        strategy.custom_exit_price = MagicMock(return_value=None)  # type: ignore[method-assign]
+
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        monitor._peak_prices[pos.id] = 0.70  # stop level = 0.50
+
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.48),
+            current_price=0.48,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[1] == pytest.approx(0.50)
+
+    # ------------------------------------------------------------------
+    # stoploss_on_exchange: in-memory fallback always fires
+    # ------------------------------------------------------------------
+
+    def test_stoploss_on_exchange_in_memory_fallback_still_fires(self) -> None:
+        """stoploss_on_exchange=True: in-memory stoploss check still closes position."""
+        strategy = _make_limit_strategy(
+            stoploss=-0.15,
+            trailing_stop=False,
+            stoploss_on_exchange=True,
+            stoploss_type="limit",
+        )
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.60)
+
+        # Price drops 0.20 below entry — exceeds stoploss=-0.15
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=0.40),
+            current_price=0.40,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "stoploss"
+
+    # ------------------------------------------------------------------
+    # Exchange stoploss price formula
+    # ------------------------------------------------------------------
+
+    def test_stoploss_exchange_formula_yes(self) -> None:
+        """YES position: exchange stoploss price = (entry + stoploss) * limit_ratio."""
+        from freqpred.strategy.config import OrderTypes
+        pos = _make_position(entry_price=0.60, direction="YES")
+        order_types = OrderTypes(
+            stoploss_on_exchange=True,
+            stoploss="limit",
+            stoploss_on_exchange_limit_ratio=0.99,
+        )
+        # (0.60 + (-0.15)) * 0.99 = 0.45 * 0.99 = 0.4455
+        price = _compute_exchange_stoploss_price(pos, order_types, stoploss=-0.15)
+        assert price == pytest.approx(0.4455)
+
+    def test_stoploss_exchange_formula_no(self) -> None:
+        """NO position: same formula applied to NO contract value (entry_price in NO terms)."""
+        from freqpred.strategy.config import OrderTypes
+        pos = _make_position(entry_price=0.40, direction="NO")
+        order_types = OrderTypes(
+            stoploss_on_exchange=True,
+            stoploss="limit",
+            stoploss_on_exchange_limit_ratio=0.99,
+        )
+        # (0.40 + (-0.15)) * 0.99 = 0.25 * 0.99 = 0.2475
+        price = _compute_exchange_stoploss_price(pos, order_types, stoploss=-0.15)
+        assert price == pytest.approx(0.2475)
+
+    # ------------------------------------------------------------------
+    # emergency exit always uses market (current bid)
+    # ------------------------------------------------------------------
+
+    def test_emergency_exit_always_market(self) -> None:
+        """force_exit (emergency path) fills at current bid regardless of exit='limit'."""
+        strategy = _make_limit_strategy(
+            stoploss=-0.20, trailing_stop=True, exit_type="limit"
+        )
+        strategy.force_exit = MagicMock(return_value="emergency")  # type: ignore[method-assign]
+
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+        monitor._peak_prices[pos.id] = 0.52  # far from stop level; trailing stop won't fire
+
+        current_bid = 0.51
+        result = monitor.evaluate_exit(
+            position=pos,
+            market=_make_market(mid_price=current_bid),
+            current_price=current_bid,
+            strategy=strategy,
+        )
+        assert result is not None
+        assert result[0] == "force_exit:emergency"
+        # Emergency exit fills at current price, not a limit price
+        assert result[1] == pytest.approx(current_bid)
+
+    # ------------------------------------------------------------------
+    # Exchange stoploss level refreshed when peak advances
+    # ------------------------------------------------------------------
+
+    def test_trailing_stop_limit_refreshed_on_peak_advance(self) -> None:
+        """stoploss_on_exchange=True: _stoploss_order_levels updated as peak advances."""
+        strategy = _make_limit_strategy(
+            stoploss=-0.20,
+            trailing_stop=True,
+            stoploss_on_exchange=True,
+            stoploss_type="limit",
+            limit_ratio=0.99,
+        )
+        monitor = self._monitor(strategy)
+        pos = _make_position(entry_price=0.50)
+
+        # Simulate peak advancing from 0.60 to 0.70
+        monitor._peak_prices[pos.id] = 0.60
+        monitor._maybe_refresh_exchange_stoploss(pos, strategy.config)
+        level_at_60 = monitor._stoploss_order_levels.get(pos.id)
+
+        monitor._peak_prices[pos.id] = 0.70
+        monitor._maybe_refresh_exchange_stoploss(pos, strategy.config)
+        level_at_70 = monitor._stoploss_order_levels.get(pos.id)
+
+        # stop level at peak 0.60 = 0.60 - 0.20 = 0.40 → * 0.99 = 0.396
+        # stop level at peak 0.70 = 0.70 - 0.20 = 0.50 → * 0.99 = 0.495
+        assert level_at_60 is not None
+        assert level_at_70 is not None
+        assert level_at_70 > level_at_60
+        assert level_at_60 == pytest.approx(0.396)
+        assert level_at_70 == pytest.approx(0.495)
+
+    # ------------------------------------------------------------------
+    # Helper function: _compute_trailing_stop_level
+    # ------------------------------------------------------------------
+
+    def test_compute_trailing_stop_level_normal_trail(self) -> None:
+        """Normal trail: stop = peak - |stoploss|."""
+        pos = _make_position(entry_price=0.50)
+        level = _compute_trailing_stop_level(
+            pos, peak_price=0.70, stoploss=-0.20,
+            trailing_stop_positive=None, trailing_stop_positive_offset=0.02,
+        )
+        assert level == pytest.approx(0.50)  # 0.70 - 0.20
+
+    def test_compute_trailing_stop_level_tight_trail(self) -> None:
+        """Tight trail kicks in when peak_gain >= trailing_stop_positive."""
+        pos = _make_position(entry_price=0.50)
+        level = _compute_trailing_stop_level(
+            pos, peak_price=0.70, stoploss=-0.20,
+            trailing_stop_positive=0.10,  # 0.70 - 0.50 = 0.20 >= 0.10 → tight
+            trailing_stop_positive_offset=0.02,
+        )
+        assert level == pytest.approx(0.68)  # 0.70 - 0.02

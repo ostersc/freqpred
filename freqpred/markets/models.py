@@ -172,6 +172,9 @@ class PositionRow(Base):
     # Running realized P&L for partial closes; finalized into pnl on full close
     realized_pnl_accumulator: Mapped[float] = mapped_column(Float, nullable=False, server_default="0", default=0.0)
 
+    # Exchange-hosted stoploss order ID (live mode only; T48)
+    exchange_stoploss_order_id: Mapped[str | None] = mapped_column(VARCHAR(255), nullable=True)
+
     # Excursion tracking — signed price deltas (multiply by contracts for $ impact)
     mae: Mapped[float | None] = mapped_column(Float, nullable=True)  # max adverse excursion
     mfe: Mapped[float | None] = mapped_column(Float, nullable=True)  # max favorable excursion
@@ -422,3 +425,4 @@ class Position:
     exit_requested_contracts: int | None = None
     exit_filled_contracts: int | None = None
     realized_pnl_accumulator: float = 0.0
+    exchange_stoploss_order_id: str | None = None  # resting stoploss order on exchange (T48)

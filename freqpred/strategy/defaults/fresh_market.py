@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from freqpred.strategy.base import IPredictionStrategy
-from freqpred.strategy.config import StrategyConfig
+from freqpred.strategy.config import OrderTypes, StrategyConfig
 
 if TYPE_CHECKING:
     from freqpred.markets.models import Market
@@ -34,6 +34,7 @@ class FreshMarketStrategy(IPredictionStrategy):
         trailing_stop=True,
         trailing_stop_positive=0.10,
         trailing_stop_positive_offset=0.02,
+        order_types=OrderTypes(entry="limit", exit="limit"),
     )
 
     def is_market_interesting(self, market: Market) -> bool:

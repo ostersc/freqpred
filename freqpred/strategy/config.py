@@ -22,6 +22,13 @@ class OrderTypes:
     stoploss_on_exchange_interval: int = 60
     stoploss_on_exchange_limit_ratio: float = 0.99
 
+    def __post_init__(self) -> None:
+        if self.stoploss_on_exchange and self.stoploss != "limit":
+            raise ValueError(
+                "stoploss_on_exchange=True requires stoploss='limit', "
+                f"got stoploss={self.stoploss!r}"
+            )
+
 
 @dataclass
 class StrategyConfig:

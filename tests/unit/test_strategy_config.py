@@ -105,3 +105,21 @@ class TestTechExitConfig:
     def test_trailing_stop_enabled(self) -> None:
         assert self.config.trailing_stop is True
 
+
+class TestOrderTypesValidation:
+    def test_stoploss_on_exchange_requires_stoploss_limit(self) -> None:
+        from freqpred.strategy.config import OrderTypes
+        with pytest.raises(ValueError, match="stoploss_on_exchange=True requires stoploss='limit'"):
+            OrderTypes(stoploss_on_exchange=True, stoploss="market")
+
+    def test_stoploss_on_exchange_valid_with_stoploss_limit(self) -> None:
+        from freqpred.strategy.config import OrderTypes
+        ot = OrderTypes(stoploss_on_exchange=True, stoploss="limit")
+        assert ot.stoploss_on_exchange is True
+        assert ot.stoploss == "limit"
+
+    def test_stoploss_on_exchange_false_allows_market_stoploss(self) -> None:
+        from freqpred.strategy.config import OrderTypes
+        ot = OrderTypes(stoploss_on_exchange=False, stoploss="market")
+        assert ot.stoploss_on_exchange is False
+
