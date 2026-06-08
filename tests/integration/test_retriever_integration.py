@@ -66,6 +66,7 @@ def _make_embedder_for_question(question_embedding: list[float]) -> MagicMock:
     """Embedder whose embed_text returns the given vector for the query."""
     embedder = MagicMock(spec=LocalEmbedder)
     embedder.embed_text = AsyncMock(return_value=question_embedding)
+    embedder.embedding_column = "embedding"
     return embedder
 
 

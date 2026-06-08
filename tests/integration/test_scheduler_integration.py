@@ -82,6 +82,9 @@ async def session(engine):
 def mock_embedder():
     embedder = MagicMock()
     embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder.max_embed_chars = 2000
+    embedder.embedding_column = "embedding"
+    embedder.model_name = "all-MiniLM-L6-v2"
     return embedder
 
 
