@@ -38,6 +38,10 @@ def _dot(a: list[float], b: list[float]) -> float:
 
 
 class Embedder(Protocol):
+    model_name: str
+    max_embed_chars: int
+    embedding_column: str  # "embedding" (384-dim) or "embedding_768" (768-dim)
+
     async def embed_text(self, text: str) -> list[float]: ...
 
 
@@ -74,6 +78,9 @@ async def retrieve(
     reference = now if now is not None else datetime.now(timezone.utc)
     cutoff = reference - timedelta(days=max_age_days)
 
+    embed_col = embedder.embedding_column  # "embedding" or "embedding_768"
+    embed_attr = getattr(DocumentRow, embed_col)
+
     # Subquery: distinct document IDs linked to this market.
     linked_ids_sq = (
         select(DocumentMarketLinkRow.document_id)
@@ -82,7 +89,7 @@ async def retrieve(
         .subquery()
     )
 
-    distance_col = DocumentRow.embedding.cosine_distance(query_vector).label("cosine_distance")
+    distance_col = embed_attr.cosine_distance(query_vector).label("cosine_distance")
     # Use summary for BM25 when present — summaries are generated with market-question
     # vocabulary so they score better against the market question than the raw body.
     # Use only the first line of the question to avoid boilerplate resolution criteria
@@ -100,6 +107,7 @@ async def retrieve(
         select(DocumentRow, distance_col, bm25_col)
         .join(linked_ids_sq, DocumentRow.id == linked_ids_sq.c.document_id)
         .where(DocumentRow.published_at >= cutoff)
+        .where(embed_attr.is_not(None))  # exclude docs not yet reindexed for this backend
     )
 
     result = await session.execute(stmt)
@@ -156,7 +164,7 @@ async def retrieve(
             best_row: DocumentRow | None = None
             best_sim = -1.0
             for row in remaining:
-                sim = _dot(list(row.embedding), cat_vec)
+                sim = _dot(list(getattr(row, embed_col)), cat_vec)
                 if sim > best_sim:
                     best_sim = sim
                     best_row = row
@@ -192,7 +200,7 @@ async def retrieve(
         max_age_days=max_age_days,
         catalyst_count=len(catalyst_queries) if catalyst_queries else 0,
     )
-    return [(_row_to_document(row), score) for row, score in top]
+    return [(_row_to_document(row, embed_col), score) for row, score in top]
 
 
 def compute_retrieval_hash(doc_ids: list[str]) -> str:
@@ -210,7 +218,8 @@ def compute_retrieval_hash(doc_ids: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _row_to_document(row: DocumentRow) -> Document:
+def _row_to_document(row: DocumentRow, embed_col: str = "embedding") -> Document:
+    raw_vec = getattr(row, embed_col)
     return Document(
         id=str(row.id),
         source_url=row.source_url,
@@ -223,7 +232,7 @@ def _row_to_document(row: DocumentRow) -> Document:
         tags=list(row.tags),
         published_at=row.published_at,
         fetched_at=row.fetched_at,
-        embedding=list(row.embedding),
+        embedding=list(raw_vec) if raw_vec is not None else [],
         embedding_model=row.embedding_model,
         summary=row.summary,
     )

@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-06-07 (T48 limit exits + exchange-hosted stoploss)
+**Last updated:** 2026-06-07 (T83 OllamaEmbedder + EmbeddingConfig + VECTOR(768) migration)
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -744,7 +744,11 @@ class Document:
 
 **Deduplication:** Documents are inserted with `ON CONFLICT (source_url) DO UPDATE` — if a URL is fetched again, we update `content_hash` and `fetched_at` only if the content changed. The embedding is regenerated only when content changes.
 
-**Embedding model:** `sentence-transformers` (`all-MiniLM-L6-v2`, 384-dim) — local CPU-based embeddings, no API key required. Stored via the **pgvector** extension on RDS Postgres. No separate vector database needed. Voyage AI (`voyage-3`, 1024-dim) is a possible future enhancement for higher-quality retrieval.
+**Embedding model:** Configured via `EmbeddingConfig` (`config.embedding`). Two backends:
+- `sentence_transformers` (default) — `all-MiniLM-L6-v2`, 384-dim, ~90 MB, runs on CPU, no API key required. `max_embed_chars` default: 2000.
+- `ollama` — delegates to a local Ollama server. Default model: `nomic-embed-text` (768-dim, 8K token context). `max_embed_chars` default: 6000. Evaluated against miniLM on 113 markets: nomic had higher avg top-10 relevance in 65% of markets; avg blended score 0.721 vs 0.702. To switch: apply migration `0046`, run `scripts/reindex_embeddings.py --apply`, set `embedding.backend: ollama` in config.
+
+Use `make_embedder(config.embedding)` (from `freqpred/rag/embedder.py`) to construct the configured embedder. Stored embeddings use `documents.embedding_model` to track which model produced each vector so partial re-embedding is idempotent.
 
 **Full-text search index:** A GIN index on `to_tsvector('english', title || ' ' || body)` supports BM25 keyword scoring via `ts_rank`. Used in hybrid retrieval alongside cosine similarity.
 
@@ -1654,6 +1658,7 @@ Each task has a linked GitHub issue with full implementation scope, test plan, a
 - [ ] **T81** [#81](https://github.com/ostersc/freqpred/issues/81) — Whale tracking via Polymarket CLOB trades API: `polymarket_whale_trades` + `polymarket_whale_wallets` DB tables + migration; wire into `realtime_scheduler.py` (5 min cadence, cursor-based dedup via `fetcher_cursors`); whale qualification uses hybrid USD-floor-OR-volume-pct threshold; upsert `polymarket_whale_wallets` running totals per trade; daily batch win/loss scoring on resolved Polymarket markets including per-category `category_stats` JSONB; Telegram/Discord alert on qualifying trades for watched markets; `SERVICE_POLYMARKET_WHALE_TRACKER` telemetry heartbeat. Depends on: T78.
 
 - [ ] **T82** [#82](https://github.com/ostersc/freqpred/issues/82) — Cross-platform dashboard page: `GET /api/polymarket/dashboard` summary endpoint; new "Cross-Platform" React page with: divergence table (all matched markets, Kalshi vs Polymarket price, delta column, toxic-flow indicator), price comparison chart for selected market (Kalshi mid vs Polymarket mid, last 24h), whale trade feed (market, wallet short-hash with "Known sharp" / "Known whale" badge, direction, size, % of volume, pct_of_liquidity, age). Depends on: T79, T81.
+- [x] **T83** [#83](https://github.com/ostersc/freqpred/issues/83) — nomic-embed-text migration: `OllamaEmbedder` class satisfying the `Embedder` protocol; `EmbeddingConfig` section in `Settings` (`backend`, `model`, `ollama_base_url`, `max_embed_chars`); embedder factory in `cli.py`; `ALTER TABLE documents ALTER COLUMN embedding TYPE vector(768)` migration; `scripts/reindex_embeddings.py` to re-embed all docs with new model; make embed truncation config-driven in `ingestion/store.py`. Evaluation showed nomic has higher avg top-10 retrieval score on 65% of markets vs 26% for miniLM across 113 active markets.
 
 **Done when:** Polymarket prices are feeding the assessment prompt, matched markets appear in the dashboard, and whale alerts are firing on live markets with open positions.
 

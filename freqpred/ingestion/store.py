@@ -11,6 +11,7 @@ Flow for upsert_document:
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,15 +23,15 @@ from sqlalchemy import select, text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.rag.embedder import LocalEmbedder
 from freqpred.rag.models import Document, DocumentMarketLinkRow, DocumentRow
+from freqpred.rag.retriever import Embedder
 
 if TYPE_CHECKING:
     from freqpred.llm.client import LLMClient
 
 log = structlog.get_logger()
 
-_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+# Embedding model name is read from the embedder at upsert time — not hardcoded here.
 
 
 class DocumentSkipped(Exception):
@@ -45,8 +46,7 @@ class UpsertStatus(str, Enum):
     UPDATED = "updated"     # existing URL, content changed
     DEDUPED = "deduped"     # existing URL, content unchanged — no DB write
 
-# Truncate body before embedding to keep token count reasonable.
-# all-MiniLM-L6-v2 has a 512-token limit; ~2000 chars ≈ 400 tokens.
+# Default truncation limit; overridden per-call by embedder.max_embed_chars.
 _MAX_EMBED_CHARS = 2_000
 
 # LLM summarization thresholds.
@@ -103,11 +103,19 @@ class _HTMLStripper(HTMLParser):
         return " ".join("".join(self._parts).split())
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
 def _strip_html(text: str) -> str:
     """Remove HTML tags from *text* and return the plain-text content."""
     stripper = _HTMLStripper()
-    stripper.feed(text)
-    return stripper.get_text()
+    try:
+        stripper.feed(text)
+        return stripper.get_text()
+    except Exception:
+        # Fallback for malformed markup (e.g. invalid marked sections like
+        # <![Image ...]> from presidency.ucsb.edu) that HTMLParser rejects.
+        return " ".join(_TAG_RE.sub(" ", text).split())
 
 
 def _sanitize(text: str) -> str:
@@ -155,7 +163,7 @@ def _row_to_domain(row: DocumentRow) -> Document:
 
 async def upsert_document(
     session: AsyncSession,
-    embedder: LocalEmbedder,
+    embedder: Embedder,
     raw_doc: RawDocument,
     *,
     llm_client: LLMClient | None = None,
@@ -171,7 +179,7 @@ async def upsert_document(
 
     Args:
         session:          An open async SQLAlchemy session (caller manages commit).
-        embedder:         Local embedder instance.
+        embedder:         Embedder instance (LocalEmbedder or OllamaEmbedder).
         raw_doc:          The raw fetched document.
         llm_client:       Optional LLM client for body summarization.
         query_text:       Catalyst query that retrieved this document (for prompt context).
@@ -286,8 +294,9 @@ async def upsert_document(
 
     # Use summary for embedding when present — aligns the embedding vector with
     # the summarized content rather than an arbitrary body truncation.
+    max_chars = embedder.max_embed_chars
     summary_clean = _sanitize(raw_doc.summary) if raw_doc.summary else None
-    embed_text = summary_clean[:_MAX_EMBED_CHARS] if summary_clean else body_clean[:_MAX_EMBED_CHARS]
+    embed_text = summary_clean[:max_chars] if summary_clean else body_clean[:max_chars]
 
     log.debug(
         "store.upsert_document.embed",
@@ -296,43 +305,53 @@ async def upsert_document(
         embed_source="summary" if summary_clean else "body",
     )
     embedding = await embedder.embed_text(embed_text)
+    embed_col = embedder.embedding_column  # "embedding" or "embedding_768"
 
     doc_id = uuid.uuid4() if existing is None else existing.id
 
+    # For sentence_transformers (embed_col="embedding"): embedding_768 gets None.
+    # For Ollama (embed_col="embedding_768"): embedding gets a zero placeholder so
+    # the NOT NULL constraint is satisfied; the retriever filters this column out.
+    insert_values: dict = {
+        "id": doc_id,
+        "source_url": raw_doc.source_url,
+        "content_hash": content_hash,
+        "title": _sanitize(raw_doc.title),
+        "body": body_clean,
+        "summary": _sanitize(raw_doc.summary) if raw_doc.summary else raw_doc.summary,
+        "source_type": raw_doc.source_type,
+        "source_name": raw_doc.source_name,
+        "category": raw_doc.category,
+        "tags": raw_doc.tags,
+        "published_at": raw_doc.published_at,
+        "fetched_at": raw_doc.fetched_at,
+        "embedding_model": embedder.model_name,
+        embed_col: embedding,
+    }
+    if embed_col != "embedding":
+        insert_values["embedding"] = [0.0] * 384
+
+    update_values: dict = {
+        "content_hash": content_hash,
+        "title": _sanitize(raw_doc.title),
+        "body": body_clean,
+        "summary": _sanitize(raw_doc.summary) if raw_doc.summary else raw_doc.summary,
+        "source_type": raw_doc.source_type,
+        "source_name": raw_doc.source_name,
+        "category": raw_doc.category,
+        "tags": raw_doc.tags,
+        "published_at": raw_doc.published_at,
+        "fetched_at": raw_doc.fetched_at,
+        "embedding_model": embedder.model_name,
+        embed_col: embedding,
+    }
+
     stmt = (
         pg_insert(DocumentRow)
-        .values(
-            id=doc_id,
-            source_url=raw_doc.source_url,
-            content_hash=content_hash,
-            title=_sanitize(raw_doc.title),
-            body=body_clean,
-            summary=_sanitize(raw_doc.summary) if raw_doc.summary else raw_doc.summary,
-            source_type=raw_doc.source_type,
-            source_name=raw_doc.source_name,
-            category=raw_doc.category,
-            tags=raw_doc.tags,
-            published_at=raw_doc.published_at,
-            fetched_at=raw_doc.fetched_at,
-            embedding=embedding,
-            embedding_model=_EMBEDDING_MODEL,
-        )
+        .values(**insert_values)
         .on_conflict_do_update(
             index_elements=["source_url"],
-            set_={
-                "content_hash": content_hash,
-                "title": _sanitize(raw_doc.title),
-                "body": body_clean,
-                "summary": _sanitize(raw_doc.summary) if raw_doc.summary else raw_doc.summary,
-                "source_type": raw_doc.source_type,
-                "source_name": raw_doc.source_name,
-                "category": raw_doc.category,
-                "tags": raw_doc.tags,
-                "published_at": raw_doc.published_at,
-                "fetched_at": raw_doc.fetched_at,
-                "embedding": embedding,
-                "embedding_model": _EMBEDDING_MODEL,
-            },
+            set_=update_values,
         )
         .returning(DocumentRow)
     )

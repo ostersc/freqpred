@@ -51,8 +51,11 @@ class DocumentRow(Base):
         TIMESTAMP(timezone=True), nullable=False
     )
 
-    # Vector search — pgvector VECTOR(384) for all-MiniLM-L6-v2
+    # Vector search
+    # embedding       — 384-dim, written by sentence_transformers (all-MiniLM-L6-v2)
+    # embedding_768   — 768-dim, written by Ollama (nomic-embed-text); nullable until reindexed
     embedding: Mapped[list] = mapped_column(Vector(384), nullable=False)
+    embedding_768: Mapped[list | None] = mapped_column(Vector(768), nullable=True)
     embedding_model: Mapped[str] = mapped_column(VARCHAR(100), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(

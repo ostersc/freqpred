@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from typing import Any
+from typing import Any, Literal, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -131,6 +131,16 @@ class DashboardConfig(BaseModel):
     api_enabled: bool = Field(default=True)
 
 
+class EmbeddingConfig(BaseModel):
+    backend: Literal["sentence_transformers", "ollama"] = "sentence_transformers"
+    model: str = "all-MiniLM-L6-v2"
+    ollama_base_url: str = "http://localhost:11434"
+    # Maximum characters sent to the embedder per document.
+    # all-MiniLM-L6-v2 has a 512-token limit (~2K chars); nomic-embed-text has
+    # an 8K-token limit (~6K chars). Raise to 6000 when switching to nomic.
+    max_embed_chars: int = 2000
+
+
 class AlertsConfig(BaseModel):
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
@@ -156,6 +166,7 @@ class Settings(BaseModel):
     guardian: GuardianConfig = Field(default_factory=GuardianConfig)
     reddit: RedditConfig = Field(default_factory=RedditConfig)
     truthsocial: TruthSocialConfig = Field(default_factory=TruthSocialConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
     signal: SignalConfig = Field(default_factory=SignalConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)

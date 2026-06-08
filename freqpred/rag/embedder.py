@@ -1,24 +1,37 @@
-"""Local sentence-transformers embedder (free, no API key required).
+"""Embedder implementations and factory.
 
-Uses ``all-MiniLM-L6-v2`` by default — 384-dim, ~90 MB, runs on CPU.
-The model is downloaded from HuggingFace on first use and cached locally.
+Two backends:
+    LocalEmbedder   — sentence-transformers, runs on CPU, no API key required.
+    OllamaEmbedder  — delegates to a local Ollama server (e.g. nomic-embed-text).
 
-Public API:
-    LocalEmbedder  — async wrapper around SentenceTransformer
+Both satisfy the Embedder protocol defined in retriever.py:
+    async def embed_text(self, text: str) -> list[float]
+
+Both also expose:
+    model_name: str        — written to documents.embedding_model
+    max_embed_chars: int   — how many chars to truncate before embedding
+
+Use make_embedder(config) to construct the right one from EmbeddingConfig.
 """
 from __future__ import annotations
 
 import asyncio
 import functools
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
+import httpx
 import numpy as np
 import structlog
 from sentence_transformers import SentenceTransformer
 
+if TYPE_CHECKING:
+    from freqpred.config import EmbeddingConfig
+
 log = structlog.get_logger()
 
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
+_DEFAULT_MAX_EMBED_CHARS = 2_000
 
 # Single shared thread pool for CPU-bound inference — avoids spinning up a
 # new thread per call while still keeping the event loop unblocked.
@@ -37,21 +50,28 @@ class LocalEmbedder:
     conflict with same-named packages in the project).
 
     Args:
-        model_name: HuggingFace model ID. Defaults to ``all-MiniLM-L6-v2``
-                    (384-dim, ~90 MB).
+        model_name:      HuggingFace model ID. Defaults to ``all-MiniLM-L6-v2``
+                         (384-dim, ~90 MB).
+        max_embed_chars: Truncation limit before embedding. Defaults to 2000.
     """
 
-    def __init__(self, model_name: str = _DEFAULT_MODEL) -> None:
-        self.model = model_name
+    def __init__(
+        self,
+        model_name: str = _DEFAULT_MODEL,
+        max_embed_chars: int = _DEFAULT_MAX_EMBED_CHARS,
+    ) -> None:
+        self.model_name = model_name
+        self.max_embed_chars = max_embed_chars
+        self.embedding_column = "embedding"
         self.dim: int = 0  # set after first load
         self._model: SentenceTransformer | None = None
 
     def _load(self) -> SentenceTransformer:
         """Load the model synchronously (called once from the thread pool)."""
-        log.info("embedder.loading_model", model=self.model)
-        m = SentenceTransformer(self.model)
+        log.info("embedder.loading_model", model=self.model_name)
+        m = SentenceTransformer(self.model_name)
         self.dim = m.get_sentence_embedding_dimension()
-        log.info("embedder.model_loaded", model=self.model, dim=self.dim)
+        log.info("embedder.model_loaded", model=self.model_name, dim=self.dim)
         return m
 
     async def _ensure_loaded(self) -> SentenceTransformer:
@@ -81,3 +101,64 @@ class LocalEmbedder:
         )
         embeddings: np.ndarray = await loop.run_in_executor(_EXECUTOR, encode_fn)
         return embeddings.tolist()
+
+
+class OllamaEmbedder:
+    """Embedding via a local Ollama server (e.g. nomic-embed-text, 768-dim).
+
+    POSTs to /api/embeddings with ``num_ctx`` set to 8192 so Ollama uses the
+    full context window of nomic-embed-text (8K tokens vs the default 2K).
+
+    Args:
+        model:           Ollama model name. Defaults to ``nomic-embed-text``.
+        base_url:        Ollama server base URL. Defaults to localhost:11434.
+        max_embed_chars: Truncation limit before embedding. Defaults to 6000
+                         (~750 tokens headroom under the 8K limit).
+    """
+
+    def __init__(
+        self,
+        model: str = "nomic-embed-text",
+        base_url: str = "http://localhost:11434",
+        max_embed_chars: int = 6_000,
+    ) -> None:
+        self.model_name = model
+        self.max_embed_chars = max_embed_chars
+        self.embedding_column = "embedding_768"
+        self._base_url = base_url.rstrip("/")
+
+    async def embed_text(self, text: str) -> list[float]:
+        """Embed a single string via Ollama. Returns a float list.
+
+        Uses the /api/embed endpoint (Ollama ≥ 0.1.26) with truncate=True so
+        the model silently clips inputs that exceed its context window instead
+        of returning a 500 error.
+        """
+        url = f"{self._base_url}/api/embed"
+        payload = {
+            "model": self.model_name,
+            "input": text,
+            "truncate": True,
+        }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=payload)
+        if resp.status_code != 200:
+            detail = resp.text[:200]
+            raise RuntimeError(
+                f"Ollama embedding failed ({resp.status_code}): {detail}"
+            )
+        return resp.json()["embeddings"][0]
+
+
+def make_embedder(config: "EmbeddingConfig") -> "LocalEmbedder | OllamaEmbedder":
+    """Construct the configured embedder from EmbeddingConfig."""
+    if config.backend == "ollama":
+        return OllamaEmbedder(
+            model=config.model,
+            base_url=config.ollama_base_url,
+            max_embed_chars=config.max_embed_chars,
+        )
+    return LocalEmbedder(
+        model_name=config.model,
+        max_embed_chars=config.max_embed_chars,
+    )

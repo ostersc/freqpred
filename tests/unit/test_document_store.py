@@ -23,6 +23,16 @@ NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
 FAKE_EMBEDDING = [0.1] * 384
 
 
+def _make_embedder_mock() -> AsyncMock:
+    """Return an AsyncMock that satisfies the Embedder protocol."""
+    embedder = AsyncMock()
+    embedder.model_name = "all-MiniLM-L6-v2"
+    embedder.max_embed_chars = 2000
+    embedder.embedding_column = "embedding"
+    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    return embedder
+
+
 def _make_raw_doc(
     url: str = "https://example.com/article",
     body: str = "Plain body text.",
@@ -162,8 +172,7 @@ async def test_upsert_new_document_calls_embedder():
     upserted_row = _make_document_row(raw_doc.source_url, content_hash)
     session = _make_session(existing_row=None, upserted_row=upserted_row)
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
 
     doc, status = await upsert_document(session, embedder, raw_doc)
 
@@ -180,8 +189,7 @@ async def test_upsert_new_document_flushes_session():
 
     upserted_row = _make_document_row(raw_doc.source_url, content_hash)
     session = _make_session(existing_row=None, upserted_row=upserted_row)
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
 
     await upsert_document(session, embedder, raw_doc)
 
@@ -208,8 +216,7 @@ async def test_same_url_same_hash_skips_embed():
     session.execute = AsyncMock(return_value=select_result)
     session.flush = AsyncMock()
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
 
     doc, status = await upsert_document(session, embedder, raw_doc)
 
@@ -235,8 +242,7 @@ async def test_different_url_same_content_returns_deduped():
     existing_by_hash = _make_document_row("https://example.com/article", content_hash)
     session = _make_session(existing_row=None, hash_existing_row=existing_by_hash)
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
 
     doc, status = await upsert_document(session, embedder, raw_doc)
 
@@ -263,8 +269,7 @@ async def test_same_url_changed_hash_triggers_reembed():
     upserted_row = _make_document_row(raw_doc.source_url, new_hash)
     session = _make_session(existing_row=existing_row, upserted_row=upserted_row)
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
 
     doc, status = await upsert_document(session, embedder, raw_doc)
 
@@ -302,8 +307,7 @@ async def test_embed_called_with_stripped_body():
     upserted_row = _make_document_row(raw_doc.source_url, content_hash)
     session = _make_session(existing_row=None, upserted_row=upserted_row)
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
 
     await upsert_document(session, embedder, raw_doc)
 
@@ -397,8 +401,7 @@ async def test_upsert_uses_summary_for_embedding_when_present():
     upserted_row = _make_document_row(raw_doc.source_url, content_hash)
     session = _make_session(existing_row=None, upserted_row=upserted_row)
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
 
     await upsert_document(session, embedder, raw_doc)
 
@@ -415,8 +418,7 @@ async def test_upsert_long_body_with_llm_client_calls_summarizer():
     upserted_row = _make_document_row(raw_doc.source_url, content_hash)
     session = _make_session_with_bm25(existing_row=None, bm25_score=0.3, upserted_row=upserted_row)
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
 
     llm_client = MagicMock()
 
@@ -449,8 +451,7 @@ async def test_upsert_deduped_doc_never_calls_summarizer():
     session.execute = AsyncMock(return_value=select_result)
     session.flush = AsyncMock()
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
     llm_client = MagicMock()
 
     with patch(
@@ -479,8 +480,7 @@ async def test_upsert_low_bm25_skips_summarizer():
     upserted_row = _make_document_row(raw_doc.source_url, content_hash)
     session = _make_session_with_bm25(existing_row=None, bm25_score=0.001, upserted_row=upserted_row)
 
-    embedder = AsyncMock()
-    embedder.embed_text = AsyncMock(return_value=FAKE_EMBEDDING)
+    embedder = _make_embedder_mock()
     llm_client = MagicMock()
 
     with patch(

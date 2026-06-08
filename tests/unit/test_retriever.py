@@ -72,6 +72,9 @@ def _make_session(
 def _make_embedder(embedding: list[float] = FAKE_EMBEDDING) -> AsyncMock:
     embedder = AsyncMock()
     embedder.embed_text = AsyncMock(return_value=embedding)
+    embedder.model_name = "all-MiniLM-L6-v2"
+    embedder.max_embed_chars = 2000
+    embedder.embedding_column = "embedding"
     return embedder
 
 
@@ -264,7 +267,7 @@ async def test_retrieve_catalyst_adds_supplemental_doc():
             return FAKE_EMBEDDING  # market question
         return catalyst_vec  # catalyst query
 
-    embedder = AsyncMock()
+    embedder = _make_embedder()
     embedder.embed_text = AsyncMock(side_effect=multi_embed)
 
     pairs = await retrieve(
@@ -293,7 +296,7 @@ async def test_retrieve_catalyst_no_duplicate_docs():
         call_count += 1
         return FAKE_EMBEDDING  # same vector for everything — catalyst picks row 2 both times
 
-    embedder = AsyncMock()
+    embedder = _make_embedder()
     embedder.embed_text = AsyncMock(side_effect=multi_embed)
 
     pairs = await retrieve(

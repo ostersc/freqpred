@@ -62,6 +62,21 @@ truthsocial:
   username: ""
   password: ""
 
+embedding:
+  # backend: sentence_transformers  # default — runs locally, no API key required
+  # model: all-MiniLM-L6-v2         # 384-dim, ~90 MB, downloads from HuggingFace on first run
+  # max_embed_chars: 2000            # chars sent to embedder per doc (~400 tokens for MiniLM)
+  #
+  # To switch to nomic-embed-text (768-dim, better retrieval quality):
+  #   1. Install Ollama: https://ollama.com and run: ollama pull nomic-embed-text
+  #   2. Apply migration 0046: uv run alembic upgrade head
+  #   3. Re-embed all documents: DATABASE_URL=... uv run python scripts/reindex_embeddings.py --apply
+  #   4. Uncomment the block below:
+  # backend: ollama
+  # model: nomic-embed-text
+  # ollama_base_url: http://localhost:11434
+  # max_embed_chars: 6000            # ~750-token headroom under nomic's 8K context window
+
 ingestion:
   schedule_interval_seconds: 1800  # 30 minutes
   truthsocial:

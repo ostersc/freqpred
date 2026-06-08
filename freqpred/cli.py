@@ -207,7 +207,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.markets.models import Market, MarketRow
     from freqpred.markets.watcher import MarketWatcher
-    from freqpred.rag.embedder import LocalEmbedder
+    from freqpred.rag.embedder import make_embedder
     from freqpred.signal.llm import PROMPT_VERSION
     from freqpred.signal.pipeline import SignalPipeline
     from freqpred.strategy.loader import load_strategy
@@ -234,7 +234,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     engine = make_engine(config.database.url)
     session_factory = make_session_factory(engine)
 
-    embedder = LocalEmbedder()
+    embedder = make_embedder(config.embedding)
     llm_client = LLMClient(
         anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
         session_factory,
@@ -1091,7 +1091,7 @@ async def _ingestion_run(
     from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
     from freqpred.ingestion.store import RawDocument, upsert_document
     from freqpred.markets.models import MarketRow
-    from freqpred.rag.embedder import LocalEmbedder
+    from freqpred.rag.embedder import make_embedder
 
     if not config.database.url:
         click.echo("ERROR: DATABASE_URL not configured.", err=True)
@@ -1110,7 +1110,7 @@ async def _ingestion_run(
         prompt_version="catalyst-v1",
     )
 
-    embedder = LocalEmbedder()
+    embedder = make_embedder(config.embedding)
 
     now = datetime.now(UTC)
 
@@ -1313,7 +1313,7 @@ async def _signal_analyze(config: object, market_id: str, *, force: bool = False
     from freqpred.db import make_engine, make_session_factory
     from freqpred.llm.client import LLMClient
     from freqpred.markets.models import Market, MarketRow
-    from freqpred.rag.embedder import LocalEmbedder
+    from freqpred.rag.embedder import make_embedder
     from freqpred.signal.pipeline import SignalPipeline
 
     if not config.database.url:
@@ -1365,7 +1365,7 @@ async def _signal_analyze(config: object, market_id: str, *, force: bool = False
         click.echo(f"Analyzing: {market.question}")
         click.echo(f"Category : {market.category}  |  Mid: {market.mid_price:.3f}")
 
-        embedder = LocalEmbedder()
+        embedder = make_embedder(config.embedding)
         from freqpred.signal.llm import PROMPT_VERSION  # noqa: PLC0415
         llm_client = LLMClient(
             anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
