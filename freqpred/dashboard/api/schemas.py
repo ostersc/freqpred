@@ -472,6 +472,12 @@ class ChangelogStatusOut(BaseModel):
     last_checked_at: datetime | None
 
 
+class KalshiApiTierOut(BaseModel):
+    api_usage_level: str | None     # e.g. "basic", "advanced"
+    can_upgrade: bool               # True when not already Advanced
+    fetched_at: datetime
+
+
 class PendingOrderSummary(BaseModel):
     """Per-pending-order detail surfaced on the System Health page.
 
@@ -503,6 +509,7 @@ class SystemHealthResponse(BaseModel):
     open_positions: int
     db_ok: bool
     uptime_seconds: int
+    api_tier: KalshiApiTierOut | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-06-07 (T83 OllamaEmbedder + EmbeddingConfig + VECTOR(768) migration)
+**Last updated:** 2026-06-09 (T85 Kalshi API tier display + self-serve upgrade)
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -1659,6 +1659,7 @@ Each task has a linked GitHub issue with full implementation scope, test plan, a
 
 - [ ] **T82** [#82](https://github.com/ostersc/freqpred/issues/82) — Cross-platform dashboard page: `GET /api/polymarket/dashboard` summary endpoint; new "Cross-Platform" React page with: divergence table (all matched markets, Kalshi vs Polymarket price, delta column, toxic-flow indicator), price comparison chart for selected market (Kalshi mid vs Polymarket mid, last 24h), whale trade feed (market, wallet short-hash with "Known sharp" / "Known whale" badge, direction, size, % of volume, pct_of_liquidity, age). Depends on: T79, T81.
 - [x] **T83** [#83](https://github.com/ostersc/freqpred/issues/83) — nomic-embed-text migration: `OllamaEmbedder` class satisfying the `Embedder` protocol; `EmbeddingConfig` section in `Settings` (`backend`, `model`, `ollama_base_url`, `max_embed_chars`); embedder factory in `cli.py`; `ALTER TABLE documents ALTER COLUMN embedding TYPE vector(768)` migration; `scripts/reindex_embeddings.py` to re-embed all docs with new model; make embed truncation config-driven in `ingestion/store.py`. Evaluation showed nomic has higher avg top-10 retrieval score on 65% of markets vs 26% for miniLM across 113 active markets.
+- [ ] **T85** [#85](https://github.com/ostersc/freqpred/issues/85) — Kalshi API tier display + self-serve upgrade: `get_account_limits()` + `upgrade_api_tier()` on `KalshiClient`; `KalshiApiTierOut` schema + `api_tier` field in `SystemHealthResponse`; `_kalshi_client` dep in dashboard routes; tier fetched (fail-open) in `GET /system/health`; `POST /system/api-tier/upgrade` route; System Health page shows tier badge + "Upgrade to Advanced" button hidden when already Advanced.
 
 **Done when:** Polymarket prices are feeding the assessment prompt, matched markets appear in the dashboard, and whale alerts are firing on live markets with open positions.
 

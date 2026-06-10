@@ -1,6 +1,6 @@
 import React from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getSystemHealth } from '../api/health'
+import { getSystemHealth, upgradeApiTier } from '../api/health'
 import { setRunState, shutdown } from '../api/system'
 import { Badge, Panel, Stat, LoadingSpinner, ErrorBanner, fmtUptime } from '../components/ui'
 
@@ -44,6 +44,11 @@ export default function SystemHealth() {
 
   const shutdownMutation = useMutation({
     mutationFn: shutdown,
+  })
+
+  const upgradeTierMutation = useMutation({
+    mutationFn: upgradeApiTier,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['systemHealth'] }),
   })
 
   return (
@@ -233,6 +238,7 @@ export default function SystemHealth() {
             {(() => {
               const ex = data.exchange
               const cl = data.changelog
+              const tier = data.api_tier
               const overallOk = ex.exchange_active === true && ex.trading_active === true
               const unavailable = ex.exchange_active === null
               const exchangeBadge = unavailable
@@ -280,6 +286,27 @@ export default function SystemHealth() {
                             {cl.unreviewed_count > 0
                               ? <a href="https://docs.kalshi.com/changelog" target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>view ↗</a>
                               : <span className="mono dim" style={{ fontSize: 11 }}>{cl.last_reviewed_at ?? '—'}</span>}
+                          </span>
+                        </R>
+                      )}
+                      {tier != null && (
+                        <R label="API tier">
+                          <span style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end' }}>
+                            <Badge kind={tier.api_usage_level?.toLowerCase() === 'advanced' ? 'pos' : 'info'}>
+                              {tier.api_usage_level ?? 'unknown'}
+                            </Badge>
+                            {tier.can_upgrade && (
+                              <button
+                                className="btn btn-sm"
+                                disabled={upgradeTierMutation.isPending}
+                                onClick={() => upgradeTierMutation.mutate()}
+                                style={{ fontSize: 11, padding: '2px 8px' }}
+                              >
+                                {upgradeTierMutation.isPending ? 'upgrading…' : 'Upgrade to Advanced'}
+                              </button>
+                            )}
+                            {upgradeTierMutation.isSuccess && <span className="mono" style={{ fontSize: 11, color: 'var(--pos)' }}>upgraded</span>}
+                            {upgradeTierMutation.isError && <span className="mono" style={{ fontSize: 11, color: 'var(--neg)' }}>failed</span>}
                           </span>
                         </R>
                       )}

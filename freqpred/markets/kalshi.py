@@ -635,6 +635,18 @@ class KalshiClient(IMarketClient):
         return balance_usd
 
     # ------------------------------------------------------------------
+    # Account
+    # ------------------------------------------------------------------
+
+    async def get_account_limits(self) -> dict[str, Any]:
+        """Return raw account limits payload from GET /account/limits."""
+        return await self._get("/account/limits")
+
+    async def upgrade_api_tier(self) -> dict[str, Any]:
+        """Promote account to the Advanced API tier via POST /account/api_usage_level/upgrade."""
+        return await self._post("/account/api_usage_level/upgrade", {})
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 

@@ -710,6 +710,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 order_manager=order_manager,
                 runtime_telemetry=runtime_telemetry,
                 kalshi_base_url=config.kalshi.base_url,
+                kalshi_client=kalshi_client,
             )
             _dash_server = _uvicorn.Server(
                 _uvicorn.Config(

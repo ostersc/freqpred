@@ -7,7 +7,7 @@ import signal
 import subprocess
 import uuid as _uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -50,6 +50,7 @@ from .schemas import (
     CircuitBreakerStateOut,
     DocumentLinkOut,
     HealthResponse,
+    KalshiApiTierOut,
     LedgerResponse,
     LLMCostResponse,
     LLMQueryDetailOut,
@@ -82,6 +83,9 @@ from .schemas import (
     SystemHealthResponse,
     WebSocketStateOut,
 )
+
+if TYPE_CHECKING:
+    from freqpred.markets.kalshi import KalshiClient
 
 # Fields that cannot be changed at runtime (require a process restart).
 _IMMUTABLE_FIELDS: frozenset[str] = frozenset({"name", "categories"})
@@ -145,6 +149,12 @@ def _kalshi_base_url(request: Request) -> str:
 def _runtime_telemetry(request: Request) -> RuntimeTelemetry | None:
     telemetry = getattr(request.app.state, "runtime_telemetry", None)
     return telemetry if isinstance(telemetry, RuntimeTelemetry) else None
+
+
+def _kalshi_client(request: Request) -> "KalshiClient | None":
+    from freqpred.markets.kalshi import KalshiClient as _KC  # noqa: PLC0415
+    client = getattr(request.app.state, "kalshi_client", None)
+    return client if isinstance(client, _KC) else None
 
 
 # ---------------------------------------------------------------------------
@@ -1751,6 +1761,7 @@ async def get_system_health(
     started_at: Annotated[datetime, Depends(_started_at)],
     runtime_telemetry: Annotated[RuntimeTelemetry | None, Depends(_runtime_telemetry)],
     kalshi_base_url: Annotated[str, Depends(_kalshi_base_url)],
+    kalshi_client: Annotated["KalshiClient | None", Depends(_kalshi_client)],
 ) -> SystemHealthResponse:
     import httpx as _httpx  # noqa: PLC0415
     import freqpred.alerts.models  # noqa: F401 — ensure RunStateRow is registered  # noqa: PLC0415
@@ -1955,6 +1966,28 @@ async def get_system_health(
 
     uptime_seconds = int((datetime.now(UTC) - started_at).total_seconds())
 
+    api_tier: KalshiApiTierOut | None = None
+    if kalshi_client is not None:
+        try:
+            limits_data = await kalshi_client.get_account_limits()
+            raw_level: str | None = limits_data.get("api_usage_level") or limits_data.get("usage_level")
+            if raw_level is None:
+                for v in limits_data.values():
+                    if isinstance(v, dict):
+                        raw_level = v.get("api_usage_level") or v.get("usage_level")
+                        if raw_level:
+                            break
+            if raw_level is None:
+                log.info("system_health.api_tier_unknown", limits_keys=list(limits_data.keys()))
+            api_tier = KalshiApiTierOut(
+                api_usage_level=raw_level,
+                # Only offer upgrade when we know the current tier and it isn't advanced.
+                can_upgrade=raw_level is not None and raw_level.lower() != "advanced",
+                fetched_at=datetime.now(UTC),
+            )
+        except Exception:
+            log.warning("system_health.api_tier_fetch_failed")
+
     return SystemHealthResponse(
         run_state=run_state,
         mode=app_mode,
@@ -1996,7 +2029,27 @@ async def get_system_health(
         open_positions=open_positions,
         db_ok=db_ok,
         uptime_seconds=uptime_seconds,
+        api_tier=api_tier,
     )
+
+
+# ---------------------------------------------------------------------------
+# API tier upgrade
+# ---------------------------------------------------------------------------
+
+
+@router.post("/system/api-tier/upgrade", status_code=200)
+async def upgrade_api_tier_endpoint(
+    kalshi_client: Annotated["KalshiClient | None", Depends(_kalshi_client)],
+) -> dict[str, bool]:
+    if kalshi_client is None:
+        raise HTTPException(status_code=503, detail="Kalshi client not available")
+    try:
+        await kalshi_client.upgrade_api_tier()
+    except Exception as exc:
+        log.exception("api_tier.upgrade_failed")
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ from .routes import router
 
 if TYPE_CHECKING:
     from freqpred.config import RiskConfig
+    from freqpred.markets.kalshi import KalshiClient
     from freqpred.runtime.telemetry import RuntimeTelemetry
     from freqpred.trading.order_manager import OrderManager
 
@@ -27,6 +28,7 @@ def create_app(
     order_manager: "OrderManager | None" = None,
     runtime_telemetry: "RuntimeTelemetry | None" = None,
     kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2",
+    kalshi_client: "KalshiClient | None" = None,
 ) -> FastAPI:
     """Create and configure the dashboard FastAPI application.
 
@@ -61,6 +63,7 @@ def create_app(
     app.state.order_manager = order_manager
     app.state.runtime_telemetry = runtime_telemetry
     app.state.kalshi_base_url = kalshi_base_url.rstrip("/")
+    app.state.kalshi_client = kalshi_client
 
     app.include_router(router, prefix="/api")
 

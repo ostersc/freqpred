@@ -60,6 +60,7 @@ def _make_app(
     signal_pipeline: object | None = None,
     order_manager: object | None = None,
     runtime_telemetry: object | None = None,
+    kalshi_client: object | None = None,
 ) -> object:
     """Create app with the real session factory replaced by a mock."""
     sf = MagicMock()
@@ -71,6 +72,7 @@ def _make_app(
         signal_pipeline=signal_pipeline,
         order_manager=order_manager,
         runtime_telemetry=runtime_telemetry,
+        kalshi_client=kalshi_client,
     )
 
     async def _override_get_db():
@@ -1886,3 +1888,121 @@ def test_position_out_exposes_exit_fields_for_live_only() -> None:
     assert item["exit_fee_usd"] == pytest.approx(0.02)
     assert item["exit_requested_contracts"] == 10
     assert item["exit_filled_contracts"] == 6
+
+
+# ---------------------------------------------------------------------------
+# /api/system/api-tier/upgrade
+# ---------------------------------------------------------------------------
+
+
+def test_upgrade_api_tier_route_success() -> None:
+    """POST /system/api-tier/upgrade returns 200 {ok: true} when client is present."""
+    from freqpred.dashboard.api.routes import _kalshi_client as _dep
+
+    mock_kc = AsyncMock()
+    mock_kc.upgrade_api_tier = AsyncMock(return_value={"api_usage_level": "advanced"})
+
+    session = _make_system_health_session()
+    app = _make_app(session)
+    app.dependency_overrides[_dep] = lambda: mock_kc
+
+    client = TestClient(app)
+    resp = client.post("/api/system/api-tier/upgrade")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    mock_kc.upgrade_api_tier.assert_called_once()
+
+
+def test_upgrade_api_tier_route_503_no_client() -> None:
+    """POST /system/api-tier/upgrade returns 503 when no Kalshi client is wired."""
+    from freqpred.dashboard.api.routes import _kalshi_client as _dep
+
+    session = _make_system_health_session()
+    app = _make_app(session)
+    app.dependency_overrides[_dep] = lambda: None
+
+    client = TestClient(app)
+    resp = client.post("/api/system/api-tier/upgrade")
+
+    assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# System health api_tier field
+# ---------------------------------------------------------------------------
+
+
+def test_system_health_includes_api_tier() -> None:
+    """GET /system/health includes api_tier when kalshi_client returns limits data."""
+    from freqpred.dashboard.api.routes import _kalshi_client as _dep
+
+    mock_kc = AsyncMock()
+    mock_kc.get_account_limits = AsyncMock(
+        return_value={"api_usage_level": "basic", "grants": []}
+    )
+
+    session = _make_system_health_session()
+    app = _make_app(session)
+    app.dependency_overrides[_dep] = lambda: mock_kc
+
+    client = TestClient(app)
+    resp = client.get("/api/system/health")
+
+    assert resp.status_code == 200
+    tier = resp.json().get("api_tier")
+    assert tier is not None
+    assert tier["api_usage_level"] == "basic"
+    assert tier["can_upgrade"] is True
+
+
+def test_system_health_api_tier_null_when_no_client() -> None:
+    """GET /system/health returns api_tier: null when no kalshi_client is wired."""
+    from freqpred.dashboard.api.routes import _kalshi_client as _dep
+
+    session = _make_system_health_session()
+    app = _make_app(session)
+    app.dependency_overrides[_dep] = lambda: None
+
+    client = TestClient(app)
+    resp = client.get("/api/system/health")
+
+    assert resp.status_code == 200
+    assert resp.json().get("api_tier") is None
+
+
+def test_system_health_api_tier_fetch_failure_is_non_fatal() -> None:
+    """GET /system/health returns 200 with api_tier: null when limit fetch raises."""
+    from freqpred.dashboard.api.routes import _kalshi_client as _dep
+
+    mock_kc = AsyncMock()
+    mock_kc.get_account_limits = AsyncMock(side_effect=RuntimeError("network error"))
+
+    session = _make_system_health_session()
+    app = _make_app(session)
+    app.dependency_overrides[_dep] = lambda: mock_kc
+
+    client = TestClient(app)
+    resp = client.get("/api/system/health")
+
+    assert resp.status_code == 200
+    assert resp.json().get("api_tier") is None
+
+
+def test_system_health_advanced_tier_can_upgrade_false() -> None:
+    """can_upgrade is False when tier is already 'advanced' (case-insensitive)."""
+    from freqpred.dashboard.api.routes import _kalshi_client as _dep
+
+    mock_kc = AsyncMock()
+    mock_kc.get_account_limits = AsyncMock(return_value={"api_usage_level": "Advanced"})
+
+    session = _make_system_health_session()
+    app = _make_app(session)
+    app.dependency_overrides[_dep] = lambda: mock_kc
+
+    client = TestClient(app)
+    resp = client.get("/api/system/health")
+
+    assert resp.status_code == 200
+    tier = resp.json()["api_tier"]
+    assert tier["can_upgrade"] is False

@@ -351,6 +351,12 @@ export interface PendingOrderSummary {
   last_exchange_sync_at: string | null
 }
 
+export interface KalshiApiTierOut {
+  api_usage_level: string | null
+  can_upgrade: boolean
+  fetched_at: string
+}
+
 export interface SystemHealthResponse {
   run_state: string
   mode: string
@@ -366,6 +372,7 @@ export interface SystemHealthResponse {
   open_positions: number
   db_ok: boolean
   uptime_seconds: number
+  api_tier?: KalshiApiTierOut | null
 }
 
 export interface LedgerResponse {

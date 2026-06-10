@@ -799,3 +799,55 @@ class TestGetActiveMarkets:
             await client.get_active_markets()
 
         mock_list.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# get_account_limits / upgrade_api_tier
+# ---------------------------------------------------------------------------
+
+class TestGetAccountLimits:
+    @pytest.mark.asyncio
+    async def test_returns_raw_dict(self) -> None:
+        client = _make_client()
+        payload = {"api_usage_level": "basic", "grants": []}
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(payload)
+            result = await client.get_account_limits()
+
+        assert result == payload
+
+    @pytest.mark.asyncio
+    async def test_calls_correct_endpoint(self) -> None:
+        client = _make_client()
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response({})
+            await client.get_account_limits()
+
+        called_url = mock_get.call_args[0][0]
+        assert called_url.endswith("/account/limits")
+
+
+class TestUpgradeApiTier:
+    @pytest.mark.asyncio
+    async def test_returns_raw_dict(self) -> None:
+        client = _make_client()
+        payload = {"api_usage_level": "advanced"}
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(payload)
+            result = await client.upgrade_api_tier()
+
+        assert result == payload
+
+    @pytest.mark.asyncio
+    async def test_calls_correct_endpoint(self) -> None:
+        client = _make_client()
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response({})
+            await client.upgrade_api_tier()
+
+        called_url = mock_post.call_args[0][0]
+        assert called_url.endswith("/account/api_usage_level/upgrade")
