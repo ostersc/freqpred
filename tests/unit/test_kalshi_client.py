@@ -851,3 +851,18 @@ class TestUpgradeApiTier:
 
         called_url = mock_post.call_args[0][0]
         assert called_url.endswith("/account/api_usage_level/upgrade")
+
+    @pytest.mark.asyncio
+    async def test_empty_body_201_returns_empty_dict(self) -> None:
+        """201 with no body (success, no JSON) returns {} rather than raising."""
+        client = _make_client()
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 201
+        resp.content = b""
+        resp.raise_for_status = MagicMock()
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = resp
+            result = await client.upgrade_api_tier()
+
+        assert result == {}

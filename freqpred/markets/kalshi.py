@@ -643,8 +643,18 @@ class KalshiClient(IMarketClient):
         return await self._get("/account/limits")
 
     async def upgrade_api_tier(self) -> dict[str, Any]:
-        """Promote account to the Advanced API tier via POST /account/api_usage_level/upgrade."""
-        return await self._post("/account/api_usage_level/upgrade", {})
+        """Promote account to the Advanced API tier via POST /account/api_usage_level/upgrade.
+
+        Returns an empty dict on 201 responses with no body.
+        """
+        path = "/account/api_usage_level/upgrade"
+        url = self._base_url + path
+        headers = self._make_auth_headers("POST", self._base_path + path)
+        headers["Content-Type"] = "application/json"
+        resp = await self._http.post(url, json={}, headers=headers)
+        if resp.status_code >= 400:
+            raise KalshiAPIError(resp.status_code, resp.text)
+        return resp.json() if resp.content else {}
 
     # ------------------------------------------------------------------
     # Lifecycle

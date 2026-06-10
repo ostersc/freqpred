@@ -1970,11 +1970,19 @@ async def get_system_health(
     if kalshi_client is not None:
         try:
             limits_data = await kalshi_client.get_account_limits()
-            raw_level: str | None = limits_data.get("api_usage_level") or limits_data.get("usage_level")
+            raw_level: str | None = (
+                limits_data.get("usage_tier")
+                or limits_data.get("api_usage_level")
+                or limits_data.get("usage_level")
+            )
             if raw_level is None:
                 for v in limits_data.values():
                     if isinstance(v, dict):
-                        raw_level = v.get("api_usage_level") or v.get("usage_level")
+                        raw_level = (
+                            v.get("usage_tier")
+                            or v.get("api_usage_level")
+                            or v.get("usage_level")
+                        )
                         if raw_level:
                             break
             if raw_level is None:
@@ -2046,6 +2054,12 @@ async def upgrade_api_tier_endpoint(
         raise HTTPException(status_code=503, detail="Kalshi client not available")
     try:
         await kalshi_client.upgrade_api_tier()
+    except KalshiAPIError as exc:
+        if exc.status_code == 404:
+            log.warning("api_tier.upgrade_not_available")
+            raise HTTPException(status_code=503, detail="Upgrade endpoint not yet available") from exc
+        log.exception("api_tier.upgrade_failed")
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         log.exception("api_tier.upgrade_failed")
         raise HTTPException(status_code=502, detail=str(exc)) from exc

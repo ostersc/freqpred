@@ -1939,7 +1939,7 @@ def test_system_health_includes_api_tier() -> None:
 
     mock_kc = AsyncMock()
     mock_kc.get_account_limits = AsyncMock(
-        return_value={"api_usage_level": "basic", "grants": []}
+        return_value={"read": {}, "usage_tier": "basic", "write": {}}
     )
 
     session = _make_system_health_session()
@@ -1994,7 +1994,7 @@ def test_system_health_advanced_tier_can_upgrade_false() -> None:
     from freqpred.dashboard.api.routes import _kalshi_client as _dep
 
     mock_kc = AsyncMock()
-    mock_kc.get_account_limits = AsyncMock(return_value={"api_usage_level": "Advanced"})
+    mock_kc.get_account_limits = AsyncMock(return_value={"usage_tier": "Advanced"})
 
     session = _make_system_health_session()
     app = _make_app(session)
