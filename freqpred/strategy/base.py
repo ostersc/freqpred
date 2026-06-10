@@ -49,6 +49,13 @@ class IPredictionStrategy(ABC):
         min_edge, max_edge, min_confidence, min_mid_price, max_mid_price, and
         is_market_interesting (re-checked at entry time so markets kept alive
         only for exit monitoring cannot accumulate new entries).
+
+        The min/max price filters apply to the entry side's own cost: the YES
+        mid for YES signals, ``1 - mid`` for NO signals. A NO entry on a market
+        trading at 0.93 costs 0.07 per contract — exactly the longshot profile
+        min_mid_price exists to block. (is_market_interesting still filters on
+        the raw YES mid at selection time, before any direction is known.)
+
         Override to add custom logic; call super().should_trade() to preserve
         the base filter checks.
         """
@@ -60,9 +67,10 @@ class IPredictionStrategy(ABC):
             return False
         if signal.confidence < self.config.min_confidence:
             return False
-        if self.config.min_mid_price is not None and market.mid_price < self.config.min_mid_price:
+        side_price = 1.0 - market.mid_price if signal.direction == "NO" else market.mid_price
+        if self.config.min_mid_price is not None and side_price < self.config.min_mid_price:
             return False
-        if self.config.max_mid_price is not None and market.mid_price > self.config.max_mid_price:
+        if self.config.max_mid_price is not None and side_price > self.config.max_mid_price:
             return False
         return True
 

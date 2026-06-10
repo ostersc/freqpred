@@ -58,6 +58,9 @@ class StrategyConfig:
     # Price range filter: skip markets the market has already decided.
     # Markets trading below min_mid_price or above max_mid_price are excluded
     # from ingestion and signal generation. None = no filter on that bound.
+    # At entry time (should_trade) the bounds apply to the entry side's own
+    # cost — the YES mid for YES signals, 1 - mid for NO signals — so a NO
+    # entry on a market at 0.93 (own cost 0.07) is blocked as a longshot.
     min_mid_price: float | None = 0.05
     max_mid_price: float | None = 0.95
 

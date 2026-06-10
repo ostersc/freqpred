@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-06-09 (T85 Kalshi API tier display + self-serve upgrade)
+**Last updated:** 2026-06-09 (side-aware entry price floor: min/max_mid_price apply to the entry side's own cost in should_trade; added T86 + T87 tasks)
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -670,6 +670,11 @@ class StrategyConfig:
     # Skip markets whose current mid_price is outside this range.
     # Markets priced below 0.05 or above 0.95 are effectively decided by the
     # market — the LLM has no edge and generating signals on them produces noise.
+    # At entry time (should_trade) the bounds apply to the entry side's OWN cost:
+    # the YES mid for YES signals, 1 - mid for NO signals. A NO entry on a market
+    # trading at 0.93 costs 0.07 per contract — the same longshot profile
+    # min_mid_price exists to block. is_market_interesting still filters on the
+    # raw YES mid at selection time, before any direction is known.
     # Applied in is_market_interesting() so it gates both ingestion and signal
     # generation. Set either bound to None to disable that side of the filter.
 
@@ -1660,6 +1665,8 @@ Each task has a linked GitHub issue with full implementation scope, test plan, a
 - [ ] **T82** [#82](https://github.com/ostersc/freqpred/issues/82) — Cross-platform dashboard page: `GET /api/polymarket/dashboard` summary endpoint; new "Cross-Platform" React page with: divergence table (all matched markets, Kalshi vs Polymarket price, delta column, toxic-flow indicator), price comparison chart for selected market (Kalshi mid vs Polymarket mid, last 24h), whale trade feed (market, wallet short-hash with "Known sharp" / "Known whale" badge, direction, size, % of volume, pct_of_liquidity, age). Depends on: T79, T81.
 - [x] **T83** [#83](https://github.com/ostersc/freqpred/issues/83) — nomic-embed-text migration: `OllamaEmbedder` class satisfying the `Embedder` protocol; `EmbeddingConfig` section in `Settings` (`backend`, `model`, `ollama_base_url`, `max_embed_chars`); embedder factory in `cli.py`; `ALTER TABLE documents ALTER COLUMN embedding TYPE vector(768)` migration; `scripts/reindex_embeddings.py` to re-embed all docs with new model; make embed truncation config-driven in `ingestion/store.py`. Evaluation showed nomic has higher avg top-10 retrieval score on 65% of markets vs 26% for miniLM across 113 active markets.
 - [ ] **T85** [#85](https://github.com/ostersc/freqpred/issues/85) — Kalshi API tier display + self-serve upgrade: `get_account_limits()` + `upgrade_api_tier()` on `KalshiClient`; `KalshiApiTierOut` schema + `api_tier` field in `SystemHealthResponse`; `_kalshi_client` dep in dashboard routes; tier fetched (fail-open) in `GET /system/health`; `POST /system/api-tier/upgrade` route; System Health page shows tier badge + "Upgrade to Advanced" button hidden when already Advanced.
+- [ ] **T86** [#86](https://github.com/ostersc/freqpred/issues/86) — Fetcher reliability: Reddit fetcher OAuth recovery (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` script-app flow via `oauth.reddit.com`, blanket-403 treated as error-level + rate-limit trip instead of debug skip, connect/DNS errors counted as fetcher errors); GDELT backoff cap (`skip_cycles_next` capped at 8 with warning alert at cap); per-fetcher telemetry heartbeats (`SERVICE_FETCHER_*` constants + `FreshnessSpec` per fetcher so a dead source surfaces as stale within 24h).
+- [ ] **T87** [#87](https://github.com/ostersc/freqpred/issues/87) — Assessment trust gate: new `StrategyConfig.min_trust_score: float | None = None`; `OrderManager.submit()` skips new entries whose assessment `trust_score` falls below the threshold (fail-open when no assessment; never blocks exits); blocked entries logged + emitted as runtime events; `PoliticsEdgeStrategy` ships with `min_trust_score=0.45`. Motivated by DB evidence: v9-era trades with trust < 0.45 lost $125 over 113 trades (35.4% win) vs +$8 over 16 trades (43.8% win) at or above it. Depends on: T57.
 
 **Done when:** Polymarket prices are feeding the assessment prompt, matched markets appear in the dashboard, and whale alerts are firing on live markets with open positions.
 

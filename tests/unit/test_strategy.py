@@ -51,6 +51,7 @@ def _signal(
     edge: float = 0.15,
     confidence: float = 0.85,
     estimated_probability: float = 0.60,
+    direction: str = "YES",
 ) -> Signal:
     return Signal(
         id=str(uuid.uuid4()),
@@ -59,7 +60,7 @@ def _signal(
         confidence=confidence,
         edge=edge,
         market_mid_at_signal=0.42,
-        direction="YES",
+        direction=direction,
         reasoning="test",
         sources=[],
         retrieval_hash="abc123",
@@ -145,6 +146,99 @@ class TestConservativeDefaultShouldTrade:
         assert self.strategy.config.min_edge == 0.12
         assert self.strategy.config.min_confidence == 0.80
         assert self.strategy.config.kelly_fraction == 0.15
+
+
+# ---------------------------------------------------------------------------
+# should_trade — side-aware min/max price filters
+# ---------------------------------------------------------------------------
+
+class TestShouldTradeSideAwarePriceFilter:
+    """The price floor/ceiling must apply to the entry side's own cost.
+
+    A NO entry on a market trading at 0.93 costs 0.07 per contract — the same
+    longshot profile min_mid_price exists to block on the YES side.
+    """
+
+    @staticmethod
+    def _strategy(
+        min_mid_price: float | None = 0.10,
+        max_mid_price: float | None = None,
+    ) -> IPredictionStrategy:
+        class SideAware(IPredictionStrategy):
+            config = StrategyConfig(
+                name="SideAware",
+                min_edge=0.10,
+                min_confidence=0.60,
+                max_exposure_per_market=0.05,
+                kelly_fraction=0.25,
+                categories=[],
+                min_volume_24h=0.0,
+                max_days_to_close=90,
+                min_days_to_close=0,
+                min_mid_price=min_mid_price,
+                max_mid_price=max_mid_price,
+            )
+
+            def position_size(self, signal, bankroll, existing_market_exposure=0.0, assessment=None):  # type: ignore[override]
+                return 0.0
+
+        return SideAware()
+
+    def test_no_longshot_blocked_by_min_floor(self) -> None:
+        # YES mid 0.93 → NO side costs 0.07, below the 0.10 floor.
+        strat = self._strategy(min_mid_price=0.10)
+        assert not strat.should_trade(
+            _signal(direction="NO", edge=0.20, confidence=0.80), _market(mid_price=0.93)
+        )
+
+    def test_yes_longshot_blocked_by_min_floor(self) -> None:
+        strat = self._strategy(min_mid_price=0.10)
+        assert not strat.should_trade(
+            _signal(direction="YES", edge=0.20, confidence=0.80), _market(mid_price=0.07)
+        )
+
+    def test_no_entry_passes_when_own_side_above_floor(self) -> None:
+        # YES mid 0.60 → NO side costs 0.40 — fine.
+        strat = self._strategy(min_mid_price=0.10)
+        assert strat.should_trade(
+            _signal(direction="NO", edge=0.20, confidence=0.80), _market(mid_price=0.60)
+        )
+
+    def test_yes_entry_passes_when_own_side_above_floor(self) -> None:
+        strat = self._strategy(min_mid_price=0.10)
+        assert strat.should_trade(
+            _signal(direction="YES", edge=0.20, confidence=0.80), _market(mid_price=0.60)
+        )
+
+    def test_no_entry_passes_at_floor_boundary(self) -> None:
+        # YES mid 0.75 → NO side costs exactly 0.25 — boundary passes.
+        # (0.75/0.25 are exact in binary floating point; 1.0 - 0.90 is not.)
+        strat = self._strategy(min_mid_price=0.25)
+        assert strat.should_trade(
+            _signal(direction="NO", edge=0.20, confidence=0.80), _market(mid_price=0.75)
+        )
+
+    def test_no_near_certainty_blocked_by_max_ceiling(self) -> None:
+        # YES mid 0.12 → NO side costs 0.88, above a 0.85 ceiling.
+        strat = self._strategy(min_mid_price=None, max_mid_price=0.85)
+        assert not strat.should_trade(
+            _signal(direction="NO", edge=0.20, confidence=0.80), _market(mid_price=0.12)
+        )
+
+    def test_yes_near_certainty_blocked_by_max_ceiling(self) -> None:
+        strat = self._strategy(min_mid_price=None, max_mid_price=0.85)
+        assert not strat.should_trade(
+            _signal(direction="YES", edge=0.20, confidence=0.80), _market(mid_price=0.88)
+        )
+
+    def test_filters_disabled_when_none(self) -> None:
+        strat = self._strategy(min_mid_price=None, max_mid_price=None)
+        assert strat.should_trade(
+            _signal(direction="NO", edge=0.20, confidence=0.80), _market(mid_price=0.97)
+        )
+        assert strat.should_trade(
+            _signal(direction="YES", edge=0.20, confidence=0.80), _market(mid_price=0.03)
+        )
 
 
 # ---------------------------------------------------------------------------
