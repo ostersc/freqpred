@@ -27,6 +27,17 @@ SERVICE_PENDING_ORDER_RECONCILE = "pending_order_reconcile"
 SERVICE_MARKET_WATCHER = "market_watcher"
 SERVICE_KALSHI_CHANGELOG = "kalshi_changelog"
 
+# Per-fetcher heartbeats. Each ingestion fetcher reports independently (the
+# scheduler loop marks these at cycle end) so a single dead source surfaces as
+# stale even while the scheduler heartbeat stays green. Names follow the
+# "fetcher_<name>" pattern produced by the ingestion scheduler.
+SERVICE_FETCHER_REDDIT = "fetcher_reddit"
+SERVICE_FETCHER_GDELT = "fetcher_gdelt"
+SERVICE_FETCHER_TAVILY = "fetcher_tavily"
+SERVICE_FETCHER_NEWSAPI = "fetcher_newsapi"
+SERVICE_FETCHER_GUARDIAN = "fetcher_guardian"
+SERVICE_FETCHER_TV_ARCHIVE = "fetcher_tv_archive"
+
 EVENT_CATEGORY_KALSHI_API = "kalshi_api"
 EVENT_CATEGORY_STALE_SERVICE = "stale_service"
 EVENT_CATEGORY_WEBSOCKET = "websocket"
@@ -113,6 +124,42 @@ def build_freshness_specs(
             service_name=SERVICE_KALSHI_CHANGELOG,
             label="Kalshi changelog monitor",
             stale_after_seconds=36 * 3600,
+        ),
+        # Individual ingestion fetchers. 24h staleness is generous enough not
+        # to flap on quiet news days or short backoffs, while still surfacing
+        # a dead source within a day (the Reddit JSON shutdown went unnoticed
+        # for 12 days because only the scheduler-level heartbeat existed).
+        # Fetchers disabled by config never write a heartbeat and stay
+        # "unknown", which the watchdog does not alert on.
+        SERVICE_FETCHER_REDDIT: FreshnessSpec(
+            service_name=SERVICE_FETCHER_REDDIT,
+            label="Reddit fetcher",
+            stale_after_seconds=24 * 3600,
+        ),
+        SERVICE_FETCHER_GDELT: FreshnessSpec(
+            service_name=SERVICE_FETCHER_GDELT,
+            label="GDELT fetcher",
+            stale_after_seconds=24 * 3600,
+        ),
+        SERVICE_FETCHER_TAVILY: FreshnessSpec(
+            service_name=SERVICE_FETCHER_TAVILY,
+            label="Tavily fetcher",
+            stale_after_seconds=24 * 3600,
+        ),
+        SERVICE_FETCHER_NEWSAPI: FreshnessSpec(
+            service_name=SERVICE_FETCHER_NEWSAPI,
+            label="NewsAPI fetcher",
+            stale_after_seconds=24 * 3600,
+        ),
+        SERVICE_FETCHER_GUARDIAN: FreshnessSpec(
+            service_name=SERVICE_FETCHER_GUARDIAN,
+            label="Guardian fetcher",
+            stale_after_seconds=24 * 3600,
+        ),
+        SERVICE_FETCHER_TV_ARCHIVE: FreshnessSpec(
+            service_name=SERVICE_FETCHER_TV_ARCHIVE,
+            label="TV Archive fetcher",
+            stale_after_seconds=24 * 3600,
         ),
     }
 

@@ -11,9 +11,15 @@ Backoff logic:
 Example progression for a service that keeps tripping:
   trip 1 → skip 1 cycle  (skip_cycles_next becomes 2)
   trip 2 → skip 2 cycles (skip_cycles_next becomes 4)
-  trip 3 → skip 4 cycles (skip_cycles_next becomes 8)
-  ...
+  trip 3 → skip 4 cycles (skip_cycles_next becomes 8 — the cap)
+  trip 4+ → skip 8 cycles, logged at error level
   success → reset to skip_cycles_next = 1
+
+The cap is deliberately low (8 cycles = 4 hours at the default 30-min cadence).
+A service that keeps tripping at the cap is persistently failing, not
+transiently rate-limited — that needs surfacing, not ever-longer silence.
+GDELT once escalated to 32-cycle skips (16 hours) and the source was
+effectively dead for days before anyone noticed.
 """
 from __future__ import annotations
 
@@ -28,7 +34,7 @@ from freqpred.ingestion.models import FetcherRateLimitRow
 
 log = structlog.get_logger(__name__)
 
-_MAX_SKIP_CYCLES = 32
+_MAX_SKIP_CYCLES = 8
 
 
 async def tick_and_load(
@@ -111,12 +117,22 @@ async def record_rate_limit(session: AsyncSession, service: str) -> int:
 
     await session.commit()
 
-    log.warning(
-        "fetcher_backoff.rate_limit_recorded",
-        service=service,
-        skip_cycles=skip,
-        next_skip_cycles=next_skip,
-    )
+    if skip >= _MAX_SKIP_CYCLES:
+        # Repeated trips at the cap mean the service is persistently failing,
+        # not transiently rate-limited.
+        log.error(
+            "fetcher_backoff.at_cap",
+            service=service,
+            skip_cycles=skip,
+            max_skip_cycles=_MAX_SKIP_CYCLES,
+        )
+    else:
+        log.warning(
+            "fetcher_backoff.rate_limit_recorded",
+            service=service,
+            skip_cycles=skip,
+            next_skip_cycles=next_skip,
+        )
     return skip
 
 

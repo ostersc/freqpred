@@ -238,6 +238,121 @@ class TestEnsureCatalysts:
         mock_newsapi.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_reddit_blocked_trips_rate_limit_and_skips_rest_of_cycle(self) -> None:
+        """RedditBlockedError must trip the backoff and stop further Reddit calls.
+
+        This is the wiring that prevents a repeat of the May 2026 silent death:
+        the fetcher raises, the scheduler records the rate limit, and the rest
+        of the cycle skips Reddit instead of hammering a blocked endpoint.
+        """
+        from freqpred.ingestion.fetchers.reddit import RedditBlockedError
+
+        session = AsyncMock()
+        embedder = MagicMock()
+        close_time = datetime.now(UTC) + timedelta(days=7)
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=[(
+                    "MKT-1",
+                    "politics",
+                    "Will X happen?",
+                    close_time,
+                    [("query one", None), ("query two", None)],
+                )],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+                side_effect=RedditBlockedError("all subreddits 403"),
+            ) as mock_reddit,
+            patch(
+                "freqpred.ingestion.scheduler.record_rate_limit",
+                new_callable=AsyncMock,
+                return_value=1,
+            ) as mock_trip,
+        ):
+            await run_cycle(
+                session_factory=_make_session_factory(session),
+                embedder=embedder,
+            )
+
+        # Tripped exactly once, for the reddit service.
+        trip_services = [c.args[1] for c in mock_trip.call_args_list]
+        assert trip_services == ["reddit"]
+        # Second query in the same cycle must not call Reddit again.
+        assert mock_reddit.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_reddit_skipped_when_backed_off_from_previous_cycle(self) -> None:
+        """Persistent backoff state must keep Reddit off for the whole cycle."""
+        session = AsyncMock()
+        embedder = MagicMock()
+        close_time = datetime.now(UTC) + timedelta(days=7)
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler.tick_and_load",
+                new_callable=AsyncMock,
+                return_value={"reddit": True},
+            ),
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=[("MKT-1", "politics", "Will X happen?", close_time, [("q", None)])],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+            ) as mock_reddit,
+        ):
+            await run_cycle(
+                session_factory=_make_session_factory(session),
+                embedder=embedder,
+            )
+
+        mock_reddit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_per_fetcher_telemetry_success_and_error(self) -> None:
+        """Each fetcher reports its own heartbeat: success on a clean call,
+        error when it raised — independent of the scheduler-level heartbeat."""
+        from freqpred.ingestion.fetchers.reddit import RedditBlockedError
+
+        session = AsyncMock()
+        embedder = MagicMock()
+        telemetry = AsyncMock()
+        close_time = datetime.now(UTC) + timedelta(days=7)
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=[("MKT-1", "politics", "Will X happen?", close_time, [("q", None)])],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+                side_effect=RedditBlockedError("all subreddits 403"),
+            ),
+        ):
+            await run_cycle(
+                session_factory=_make_session_factory(session),
+                embedder=embedder,
+                telemetry=telemetry,
+            )
+
+        success_services = [c.args[0] for c in telemetry.mark_success.call_args_list]
+        error_services = [c.args[0] for c in telemetry.mark_error.call_args_list]
+        # GDELT is mocked to return [] (autouse fixture) → success heartbeat.
+        assert "fetcher_gdelt" in success_services
+        # Reddit raised → error heartbeat, no success heartbeat.
+        assert "fetcher_reddit" in error_services
+        assert "fetcher_reddit" not in success_services
+
+    @pytest.mark.asyncio
     async def test_generation_error_is_swallowed(self) -> None:
         """A CatalystGenerationError for one market should not abort others."""
         from freqpred.ingestion.catalyst_generator import CatalystGenerationError

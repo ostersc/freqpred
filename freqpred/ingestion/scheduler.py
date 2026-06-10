@@ -38,6 +38,7 @@ from freqpred.ingestion.fetchers import tv_archive as tv_archive_fetcher
 from freqpred.ingestion.fetchers.gdelt import GDELTRateLimitError
 from freqpred.ingestion.fetchers.guardian import GuardianRateLimitError
 from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
+from freqpred.ingestion.fetchers.reddit import RedditBlockedError
 from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.ingestion.quota import current_window, get_daily_count, get_window_count, increment_window_count
@@ -52,7 +53,14 @@ if TYPE_CHECKING:
 
 # Backoff services owned by this scheduler — passed to tick_and_load so the
 # realtime scheduler's counters (truthsocial) are not affected.
-_MAIN_SCHEDULER_SERVICES: frozenset[str] = frozenset({"tavily", "newsapi", "guardian", "gdelt", "tv_archive"})
+_MAIN_SCHEDULER_SERVICES: frozenset[str] = frozenset(
+    {"tavily", "newsapi", "guardian", "gdelt", "tv_archive", "reddit"}
+)
+
+# Heartbeat service name for an individual ingestion fetcher (matches the
+# SERVICE_FETCHER_* constants in freqpred.runtime.telemetry).
+def _fetcher_service(name: str) -> str:
+    return f"fetcher_{name}"
 
 log = structlog.get_logger(__name__)
 
@@ -194,6 +202,7 @@ async def run_cycle(
         guardian_limit_hit: bool = backoff_state.get("guardian", False)
         gdelt_limit_hit: bool = backoff_state.get("gdelt", False)
         tv_archive_limit_hit: bool = backoff_state.get("tv_archive", False)
+        reddit_limit_hit: bool = backoff_state.get("reddit", False)
 
         # Per-fetcher daily quota checks — if already at cap, skip for the whole cycle.
         tavily_daily_count: int = 0
@@ -245,6 +254,9 @@ async def run_cycle(
     total_error = 0
     total_fetcher_errors = 0
     last_fetcher_error = ""
+    # Last error message per fetcher this cycle (includes rate-limit trips) —
+    # flushed to per-fetcher telemetry heartbeats at cycle end.
+    fetcher_error_messages: dict[str, str] = {}
 
     # Track which services had a successful call this cycle so we only write
     # record_success once per service (it's idempotent but avoids extra DB hits).
@@ -332,12 +344,13 @@ async def run_cycle(
                         excluded_domains=domain_blacklist,
                     ))
 
-                fetch_names.append("reddit")
-                fetch_coros.append(reddit_fetcher.fetch(
-                    subreddits=_subreddits_for_category(category),
-                    query=query_text,
-                    user_agent=reddit_user_agent,
-                ))
+                if not reddit_limit_hit:
+                    fetch_names.append("reddit")
+                    fetch_coros.append(reddit_fetcher.fetch(
+                        subreddits=_subreddits_for_category(category),
+                        query=query_text,
+                        user_agent=reddit_user_agent,
+                    ))
 
                 if tv_query and not tv_archive_limit_hit:
                     fetch_names.append("tv_archive")
@@ -352,6 +365,7 @@ async def run_cycle(
                 raw_docs = []
                 for name, result in zip(fetch_names, results):
                     if isinstance(result, BaseException):
+                        fetcher_error_messages[name] = str(result)
                         if name == "tavily" and isinstance(result, (ForbiddenError, UsageLimitExceededError)):
                             tavily_limit_hit = True
                             tavily_due_this_market = False
@@ -368,6 +382,14 @@ async def run_cycle(
                             guardian_due_this_market = False
                             skip_cycles = await record_rate_limit(market_session, "guardian")
                             log.warning("scheduler.guardian_rate_limited", reason=str(result), skip_cycles=skip_cycles)
+                        elif name == "reddit" and isinstance(result, RedditBlockedError):
+                            reddit_limit_hit = True
+                            skip_cycles = await record_rate_limit(market_session, "reddit")
+                            log.error(
+                                "scheduler.reddit_blocked",
+                                reason=str(result),
+                                skip_cycles=skip_cycles,
+                            )
                         else:
                             total_fetcher_errors += 1
                             last_fetcher_error = f"{name}: {result}"
@@ -420,9 +442,11 @@ async def run_cycle(
                             success_recorded.add("gdelt")
                     except GDELTRateLimitError as exc:
                         gdelt_limit_hit = True
+                        fetcher_error_messages["gdelt"] = str(exc)
                         skip_cycles = await record_rate_limit(market_session, "gdelt")
                         log.warning("scheduler.gdelt_rate_limited", reason=str(exc), skip_cycles=skip_cycles)
-                    except Exception:
+                    except Exception as exc:
+                        fetcher_error_messages["gdelt"] = str(exc)
                         log.warning(
                             "scheduler.fetcher_error",
                             market_id=market_id,
@@ -512,6 +536,15 @@ async def run_cycle(
             )
         else:
             await telemetry.mark_success(SERVICE_INGESTION_SCHEDULER, details=stats)
+
+        # Per-fetcher heartbeats: each fetcher reports independently so a dead
+        # source surfaces as stale in system health even while the scheduler
+        # loop itself stays green. Success = at least one error-free call this
+        # cycle (zero docs is still success).
+        for name in success_recorded:
+            await telemetry.mark_success(_fetcher_service(name))
+        for name, message in fetcher_error_messages.items():
+            await telemetry.mark_error(_fetcher_service(name), message)
     return stats
 
 

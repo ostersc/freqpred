@@ -58,7 +58,7 @@ freqpred/
 - **PostgreSQL 16 + pgvector** — main DB + vector search
 - **sentence-transformers** (`all-MiniLM-L6-v2`, 384-dim) — local document embeddings, no API key required
 - **Anthropic SDK** — Claude for signal analysis + social pre-summarizer
-- **httpx** — async HTTP client; Reddit fetcher uses the public JSON API directly (no PRAW)
+- **httpx** — async HTTP client; Reddit fetcher uses the public Atom/RSS search feeds (`/r/{sub}/search.rss`) — Reddit shut down unauthenticated JSON API access in June 2026 and gated OAuth behind pre-approval ("Responsible Builder Policy"). RSS is a stopgap Reddit has said it may also close; a blanket failure raises `RedditBlockedError` and surfaces via the `fetcher_reddit` telemetry heartbeat
 - **Tavily SDK** — web search
 - **pytest + pytest-asyncio** — testing
 - **Pydantic v2** — config validation and data models
