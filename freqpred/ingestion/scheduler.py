@@ -68,8 +68,30 @@ _NEWSAPI_LOOKBACK_DAYS = 7
 _GUARDIAN_LOOKBACK_DAYS = 7
 
 # Category → subreddit mapping used for Reddit queries.
+# Keys are matched lowercase. Kalshi politics markets arrive under three
+# categories — "Politics", "Elections", and "Mentions" (word-mention series
+# like KXTRUMPSAY) — all of which need the politics subreddits. Without an
+# entry a category silently falls back to ["news"], which is both a weak
+# match for niche catalyst queries and a poor-Brier source.
+#
+# Selection principle (per source_quality_scores Brier on Mentions markets):
+# moderated discussion subs far outperform link firehoses — NeutralPolitics
+# 0.064 and PoliticalDiscussion 0.091 vs the r/politics firehose at 0.275.
+# moderatepolitics and NeutralNews match the winning profile; Conservative is
+# a base-sentiment hypothesis for "will Trump say X" markets (he amplifies
+# what resonates there) — prune any of these if their Brier comes back bad.
+_POLITICS_SUBREDDITS: list[str] = [
+    "politics",
+    "PoliticalDiscussion",
+    "neutralpolitics",
+    "moderatepolitics",
+    "NeutralNews",
+    "Conservative",
+]
 _SUBREDDIT_MAP: dict[str, list[str]] = {
-    "politics":   ["politics", "PoliticalDiscussion", "neutralpolitics"],
+    "politics":   _POLITICS_SUBREDDITS,
+    "mentions":   _POLITICS_SUBREDDITS,
+    "elections":  _POLITICS_SUBREDDITS,
     "technology": ["technology", "MachineLearning", "singularity"],
     "economics":  ["economics", "investing", "stocks"],
     "fintech":    ["investing", "wallstreetbets", "stocks", "fintech"],

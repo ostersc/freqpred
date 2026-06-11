@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.scheduler import _CATALYST_REFRESH_INTERVAL, _ensure_catalysts, run_cycle
+from freqpred.ingestion.scheduler import (
+    _CATALYST_REFRESH_INTERVAL,
+    _ensure_catalysts,
+    _subreddits_for_category,
+    run_cycle,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +104,20 @@ def _make_session_factory(session: AsyncMock | None = None) -> MagicMock:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+class TestSubredditsForCategory:
+    def test_all_politics_strategy_categories_map_to_politics_subs(self) -> None:
+        """Every category PoliticsEdgeStrategy trades must reach the politics
+        subreddits — an unmapped category silently falls back to r/news, which
+        is how Mentions markets spent weeks searching only r/news."""
+        for category in ("Politics", "Elections", "Mentions"):
+            subs = _subreddits_for_category(category)
+            assert "PoliticalDiscussion" in subs, f"{category} missing politics subs"
+            assert subs != ["news"]
+
+    def test_unknown_category_falls_back_to_news(self) -> None:
+        assert _subreddits_for_category("Climate and Weather Oddities") == ["news"]
+
 
 class TestEnsureCatalysts:
     @pytest.mark.asyncio
