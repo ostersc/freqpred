@@ -62,6 +62,14 @@ class GuardianConfig(BaseModel):
 
 class RedditConfig(BaseModel):
     user_agent: str = Field(default="freqpred/0.1")
+    min_fetch_interval_hours: float = Field(
+        default=2.0,
+        description=(
+            "Floor on the per-market Reddit fetch interval. Each due market costs"
+            " subreddits x queries unauthenticated RSS requests, so Reddit is"
+            " cursor-gated to stay under its ~1 req/2s tolerance."
+        ),
+    )
 
 
 class TruthSocialConfig(BaseModel):

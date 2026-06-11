@@ -43,6 +43,19 @@ def _mock_backoff(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _mock_cursors(monkeypatch):
+    """Patch fetch cursors so every fetcher is 'due' against mock sessions."""
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.get_cursor",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "freqpred.ingestion.scheduler.set_cursor",
+        AsyncMock(return_value=None),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -333,6 +346,114 @@ class TestEnsureCatalysts:
             )
 
         mock_reddit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reddit_skipped_when_cursor_not_due(self, monkeypatch) -> None:
+        """A market fetched recently (within reddit_min_fetch_interval_hours)
+        must not hit Reddit again — each due market costs subreddits x queries
+        unauthenticated requests, which is what drew the 429s."""
+        monkeypatch.setattr(
+            "freqpred.ingestion.scheduler.get_cursor",
+            AsyncMock(return_value=datetime.now(UTC) - timedelta(minutes=10)),
+        )
+        session = AsyncMock()
+        embedder = MagicMock()
+        close_time = datetime.now(UTC) + timedelta(days=7)
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=[("MKT-1", "politics", "Will X happen?", close_time, [("q", None)])],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+            ) as mock_reddit,
+        ):
+            await run_cycle(
+                session_factory=_make_session_factory(session),
+                embedder=embedder,
+                reddit_min_fetch_interval_hours=2.0,
+            )
+
+        mock_reddit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("jitter_draw", "expect_fetch"),
+        [(0.75, True), (1.25, False)],
+        ids=["low-jitter-due", "high-jitter-not-due"],
+    )
+    async def test_reddit_interval_jitter_desynchronizes_markets(
+        self, monkeypatch, jitter_draw: float, expect_fetch: bool
+    ) -> None:
+        """The due-check interval is jittered +/-25% so markets fetched in the
+        same cycle don't all become due together one interval later (idle,
+        idle, idle, 390-request burst). A 1.6h-old cursor against a 2h base is
+        due only when the jitter draws low."""
+        monkeypatch.setattr(
+            "freqpred.ingestion.scheduler.get_cursor",
+            AsyncMock(return_value=datetime.now(UTC) - timedelta(hours=1.6)),
+        )
+        monkeypatch.setattr(
+            "freqpred.ingestion.scheduler.random.uniform",
+            lambda lo, hi: jitter_draw,
+        )
+        session = AsyncMock()
+        embedder = MagicMock()
+        close_time = datetime.now(UTC) + timedelta(days=7)
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=[("MKT-1", "politics", "Will X happen?", close_time, [("q", None)])],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_reddit,
+        ):
+            await run_cycle(
+                session_factory=_make_session_factory(session),
+                embedder=embedder,
+                reddit_min_fetch_interval_hours=2.0,
+            )
+
+        assert mock_reddit.called == expect_fetch
+
+    @pytest.mark.asyncio
+    async def test_reddit_cursor_set_after_successful_fetch(self, monkeypatch) -> None:
+        set_cursor_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("freqpred.ingestion.scheduler.set_cursor", set_cursor_mock)
+        session = AsyncMock()
+        embedder = MagicMock()
+        close_time = datetime.now(UTC) + timedelta(days=7)
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=[("MKT-1", "politics", "Will X happen?", close_time, [("q", None)])],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            await run_cycle(
+                session_factory=_make_session_factory(session),
+                embedder=embedder,
+            )
+
+        reddit_cursor_calls = [
+            c for c in set_cursor_mock.call_args_list if c.args[1] == "reddit"
+        ]
+        assert len(reddit_cursor_calls) == 1
+        assert reddit_cursor_calls[0].args[2] == "MKT-1"
 
     @pytest.mark.asyncio
     async def test_per_fetcher_telemetry_success_and_error(self) -> None:

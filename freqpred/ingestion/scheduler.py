@@ -19,6 +19,7 @@ Public API:
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -129,6 +130,7 @@ async def run_cycle(
     guardian_daily_cap: int = 490,
     guardian_min_fetch_interval_hours: float = 1.0,
     reddit_user_agent: str = "freqpred/0.1",
+    reddit_min_fetch_interval_hours: float = 2.0,
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
     telemetry: "RuntimeTelemetry | None" = None,
 ) -> dict[str, int]:
@@ -173,6 +175,11 @@ async def run_cycle(
                                     (default: 1.0h). The actual interval scales up automatically
                                     with market count to stay within the daily cap.
         reddit_user_agent:          User-Agent for Reddit requests.
+        reddit_min_fetch_interval_hours: Floor on the per-market Reddit fetch interval
+                                    (default: 2.0h). Each due market costs
+                                    subreddits x queries unauthenticated RSS requests,
+                                    so Reddit is cursor-gated like the API fetchers
+                                    to stay under its ~1 req/2s tolerance.
         domain_blacklist:           Domains to exclude from fetcher results.
                                     Matched as a substring of each URL (default: kalshi.com).
     Returns:
@@ -317,6 +324,23 @@ async def run_cycle(
                 )
             guardian_fetched_this_market = False
 
+            reddit_due_this_market = False
+            if not reddit_limit_hit:
+                last_reddit = await get_cursor(market_session, "reddit", market_id)
+                # Jitter the interval +/-25% (i.e. +/-30 min at the 2h default)
+                # so markets desynchronize. Without it, every market fetched in
+                # the same cycle becomes due together again one interval later —
+                # 3 idle cycles, then one cycle bursting subreddits x queries x
+                # all-markets requests. Symmetric jitter preserves the average
+                # cadence at the configured base.
+                jittered = timedelta(
+                    hours=reddit_min_fetch_interval_hours * random.uniform(0.75, 1.25)
+                )
+                reddit_due_this_market = (
+                    last_reddit is None or (now - last_reddit) >= jittered
+                )
+            reddit_fetched_this_market = False
+
             for query_text, tv_query in query_pairs:
                 # --- Build non-GDELT fetch coroutines to run in parallel ---
                 # GDELT (doc + TV) are run sequentially afterwards because they share
@@ -366,7 +390,7 @@ async def run_cycle(
                         excluded_domains=domain_blacklist,
                     ))
 
-                if not reddit_limit_hit:
+                if reddit_due_this_market and not reddit_limit_hit:
                     fetch_names.append("reddit")
                     fetch_coros.append(reddit_fetcher.fetch(
                         subreddits=_subreddits_for_category(category),
@@ -436,6 +460,8 @@ async def run_cycle(
                         if name == "newsapi" and newsapi_queued:
                             newsapi_fetched_this_market = True
                             await increment_window_count(market_session, "newsapi", newsapi_window_date, newsapi_hour_slot)
+                        if name == "reddit":
+                            reddit_fetched_this_market = True
                         if name == "guardian":
                             guardian_fetched_this_market = True
                             guardian_daily_count += 1
@@ -519,6 +545,8 @@ async def run_cycle(
                 await set_cursor(market_session, "newsapi", market_id, now)
             if guardian_fetched_this_market:
                 await set_cursor(market_session, "guardian", market_id, now)
+            if reddit_fetched_this_market:
+                await set_cursor(market_session, "reddit", market_id, now)
 
             await market_session.commit()
 
@@ -589,6 +617,7 @@ async def run_scheduler(
     guardian_daily_cap: int = 490,
     guardian_min_fetch_interval_hours: float = 1.0,
     reddit_user_agent: str = "freqpred/0.1",
+    reddit_min_fetch_interval_hours: float = 2.0,
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
     telemetry: "RuntimeTelemetry | None" = None,
 ) -> None:
@@ -649,6 +678,7 @@ async def run_scheduler(
                 guardian_daily_cap=guardian_daily_cap,
                 guardian_min_fetch_interval_hours=guardian_min_fetch_interval_hours,
                 reddit_user_agent=reddit_user_agent,
+                reddit_min_fetch_interval_hours=reddit_min_fetch_interval_hours,
                 domain_blacklist=domain_blacklist,
                 telemetry=telemetry,
             )

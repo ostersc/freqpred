@@ -16,8 +16,10 @@ Differences vs the retired JSON fetcher:
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import re
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
@@ -32,6 +34,25 @@ _MAX_AGE_DAYS = 7
 _BASE_URL = "https://www.reddit.com"
 _SEARCH_PATH = "/r/{subreddit}/search.rss"
 _ATOM = "{http://www.w3.org/2005/Atom}"
+
+# Global spacing between Reddit requests, across all fetch() calls in the
+# process. Unauthenticated access tolerates roughly 1 request per 2 seconds;
+# bursts (subreddits x queries x markets) draw 429s on the whole IP.
+_REQUEST_SPACING_SECONDS = 2.5
+_throttle_lock = asyncio.Lock()
+_last_request_at = 0.0  # time.monotonic()
+
+
+async def _throttle() -> None:
+    """Enforce minimum spacing between Reddit requests process-wide."""
+    global _last_request_at
+    if _REQUEST_SPACING_SECONDS <= 0:
+        return
+    async with _throttle_lock:
+        wait = _last_request_at + _REQUEST_SPACING_SECONDS - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_request_at = time.monotonic()
 
 _TAG_RE = re.compile(r"<[^>]+>")
 # Reddit appends "submitted by /u/<user> [link] [comments]" to every entry body.
@@ -99,6 +120,7 @@ async def fetch(
     async with httpx.AsyncClient(base_url=_BASE_URL, headers=headers, timeout=15.0) as client:
         for subreddit_name in subreddits:
             try:
+                await _throttle()
                 response = await client.get(
                     _SEARCH_PATH.format(subreddit=subreddit_name),
                     params={

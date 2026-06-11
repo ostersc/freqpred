@@ -749,6 +749,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     guardian_enabled=config.guardian.enabled,
                     guardian_daily_cap=config.guardian.daily_cap,
                     guardian_min_fetch_interval_hours=config.guardian.min_fetch_interval_hours,
+                    reddit_user_agent=config.reddit.user_agent,
+                    reddit_min_fetch_interval_hours=config.reddit.min_fetch_interval_hours,
                     telemetry=runtime_telemetry,
                 ),
                 name="ingestion_scheduler",

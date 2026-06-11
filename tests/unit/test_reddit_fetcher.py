@@ -54,6 +54,12 @@ def _make_http_response(entries: list[str], status_code: int = 200) -> MagicMock
     return resp
 
 
+@pytest.fixture(autouse=True)
+def _no_throttle(monkeypatch):
+    """Disable the inter-request throttle so unit tests don't sleep."""
+    monkeypatch.setattr("freqpred.ingestion.fetchers.reddit._REQUEST_SPACING_SECONDS", 0)
+
+
 @pytest.fixture()
 def mock_httpx():
     """Patch httpx.AsyncClient and return the mock client instance."""
@@ -329,3 +335,32 @@ async def test_fetch_empty_feed_returns_empty(mock_httpx):
     docs = await fetch(_SUBREDDITS, _QUERY)
 
     assert docs == []
+
+
+# ---------------------------------------------------------------------------
+# Request throttling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_throttle_spaces_consecutive_requests(mock_httpx, monkeypatch):
+    """Back-to-back subreddit requests must sleep to honor the global spacing
+    (~1 req/2.5s) — bursts across subreddits x queries x markets draw 429s."""
+    import freqpred.ingestion.fetchers.reddit as reddit_mod
+
+    monkeypatch.setattr(reddit_mod, "_REQUEST_SPACING_SECONDS", 2.5)
+    monkeypatch.setattr(reddit_mod, "_last_request_at", 0.0)
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(reddit_mod.asyncio, "sleep", fake_sleep)
+    mock_httpx.get.return_value = _make_http_response([])
+
+    await fetch(["a", "b", "c"], _QUERY)
+
+    # First request goes through immediately; the next two must wait.
+    assert len(sleeps) == 2
+    assert all(0 < s <= 2.5 for s in sleeps)

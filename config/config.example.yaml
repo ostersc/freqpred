@@ -54,8 +54,13 @@ guardian:
   min_fetch_interval_hours: 1.0   # floor on per-market interval regardless of market count
 
 reddit:
-  # Uses the public Reddit JSON API — no credentials required
+  # Uses Reddit's public Atom/RSS search feeds — no credentials required.
+  # (Reddit shut down unauthenticated JSON API access in June 2026.)
   user_agent: "freqpred/0.1"
+  # Floor on the per-market fetch interval. Each due market costs
+  # subreddits × queries unauthenticated requests; the fetcher also spaces
+  # requests ~2.5s apart globally to stay under Reddit's 429 threshold.
+  min_fetch_interval_hours: 2.0
 
 truthsocial:
   # Overridden by TRUTHSOCIAL_USERNAME / TRUTHSOCIAL_PASSWORD env vars
