@@ -340,8 +340,13 @@ async def run_cycle(
                     last_reddit is None or (now - last_reddit) >= jittered
                 )
             reddit_fetched_this_market = False
+            # Reddit's unauthenticated budget is 1 request/min per IP, so a due
+            # market gets exactly one search — a randomly chosen catalyst query.
+            # Rotation across fetches (every ~2h per market) covers all queries
+            # over the course of a day.
+            reddit_query_index = random.randrange(len(query_pairs)) if query_pairs else -1
 
-            for query_text, tv_query in query_pairs:
+            for query_index, (query_text, tv_query) in enumerate(query_pairs):
                 # --- Build non-GDELT fetch coroutines to run in parallel ---
                 # GDELT (doc + TV) are run sequentially afterwards because they share
                 # a 1 req/5 s rate limit across all their API endpoints.
@@ -390,7 +395,11 @@ async def run_cycle(
                         excluded_domains=domain_blacklist,
                     ))
 
-                if reddit_due_this_market and not reddit_limit_hit:
+                if (
+                    reddit_due_this_market
+                    and not reddit_limit_hit
+                    and query_index == reddit_query_index
+                ):
                     fetch_names.append("reddit")
                     fetch_coros.append(reddit_fetcher.fetch(
                         subreddits=_subreddits_for_category(category),

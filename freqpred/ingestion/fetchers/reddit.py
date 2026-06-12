@@ -41,9 +41,10 @@ _SEARCH_PATH = "/r/{multireddit}/search.rss"
 _ATOM = "{http://www.w3.org/2005/Atom}"
 
 # Global spacing between Reddit requests, across all fetch() calls in the
-# process. Unauthenticated access tolerates roughly 10 requests/min per IP
-# (2.5s spacing still drew sustained 429s); 6.5s ≈ 9/min leaves headroom.
-_REQUEST_SPACING_SECONDS = 6.5
+# process. Reddit's unauthenticated budget is 1 request per minute per IP
+# (observed live 2026-06-11: x-ratelimit-used: 1, x-ratelimit-remaining: 0.0,
+# x-ratelimit-reset: 59 on a single request). 61s keeps us inside the window.
+_REQUEST_SPACING_SECONDS = 61.0
 _throttle_lock = asyncio.Lock()
 _last_request_at = 0.0  # time.monotonic()
 

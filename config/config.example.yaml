@@ -57,9 +57,10 @@ reddit:
   # Uses Reddit's public Atom/RSS search feeds — no credentials required.
   # (Reddit shut down unauthenticated JSON API access in June 2026.)
   user_agent: "freqpred/0.1"
-  # Floor on the per-market fetch interval. Each due market costs
-  # subreddits × queries unauthenticated requests; the fetcher also spaces
-  # requests ~2.5s apart globally to stay under Reddit's 429 threshold.
+  # Floor on the per-market fetch interval. Reddit's unauthenticated budget
+  # is 1 request/min per IP, so a due market gets exactly one multireddit
+  # search per interval (one randomly rotated catalyst query); the fetcher
+  # also spaces requests 61s apart globally.
   min_fetch_interval_hours: 2.0
 
 truthsocial:

@@ -65,9 +65,10 @@ class RedditConfig(BaseModel):
     min_fetch_interval_hours: float = Field(
         default=2.0,
         description=(
-            "Floor on the per-market Reddit fetch interval. Each due market costs"
-            " subreddits x queries unauthenticated RSS requests, so Reddit is"
-            " cursor-gated to stay under its ~1 req/2s tolerance."
+            "Floor on the per-market Reddit fetch interval. Reddit's"
+            " unauthenticated budget is 1 request/min per IP, so a due market"
+            " gets exactly one multireddit search per interval (one randomly"
+            " rotated catalyst query)."
         ),
     )
 

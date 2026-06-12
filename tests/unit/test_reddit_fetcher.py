@@ -326,7 +326,7 @@ async def test_throttle_spaces_consecutive_requests(mock_httpx, monkeypatch):
     Reddit's unauthenticated tolerance is ~10 requests/min per IP."""
     import freqpred.ingestion.fetchers.reddit as reddit_mod
 
-    monkeypatch.setattr(reddit_mod, "_REQUEST_SPACING_SECONDS", 6.5)
+    monkeypatch.setattr(reddit_mod, "_REQUEST_SPACING_SECONDS", 61.0)
     monkeypatch.setattr(reddit_mod, "_last_request_at", 0.0)
 
     sleeps: list[float] = []
@@ -343,4 +343,4 @@ async def test_throttle_spaces_consecutive_requests(mock_httpx, monkeypatch):
 
     # First call goes through immediately; the next two must wait.
     assert len(sleeps) == 2
-    assert all(0 < s <= 6.5 for s in sleeps)
+    assert all(0 < s <= 61.0 for s in sleeps)

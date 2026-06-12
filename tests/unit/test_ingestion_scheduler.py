@@ -425,6 +425,37 @@ class TestEnsureCatalysts:
         assert mock_reddit.called == expect_fetch
 
     @pytest.mark.asyncio
+    async def test_reddit_fires_once_per_due_market_not_per_query(self) -> None:
+        """A due market gets exactly one Reddit search regardless of how many
+        catalyst queries it has — Reddit's unauthenticated budget is 1
+        request/min per IP, so one rotated query per market per interval."""
+        session = AsyncMock()
+        embedder = MagicMock()
+        close_time = datetime.now(UTC) + timedelta(days=7)
+        queries = [(f"query {i}", None) for i in range(5)]
+
+        with (
+            patch(
+                "freqpred.ingestion.scheduler._load_active_market_queries",
+                new_callable=AsyncMock,
+                return_value=[("MKT-1", "politics", "Will X happen?", close_time, queries)],
+            ),
+            patch(
+                "freqpred.ingestion.scheduler.reddit_fetcher.fetch",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_reddit,
+        ):
+            await run_cycle(
+                session_factory=_make_session_factory(session),
+                embedder=embedder,
+            )
+
+        assert mock_reddit.call_count == 1
+        # The query used must be one of the market's catalyst queries.
+        assert mock_reddit.call_args.kwargs["query"] in {q for q, _ in queries}
+
+    @pytest.mark.asyncio
     async def test_reddit_cursor_set_after_successful_fetch(self, monkeypatch) -> None:
         set_cursor_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("freqpred.ingestion.scheduler.set_cursor", set_cursor_mock)
