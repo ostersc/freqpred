@@ -67,6 +67,8 @@ from .schemas import (
     PnLDayOut,
     PnLTimeSeriesResponse,
     PromptVersionStart,
+    SettlementSourceSummaryOut,
+    SettlementSourceSummaryResponse,
     SignalAssessmentOut,
     SignalDetailOut,
     SignalListResponse,
@@ -927,6 +929,49 @@ async def list_markets(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get(
+    "/markets/settlement-sources/summary",
+    response_model=SettlementSourceSummaryResponse,
+)
+async def get_settlement_sources_summary(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> SettlementSourceSummaryResponse:
+    """Group active markets by official settlement source, ranked by market count.
+
+    Surfaces candidates for a dedicated fetcher the way FactBase (T73) was
+    found manually for KXTRUMPSAY markets — a source appearing on many active
+    markets is worth scraping directly.
+    """
+    rows = (
+        await session.execute(
+            select(MarketRow.metadata_).where(MarketRow.status == "active")
+        )
+    ).scalars().all()
+
+    # Kalshi's own settlement_sources values are inconsistent about trailing
+    # slashes on otherwise-identical URLs (e.g. "espn.com" vs "espn.com/"),
+    # which fragments counts for what is really one source. Normalize on the
+    # grouping key only; display the first-seen (name, url) for that key.
+    counts: dict[tuple[str, str], int] = {}
+    display: dict[tuple[str, str], tuple[str, str]] = {}
+    for metadata in rows:
+        sources = (metadata or {}).get("settlement_sources") or []
+        for source in sources:
+            name = source.get("name", "")
+            url = source.get("url", "")
+            if not name and not url:
+                continue
+            key = (name.strip().lower(), url.strip().lower().rstrip("/"))
+            counts[key] = counts.get(key, 0) + 1
+            display.setdefault(key, (name, url))
+
+    items = [
+        SettlementSourceSummaryOut(name=display[key][0], url=display[key][1], market_count=count)
+        for key, count in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+    return SettlementSourceSummaryResponse(items=items)
 
 
 @router.get("/markets/{market_id}", response_model=MarketDetailOut)

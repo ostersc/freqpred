@@ -231,6 +231,7 @@ class Market:
     yes_ask_size: float = 0.0
     series_ticker: str | None = None
     volume_total: float = 0.0
+    settlement_sources: list[dict[str, str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +321,13 @@ class KalshiMarketsResponse(BaseModel):
     cursor: str = ""
 
 
+class KalshiSettlementSourceSchema(BaseModel):
+    """Pydantic schema for a single settlement source entry on an event/series."""
+
+    name: str = ""
+    url: str = ""
+
+
 class KalshiEventSchema(BaseModel):
     """Pydantic schema for a single event object from GET /events."""
 
@@ -329,6 +337,7 @@ class KalshiEventSchema(BaseModel):
     title: str = ""
     sub_title: str = ""
     markets: list[KalshiMarketSchema] = Field(default_factory=list)
+    settlement_sources: list[KalshiSettlementSourceSchema] = Field(default_factory=list)
 
 
 class KalshiEventsResponse(BaseModel):

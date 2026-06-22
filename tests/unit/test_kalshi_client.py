@@ -124,6 +124,23 @@ class TestToMarket:
         market = client._to_market(_MARKET_PAYLOAD, category="politics")
         assert market.metadata["event_ticker"] == "KXPRES-25"
 
+    def test_metadata_settlement_sources_defaults_to_empty(self) -> None:
+        """_to_market (no event-level settlement_sources) defaults to []."""
+        client = _make_client()
+        market = client._to_market(_MARKET_PAYLOAD, category="politics")
+        assert market.metadata["settlement_sources"] == []
+        assert market.settlement_sources == []
+
+    def test_schema_to_market_includes_settlement_sources(self) -> None:
+        client = _make_client()
+        from freqpred.markets.models import KalshiMarketSchema  # noqa: PLC0415
+
+        schema = KalshiMarketSchema.model_validate(_MARKET_PAYLOAD)
+        sources = [{"name": "FactBase", "url": "https://factba.se"}]
+        market = client._schema_to_market(schema, "politics", "KXPRES", sources)
+        assert market.metadata["settlement_sources"] == sources
+        assert market.settlement_sources == sources
+
     def test_missing_prices_default_to_zero(self) -> None:
         client = _make_client()
         raw = {k: v for k, v in _MARKET_PAYLOAD.items() if "dollars" not in k}
@@ -247,6 +264,40 @@ class TestListMarkets:
             result = await client.list_markets()
 
         assert result[0].volume_total == pytest.approx(66843.0)
+
+    @pytest.mark.asyncio
+    async def test_settlement_sources_passed_through_from_event(self) -> None:
+        """Markets inherit settlement_sources from their parent event into metadata."""
+        client = _make_client()
+        event_with_sources = {
+            **_EVENT_PAYLOAD_1,
+            "settlement_sources": [{"name": "FactBase", "url": "https://factba.se"}],
+        }
+        events_page = {"events": [event_with_sources], "cursor": ""}
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(events_page)
+            result = await client.list_markets()
+
+        assert result[0].metadata["settlement_sources"] == [
+            {"name": "FactBase", "url": "https://factba.se"}
+        ]
+        assert result[0].settlement_sources == [
+            {"name": "FactBase", "url": "https://factba.se"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_settlement_sources_default_empty_when_absent(self) -> None:
+        """Events predating the settlement_sources field yield [] without errors."""
+        client = _make_client()
+        events_page = {"events": [_EVENT_PAYLOAD_1], "cursor": ""}
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(events_page)
+            result = await client.list_markets()
+
+        assert result[0].metadata["settlement_sources"] == []
+        assert result[0].settlement_sources == []
 
     @pytest.mark.asyncio
     async def test_pagination_continues_on_full_page(self) -> None:
@@ -824,6 +875,79 @@ class TestGetMarketsByTickers:
             markets = await client.get_markets_by_tickers(["KXPRES-25-DEM"])
 
         assert markets == []
+
+
+# ---------------------------------------------------------------------------
+# get_events_by_tickers
+# ---------------------------------------------------------------------------
+
+class TestGetEventsByTickers:
+    @pytest.mark.asyncio
+    async def test_empty_input_returns_empty_without_calling_get(self) -> None:
+        client = _make_client()
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            events = await client.get_events_by_tickers([])
+
+        assert events == []
+        mock_get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_chunks_250_tickers_into_two_calls(self) -> None:
+        client = _make_client()
+        tickers = [f"EVENT-{i}" for i in range(250)]
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = [
+                _mock_response({"events": [_EVENT_PAYLOAD_1], "cursor": ""}),
+                _mock_response({"events": [_EVENT_PAYLOAD_2], "cursor": ""}),
+            ]
+            events = await client.get_events_by_tickers(tickers)
+
+        assert mock_get.call_count == 2
+        first_params = mock_get.call_args_list[0].kwargs["params"]
+        second_params = mock_get.call_args_list[1].kwargs["params"]
+        assert first_params["tickers"].count(",") == 199
+        assert second_params["tickers"].count(",") == 49
+        assert {e.event_ticker for e in events} == {"KXPRES-25", "KXTECH-25"}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_api_error(self) -> None:
+        client = _make_client()
+
+        with patch.object(client, "_get", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = KalshiAPIError(status_code=500, body="boom")
+            events = await client.get_events_by_tickers(["KXPRES-25"])
+
+        assert events == []
+
+
+# ---------------------------------------------------------------------------
+# KalshiEventSchema.settlement_sources parsing
+# ---------------------------------------------------------------------------
+
+class TestKalshiEventSchemaSettlementSources:
+    def test_parses_settlement_sources_list(self) -> None:
+        from freqpred.markets.models import KalshiEventSchema  # noqa: PLC0415
+
+        payload = {
+            **_EVENT_PAYLOAD_1,
+            "settlement_sources": [
+                {"name": "FactBase", "url": "https://factba.se"},
+                {"name": "Reuters", "url": "https://reuters.com"},
+            ],
+        }
+        schema = KalshiEventSchema.model_validate(payload)
+        assert [s.model_dump() for s in schema.settlement_sources] == [
+            {"name": "FactBase", "url": "https://factba.se"},
+            {"name": "Reuters", "url": "https://reuters.com"},
+        ]
+
+    def test_missing_settlement_sources_defaults_to_empty(self) -> None:
+        from freqpred.markets.models import KalshiEventSchema  # noqa: PLC0415
+
+        schema = KalshiEventSchema.model_validate(_EVENT_PAYLOAD_1)
+        assert schema.settlement_sources == []
 
 
 # ---------------------------------------------------------------------------

@@ -1336,6 +1336,74 @@ def test_market_detail_returns_404_for_unknown_id() -> None:
     assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# /api/markets/settlement-sources/summary
+# ---------------------------------------------------------------------------
+
+
+def test_settlement_sources_summary_groups_by_source_with_counts() -> None:
+    factbase = {"name": "FactBase", "url": "https://factba.se"}
+    reuters = {"name": "Reuters", "url": "https://reuters.com"}
+    metadata_rows = [
+        {"settlement_sources": [factbase]},
+        {"settlement_sources": [factbase, reuters]},
+        {"settlement_sources": [reuters]},
+    ]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalars_result(metadata_rows))
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/markets/settlement-sources/summary")
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert items[0]["name"] == "FactBase"
+    assert items[0]["market_count"] == 2
+    assert items[1]["name"] == "Reuters"
+    assert items[1]["market_count"] == 2
+
+
+def test_settlement_sources_summary_excludes_empty_sources() -> None:
+    metadata_rows = [
+        {"settlement_sources": []},
+        {},
+        {"settlement_sources": [{"name": "FactBase", "url": "https://factba.se"}]},
+    ]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalars_result(metadata_rows))
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/markets/settlement-sources/summary")
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["name"] == "FactBase"
+    assert items[0]["market_count"] == 1
+
+
+def test_settlement_sources_summary_normalizes_trailing_slash_and_case() -> None:
+    """ESPN with/without a trailing slash (and case variants) is one source."""
+    metadata_rows = [
+        {"settlement_sources": [{"name": "ESPN", "url": "https://www.espn.com"}]},
+        {"settlement_sources": [{"name": "ESPN", "url": "https://www.espn.com/"}]},
+        {"settlement_sources": [{"name": "espn", "url": "https://www.espn.com"}]},
+    ]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalars_result(metadata_rows))
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/markets/settlement-sources/summary")
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["market_count"] == 3
+
+
 def test_analyze_market_triggers_signal_pipeline() -> None:
     market_row = _make_market_row(id="M1")
 

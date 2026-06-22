@@ -418,6 +418,16 @@ class AnalyzeResponse(BaseModel):
     cached: bool
 
 
+class SettlementSourceSummaryOut(BaseModel):
+    name: str
+    url: str
+    market_count: int
+
+
+class SettlementSourceSummaryResponse(BaseModel):
+    items: list[SettlementSourceSummaryOut]
+
+
 # ---------------------------------------------------------------------------
 # System health
 # ---------------------------------------------------------------------------

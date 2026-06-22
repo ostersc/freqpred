@@ -219,6 +219,7 @@ class KalshiClient(IMarketClient):
         schema: Any,
         category: str = "other",
         series_ticker: str | None = None,
+        settlement_sources: list[dict[str, str]] | None = None,
     ) -> Market:
         """Convert a validated KalshiMarketSchema to the Market domain object."""
         from freqpred.markets.models import KalshiMarketSchema
@@ -231,6 +232,7 @@ class KalshiClient(IMarketClient):
             if s.open_time
             else None
         )
+        sources = settlement_sources or []
 
         return Market(
             id=s.ticker,
@@ -259,11 +261,13 @@ class KalshiClient(IMarketClient):
             metadata_fetched_at=now,
             open_time=open_time,
             series_ticker=series_ticker,
+            settlement_sources=sources,
             metadata={
                 "event_ticker": s.event_ticker,
                 "series_ticker": series_ticker,
                 "subtitle": s.subtitle,
                 "status": s.status,
+                "settlement_sources": sources,
             },
         )
 
@@ -292,8 +296,11 @@ class KalshiClient(IMarketClient):
             series = ev.series_ticker or None
             if category is not None and cat != category:
                 continue
+            sources = [s.model_dump() for s in ev.settlement_sources]
             for market_schema in ev.markets:
-                result.append(self._schema_to_market(market_schema, cat, series))
+                result.append(
+                    self._schema_to_market(market_schema, cat, series, sources)
+                )
 
         total = sum(len(ev.markets) for ev in events)
         log.info(
@@ -361,6 +368,29 @@ class KalshiClient(IMarketClient):
             except KalshiAPIError:
                 continue
             results.extend(self._to_market(m) for m in data.get("markets", []))
+        return results
+
+    async def get_events_by_tickers(
+        self, event_tickers: list[str]
+    ) -> list[KalshiEventSchema]:
+        """Batch-fetch events via GET /events?tickers=, chunked at 200 per call.
+
+        Used for targeted backfills (e.g. re-fetching settlement_sources for a
+        known subset of events) without re-paginating the full open-events list.
+        Silently skips chunks that error.
+        """
+        if not event_tickers:
+            return []
+        chunk_size = 200
+        results: list[KalshiEventSchema] = []
+        for i in range(0, len(event_tickers), chunk_size):
+            chunk = event_tickers[i : i + chunk_size]
+            try:
+                data = await self._get("/events", params={"tickers": ",".join(chunk)})
+            except KalshiAPIError:
+                continue
+            envelope = KalshiEventsResponse.model_validate(data)
+            results.extend(envelope.events)
         return results
 
     async def get_series_settled_history(self, series_ticker: str) -> list[dict[str, Any]]:
