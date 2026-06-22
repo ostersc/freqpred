@@ -330,17 +330,38 @@ class KalshiClient(IMarketClient):
         Pass multiple tickers as a comma-separated string.  Returns only the
         markets that were found; silently skips any that are absent.
         """
+        return await self._get_markets_by_tickers_chunked(market_ids, status="settled")
+
+    async def get_markets_by_tickers(self, market_ids: list[str]) -> list[Market]:
+        """Batch-fetch markets of any status via GET /markets?tickers=.
+
+        Chunks requests into groups of up to 200 tickers (Kalshi's max).
+        Returns only the markets that were found; silently skips any that
+        are absent (true 404s — caller diffs requested vs. returned tickers).
+        """
+        return await self._get_markets_by_tickers_chunked(market_ids, status=None)
+
+    async def _get_markets_by_tickers_chunked(
+        self, market_ids: list[str], *, status: str | None
+    ) -> list[Market]:
         if not market_ids:
             return []
-        try:
-            data = await self._get("/markets", params={
-                "status": "settled",
-                "tickers": ",".join(market_ids),
-                "limit": len(market_ids),
-            })
-        except KalshiAPIError:
-            return []
-        return [self._to_market(m) for m in data.get("markets", [])]
+        chunk_size = 200
+        results: list[Market] = []
+        for i in range(0, len(market_ids), chunk_size):
+            chunk = market_ids[i : i + chunk_size]
+            params: dict[str, Any] = {
+                "tickers": ",".join(chunk),
+                "limit": len(chunk),
+            }
+            if status is not None:
+                params["status"] = status
+            try:
+                data = await self._get("/markets", params=params)
+            except KalshiAPIError:
+                continue
+            results.extend(self._to_market(m) for m in data.get("markets", []))
+        return results
 
     async def get_series_settled_history(self, series_ticker: str) -> list[dict[str, Any]]:
         """Return all settled markets for a series, paginated.

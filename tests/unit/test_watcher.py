@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from freqpred.markets.kalshi import KalshiClient
 from freqpred.markets.watcher import (
     PRICE_MOVE_THRESHOLD,
     MarketWatcher,
@@ -172,6 +173,113 @@ class TestCheckPriceMoveTriggers:
 
         assert count == 0
         session.execute.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# MarketWatcher._sweep_closed_markets
+# ---------------------------------------------------------------------------
+
+
+class TestSweepClosedMarkets:
+    @pytest.mark.asyncio
+    async def test_makes_one_batched_call_instead_of_n_single_calls(self) -> None:
+        market_ids = ["MKT-1", "MKT-2", "MKT-3"]
+        client = AsyncMock(spec=KalshiClient)
+        client.get_markets_by_tickers.return_value = [
+            _make_sweep_market(mid) for mid in market_ids
+        ]
+        session, factory = _make_sweep_session_factory(market_ids)
+        watcher = MarketWatcher(client=client, session_factory=factory)
+
+        with patch("freqpred.markets.watcher.upsert_markets", new_callable=AsyncMock):
+            updated = await watcher._sweep_closed_markets()
+
+        client.get_markets_by_tickers.assert_awaited_once_with(market_ids)
+        client.get_market.assert_not_called()
+        assert updated == 3
+
+    @pytest.mark.asyncio
+    async def test_missing_from_batch_falls_back_to_settled(self) -> None:
+        market_ids = ["MKT-1", "MKT-2"]
+        client = AsyncMock(spec=KalshiClient)
+        # Only MKT-1 comes back from the batch call; MKT-2 is "missing".
+        client.get_markets_by_tickers.return_value = [_make_sweep_market("MKT-1")]
+        client.get_market_from_settled.return_value = _make_sweep_market(
+            "MKT-2", result="yes"
+        )
+        session, factory = _make_sweep_session_factory(market_ids)
+        watcher = MarketWatcher(client=client, session_factory=factory)
+
+        with patch(
+            "freqpred.markets.watcher.upsert_markets", new_callable=AsyncMock
+        ) as mock_upsert:
+            updated = await watcher._sweep_closed_markets()
+
+        client.get_market_from_settled.assert_awaited_once_with("MKT-2")
+        upserted_ids = {m.id for m in mock_upsert.call_args.args[1]}
+        assert upserted_ids == {"MKT-1", "MKT-2"}
+        assert updated == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_and_not_in_settled_marks_finalized(self) -> None:
+        market_ids = ["MKT-1"]
+        client = AsyncMock(spec=KalshiClient)
+        client.get_markets_by_tickers.return_value = []
+        client.get_market_from_settled.return_value = None
+        session, factory = _make_sweep_session_factory(market_ids)
+        watcher = MarketWatcher(client=client, session_factory=factory)
+
+        with patch("freqpred.markets.watcher.upsert_markets", new_callable=AsyncMock):
+            updated = await watcher._sweep_closed_markets()
+
+        assert updated == 0
+        # The last execute() call should be the "mark finalized" UPDATE.
+        last_stmt = session.execute.call_args.args[0]
+        assert "finalized" in str(last_stmt.compile(compile_kwargs={"literal_binds": True}))
+
+    @pytest.mark.asyncio
+    async def test_finalized_with_no_result_skipped_from_upsert(self) -> None:
+        market_ids = ["MKT-1"]
+        client = AsyncMock(spec=KalshiClient)
+        client.get_markets_by_tickers.return_value = [
+            _make_sweep_market("MKT-1", status="finalized", result=None)
+        ]
+        session, factory = _make_sweep_session_factory(market_ids)
+        watcher = MarketWatcher(client=client, session_factory=factory)
+
+        with patch(
+            "freqpred.markets.watcher.upsert_markets", new_callable=AsyncMock
+        ) as mock_upsert:
+            updated = await watcher._sweep_closed_markets()
+
+        mock_upsert.assert_not_called()
+        assert updated == 0
+
+
+def _make_sweep_market(
+    market_id: str, status: str = "finalized", result: str | None = "yes"
+) -> MagicMock:
+    m = MagicMock()
+    m.id = market_id
+    m.status = status
+    m.result = result
+    return m
+
+
+def _make_sweep_session_factory(market_ids: list[str]) -> tuple[AsyncMock, MagicMock]:
+    """Session whose first execute() returns the pending market_ids; later
+    execute()/commit() calls (UPDATE ... finalized) are accepted no-ops."""
+    select_result = MagicMock()
+    select_result.all.return_value = [MagicMock(id=mid) for mid in market_ids]
+
+    session = AsyncMock()
+    session.execute.return_value = select_result
+    session.commit = AsyncMock()
+
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=None)
+    return session, factory
 
 
 # ---------------------------------------------------------------------------

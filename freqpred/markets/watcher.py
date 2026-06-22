@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.base import IMarketClient
 from freqpred.markets.kalshi import KalshiAPIError, KalshiClient
-from freqpred.markets.models import MarketRow, PositionRow
+from freqpred.markets.models import Market, MarketRow, PositionRow
 from freqpred.markets.repository import upsert_markets
 from freqpred.trading import ledger
 
@@ -21,8 +21,10 @@ if TYPE_CHECKING:
 
 from freqpred.runtime.telemetry import SERVICE_MARKET_WATCHER
 
-# Max markets to re-fetch per sweep cycle (rate-limit safety).
-_RESOLVED_SWEEP_BATCH = 200
+# Max markets to re-fetch per sweep cycle. Chunked into ≤200-ticker batched
+# calls by get_markets_by_tickers(), so this is now bounded by DB/memory cost
+# rather than per-market round-trip cost.
+_RESOLVED_SWEEP_BATCH = 1000
 
 log = structlog.get_logger(__name__)
 
@@ -179,68 +181,74 @@ class MarketWatcher:
 
         updated = 0
         markets_to_upsert = []
-        for market_id in market_ids:
+        fetched_markets: list[Market] = []
+
+        if isinstance(self._client, KalshiClient):
             try:
-                market = await self._client.get_market(market_id)
-                if market.status == "finalized" and market.result is None:
-                    # Kalshi sets status before populating result — skip the upsert
-                    # so the market stays at its current DB status and is retried
-                    # next cycle.  The 404 handler will eventually catch it if
-                    # Kalshi removes the market without ever setting a result.
-                    log.debug(
-                        "market_watcher.resolved_sweep_result_pending",
-                        market_id=market_id,
-                    )
-                else:
-                    markets_to_upsert.append(market)
-            except KalshiAPIError as exc:
-                if exc.status_code == 404:
-                    # Market gone from live API — try the settled list as a fallback
-                    # before giving up, since settled retains results for purged markets.
-                    settled_market = None
-                    if isinstance(self._client, KalshiClient):
-                        settled_market = await self._client.get_market_from_settled(market_id)
-                    if settled_market is not None:
-                        log.info(
-                            "market_watcher.resolved_sweep_recovered_from_settled",
-                            market_id=market_id,
-                            result=settled_market.result,
-                        )
-                        markets_to_upsert.append(settled_market)
-                    else:
-                        log.warning(
-                            "market_watcher.resolved_sweep_not_found",
-                            market_id=market_id,
-                            hint="marking finalized so it is not retried",
-                        )
-                        async with self._session_factory() as session:
-                            await session.execute(
-                                update(MarketRow)
-                                .where(MarketRow.id == market_id)
-                                .values(status="finalized")
-                            )
-                            await session.commit()
-                else:
-                    log.error(
-                        "market_watcher.resolved_sweep_error",
-                        market_id=market_id,
-                        status_code=exc.status_code,
-                        body=exc.body,
-                    )
-                    if self._runtime_telemetry is not None:
-                        await self._runtime_telemetry.record_kalshi_error(
-                            "market_watcher",
-                            f"resolved sweep failed for {market_id}: {exc}",
-                            details={"market_id": market_id, "status_code": exc.status_code},
-                        )
+                fetched_markets = await self._client.get_markets_by_tickers(market_ids)
             except Exception as exc:
                 if self._runtime_telemetry is not None:
                     await self._runtime_telemetry.record_kalshi_error(
                         "market_watcher",
-                        f"resolved sweep failed for {market_id}: {exc}",
-                        details={"market_id": market_id},
+                        f"resolved sweep batch fetch failed: {exc}",
+                        details={"market_ids": market_ids},
                     )
-                log.exception("market_watcher.resolved_sweep_error", market_id=market_id)
+                log.exception("market_watcher.resolved_sweep_error", market_ids=market_ids)
+        else:
+            for market_id in market_ids:
+                try:
+                    fetched_markets.append(await self._client.get_market(market_id))
+                except Exception as exc:
+                    if self._runtime_telemetry is not None:
+                        await self._runtime_telemetry.record_kalshi_error(
+                            "market_watcher",
+                            f"resolved sweep failed for {market_id}: {exc}",
+                            details={"market_id": market_id},
+                        )
+                    log.exception("market_watcher.resolved_sweep_error", market_id=market_id)
+
+        fetched_by_id = {m.id: m for m in fetched_markets}
+        missing_ids = [mid for mid in market_ids if mid not in fetched_by_id]
+
+        for market in fetched_markets:
+            if market.status == "finalized" and market.result is None:
+                # Kalshi sets status before populating result — skip the upsert
+                # so the market stays at its current DB status and is retried
+                # next cycle.  The 404 handler will eventually catch it if
+                # Kalshi removes the market without ever setting a result.
+                log.debug(
+                    "market_watcher.resolved_sweep_result_pending",
+                    market_id=market.id,
+                )
+            else:
+                markets_to_upsert.append(market)
+
+        for market_id in missing_ids:
+            # Market gone from live API — try the settled list as a fallback
+            # before giving up, since settled retains results for purged markets.
+            settled_market = None
+            if isinstance(self._client, KalshiClient):
+                settled_market = await self._client.get_market_from_settled(market_id)
+            if settled_market is not None:
+                log.info(
+                    "market_watcher.resolved_sweep_recovered_from_settled",
+                    market_id=market_id,
+                    result=settled_market.result,
+                )
+                markets_to_upsert.append(settled_market)
+            else:
+                log.warning(
+                    "market_watcher.resolved_sweep_not_found",
+                    market_id=market_id,
+                    hint="marking finalized so it is not retried",
+                )
+                async with self._session_factory() as session:
+                    await session.execute(
+                        update(MarketRow)
+                        .where(MarketRow.id == market_id)
+                        .values(status="finalized")
+                    )
+                    await session.commit()
 
         if markets_to_upsert:
             async with self._session_factory() as session:

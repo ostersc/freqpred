@@ -779,6 +779,54 @@ class TestGetPositions:
 
 
 # ---------------------------------------------------------------------------
+# get_markets_by_tickers
+# ---------------------------------------------------------------------------
+
+class TestGetMarketsByTickers:
+    @pytest.mark.asyncio
+    async def test_empty_input_returns_empty_without_calling_get(self) -> None:
+        client = _make_client()
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            markets = await client.get_markets_by_tickers([])
+
+        assert markets == []
+        mock_get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_chunks_250_tickers_into_two_calls(self) -> None:
+        client = _make_client()
+        tickers = [f"TICKER-{i}" for i in range(250)]
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = [
+                _mock_response({"markets": [_MARKET_PAYLOAD]}),
+                _mock_response({"markets": [_MARKET_PAYLOAD_2]}),
+            ]
+            markets = await client.get_markets_by_tickers(tickers)
+
+        assert mock_get.call_count == 2
+        first_params = mock_get.call_args_list[0].kwargs["params"]
+        second_params = mock_get.call_args_list[1].kwargs["params"]
+        assert first_params["tickers"].count(",") == 199
+        assert second_params["tickers"].count(",") == 49
+        assert "status" not in first_params
+        assert "status" not in second_params
+
+        assert {m.id for m in markets} == {"KXPRES-25-DEM", "KXTECH-25-AI"}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_api_error(self) -> None:
+        client = _make_client()
+
+        with patch.object(client, "_get", new_callable=AsyncMock) as mock_get:
+            mock_get.side_effect = KalshiAPIError(status_code=500, body="boom")
+            markets = await client.get_markets_by_tickers(["KXPRES-25-DEM"])
+
+        assert markets == []
+
+
+# ---------------------------------------------------------------------------
 # get_active_markets (delegates to list_markets)
 # ---------------------------------------------------------------------------
 
