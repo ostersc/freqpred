@@ -2058,6 +2058,25 @@ async def upgrade_api_tier_endpoint(
         if exc.status_code == 404:
             log.warning("api_tier.upgrade_not_available")
             raise HTTPException(status_code=503, detail="Upgrade endpoint not yet available") from exc
+        if exc.status_code == 403:
+            if "insufficient_scope" in exc.body:
+                log.warning("api_tier.upgrade_insufficient_scope")
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Kalshi API key lacks write/trading scope. Generate a key with "
+                        "trading permissions in your Kalshi account settings."
+                    ),
+                ) from exc
+            log.warning("api_tier.upgrade_no_api_order")
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Kalshi requires at least one order placed via the API in your "
+                    "last 100 orders before granting the Advanced tier. Place an "
+                    "API order, then retry."
+                ),
+            ) from exc
         log.exception("api_tier.upgrade_failed")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:

@@ -562,23 +562,16 @@ class TestPlaceOrder:
         assert body["type"] == "limit"
 
     @pytest.mark.asyncio
-    async def test_place_order_empty_event_ticker_fallback(self) -> None:
-        """place_order() with empty event_ticker falls back to legacy path and logs a warning."""
+    async def test_place_order_empty_event_ticker_raises(self) -> None:
+        """place_order() with empty event_ticker raises rather than using the
+        deprecated legacy /portfolio/orders endpoint."""
         client = _make_client()
         order = Order(market_id="KXPRES-25-DEM", direction="YES", contracts=5, price=0.50, mode="live")
-        resp_data = {"order": {"order_id": "ORD-LEG", "status": "resting"}}
 
         with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = _mock_response(resp_data)
-            result = await client.place_order(order)
-
-        call_args = mock_post.call_args
-        url = call_args.args[0] if call_args.args else call_args.kwargs.get("url", "")
-        assert "/portfolio/orders" in url
-        assert "/events/" not in url
-        body = call_args.kwargs.get("json") or call_args.args[1]
-        assert body["ticker"] == "KXPRES-25-DEM"
-        assert result.exchange_order_id == "ORD-LEG"
+            with pytest.raises(ValueError, match="event_ticker is required"):
+                await client.place_order(order)
+            mock_post.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_place_order_returns_order_with_exchange_id(self) -> None:

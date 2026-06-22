@@ -560,21 +560,23 @@ class OrderManager:
         assert self._kalshi_client is not None, "kalshi_client required for live mode"
         try:
             filled_order = await self._kalshi_client.place_order(order)
-        except KalshiAPIError as exc:
+        except (KalshiAPIError, ValueError) as exc:
+            status_code = exc.status_code if isinstance(exc, KalshiAPIError) else None
+            body = exc.body if isinstance(exc, KalshiAPIError) else str(exc)
             logger.warning(
                 "order_manager.live_order_failed",
                 market_id=order.market_id,
                 direction=order.direction,
                 contracts=order.contracts,
                 price=order.price,
-                status_code=exc.status_code,
-                body=exc.body,
+                status_code=status_code,
+                body=body,
             )
             if self._runtime_telemetry is not None:
                 await self._runtime_telemetry.record_kalshi_error(
                     "order_manager",
                     f"submit live order failed for {order.market_id}: {exc}",
-                    details={"market_id": order.market_id, "status_code": exc.status_code},
+                    details={"market_id": order.market_id, "status_code": status_code},
                 )
             return None
 

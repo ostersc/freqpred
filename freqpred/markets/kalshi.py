@@ -410,39 +410,30 @@ class KalshiClient(IMarketClient):
         return {"yes_bid": yes_bid, "yes_ask": yes_ask}
 
     async def place_order(self, order: Order) -> Order:
-        """Submit a limit order to Kalshi.
+        """Submit a limit order to Kalshi via the V2 /portfolio/events/orders path.
 
-        Uses the V2 /portfolio/events/orders path when order.event_ticker is set.
-        Falls back to legacy /portfolio/orders with a warning when event_ticker is
-        empty (e.g. position opened before event_ticker was reliably stored).
+        Requires order.event_ticker to be set. The legacy /portfolio/orders
+        mutation endpoint Kalshi previously allowed as a fallback is being
+        deprecated (announced 2026-06-18, effective by 2026-06-25), so a
+        missing event_ticker is now treated as a data error rather than a
+        reason to fall back to a soon-dead endpoint.
         """
-        price_cents = int(round(order.price * 100))
-        if order.event_ticker:
-            path = "/portfolio/events/orders"
-            body: dict[str, Any] = {
-                "event_ticker": order.event_ticker,
-                "market_ticker": order.market_id,
-                "action": order.action,
-                "side": order.direction.lower(),
-                "type": "limit",
-                "count": order.contracts,
-                "yes_price" if order.direction == "YES" else "no_price": price_cents,
-            }
-        else:
-            log.warning(
-                "kalshi.place_order.legacy_fallback",
-                market_id=order.market_id,
-                reason="event_ticker empty; using legacy endpoint",
+        if not order.event_ticker:
+            raise ValueError(
+                f"Cannot place order for {order.market_id}: event_ticker is "
+                "required (legacy /portfolio/orders endpoint is deprecated)"
             )
-            path = "/portfolio/orders"
-            body = {
-                "ticker": order.market_id,
-                "action": order.action,
-                "side": order.direction.lower(),
-                "type": "limit",
-                "count": order.contracts,
-                "yes_price" if order.direction == "YES" else "no_price": price_cents,
-            }
+        price_cents = int(round(order.price * 100))
+        path = "/portfolio/events/orders"
+        body: dict[str, Any] = {
+            "event_ticker": order.event_ticker,
+            "market_ticker": order.market_id,
+            "action": order.action,
+            "side": order.direction.lower(),
+            "type": "limit",
+            "count": order.contracts,
+            "yes_price" if order.direction == "YES" else "no_price": price_cents,
+        }
         # Only send time_in_force when non-default; omitting the field lets Kalshi
         # apply its default (GTC). Kalshi accepts "fill_or_kill" for immediate exits.
         if order.time_in_force.upper() != "GTC":

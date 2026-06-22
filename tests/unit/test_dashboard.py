@@ -1928,6 +1928,48 @@ def test_upgrade_api_tier_route_503_no_client() -> None:
     assert resp.status_code == 503
 
 
+def test_upgrade_api_tier_route_403_insufficient_scope() -> None:
+    """A 403 with 'insufficient_scope' in the body maps to a key-permission message."""
+    from freqpred.markets.kalshi import KalshiAPIError
+    from freqpred.dashboard.api.routes import _kalshi_client as _dep
+
+    mock_kc = AsyncMock()
+    mock_kc.upgrade_api_tier = AsyncMock(
+        side_effect=KalshiAPIError(
+            403, '{"error":{"code":"insufficient_scope:_write_required"}}'
+        )
+    )
+
+    session = _make_system_health_session()
+    app = _make_app(session)
+    app.dependency_overrides[_dep] = lambda: mock_kc
+
+    client = TestClient(app)
+    resp = client.post("/api/system/api-tier/upgrade")
+
+    assert resp.status_code == 403
+    assert "trading permissions" in resp.json()["detail"]
+
+
+def test_upgrade_api_tier_route_403_no_api_order() -> None:
+    """A 403 with no 'insufficient_scope' marker maps to the API-order requirement message."""
+    from freqpred.markets.kalshi import KalshiAPIError
+    from freqpred.dashboard.api.routes import _kalshi_client as _dep
+
+    mock_kc = AsyncMock()
+    mock_kc.upgrade_api_tier = AsyncMock(side_effect=KalshiAPIError(403, ""))
+
+    session = _make_system_health_session()
+    app = _make_app(session)
+    app.dependency_overrides[_dep] = lambda: mock_kc
+
+    client = TestClient(app)
+    resp = client.post("/api/system/api-tier/upgrade")
+
+    assert resp.status_code == 403
+    assert "order placed via the API" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # System health api_tier field
 # ---------------------------------------------------------------------------
