@@ -124,7 +124,6 @@ body {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--pos);
   box-shadow: 0 0 8px var(--pos);
-  animation: pulse 2s infinite;
 }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
 
