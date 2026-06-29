@@ -581,8 +581,11 @@ class OrderManager:
             return None
 
         mapped = map_order_to_status(filled_order, order.contracts)
-        # Effective entry cost per contract including exchange fee.
-        effective_entry = order.price + (filled_order.fee_usd / order.contracts if order.contracts else 0)
+        # Use the actual fill price from the exchange response (Kalshi gives price
+        # improvement — the fill price can be better than our limit). Fall back to
+        # the limit price only if the exchange didn't return a fill price.
+        fill_price = filled_order.price if filled_order.price else order.price
+        effective_entry = fill_price + (filled_order.fee_usd / order.contracts if order.contracts else 0)
         logger.info(
             "order_manager.live_order_submitted",
             exchange_order_id=filled_order.exchange_order_id,
@@ -591,7 +594,8 @@ class OrderManager:
             contracts=order.contracts,
             requested_contracts=order.contracts,
             filled_contracts=mapped.contracts,
-            price=order.price,
+            limit_price=order.price,
+            fill_price=fill_price,
             fee_usd=filled_order.fee_usd,
             effective_entry_price=round(effective_entry, 6),
             position_status=mapped.db_status,
@@ -613,7 +617,7 @@ class OrderManager:
                 strategy_version=self._strategy_version,
                 direction=order.direction,
                 contracts=persisted_contracts,
-                entry_price=order.price,
+                entry_price=fill_price,
                 mode=self._mode,
                 status=mapped.db_status,
                 exchange_order_id=filled_order.exchange_order_id,
