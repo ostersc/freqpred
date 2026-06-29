@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -460,35 +461,52 @@ class KalshiClient(IMarketClient):
 
         return {"yes_bid": yes_bid, "yes_ask": yes_ask}
 
-    async def place_order(self, order: Order) -> Order:
-        """Submit a limit order to Kalshi via the V2 /portfolio/events/orders path.
+    # CreateOrderV2Request.time_in_force only accepts these three values;
+    # "GTC" is freqpred's internal shorthand for good_till_canceled.
+    _TIME_IN_FORCE_MAP = {
+        "GTC": "good_till_canceled",
+        "fill_or_kill": "fill_or_kill",
+        "immediate_or_cancel": "immediate_or_cancel",
+    }
 
-        Requires order.event_ticker to be set. The legacy /portfolio/orders
-        mutation endpoint Kalshi previously allowed as a fallback is being
-        deprecated (announced 2026-06-18, effective by 2026-06-25), so a
-        missing event_ticker is now treated as a data error rather than a
-        reason to fall back to a soon-dead endpoint.
+    @staticmethod
+    def _book_side_and_price(order: Order) -> tuple[str, float]:
+        """Map (direction, action) to (book_side, yes-leg price).
+
+        CreateOrderV2Request quotes everything on the YES leg: book_side="bid"
+        means buy YES, "ask" means sell YES. Buying/selling NO is expressed as
+        the opposite YES-leg action at the complementary price (1 - price).
         """
-        if not order.event_ticker:
+        if order.direction == "YES":
+            book_side = "bid" if order.action == "buy" else "ask"
+            yes_price = order.price
+        else:
+            book_side = "ask" if order.action == "buy" else "bid"
+            yes_price = 1.0 - order.price
+        return book_side, yes_price
+
+    async def place_order(self, order: Order) -> Order:
+        """Submit a limit order to Kalshi via the V2 /portfolio/events/orders path."""
+        try:
+            time_in_force = self._TIME_IN_FORCE_MAP[order.time_in_force]
+        except KeyError:
             raise ValueError(
-                f"Cannot place order for {order.market_id}: event_ticker is "
-                "required (legacy /portfolio/orders endpoint is deprecated)"
-            )
-        price_cents = int(round(order.price * 100))
+                f"Unsupported time_in_force {order.time_in_force!r}; "
+                f"expected one of {sorted(self._TIME_IN_FORCE_MAP)}"
+            ) from None
+        book_side, yes_price = self._book_side_and_price(order)
+        client_order_id = order.client_order_id or str(uuid.uuid4())
         path = "/portfolio/events/orders"
         body: dict[str, Any] = {
-            "event_ticker": order.event_ticker,
-            "market_ticker": order.market_id,
-            "action": order.action,
-            "side": order.direction.lower(),
+            "ticker": order.market_id,
+            "client_order_id": client_order_id,
+            "side": book_side,
             "type": "limit",
-            "count": order.contracts,
-            "yes_price" if order.direction == "YES" else "no_price": price_cents,
+            "count": f"{order.contracts:.2f}",
+            "price": f"{yes_price:.4f}",
+            "time_in_force": time_in_force,
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        # Only send time_in_force when non-default; omitting the field lets Kalshi
-        # apply its default (GTC). Kalshi accepts "fill_or_kill" for immediate exits.
-        if order.time_in_force.upper() != "GTC":
-            body["time_in_force"] = order.time_in_force
         data = await self._post(path, body)
         exchange_order = data.get("order", data)
         return self._order_from_exchange_payload(order, exchange_order)
@@ -502,24 +520,48 @@ class KalshiClient(IMarketClient):
         price but the freqpred-level ``contracts`` field reflects the total
         filled across both sides (yes + no).
         """
-        data = await self._get(f"/portfolio/events/orders/{order_id}")
+        data = await self._get(f"/portfolio/orders/{order_id}")
         exchange_order = data.get("order", data)
         return self._order_from_exchange_payload(None, exchange_order)
 
     async def cancel_order(self, order_id: str) -> Order:
         """Cancel a resting order on the exchange.
 
-        Returns the final order state from Kalshi (the cancel response includes
-        the order object reflecting any fills that landed before cancellation).
+        DELETE /portfolio/events/orders/{order_id} returns CancelOrderV2Response
+        — {order_id, client_order_id, reduced_by, ts_ms} — not a full order
+        object, so status/price/fees can't be derived from it directly. Instead,
+        follow up with GET /portfolio/orders/{order_id} for the authoritative
+        terminal state (status="canceled" with whatever fill_count_fp landed
+        before cancellation), which map_order_to_status needs.
+
+        The immediately-following GET can 404 on a brief propagation lag
+        (observed against demo) even though the DELETE already succeeded, so
+        retry a few times with a short backoff before giving up.
         """
-        data = await self._delete(f"/portfolio/events/orders/{order_id}")
-        exchange_order = data.get("order", data)
+        delete_data = await self._delete(f"/portfolio/events/orders/{order_id}")
         log.info(
             "kalshi.cancel_order",
             order_id=order_id,
-            status=exchange_order.get("status"),
+            client_order_id=delete_data.get("client_order_id"),
+            reduced_by=delete_data.get("reduced_by"),
         )
-        return self._order_from_exchange_payload(None, exchange_order)
+        last_exc: KalshiAPIError | None = None
+        for attempt in range(3):
+            if attempt > 0:
+                await asyncio.sleep(0.5 * attempt)
+            try:
+                return await self.get_order(order_id)
+            except KalshiAPIError as exc:
+                if exc.status_code != 404:
+                    raise
+                last_exc = exc
+                log.info(
+                    "kalshi.cancel_order.get_order_404_retry",
+                    order_id=order_id,
+                    attempt=attempt,
+                )
+        assert last_exc is not None
+        raise last_exc
 
     @staticmethod
     def _parse_kalshi_ts(value: Any) -> datetime | None:
@@ -530,6 +572,20 @@ class KalshiClient(IMarketClient):
         except (ValueError, TypeError):
             return None
 
+    @staticmethod
+    def _fp_int(value: Any) -> int | None:
+        """Parse a Kalshi fixed-point contract-count string (e.g. "10.00") to int."""
+        if value is None:
+            return None
+        return round(float(value))
+
+    @staticmethod
+    def _dollars(value: Any) -> float | None:
+        """Parse a Kalshi dollar-denominated string field (e.g. "0.5600") to float."""
+        if value is None:
+            return None
+        return float(value)
+
     def _order_from_exchange_payload(
         self,
         request: Order | None,
@@ -537,71 +593,97 @@ class KalshiClient(IMarketClient):
     ) -> Order:
         """Build an Order from a Kalshi order response payload.
 
-        Used by place_order, get_order, and cancel_order to share parsing.
-        ``request`` is the originating Order (place_order only) — get_order and
-        cancel_order pass None and the returned Order reflects exchange state.
+        Used by place_order and get_order to share parsing. ``request`` is the
+        originating Order (place_order only) — get_order passes None and the
+        returned Order reflects pure exchange state.
+
+        Two response shapes feed this:
+        - CreateOrderV2Response (place_order): order_id, client_order_id,
+          fill_count, remaining_count (fp strings, no _fp suffix),
+          average_fill_price, average_fee_paid (dollar strings), ts_ms. No
+          status/side/ticker — these come from ``request``.
+        - GetOrderResponse.order (get_order, and cancel_order via get_order):
+          full order object with fill_count_fp/remaining_count_fp/
+          initial_count_fp, yes_price_dollars/no_price_dollars,
+          taker_fees_dollars/maker_fees_dollars (already totals, not
+          per-contract), outcome_side/book_side (canonical) plus deprecated
+          side/action (yes/no, buy/sell), status, created_time/last_update_time.
         """
-        fee_cents = (
-            (exchange_order.get("maker_fees") or 0)
-            + (exchange_order.get("taker_fees") or 0)
+        filled_total = self._fp_int(
+            exchange_order.get("fill_count_fp", exchange_order.get("fill_count"))
+        ) or 0
+        remaining_int = self._fp_int(
+            exchange_order.get("remaining_count_fp", exchange_order.get("remaining_count"))
         )
-        fee_usd = fee_cents / 100
+        initial_int = self._fp_int(exchange_order.get("initial_count_fp"))
 
-        # Kalshi reports counts per side: yes_count / no_count are the filled
-        # counts; place_count (or count) is the requested amount.  For a
-        # single-side buy these mirror each other but partial fills only touch
-        # the side actually filled.
-        requested = exchange_order.get("place_count")
-        if requested is None:
-            requested = exchange_order.get("count")
-        filled_yes = exchange_order.get("yes_count")
-        filled_no = exchange_order.get("no_count")
-        filled_yes = int(filled_yes) if filled_yes is not None else None
-        filled_no = int(filled_no) if filled_no is not None else None
-        requested_int = int(requested) if requested is not None else None
-        total_filled = (filled_yes or 0) + (filled_no or 0)
-        remaining = exchange_order.get("remaining_count")
-        if remaining is None and requested_int is not None:
-            remaining = max(0, requested_int - total_filled)
+        maker_fees = self._dollars(exchange_order.get("maker_fees_dollars"))
+        taker_fees = self._dollars(exchange_order.get("taker_fees_dollars"))
+        if maker_fees is not None or taker_fees is not None:
+            fee_usd = (maker_fees or 0.0) + (taker_fees or 0.0)
         else:
-            remaining = int(remaining) if remaining is not None else None
+            avg_fee = self._dollars(exchange_order.get("average_fee_paid"))
+            fee_usd = (avg_fee or 0.0) * filled_total
 
-        # Direction mirrors the request when present; otherwise infer from side.
         if request is not None:
             direction = request.direction
-            price = request.price
             mode = request.mode
-            original_contracts = request.contracts
             order_id = request.id
+            avg_fill_yes_price = self._dollars(exchange_order.get("average_fill_price"))
+            if avg_fill_yes_price is not None:
+                price = avg_fill_yes_price if direction == "YES" else 1.0 - avg_fill_yes_price
+            else:
+                price = request.price
+            requested_int = (
+                filled_total + remaining_int if remaining_int is not None else request.contracts
+            )
         else:
-            side = (exchange_order.get("side") or "").lower()
-            direction = "YES" if side == "yes" else "NO"
-            # Kalshi prices are integer cents on the relevant side.
-            price_cents = (
-                exchange_order.get("yes_price")
-                if direction == "YES"
-                else exchange_order.get("no_price")
-            )
-            price = (
-                float(price_cents) / 100.0 if price_cents is not None else 0.0
-            )
+            outcome_side = (
+                exchange_order.get("outcome_side") or exchange_order.get("side") or ""
+            ).lower()
+            direction = "YES" if outcome_side == "yes" else "NO"
             mode = "live"
-            original_contracts = requested_int or 0
             order_id = None
+            yes_price_dollars = self._dollars(exchange_order.get("yes_price_dollars"))
+            no_price_dollars = self._dollars(exchange_order.get("no_price_dollars"))
+            if direction == "YES" and yes_price_dollars is not None:
+                price = yes_price_dollars
+            elif direction == "NO" and no_price_dollars is not None:
+                price = no_price_dollars
+            else:
+                price = 0.0
+            requested_int = initial_int if initial_int is not None else (
+                filled_total + (remaining_int or 0)
+            )
 
+        original_contracts = requested_int or 0
         # For partial fills, ``contracts`` reflects what actually filled so
         # downstream sizing/accounting reads the exchange truth.
-        effective_contracts = total_filled if total_filled > 0 else original_contracts
+        effective_contracts = filled_total if filled_total > 0 else original_contracts
 
-        status_str = exchange_order.get("status", "resting")
+        filled_yes = filled_total if direction == "YES" else None
+        filled_no = filled_total if direction == "NO" else None
+
+        status_str = exchange_order.get("status")
+        if not status_str:
+            # CreateOrderV2Response carries no status field — derive one.
+            status_str = (
+                "executed" if (remaining_int == 0 and filled_total > 0) else "resting"
+            )
+
+        created_time = self._parse_kalshi_ts(exchange_order.get("created_time"))
+        if created_time is None and exchange_order.get("ts_ms") is not None:
+            created_time = datetime.fromtimestamp(
+                int(exchange_order["ts_ms"]) / 1000, tz=UTC
+            )
+
         log.info(
             "kalshi.order_payload",
             exchange_order_id=exchange_order.get("order_id"),
             direction=direction,
             requested=requested_int,
-            filled_yes=filled_yes,
-            filled_no=filled_no,
-            remaining=remaining,
+            filled_total=filled_total,
+            remaining=remaining_int,
             status=status_str,
             fee_usd=fee_usd,
         )
@@ -619,12 +701,10 @@ class KalshiClient(IMarketClient):
             requested_count=requested_int,
             filled_yes_count=filled_yes,
             filled_no_count=filled_no,
-            remaining_count=remaining,
-            created_time=self._parse_kalshi_ts(exchange_order.get("created_time")),
-            last_update_time=self._parse_kalshi_ts(
-                exchange_order.get("last_update_time")
-                or exchange_order.get("updated_time")
-            ),
+            remaining_count=remaining_int,
+            created_time=created_time,
+            last_update_time=self._parse_kalshi_ts(exchange_order.get("last_update_time"))
+            or created_time,
         )
 
     async def get_positions(self) -> list[Position]:

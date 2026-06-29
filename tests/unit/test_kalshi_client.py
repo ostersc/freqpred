@@ -582,18 +582,14 @@ class TestPost:
 
 class TestPlaceOrder:
     @pytest.mark.asyncio
-    async def test_place_order_uses_v2_endpoint(self) -> None:
-        """place_order() with event_ticker uses V2 path and body shape."""
+    async def test_place_order_yes_buy_maps_to_bid(self) -> None:
+        """YES direction + buy action -> book_side=bid at the requested price."""
         client = _make_client()
         order = Order(
-            market_id="KXPRES-25-DEM",
-            event_ticker="KXPRES-25",
-            direction="YES",
-            contracts=10,
-            price=0.45,
-            mode="live",
+            market_id="KXPRES-25-DEM", direction="YES", contracts=10, price=0.45,
+            mode="live", action="buy",
         )
-        resp_data = {"order": {"order_id": "ORD-123", "status": "resting"}}
+        resp_data = {"order_id": "ORD-123", "fill_count": "0.00", "remaining_count": "10.00"}
 
         with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = _mock_response(resp_data)
@@ -603,40 +599,139 @@ class TestPlaceOrder:
         url = call_args.args[0] if call_args.args else call_args.kwargs.get("url", "")
         assert "/portfolio/events/orders" in url
         body = call_args.kwargs.get("json") or call_args.args[1]
-        assert body["event_ticker"] == "KXPRES-25"
-        assert body["market_ticker"] == "KXPRES-25-DEM"
-        assert "ticker" not in body
-        assert body["side"] == "yes"
-        assert body["count"] == 10
-        assert body["yes_price"] == 45
-        assert body["action"] == "buy"
+        assert body["ticker"] == "KXPRES-25-DEM"
+        assert "event_ticker" not in body
+        assert "market_ticker" not in body
+        assert body["side"] == "bid"
+        assert body["price"] == "0.4500"
         assert body["type"] == "limit"
 
     @pytest.mark.asyncio
-    async def test_place_order_empty_event_ticker_raises(self) -> None:
-        """place_order() with empty event_ticker raises rather than using the
-        deprecated legacy /portfolio/orders endpoint."""
+    async def test_place_order_yes_sell_maps_to_ask(self) -> None:
+        """YES direction + sell action -> book_side=ask at the requested price."""
         client = _make_client()
-        order = Order(market_id="KXPRES-25-DEM", direction="YES", contracts=5, price=0.50, mode="live")
+        order = Order(
+            market_id="KXPRES-25-DEM", direction="YES", contracts=5, price=0.60,
+            mode="live", action="sell",
+        )
+        resp_data = {"order_id": "ORD-1", "fill_count": "0.00", "remaining_count": "5.00"}
 
         with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
-            with pytest.raises(ValueError, match="event_ticker is required"):
-                await client.place_order(order)
+            mock_post.return_value = _mock_response(resp_data)
+            await client.place_order(order)
+
+        body = mock_post.call_args.kwargs.get("json") or mock_post.call_args.args[1]
+        assert body["side"] == "ask"
+        assert body["price"] == "0.6000"
+
+    @pytest.mark.asyncio
+    async def test_place_order_no_buy_maps_to_ask_inverted_price(self) -> None:
+        """NO direction + buy action -> sell YES (ask) at 1 - price."""
+        client = _make_client()
+        order = Order(
+            market_id="KXPRES-25-DEM", direction="NO", contracts=5, price=0.23,
+            mode="live", action="buy",
+        )
+        resp_data = {"order_id": "ORD-2", "fill_count": "0.00", "remaining_count": "5.00"}
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(resp_data)
+            await client.place_order(order)
+
+        body = mock_post.call_args.kwargs.get("json") or mock_post.call_args.args[1]
+        assert body["side"] == "ask"
+        assert body["price"] == "0.7700"
+
+    @pytest.mark.asyncio
+    async def test_place_order_no_sell_maps_to_bid_inverted_price(self) -> None:
+        """NO direction + sell action -> buy YES (bid) at 1 - price."""
+        client = _make_client()
+        order = Order(
+            market_id="KXPRES-25-DEM", direction="NO", contracts=5, price=0.23,
+            mode="live", action="sell",
+        )
+        resp_data = {"order_id": "ORD-3", "fill_count": "0.00", "remaining_count": "5.00"}
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(resp_data)
+            await client.place_order(order)
+
+        body = mock_post.call_args.kwargs.get("json") or mock_post.call_args.args[1]
+        assert body["side"] == "bid"
+        assert body["price"] == "0.7700"
+
+    @pytest.mark.asyncio
+    async def test_place_order_count_is_fp_string(self) -> None:
+        """count must be a fixed-point string, not an int — this is the exact
+        field that 400'd against the real API."""
+        client = _make_client()
+        order = Order(market_id="KX", direction="YES", contracts=3, price=0.5, mode="live")
+        resp_data = {"order_id": "ORD-4", "fill_count": "0.00", "remaining_count": "3.00"}
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(resp_data)
+            await client.place_order(order)
+
+        body = mock_post.call_args.kwargs.get("json") or mock_post.call_args.args[1]
+        assert body["count"] == "3.00"
+        assert isinstance(body["count"], str)
+
+    @pytest.mark.asyncio
+    async def test_place_order_includes_required_fields(self) -> None:
+        """client_order_id and self_trade_prevention_type are required by the
+        real schema and must always be sent."""
+        client = _make_client()
+        order = Order(market_id="KX", direction="YES", contracts=3, price=0.5, mode="live")
+        resp_data = {"order_id": "ORD-5", "fill_count": "0.00", "remaining_count": "3.00"}
+
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(resp_data)
+            await client.place_order(order)
+
+        body = mock_post.call_args.kwargs.get("json") or mock_post.call_args.args[1]
+        assert body["client_order_id"]
+        assert body["self_trade_prevention_type"] == "taker_at_cross"
+        assert body["time_in_force"] == "good_till_canceled"
+
+    @pytest.mark.asyncio
+    async def test_place_order_time_in_force_mapping(self) -> None:
+        """GTC maps to good_till_canceled; fill_or_kill passes through;
+        unrecognized values raise rather than sending an invalid enum."""
+        client = _make_client()
+        resp_data = {"order_id": "ORD-6", "fill_count": "0.00", "remaining_count": "1.00"}
+
+        fok_order = Order(
+            market_id="KX", direction="YES", contracts=1, price=0.5, mode="live",
+            time_in_force="fill_or_kill",
+        )
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = _mock_response(resp_data)
+            await client.place_order(fok_order)
+        body = mock_post.call_args.kwargs.get("json") or mock_post.call_args.args[1]
+        assert body["time_in_force"] == "fill_or_kill"
+
+        bad_order = Order(
+            market_id="KX", direction="YES", contracts=1, price=0.5, mode="live",
+            time_in_force="IOC",
+        )
+        with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
+            with pytest.raises(ValueError, match="Unsupported time_in_force"):
+                await client.place_order(bad_order)
             mock_post.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_place_order_returns_order_with_exchange_id(self) -> None:
-        """place_order() returns an Order with exchange_order_id and status from response."""
+        """place_order() returns an Order with exchange_order_id and a derived
+        status from the create response (which has no status field itself)."""
         client = _make_client()
         order = Order(
-            market_id="KXPRES-25-DEM",
-            event_ticker="KXPRES-25",
-            direction="NO",
-            contracts=5,
-            price=0.55,
-            mode="live",
+            market_id="KXPRES-25-DEM", direction="NO", contracts=5, price=0.55, mode="live",
         )
-        resp_data = {"order": {"order_id": "ORD-456", "status": "resting"}}
+        resp_data = {
+            "order_id": "ORD-456",
+            "fill_count": "0.00",
+            "remaining_count": "5.00",
+        }
 
         with patch.object(client._http, "post", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = _mock_response(resp_data)
@@ -646,7 +741,7 @@ class TestPlaceOrder:
         assert result.status == "resting"
         assert result.market_id == "KXPRES-25-DEM"
         assert result.direction == "NO"
-        assert result.contracts == 5
+        assert result.requested_count == 5
 
 
 # ---------------------------------------------------------------------------
@@ -656,22 +751,23 @@ class TestPlaceOrder:
 
 class TestGetOrder:
     @pytest.mark.asyncio
-    async def test_get_order_uses_v2_endpoint(self) -> None:
-        """get_order() calls the V2 /portfolio/events/orders/{id} path."""
+    async def test_get_order_uses_correct_path(self) -> None:
+        """get_order() calls GET /portfolio/orders/{id} — no 'events' segment."""
         client = _make_client()
         resp_data = {
             "order": {
                 "order_id": "ORD-123",
                 "ticker": "KXPRES-25-DEM",
-                "side": "yes",
-                "status": "partial",
-                "place_count": 10,
-                "yes_count": 3,
-                "no_count": 0,
-                "remaining_count": 7,
-                "yes_price": 45,
-                "maker_fees": 12,
-                "taker_fees": 0,
+                "outcome_side": "yes",
+                "book_side": "bid",
+                "status": "resting",
+                "initial_count_fp": "10.00",
+                "fill_count_fp": "3.00",
+                "remaining_count_fp": "7.00",
+                "yes_price_dollars": "0.4500",
+                "no_price_dollars": "0.5500",
+                "maker_fees_dollars": "0.12",
+                "taker_fees_dollars": "0.00",
                 "created_time": "2026-05-23T10:00:00Z",
                 "last_update_time": "2026-05-23T10:00:05Z",
             }
@@ -682,48 +778,141 @@ class TestGetOrder:
             result = await client.get_order("ORD-123")
 
         call_url = mock_get.call_args.args[0] if mock_get.call_args.args else mock_get.call_args.kwargs.get("url", "")
-        assert "/portfolio/events/orders/ORD-123" in call_url
+        assert call_url.endswith("/portfolio/orders/ORD-123")
+        assert "/events/" not in call_url
         assert result.exchange_order_id == "ORD-123"
-        assert result.status == "partial"
+        assert result.status == "resting"
         assert result.requested_count == 10
         assert result.filled_yes_count == 3
-        assert result.filled_no_count == 0
+        assert result.filled_no_count is None
         assert result.remaining_count == 7
         assert result.fee_usd == pytest.approx(0.12)
         assert result.contracts == 3  # filled total
+        assert result.price == pytest.approx(0.45)
         assert result.created_time is not None
         assert result.last_update_time is not None
 
-
-class TestCancelOrder:
     @pytest.mark.asyncio
-    async def test_cancel_order_uses_v2_endpoint(self) -> None:
-        """cancel_order() issues DELETE to the V2 /portfolio/events/orders/{id} path."""
+    async def test_get_order_parses_no_direction_from_outcome_side(self) -> None:
+        """A NO order reads no_price_dollars and reports filled_no_count."""
         client = _make_client()
         resp_data = {
             "order": {
                 "order_id": "ORD-9",
                 "ticker": "KX",
-                "side": "yes",
-                "status": "canceled",
-                "place_count": 5,
-                "yes_count": 0,
-                "no_count": 0,
-                "remaining_count": 5,
-                "yes_price": 50,
+                "outcome_side": "no",
+                "status": "executed",
+                "initial_count_fp": "5.00",
+                "fill_count_fp": "5.00",
+                "remaining_count_fp": "0.00",
+                "no_price_dollars": "0.7700",
+                "maker_fees_dollars": "0.00",
+                "taker_fees_dollars": "0.05",
             }
         }
-        with patch.object(client._http, "delete", new_callable=AsyncMock) as mock_delete:
-            mock_delete.return_value = _mock_response(resp_data)
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_order("ORD-9")
+
+        assert result.direction == "NO"
+        assert result.filled_no_count == 5
+        assert result.filled_yes_count is None
+        assert result.price == pytest.approx(0.77)
+        assert result.status == "executed"
+
+
+class TestCancelOrder:
+    @pytest.mark.asyncio
+    async def test_cancel_order_deletes_then_fetches_authoritative_state(self) -> None:
+        """cancel_order() issues DELETE (CancelOrderV2Response has no status/
+        price/fee fields), then GET for the terminal order state."""
+        client = _make_client()
+        delete_resp = {"order_id": "ORD-9", "client_order_id": "c-1", "reduced_by": "5.00", "ts_ms": 123}
+        get_resp = {
+            "order": {
+                "order_id": "ORD-9",
+                "ticker": "KX",
+                "outcome_side": "yes",
+                "status": "canceled",
+                "initial_count_fp": "5.00",
+                "fill_count_fp": "0.00",
+                "remaining_count_fp": "0.00",
+                "yes_price_dollars": "0.5000",
+            }
+        }
+        with (
+            patch.object(client._http, "delete", new_callable=AsyncMock) as mock_delete,
+            patch.object(client._http, "get", new_callable=AsyncMock) as mock_get,
+        ):
+            mock_delete.return_value = _mock_response(delete_resp)
+            mock_get.return_value = _mock_response(get_resp)
             result = await client.cancel_order("ORD-9")
 
         assert mock_delete.await_count == 1
-        call_url = mock_delete.call_args.args[0] if mock_delete.call_args.args else mock_delete.call_args.kwargs.get("url", "")
-        assert "/portfolio/events/orders/ORD-9" in call_url
+        delete_url = mock_delete.call_args.args[0] if mock_delete.call_args.args else mock_delete.call_args.kwargs.get("url", "")
+        assert delete_url.endswith("/portfolio/events/orders/ORD-9")
+        assert mock_get.await_count == 1
+        get_url = mock_get.call_args.args[0] if mock_get.call_args.args else mock_get.call_args.kwargs.get("url", "")
+        assert get_url.endswith("/portfolio/orders/ORD-9")
+        assert "/events/" not in get_url
         assert result.exchange_order_id == "ORD-9"
         assert result.status == "canceled"
         assert result.requested_count == 5
-        assert result.remaining_count == 5
+        assert result.remaining_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_retries_get_order_404(self) -> None:
+        """The GET immediately following a successful DELETE can 404 on
+        propagation lag (observed against Kalshi demo) — retry rather than
+        raise straight through to the caller."""
+        client = _make_client()
+        delete_resp = {"order_id": "ORD-1", "client_order_id": "c-1", "reduced_by": "1.00", "ts_ms": 1}
+        get_resp = {
+            "order": {
+                "order_id": "ORD-1",
+                "ticker": "KX",
+                "outcome_side": "yes",
+                "status": "canceled",
+                "initial_count_fp": "1.00",
+                "fill_count_fp": "0.00",
+                "remaining_count_fp": "0.00",
+                "yes_price_dollars": "0.5000",
+            }
+        }
+        not_found = httpx.Response(404, text='{"error":{"code":"not_found"}}')
+
+        with (
+            patch.object(client._http, "delete", new_callable=AsyncMock) as mock_delete,
+            patch.object(client._http, "get", new_callable=AsyncMock) as mock_get,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_delete.return_value = _mock_response(delete_resp)
+            mock_get.side_effect = [not_found, not_found, _mock_response(get_resp)]
+            result = await client.cancel_order("ORD-1")
+
+        assert mock_get.await_count == 3
+        assert result.status == "canceled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_raises_after_exhausting_retries(self) -> None:
+        """A persistent 404 (not just propagation lag) still surfaces to the caller."""
+        client = _make_client()
+        delete_resp = {"order_id": "ORD-2", "client_order_id": "c-2", "reduced_by": "1.00", "ts_ms": 1}
+        not_found = httpx.Response(404, text='{"error":{"code":"not_found"}}')
+
+        with (
+            patch.object(client._http, "delete", new_callable=AsyncMock) as mock_delete,
+            patch.object(client._http, "get", new_callable=AsyncMock) as mock_get,
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_delete.return_value = _mock_response(delete_resp)
+            mock_get.return_value = not_found
+            with pytest.raises(KalshiAPIError) as exc_info:
+                await client.cancel_order("ORD-2")
+
+        assert exc_info.value.status_code == 404
+        assert mock_get.await_count == 3
 
 
 # ---------------------------------------------------------------------------
