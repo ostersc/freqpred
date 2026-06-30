@@ -568,6 +568,21 @@ class PositionWatcher:
         kalshi_net: dict[str, int] = {p.market_id: p.contracts for p in kalshi_positions}
 
         if db_rows:
+            # Guard: if Kalshi returned 0 positions but we have open DB positions,
+            # this is almost certainly a transient API error on reconnect — not a
+            # genuine mass-settlement. Auto-closing here would be catastrophic (all
+            # positions wiped, system re-enters immediately). Skip and let the next
+            # reconcile cycle (next WS reconnect or detect_external_drift tick)
+            # verify. A genuine mass-close would show up as WS determined/settled
+            # events, which we handle separately.
+            if not kalshi_positions:
+                log.critical(
+                    "position_watcher.reconcile_skipped_empty_response",
+                    db_open_count=len(db_rows),
+                    hint="get_positions returned 0 with open DB positions — likely transient; skipping auto-close",
+                )
+                return
+
             # Load current market mid_prices for auto-close exits.
             market_result = await session.execute(
                 select(MarketRow.id, MarketRow.mid_price).where(

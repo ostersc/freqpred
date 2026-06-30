@@ -421,7 +421,12 @@ async def test_reconcile_updates_contracts_when_kalshi_differs() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_closes_position_when_kalshi_has_zero() -> None:
-    """Kalshi has no position for market, DB has open → ledger.close_position called."""
+    """Kalshi has positions for other markets but not for DB market → auto-close fires.
+
+    This is the legitimate external-sell case: Kalshi returned a non-empty
+    list (so the transient-empty guard passes), but the specific market is
+    absent from the response (net=0), meaning someone sold it outside freqpred.
+    """
     watcher, kalshi_client, session_factory, _, _ = _make_watcher()
 
     db_row = _make_position_row(market_id="MKT-X", contracts=10, status="open")
@@ -441,8 +446,12 @@ async def test_reconcile_closes_position_when_kalshi_has_zero() -> None:
     mock_session = session_factory.return_value.__aenter__.return_value
     mock_session.execute = AsyncMock(side_effect=fake_execute)
 
-    # Kalshi returns no positions.
-    kalshi_client.get_positions = AsyncMock(return_value=[])
+    # Kalshi returns positions for a DIFFERENT market, not MKT-X — guard passes
+    # (non-empty response), but MKT-X net is 0, so it should be auto-closed.
+    other_pos = MagicMock()
+    other_pos.market_id = "OTHER-MKT"
+    other_pos.contracts = 5
+    kalshi_client.get_positions = AsyncMock(return_value=[other_pos])
 
     with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
         mock_ledger.close_position = AsyncMock()
@@ -453,6 +462,33 @@ async def test_reconcile_closes_position_when_kalshi_has_zero() -> None:
     mock_ledger.close_position.assert_awaited_once()
     call_kwargs = mock_ledger.close_position.call_args_list[0].kwargs
     assert call_kwargs.get("exit_reason") == "reconcile_auto_close"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_auto_close_on_empty_response() -> None:
+    """get_positions returning [] with open DB positions skips auto-close entirely.
+
+    A total-zero response right after WS reconnect is almost certainly a
+    transient API error — not a genuine mass-settlement.  Blindly closing all
+    positions here would be catastrophic.  The guard must emit a critical log
+    and return without calling ledger.close_position.
+    """
+    watcher, kalshi_client, session_factory, _, _ = _make_watcher()
+
+    db_row = _make_position_row(market_id="MKT-X", contracts=10, status="open")
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(return_value=_make_db_result([db_row]))
+
+    # Kalshi returns nothing — simulates the transient error / empty reconnect case.
+    kalshi_client.get_positions = AsyncMock(return_value=[])
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        mock_ledger.close_position = AsyncMock()
+
+        async with session_factory() as session:
+            await watcher._detect_external_drift(session)
+
+    mock_ledger.close_position.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +819,12 @@ async def test_detect_external_drift_skips_pending_rows() -> None:
 
 @pytest.mark.asyncio
 async def test_detect_external_drift_auto_closes_open_position_at_zero() -> None:
-    """An open DB row whose Kalshi net is zero is auto-closed (external manual sell)."""
+    """An open DB row whose Kalshi net is zero is auto-closed (external manual sell).
+
+    Kalshi returns a non-empty list (another market is present), so the
+    transient-empty guard does not fire.  MKT-EX is absent from the Kalshi
+    response → its net is 0 → auto-close proceeds.
+    """
     watcher, kalshi_client, session_factory, _, _ = _make_watcher()
     db_row = _make_position_row(market_id="MKT-EX", contracts=10, status="open")
     market_row = MagicMock()
@@ -801,7 +842,13 @@ async def test_detect_external_drift_auto_closes_open_position_at_zero() -> None
 
     mock_session = session_factory.return_value.__aenter__.return_value
     mock_session.execute = AsyncMock(side_effect=fake_execute)
-    kalshi_client.get_positions = AsyncMock(return_value=[])
+
+    # Kalshi has a position for a different market — guard passes, but MKT-EX
+    # is absent so it gets auto-closed as an external manual sell.
+    other_pos = MagicMock()
+    other_pos.market_id = "OTHER-MKT"
+    other_pos.contracts = 3
+    kalshi_client.get_positions = AsyncMock(return_value=[other_pos])
 
     with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
         mock_ledger.close_position = AsyncMock()
