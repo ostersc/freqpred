@@ -613,28 +613,51 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     ) as kalshi_client:
         if mode == "live":
             import structlog as _sl
+            from sqlalchemy import select, func
+            from freqpred.markets.models import PositionRow as _PositionRow
             _log = _sl.get_logger("freqpred.cli")
             balance = await kalshi_client.get_balance()
-            if balance < config.trading.bankroll_usd:
+            # Add deployed capital (cost basis of open live positions) so the
+            # check doesn't fire when money is legitimately tied up in positions.
+            async with session_factory() as _bal_session:
+                _dep_result = await _bal_session.execute(
+                    select(
+                        func.coalesce(
+                            func.sum(_PositionRow.entry_price * _PositionRow.contracts), 0.0
+                        )
+                    ).where(
+                        _PositionRow.status == "open",
+                        _PositionRow.mode == "live",
+                    )
+                )
+                deployed_usd: float = float(_dep_result.scalar_one())
+            total_portfolio_usd = balance + deployed_usd
+            if total_portfolio_usd < config.trading.bankroll_usd:
                 _log.error(
                     "startup.balance_below_bankroll",
                     balance_usd=balance,
+                    deployed_usd=deployed_usd,
+                    total_portfolio_usd=total_portfolio_usd,
                     bankroll_usd=config.trading.bankroll_usd,
                 )
                 click.echo(
-                    f"ERROR: Kalshi balance ${balance:.2f} is below configured "
-                    f"bankroll ${config.trading.bankroll_usd:.2f}. Aborting.",
+                    f"ERROR: Kalshi balance ${balance:.2f} + deployed "
+                    f"${deployed_usd:.2f} = ${total_portfolio_usd:.2f} is below "
+                    f"configured bankroll ${config.trading.bankroll_usd:.2f}. Aborting.",
                     err=True,
                 )
                 await alert_dispatcher.circuit_breaker_alert(
                     "startup_balance",
-                    f"Startup aborted: Kalshi balance ${balance:.2f} < "
+                    f"Startup aborted: portfolio ${total_portfolio_usd:.2f} "
+                    f"(cash ${balance:.2f} + deployed ${deployed_usd:.2f}) < "
                     f"bankroll ${config.trading.bankroll_usd:.2f}",
                 )
                 return
             _log.info(
                 "startup.balance_ok",
                 balance_usd=balance,
+                deployed_usd=deployed_usd,
+                total_portfolio_usd=total_portfolio_usd,
                 bankroll_usd=config.trading.bankroll_usd,
             )
             risk_engine = RiskEngine(config.risk)
