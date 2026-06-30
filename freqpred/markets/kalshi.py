@@ -709,14 +709,19 @@ class KalshiClient(IMarketClient):
 
     async def get_positions(self) -> list[Position]:
         """Fetch all open positions from Kalshi for reconciliation with the local DB."""
-        data = await self._get("/portfolio/positions")
+        data = await self._get(
+            "/portfolio/positions",
+            params={"settlement_status": "unsettled"},
+        )
         # Kalshi v2 returns market_positions (per-contract) and event_positions (aggregated).
         # We use market_positions for per-ticker reconciliation.
         raw_positions: list[Any] = data.get("market_positions", [])
         result: list[Position] = []
         now = datetime.now(UTC)
         for p in raw_positions:
-            net = int(p.get("position", 0))
+            # V2 API: net position as a fixed-point string e.g. "4.00" or "-4.00".
+            # Positive = YES contracts, negative = NO contracts.
+            net = self._fp_int(p.get("position_fp", p.get("position", "0"))) or 0
             if net == 0:
                 continue
             direction = "YES" if net > 0 else "NO"

@@ -960,11 +960,20 @@ class TestGetBalance:
 class TestGetPositions:
     @pytest.mark.asyncio
     async def test_get_positions_returns_list(self) -> None:
-        """get_positions() returns a list of Position objects from exchange data."""
+        """get_positions() parses V2 position_fp field and returns Position objects."""
         client = _make_client()
         resp_data = {
             "market_positions": [
-                {"ticker": "KXPRES-25-DEM", "market_id": "KXPRES-25-DEM", "position": 5},
+                {
+                    "ticker": "KXPRES-25-DEM",
+                    "position_fp": "5.00",
+                    "market_exposure_dollars": "2.50",
+                    "resting_orders_count": 0,
+                    "fees_paid_dollars": "0.05",
+                    "realized_pnl_dollars": "0.00",
+                    "total_traded_dollars": "2.50",
+                    "last_updated_ts": "2026-06-30T00:00:00Z",
+                },
             ],
             "event_positions": [],
             "cursor": "",
@@ -981,12 +990,25 @@ class TestGetPositions:
         assert pos.direction == "YES"
 
     @pytest.mark.asyncio
+    async def test_get_positions_sends_settlement_status_filter(self) -> None:
+        """get_positions() sends settlement_status=unsettled to exclude resolved markets."""
+        client = _make_client()
+        resp_data = {"market_positions": [], "event_positions": [], "cursor": ""}
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            await client.get_positions()
+
+        call_kwargs = mock_get.call_args.kwargs
+        assert call_kwargs.get("params", {}).get("settlement_status") == "unsettled"
+
+    @pytest.mark.asyncio
     async def test_get_positions_negative_is_no(self) -> None:
-        """Negative position (net) maps to direction='NO'."""
+        """Negative position_fp maps to direction='NO' with abs(net) contracts."""
         client = _make_client()
         resp_data = {
             "market_positions": [
-                {"ticker": "KXTECH-25-AI", "market_id": "KXTECH-25-AI", "position": -3},
+                {"ticker": "KXTECH-25-AI", "position_fp": "-3.00", "resting_orders_count": 0},
             ],
             "event_positions": [],
             "cursor": "",
@@ -1001,11 +1023,11 @@ class TestGetPositions:
 
     @pytest.mark.asyncio
     async def test_get_positions_skips_zero(self) -> None:
-        """Positions with net=0 are excluded from results."""
+        """Positions with position_fp=0 are excluded from results."""
         client = _make_client()
         resp_data = {
             "market_positions": [
-                {"ticker": "KXPRES-25-DEM", "market_id": "KXPRES-25-DEM", "position": 0},
+                {"ticker": "KXPRES-25-DEM", "position_fp": "0.00", "resting_orders_count": 0},
             ],
             "event_positions": [],
             "cursor": "",
