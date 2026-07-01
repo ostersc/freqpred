@@ -67,7 +67,7 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
         <div style={miniCard}>
           <div style={miniLabel}>Entry price</div>
-          <div className="mono" style={{ fontWeight: 600 }}>{(d.entry_price * 100).toFixed(1)}¢</div>
+          <div className="mono" style={{ fontWeight: 600 }}>{(d.effective_entry_price * 100).toFixed(1)}¢</div>
         </div>
         <div style={miniCard}>
           <div style={miniLabel}>{d.status === 'open' ? 'Current mid' : 'Exit price'}</div>
@@ -142,7 +142,7 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
       <PriceTimeline
         signals={d.market_signals}
         entrySignalId={d.entry_signal.id}
-        entryPrice={d.entry_price}
+        entryPrice={d.effective_entry_price}
         currentMid={d.status === 'open' ? d.current_mid : null}
         direction={d.direction}
         selectedSignalId={activeSignalId}

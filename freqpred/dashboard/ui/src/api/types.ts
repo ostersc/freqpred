@@ -72,6 +72,10 @@ export interface PositionOut {
   direction: string
   contracts: number
   entry_price: number
+  entry_fee_usd?: number
+  // entry_price + entry_fee_usd/contracts — matches the fee-inclusive "avg
+  // price" Kalshi's own site shows for a fill.
+  effective_entry_price: number
   entry_time: string
   mode: string
   status: string

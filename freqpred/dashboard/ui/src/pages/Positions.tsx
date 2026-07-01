@@ -137,7 +137,7 @@ function summarizeGroup(positions: PositionOut[]): GroupSummary {
 
   for (const p of positions) {
     contracts += p.contracts
-    exposure += p.entry_price * p.contracts
+    exposure += p.effective_entry_price * p.contracts
     pnl += (p.status === 'open' ? p.unrealized_pnl : p.pnl) ?? 0
 
     const price = p.status === 'open'
@@ -199,7 +199,7 @@ function PositionRow({
 }) {
   const pnl = p.status === 'open' ? p.unrealized_pnl : p.pnl
   const pnlPct = p.status === 'open' ? p.unrealized_pnl_pct : p.pnl_pct
-  const exposure = p.entry_price * p.contracts
+  const exposure = p.effective_entry_price * p.contracts
   const expoPct = totalExposure > 0 ? (exposure / totalExposure) * 100 : 0
   const displayedMid = p.current_mid !== null
     ? (p.direction === 'YES' ? p.current_mid : 1 - p.current_mid)
@@ -237,7 +237,7 @@ function PositionRow({
             </span>
           )}
         </td>
-        <td className="r">{(p.entry_price * 100).toFixed(1)}¢</td>
+        <td className="r">{(p.effective_entry_price * 100).toFixed(1)}¢</td>
         <td className="r dim">
           {p.status === 'open'
             ? (displayedMid !== null ? (() => {
@@ -492,8 +492,8 @@ export default function Positions() {
   const totals = data?.items.reduce(
     (acc, p) => {
       const pnl = p.status === 'open' ? (p.unrealized_pnl ?? 0) : (p.pnl ?? 0)
-      const exposure = p.entry_price * p.contracts
-      return { contracts: acc.contracts + p.contracts, exposure: acc.exposure + exposure, pnl: acc.pnl + pnl, weightedEntry: acc.weightedEntry + p.entry_price * p.contracts }
+      const exposure = p.effective_entry_price * p.contracts
+      return { contracts: acc.contracts + p.contracts, exposure: acc.exposure + exposure, pnl: acc.pnl + pnl, weightedEntry: acc.weightedEntry + p.effective_entry_price * p.contracts }
     },
     { contracts: 0, exposure: 0, pnl: 0, weightedEntry: 0 },
   )

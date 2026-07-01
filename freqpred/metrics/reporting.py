@@ -64,11 +64,14 @@ async def generate_daily_digest(
     open_count = int(open_count)
     total_exposure = float(total_exposure)
 
-    # Unrealized P&L, net exposure, and portfolio MAE/MFE: join to markets for current mid_price
+    # Unrealized P&L, net exposure, and portfolio MAE/MFE: join to markets for current mid_price.
+    # unrealized_pnl mirrors close_position's realized formula — gross P&L net
+    # of entry fee — so this number doesn't jump the moment positions close.
     unreal_rows_result = await session.execute(
         select(
             PositionRow.contracts,
             PositionRow.entry_price,
+            PositionRow.entry_fee_usd,
             PositionRow.direction,
             PositionRow.mae,
             PositionRow.mfe,
@@ -83,12 +86,13 @@ async def generate_daily_digest(
     mfe_dollar_sum = 0.0
     mae_contract_sum = 0
     mfe_contract_sum = 0
-    for contracts, entry_price, direction, mae, mfe, mid_price in unreal_rows_result.all():
+    for contracts, entry_price, entry_fee_usd, direction, mae, mfe, mid_price in unreal_rows_result.all():
+        fee = entry_fee_usd or 0.0
         if direction == "YES":
-            unrealized_pnl += contracts * (mid_price - entry_price)
+            unrealized_pnl += contracts * (mid_price - entry_price) - fee
             net_exposure += contracts * entry_price
         else:
-            unrealized_pnl += contracts * ((1.0 - mid_price) - entry_price)
+            unrealized_pnl += contracts * ((1.0 - mid_price) - entry_price) - fee
             net_exposure -= contracts * entry_price
         if mae is not None:
             mae_dollar_sum += mae * contracts

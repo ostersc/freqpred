@@ -394,6 +394,26 @@ class Order:
 
 
 @dataclass
+class Fill:
+    """A single executed fill from GET /portfolio/fills.
+
+    Unlike Order.price (which reflects the order's quoted price and can
+    diverge from what actually executed), a Fill's price is the real,
+    per-fill execution price — the authoritative source for entry/exit
+    economics.
+    """
+    fill_id: str
+    order_id: str
+    market_id: str
+    direction: str   # "YES" | "NO"
+    contracts: int
+    price: float     # execution price for `direction`, dollars
+    fee_usd: float
+    is_taker: bool = False
+    created_time: datetime | None = None
+
+
+@dataclass
 class Position:
     id: str
     market_id: str

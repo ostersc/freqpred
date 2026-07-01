@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from freqpred.markets.kalshi import KalshiAPIError
-from freqpred.markets.models import Market, Order, Position
+from freqpred.markets.models import Fill, Market, Order, Position
 from freqpred.metrics.models import SignalAssessment
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
@@ -619,6 +619,215 @@ async def test_live_mode_risk_check_still_runs(monkeypatch: pytest.MonkeyPatch) 
     assert result is None
     mock_kalshi.place_order.assert_not_called()
     mock_ledger.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Live mode — entry price/fee sourced from get_fills(), not the create-order
+# response's optional (and observed-unreliable) average_fill_price.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_live_mode_entry_price_uses_get_fills_when_order_executed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An executed order reconciles entry_price/entry_fee_usd against
+    get_fills() — the create-order response's own .price/.fee_usd (which may
+    just be the fallback request price) must not be trusted directly."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    filled_order = Order(
+        market_id=MARKET_ID,
+        direction="YES",
+        contracts=178,
+        price=0.56,  # the (wrong/fallback) price the create response reported
+        mode="live",
+        exchange_order_id="ORD-123",
+        status="executed",
+        fee_usd=0.05,
+        filled_yes_count=178,
+        remaining_count=0,
+        requested_count=178,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+    mock_kalshi.get_fills = AsyncMock(
+        return_value=[
+            Fill(
+                fill_id="F-1", order_id="ORD-123", market_id=MARKET_ID,
+                direction="YES", contracts=100, price=0.55, fee_usd=0.05,
+            ),
+            Fill(
+                fill_id="F-2", order_id="ORD-123", market_id=MARKET_ID,
+                direction="YES", contracts=78, price=0.60, fee_usd=0.04,
+            ),
+        ]
+    )
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    expected_position = _make_position(contracts=178, entry_price=0.56)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
+
+    mock_kalshi.get_fills.assert_called_once_with(order_id="ORD-123")
+    kwargs = mock_ledger.call_args.kwargs
+    expected_price = (100 * 0.55 + 78 * 0.60) / 178
+    assert kwargs["entry_price"] == pytest.approx(expected_price)
+    assert kwargs["entry_fee_usd"] == pytest.approx(0.09)
+    assert kwargs["entry_price"] != pytest.approx(0.56)
+
+
+@pytest.mark.asyncio
+async def test_live_mode_entry_price_falls_back_when_get_fills_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If get_fills() keeps returning nothing (propagation lag that never
+    resolves), retry a bounded number of times then fall back to the
+    create-order response's own price/fee rather than recording zero/None."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    filled_order = Order(
+        market_id=MARKET_ID, direction="YES", contracts=178, price=0.56,
+        mode="live", exchange_order_id="ORD-124", status="executed",
+        fee_usd=0.07, filled_yes_count=178, remaining_count=0, requested_count=178,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+    mock_kalshi.get_fills = AsyncMock(return_value=[])
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    expected_position = _make_position(contracts=178, entry_price=0.56)
+
+    with (
+        patch(
+            "freqpred.trading.order_manager.ledger.open_position",
+            new_callable=AsyncMock,
+            return_value=expected_position,
+        ) as mock_ledger,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
+
+    assert mock_kalshi.get_fills.await_count == 3
+    kwargs = mock_ledger.call_args.kwargs
+    assert kwargs["entry_price"] == pytest.approx(0.56)
+    assert kwargs["entry_fee_usd"] == pytest.approx(0.07)
+
+
+@pytest.mark.asyncio
+async def test_live_mode_entry_price_falls_back_when_get_fills_raises_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A get_fills() API error must not block recording the position — retry,
+    then fall back to the create-order response's price/fee."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    filled_order = Order(
+        market_id=MARKET_ID, direction="YES", contracts=178, price=0.56,
+        mode="live", exchange_order_id="ORD-125", status="executed",
+        fee_usd=0.05, filled_yes_count=178, remaining_count=0, requested_count=178,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+    mock_kalshi.get_fills = AsyncMock(side_effect=KalshiAPIError(500, "boom"))
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    expected_position = _make_position(contracts=178, entry_price=0.56)
+
+    with (
+        patch(
+            "freqpred.trading.order_manager.ledger.open_position",
+            new_callable=AsyncMock,
+            return_value=expected_position,
+        ) as mock_ledger,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
+
+    assert result is expected_position
+    assert mock_kalshi.get_fills.await_count == 3
+    kwargs = mock_ledger.call_args.kwargs
+    assert kwargs["entry_price"] == pytest.approx(0.56)
+    assert kwargs["entry_fee_usd"] == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_live_mode_entry_price_falls_back_when_get_fills_raises_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw network error (timeout, connection reset — not wrapped in
+    KalshiAPIError) from get_fills() must not propagate out of _submit_live.
+    The order already filled on the exchange by this point; letting the
+    exception escape here (before ledger.open_position is even attempted)
+    would leave a live, exchange-side position with no DB row tracking it."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    filled_order = Order(
+        market_id=MARKET_ID, direction="YES", contracts=178, price=0.56,
+        mode="live", exchange_order_id="ORD-127", status="executed",
+        fee_usd=0.05, filled_yes_count=178, remaining_count=0, requested_count=178,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+    mock_kalshi.get_fills = AsyncMock(side_effect=TimeoutError("read timed out"))
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    expected_position = _make_position(contracts=178, entry_price=0.56)
+
+    with (
+        patch(
+            "freqpred.trading.order_manager.ledger.open_position",
+            new_callable=AsyncMock,
+            return_value=expected_position,
+        ) as mock_ledger,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        result = await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
+
+    assert result is expected_position
+    assert mock_kalshi.get_fills.await_count == 3
+    kwargs = mock_ledger.call_args.kwargs
+    assert kwargs["entry_price"] == pytest.approx(0.56)
+    assert kwargs["entry_fee_usd"] == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_live_mode_skips_get_fills_when_still_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resting order with no fill yet must not trigger a get_fills() lookup
+    — there's nothing to reconcile against."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    filled_order = Order(
+        market_id=MARKET_ID, direction="YES", contracts=178, price=0.56,
+        mode="live", exchange_order_id="ORD-126", status="resting",
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+    mock_kalshi.get_fills = AsyncMock(return_value=[])
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    pending_position = _make_position(contracts=178, entry_price=0.56)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=pending_position,
+    ):
+        await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.52, yes_ask=0.56), strategy)
+
+    mock_kalshi.get_fills.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

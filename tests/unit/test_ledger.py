@@ -288,8 +288,8 @@ async def test_portfolio_summary_excursions_weighted() -> None:
     # 1   YES contract  @ 0.50 with mae=-0.20, mfe=+0.30
     open_rows_mock = MagicMock()
     open_rows_mock.all.return_value = [
-        (100, 0.40, "YES", -0.08, 0.12, 0.44),
-        (1,   0.50, "YES", -0.20, 0.30, 0.55),
+        (100, 0.40, 0.0, "YES", -0.08, 0.12, 0.44),
+        (1,   0.50, 0.0, "YES", -0.20, 0.30, 0.55),
     ]
 
     call_count = 0
@@ -319,6 +319,40 @@ async def test_portfolio_summary_excursions_weighted() -> None:
 
     # Net exposure: both YES → 100*0.40 + 1*0.50 = 40.50
     assert summary["net_exposure_usd"] == pytest.approx(40.50, abs=1e-4)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_summary_unrealized_pnl_subtracts_entry_fee() -> None:
+    """unrealized_pnl_usd must net out entry_fee_usd, mirroring
+    close_position's realized formula — otherwise a position's displayed
+    P&L jumps the moment it actually closes purely from fee accounting."""
+    call_returns = [2, 0.0, 0.0, 0.0]
+
+    open_rows_mock = MagicMock()
+    open_rows_mock.all.return_value = [
+        # 4 YES @ 0.76, fee 0.05, mid 0.80 -> gross = 4*(0.80-0.76)=0.16, net = 0.16-0.05=0.11
+        (4, 0.76, 0.05, "YES", None, None, 0.80),
+        # 2 NO @ 0.70, fee 0.02, mid 0.60 -> gross = 2*((1-0.60)-0.70)=2*(-0.30)=-0.60, net=-0.62
+        (2, 0.70, 0.02, "NO", None, None, 0.60),
+    ]
+
+    call_count = 0
+
+    async def _execute(stmt: object) -> MagicMock:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 5:
+            return open_rows_mock
+        result = MagicMock()
+        result.scalar_one.return_value = call_returns.pop(0)
+        return result
+
+    session = MagicMock()
+    session.execute = _execute
+
+    summary = await get_portfolio_summary(session, mode="live")
+
+    assert summary["unrealized_pnl_usd"] == pytest.approx(0.11 + (-0.62), abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

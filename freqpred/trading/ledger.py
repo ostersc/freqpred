@@ -426,12 +426,15 @@ async def get_portfolio_summary(session: AsyncSession, mode: str = "paper") -> d
     all_time_pnl = float(all_time_result.scalar_one())
 
     # Unrealized P&L, exposure breakdown, and MAE/MFE across all open positions.
-    # YES: contracts * (mid - entry_price)
-    # NO:  contracts * ((1 - mid) - entry_price)
+    # Mirrors close_position's realized formula — gross P&L net of entry fee —
+    # so this total doesn't jump the moment positions actually close.
+    # YES: contracts * (mid - entry_price) - fee
+    # NO:  contracts * ((1 - mid) - entry_price) - fee
     open_rows_result = await session.execute(
         select(
             PositionRow.contracts,
             PositionRow.entry_price,
+            PositionRow.entry_fee_usd,
             PositionRow.direction,
             PositionRow.mae,
             PositionRow.mfe,
@@ -451,12 +454,13 @@ async def get_portfolio_summary(session: AsyncSession, mode: str = "paper") -> d
     mae_contract_sum = 0
     mfe_contract_sum = 0
 
-    for contracts, entry_price, direction, mae, mfe, mid_price in open_rows_result.all():
+    for contracts, entry_price, entry_fee_usd, direction, mae, mfe, mid_price in open_rows_result.all():
+        fee = entry_fee_usd or 0.0
         if direction == "YES":
-            unrealized_pnl += contracts * (mid_price - entry_price)
+            unrealized_pnl += contracts * (mid_price - entry_price) - fee
             long_exposure += contracts * entry_price
         else:
-            unrealized_pnl += contracts * ((1.0 - mid_price) - entry_price)
+            unrealized_pnl += contracts * ((1.0 - mid_price) - entry_price) - fee
             short_exposure += contracts * entry_price
 
         if mae is not None:

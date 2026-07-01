@@ -233,11 +233,17 @@ def _position_row_to_out(
     unrealized_pnl: float | None = None
     unrealized_pnl_pct: float | None = None
     if row.status == "open" and current_mid is not None:
+        # Mirrors ledger.close_position's realized pnl/cost_basis formula —
+        # gross P&L net of entry fee, cost basis including it — so an open
+        # position's displayed P&L doesn't jump the moment it actually
+        # closes purely because fee accounting kicks in.
+        fee = row.entry_fee_usd or 0.0
         if row.direction == "YES":
-            unrealized_pnl = row.contracts * (current_mid - row.entry_price)
+            gross_pnl = row.contracts * (current_mid - row.entry_price)
         else:
-            unrealized_pnl = row.contracts * ((1.0 - current_mid) - row.entry_price)
-        cost_basis = row.entry_price * row.contracts
+            gross_pnl = row.contracts * ((1.0 - current_mid) - row.entry_price)
+        unrealized_pnl = gross_pnl - fee
+        cost_basis = row.entry_price * row.contracts + fee
         unrealized_pnl_pct = unrealized_pnl / cost_basis if cost_basis else 0.0
 
     return PositionOut(
@@ -252,6 +258,12 @@ def _position_row_to_out(
         direction=row.direction,
         contracts=row.contracts,
         entry_price=row.entry_price,
+        entry_fee_usd=row.entry_fee_usd or 0.0,
+        effective_entry_price=(
+            row.entry_price + (row.entry_fee_usd or 0.0) / row.contracts
+            if row.contracts
+            else row.entry_price
+        ),
         entry_time=row.entry_time,
         mode=row.mode,
         status=row.status,

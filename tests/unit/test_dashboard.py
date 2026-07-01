@@ -181,6 +181,7 @@ def _make_position_row(**kw) -> MagicMock:
     row.direction = kw.get("direction", "YES")
     row.contracts = kw.get("contracts", 10)
     row.entry_price = kw.get("entry_price", 0.60)
+    row.entry_fee_usd = kw.get("entry_fee_usd", 0.0)
     row.entry_time = kw.get("entry_time", datetime(2026, 1, 1, tzinfo=UTC))
     row.mode = kw.get("mode", "paper")
     row.status = kw.get("status", "open")
@@ -1956,6 +1957,50 @@ def test_position_out_exposes_exit_fields_for_live_only() -> None:
     assert item["exit_fee_usd"] == pytest.approx(0.02)
     assert item["exit_requested_contracts"] == 10
     assert item["exit_filled_contracts"] == 6
+
+
+def test_position_out_effective_entry_price_includes_fee() -> None:
+    """effective_entry_price = entry_price + entry_fee_usd/contracts — matches
+    the fee-inclusive average price Kalshi's own UI shows for a fill, whereas
+    entry_price alone (fee tracked separately) drives internal pnl/cost_basis."""
+    pos_row = _make_position_row(
+        mode="live", status="open", contracts=4, entry_price=0.76, entry_fee_usd=0.0508,
+    )
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _mode_result("live"),
+        _scalar_result(1),
+        _all_result([(pos_row, 0.80, 0.78, 0.82, 0.80, None, 0)]),
+    )
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/positions?status=open")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["entry_price"] == pytest.approx(0.76)
+    assert item["entry_fee_usd"] == pytest.approx(0.0508)
+    assert item["effective_entry_price"] == pytest.approx(0.76 + 0.0508 / 4)
+
+
+def test_position_out_effective_entry_price_paper_mode_no_fee() -> None:
+    """Paper positions have no exchange fee, so effective_entry_price == entry_price."""
+    pos_row = _make_position_row(mode="paper", status="open", contracts=5, entry_price=0.42)
+
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _mode_result("paper"),
+        _scalar_result(1),
+        _all_result([(pos_row, 0.45, 0.43, 0.47, 0.45, None, 0)]),
+    )
+
+    client = TestClient(_make_app(session))
+    resp = client.get("/api/positions?status=open")
+
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["effective_entry_price"] == pytest.approx(0.42)
 
 
 # ---------------------------------------------------------------------------

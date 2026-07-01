@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.kalshi import KalshiAPIError
-from freqpred.markets.models import Market, MarketRow, Order, Position, PositionRow
+from freqpred.markets.models import Fill, Market, MarketRow, Order, Position, PositionRow
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.trading import ledger
@@ -585,7 +585,53 @@ class OrderManager:
         # improvement — the fill price can be better than our limit). Fall back to
         # the limit price only if the exchange didn't return a fill price.
         fill_price = filled_order.price if filled_order.price else order.price
-        effective_entry = fill_price + (filled_order.fee_usd / order.contracts if order.contracts else 0)
+        fill_fee = filled_order.fee_usd
+
+        # average_fill_price/average_fee_paid on the create-order response are
+        # optional per Kalshi's schema and are frequently absent even on a
+        # full fill. GET /portfolio/fills is the only endpoint that reports
+        # the real, per-fill execution price/fee — reconcile against it
+        # whenever the order actually filled so the recorded entry_price/
+        # entry_fee_usd reflect what we truly paid, not a fallback estimate.
+        #
+        # This is best-effort enrichment only, and the order has *already
+        # filled on the exchange* by this point — any failure here (a fill
+        # can lag behind order placement in Kalshi's fills index, mirroring
+        # the propagation lag documented on cancel_order's follow-up GET, or
+        # a transient/network error not wrapped in KalshiAPIError) must fall
+        # back to filled_order's own price/fee rather than ever raising.
+        # Letting an exception escape here — before ledger.open_position is
+        # even attempted — would mean the position is never written to the
+        # DB at all, leaving a real live position on the exchange with
+        # nothing tracking it (no stoploss, no exit logic). Retry a few
+        # times for propagation lag, but never let this block the trade.
+        if mapped.contracts > 0 and filled_order.exchange_order_id is not None:
+            fills: list[Fill] = []
+            for attempt in range(3):
+                if attempt > 0:
+                    await asyncio.sleep(0.5 * attempt)
+                try:
+                    fills = await self._kalshi_client.get_fills(
+                        order_id=filled_order.exchange_order_id
+                    )
+                except Exception:
+                    logger.warning(
+                        "order_manager.get_fills_failed",
+                        exchange_order_id=filled_order.exchange_order_id,
+                        market_id=order.market_id,
+                        attempt=attempt,
+                        exc_info=True,
+                    )
+                    fills = []
+                    continue
+                if sum(f.contracts for f in fills) > 0:
+                    break
+            fill_contracts = sum(f.contracts for f in fills)
+            if fill_contracts > 0:
+                fill_price = sum(f.price * f.contracts for f in fills) / fill_contracts
+                fill_fee = sum(f.fee_usd for f in fills)
+
+        effective_entry = fill_price + (fill_fee / order.contracts if order.contracts else 0)
         logger.info(
             "order_manager.live_order_submitted",
             exchange_order_id=filled_order.exchange_order_id,
@@ -596,7 +642,7 @@ class OrderManager:
             filled_contracts=mapped.contracts,
             limit_price=order.price,
             fill_price=fill_price,
-            fee_usd=filled_order.fee_usd,
+            fee_usd=fill_fee,
             effective_entry_price=round(effective_entry, 6),
             position_status=mapped.db_status,
             exchange_order_status=mapped.exchange_status,
@@ -621,7 +667,7 @@ class OrderManager:
                 mode=self._mode,
                 status=mapped.db_status,
                 exchange_order_id=filled_order.exchange_order_id,
-                entry_fee_usd=filled_order.fee_usd,
+                entry_fee_usd=fill_fee,
                 requested_contracts=order.contracts,
                 exchange_order_status=mapped.exchange_status,
                 last_exchange_sync_at=datetime.now(UTC),

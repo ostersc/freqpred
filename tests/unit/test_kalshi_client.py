@@ -822,6 +822,137 @@ class TestGetOrder:
         assert result.status == "executed"
 
 
+class TestGetOrderUsesFillCostForAveragePrice:
+    @pytest.mark.asyncio
+    async def test_get_order_prefers_fill_cost_over_quoted_price(self) -> None:
+        """yes_price_dollars is the order's *quoted* price, not necessarily
+        what it executed at. When taker/maker fill cost is present, the true
+        average price (cost / fill_count) must win over the quoted price."""
+        client = _make_client()
+        resp_data = {
+            "order": {
+                "order_id": "ORD-77",
+                "ticker": "KXTRUMPSAY-26JUL06-22",
+                "outcome_side": "yes",
+                "status": "executed",
+                "initial_count_fp": "4.00",
+                "fill_count_fp": "4.00",
+                "remaining_count_fp": "0.00",
+                "yes_price_dollars": "0.7600",
+                "taker_fill_cost_dollars": "3.0912",
+                "maker_fill_cost_dollars": "0.0000",
+                "taker_fees_dollars": "0.0508",
+                "maker_fees_dollars": "0.0000",
+            }
+        }
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_order("ORD-77")
+
+        # 3.0912 / 4 = 0.7728, not the quoted 0.76.
+        assert result.price == pytest.approx(0.7728)
+
+    @pytest.mark.asyncio
+    async def test_get_order_falls_back_to_quoted_price_when_no_fill_cost(self) -> None:
+        """A resting order with no fills yet has no cost fields — quoted price
+        is the only sensible value (existing behavior preserved)."""
+        client = _make_client()
+        resp_data = {
+            "order": {
+                "order_id": "ORD-78",
+                "ticker": "KX",
+                "outcome_side": "yes",
+                "status": "resting",
+                "initial_count_fp": "4.00",
+                "fill_count_fp": "0.00",
+                "remaining_count_fp": "4.00",
+                "yes_price_dollars": "0.7600",
+            }
+        }
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_order("ORD-78")
+
+        assert result.price == pytest.approx(0.76)
+
+
+class TestGetFills:
+    @pytest.mark.asyncio
+    async def test_get_fills_parses_price_and_fee(self) -> None:
+        client = _make_client()
+        resp_data = {
+            "fills": [
+                {
+                    "fill_id": "F-1",
+                    "order_id": "ORD-77",
+                    "ticker": "KXTRUMPSAY-26JUL06-22",
+                    "outcome_side": "yes",
+                    "count_fp": "4.00",
+                    "yes_price_dollars": "0.7728",
+                    "no_price_dollars": "0.2272",
+                    "fee_cost": "0.0508",
+                    "is_taker": True,
+                    "created_time": "2026-06-29T23:21:32Z",
+                }
+            ],
+            "cursor": "",
+        }
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_fills(order_id="ORD-77")
+
+        assert len(result) == 1
+        fill = result[0]
+        assert fill.order_id == "ORD-77"
+        assert fill.market_id == "KXTRUMPSAY-26JUL06-22"
+        assert fill.direction == "YES"
+        assert fill.contracts == 4
+        assert fill.price == pytest.approx(0.7728)
+        assert fill.fee_usd == pytest.approx(0.0508)
+        assert fill.is_taker is True
+
+    @pytest.mark.asyncio
+    async def test_get_fills_no_direction_uses_no_price(self) -> None:
+        client = _make_client()
+        resp_data = {
+            "fills": [
+                {
+                    "fill_id": "F-2",
+                    "order_id": "ORD-9",
+                    "ticker": "KX",
+                    "outcome_side": "no",
+                    "count_fp": "5.00",
+                    "no_price_dollars": "0.3500",
+                    "fee_cost": "0.02",
+                }
+            ],
+            "cursor": "",
+        }
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            result = await client.get_fills(order_id="ORD-9")
+
+        assert result[0].direction == "NO"
+        assert result[0].price == pytest.approx(0.35)
+
+    @pytest.mark.asyncio
+    async def test_get_fills_sends_order_id_and_ticker_params(self) -> None:
+        client = _make_client()
+        resp_data = {"fills": [], "cursor": ""}
+
+        with patch.object(client._http, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = _mock_response(resp_data)
+            await client.get_fills(order_id="ORD-1", ticker="KX")
+
+        call_kwargs = mock_get.call_args.kwargs
+        assert call_kwargs.get("params", {}).get("order_id") == "ORD-1"
+        assert call_kwargs.get("params", {}).get("ticker") == "KX"
+
+
 class TestCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_order_deletes_then_fetches_authoritative_state(self) -> None:

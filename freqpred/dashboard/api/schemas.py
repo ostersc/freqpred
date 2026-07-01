@@ -91,6 +91,11 @@ class PositionOut(BaseModel):
     direction: str
     contracts: int
     entry_price: float
+    entry_fee_usd: float = 0.0
+    # entry_price + entry_fee_usd/contracts — matches the fee-inclusive "avg
+    # price" Kalshi's own UI shows for a fill; entry_price alone (fee tracked
+    # separately) is what pnl/cost_basis are computed from internally.
+    effective_entry_price: float
     entry_time: datetime
     mode: str
     status: str

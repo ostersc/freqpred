@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from freqpred.markets.base import IMarketClient
 from freqpred.markets.models import (
+    Fill,
     KalshiEventSchema,
     KalshiEventsResponse,
     KalshiMarketsResponse,
@@ -604,10 +605,19 @@ class KalshiClient(IMarketClient):
           status/side/ticker — these come from ``request``.
         - GetOrderResponse.order (get_order, and cancel_order via get_order):
           full order object with fill_count_fp/remaining_count_fp/
-          initial_count_fp, yes_price_dollars/no_price_dollars,
+          initial_count_fp, yes_price_dollars/no_price_dollars (the order's
+          *quoted* price, not necessarily what it executed at — see below),
+          taker_fill_cost_dollars/maker_fill_cost_dollars (total $ cost of
+          fills, used to derive the true average fill price),
           taker_fees_dollars/maker_fees_dollars (already totals, not
           per-contract), outcome_side/book_side (canonical) plus deprecated
           side/action (yes/no, buy/sell), status, created_time/last_update_time.
+
+        average_fill_price/average_fee_paid on CreateOrderV2Response are
+        optional per Kalshi's schema and are frequently absent even for a
+        fully-filled order — callers that need a reliably accurate fill price
+        (e.g. recording position entry price) should not trust ``price`` on
+        the returned Order alone; use get_fills() instead.
         """
         filled_total = self._fp_int(
             exchange_order.get("fill_count_fp", exchange_order.get("fill_count"))
@@ -652,6 +662,15 @@ class KalshiClient(IMarketClient):
                 price = no_price_dollars
             else:
                 price = 0.0
+            # yes_price_dollars/no_price_dollars is the order's quoted price,
+            # not necessarily what it actually executed at (price improvement,
+            # fills spread across book levels). When the order has real fills,
+            # the true average price is total fill cost / fill count — prefer
+            # that over the quoted price whenever Kalshi reports it.
+            taker_cost = self._dollars(exchange_order.get("taker_fill_cost_dollars"))
+            maker_cost = self._dollars(exchange_order.get("maker_fill_cost_dollars"))
+            if filled_total > 0 and (taker_cost is not None or maker_cost is not None):
+                price = ((taker_cost or 0.0) + (maker_cost or 0.0)) / filled_total
             requested_int = initial_int if initial_int is not None else (
                 filled_total + (remaining_int or 0)
             )
@@ -706,6 +725,47 @@ class KalshiClient(IMarketClient):
             last_update_time=self._parse_kalshi_ts(exchange_order.get("last_update_time"))
             or created_time,
         )
+
+    async def get_fills(
+        self, *, order_id: str | None = None, ticker: str | None = None
+    ) -> list[Fill]:
+        """Fetch executed fills via GET /portfolio/fills.
+
+        This is the only endpoint that reports the real, per-fill execution
+        price — Order.price (from place_order/get_order) reflects the order's
+        quoted price or an optional/absent average, not a guaranteed-accurate
+        fill price. Callers that need authoritative entry/exit economics
+        (e.g. OrderManager._submit_live) should reconcile against this rather
+        than trusting a single order-level price field.
+        """
+        params: dict[str, Any] = {}
+        if order_id is not None:
+            params["order_id"] = order_id
+        if ticker is not None:
+            params["ticker"] = ticker
+        data = await self._get("/portfolio/fills", params=params)
+        raw_fills: list[Any] = data.get("fills", [])
+        result: list[Fill] = []
+        for f in raw_fills:
+            outcome_side = (f.get("outcome_side") or f.get("side") or "").lower()
+            direction = "YES" if outcome_side == "yes" else "NO"
+            yes_price = self._dollars(f.get("yes_price_dollars"))
+            no_price = self._dollars(f.get("no_price_dollars"))
+            price = (yes_price if direction == "YES" else no_price) or 0.0
+            result.append(
+                Fill(
+                    fill_id=f.get("fill_id", f.get("trade_id", "")),
+                    order_id=f.get("order_id", ""),
+                    market_id=f.get("ticker", f.get("market_ticker", "")),
+                    direction=direction,
+                    contracts=self._fp_int(f.get("count_fp")) or 0,
+                    price=price,
+                    fee_usd=self._dollars(f.get("fee_cost")) or 0.0,
+                    is_taker=bool(f.get("is_taker", False)),
+                    created_time=self._parse_kalshi_ts(f.get("created_time")),
+                )
+            )
+        return result
 
     async def get_positions(self) -> list[Position]:
         """Fetch all open positions from Kalshi for reconciliation with the local DB."""
