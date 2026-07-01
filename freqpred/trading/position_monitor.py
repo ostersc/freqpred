@@ -11,7 +11,7 @@ Exit priority order (per SPEC §8):
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -53,11 +53,11 @@ class PositionMonitor:
         session_factory: async_sessionmaker[AsyncSession],
         strategies: dict[str, IPredictionStrategy],
         poll_interval_seconds: float = 60.0,
-        alert_dispatcher: "AlertDispatcher | None" = None,
+        alert_dispatcher: AlertDispatcher | None = None,
         mode: str = "paper",
-        kalshi_client: "KalshiClient | None" = None,
-        runtime_telemetry: "RuntimeTelemetry | None" = None,
-        order_manager: "OrderManager | None" = None,
+        kalshi_client: KalshiClient | None = None,
+        runtime_telemetry: RuntimeTelemetry | None = None,
+        order_manager: OrderManager | None = None,
         reconcile_interval_seconds: float = 30.0,
     ) -> None:
         self._session_factory = session_factory
@@ -87,7 +87,7 @@ class PositionMonitor:
         market_id: str,
         yes_bid: float,
         yes_ask: float,
-        ts: "datetime",
+        ts: datetime,
     ) -> None:
         """Forward a WebSocket tick to every IAlgoStrategy in the registry.
 
@@ -171,7 +171,7 @@ class PositionMonitor:
         Returns:
             List of positions that were closed during this call.
         """
-        now = _now or datetime.now(tz=timezone.utc)
+        now = _now or datetime.now(tz=UTC)
         fresh_signals = fresh_signals or {}
         closed: list[Position] = []
 
@@ -335,7 +335,6 @@ class PositionMonitor:
         # what the holder would receive when selling.
         effective_price = current_price
         peak_price = self._peak_prices.get(position.id, position.entry_price)
-        now = datetime.now(tz=timezone.utc)
 
         # 0. If the market result is already known, settle at the correct payout immediately.
         # Stoploss and trailing stop use live market prices which become invalid once a market
@@ -451,7 +450,7 @@ class PositionMonitor:
         self,
         position: Position,
         market: Market,
-        strategy: "IPredictionStrategy | None",
+        strategy: IPredictionStrategy | None,
         now: datetime,
     ) -> None:
         """Fill or cancel a paper-mode resting limit position.
@@ -699,13 +698,13 @@ class PositionMonitor:
 
     async def _poll_order_terminal(
         self,
-        initial_order: "Order",
+        initial_order: Order,
         *,
         market_id: str,
         position_id: str,
         max_polls: int = 5,
         poll_interval_seconds: float = 0.5,
-    ) -> "Order | None":
+    ) -> Order | None:
         """Poll get_order until the order reaches a terminal state.
 
         IOC orders should resolve almost immediately; this is a safety net for
@@ -715,7 +714,7 @@ class PositionMonitor:
         """
         assert self._kalshi_client is not None
 
-        def _is_terminal(order: "Order") -> bool:
+        def _is_terminal(order: Order) -> bool:
             raw = (order.status or "").lower()
             return raw in ("executed", "canceled")
 
@@ -773,7 +772,7 @@ class PositionMonitor:
     def _maybe_refresh_exchange_stoploss(
         self,
         position: Position,
-        config: "StrategyConfig",
+        config: StrategyConfig,
     ) -> None:
         """Update the tracked exchange stoploss level when peak has advanced.
 
@@ -862,7 +861,7 @@ def _compute_trailing_stop_level(
 
 def _compute_exchange_stoploss_price(
     position: Position,
-    order_types: "OrderTypes",
+    order_types: OrderTypes,
     *,
     stoploss: float,
 ) -> float:

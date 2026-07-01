@@ -60,7 +60,8 @@ async def summarize_body(
 
     Args:
         raw_doc:         The raw document whose body needs summarizing.
-        query_text:      The catalyst query that retrieved this document (used as context in the prompt, not for relevance gating).
+        query_text:      The catalyst query that retrieved this document (used as context
+                         in the prompt, not for relevance gating).
         market_question: The full market question (used for prompt context).
         llm_client:      Authenticated LLMClient (handles audit logging internally).
         model:           Model to use (defaults to claude-haiku-4-5-20251001).

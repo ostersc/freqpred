@@ -4,7 +4,7 @@ All HTTP calls are mocked — no real NewsAPI calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,7 +14,7 @@ from freqpred.ingestion.store import RawDocument
 
 _API_KEY = "test-key"
 _QUERY = "election results"
-_FROM = datetime(2026, 3, 10, 0, 0, 0, tzinfo=timezone.utc)
+_FROM = datetime(2026, 3, 10, 0, 0, 0, tzinfo=UTC)
 
 
 def _make_article(
@@ -102,7 +102,7 @@ async def test_fetch_parses_published_at_z_suffix(mock_newsapi_client):
         "articles": [_make_article(published_at="2026-03-15T10:00:00Z")]
     }
     docs = await fetch(_API_KEY, _QUERY, _FROM)
-    assert docs[0].published_at == datetime(2026, 3, 15, 10, 0, 0, tzinfo=timezone.utc)
+    assert docs[0].published_at == datetime(2026, 3, 15, 10, 0, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

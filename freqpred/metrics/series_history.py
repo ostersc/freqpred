@@ -22,7 +22,7 @@ MIN_SAMPLE = 3
 
 async def refresh_series_history(
     session: AsyncSession,
-    kalshi_client: "KalshiClient",
+    kalshi_client: KalshiClient,
     *,
     lookback_days: int = 7,
     min_fetch_interval_hours: int = 6,

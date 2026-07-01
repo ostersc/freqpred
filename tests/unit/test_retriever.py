@@ -5,22 +5,21 @@ All database and embedder calls are mocked — no external dependencies.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from freqpred.rag.retriever import compute_retrieval_hash, retrieve
-from freqpred.rag.models import DocumentRow
+import freqpred.llm.models  # noqa: F401
 
 # Import all ORM models so SQLAlchemy can resolve cross-module relationships
 # (e.g. DocumentMarketLinkRow → SignalRow) before any mapper is instantiated.
 import freqpred.markets.models  # noqa: F401
-import freqpred.signal.models   # noqa: F401
-import freqpred.llm.models      # noqa: F401
+import freqpred.signal.models  # noqa: F401
+from freqpred.rag.models import DocumentRow
+from freqpred.rag.retriever import compute_retrieval_hash, retrieve
 
-
-NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
 FAKE_EMBEDDING = [0.1] * 384
 MARKET_ID = "KXTEST-26MAR20-FOO"
 
@@ -64,7 +63,7 @@ def _make_session(
         bm25_scores = [0.5] * len(rows)
     session = AsyncMock()
     execute_result = MagicMock()
-    execute_result.all.return_value = list(zip(rows, distances, bm25_scores))
+    execute_result.all.return_value = list(zip(rows, distances, bm25_scores, strict=True))
     session.execute = AsyncMock(return_value=execute_result)
     return session
 

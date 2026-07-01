@@ -84,7 +84,10 @@ The WebSocket uses **`market_lifecycle_v2`** (not `market_lifecycle`). Valid cha
 
 ```bash
 # Install dependencies
-uv sync
+uv sync --group dev
+
+# One-time: wire up the ruff pre-commit hook
+uv run pre-commit install
 
 # Copy and fill in config
 cp config/config.example.yaml config/config.yaml
@@ -109,12 +112,24 @@ Required environment variables (set in `.env` or AWS Secrets Manager in prod): s
 uv run pytest                          # run all tests
 uv run pytest tests/unit/              # unit tests only
 uv run pytest tests/integration/       # integration tests (requires DB)
+uv run ruff check .                    # lint (also runs in CI and pre-commit)
+uv run ruff check --fix .              # lint + auto-fix safe violations
 uv run alembic revision --autogenerate -m "description"  # create migration
 uv run alembic upgrade head            # apply migrations
 uv run freqpred run --help             # CLI help
 uv run freqpred markets list           # list active Kalshi markets
 uv run freqpred signal analyze --market-id <id>  # analyze a specific market
 ```
+
+### Linting (ruff)
+
+`ruff` is enforced at three points, in this order of how early it catches a problem:
+
+1. **Pre-commit hook** — configured in `.pre-commit-config.yaml`, installed via `uv run pre-commit install` (one-time, see Environment setup). Runs `ruff check --fix` on staged files before each commit; the hook fails the commit if it had to auto-fix anything, so the fix gets reviewed and re-staged rather than silently included.
+2. **CI** — the `lint` job in `.github/workflows/test.yml` runs `uv run ruff check .` on every push/PR, independent of the pre-commit hook (covers contributors who haven't installed it, and catches anything the hook was bypassed for).
+3. **Manual** — `uv run ruff check .` / `uv run ruff check --fix .` any time.
+
+Rule set and ignores are configured in `pyproject.toml` under `[tool.ruff]` / `[tool.ruff.lint]`; each ignored rule has an inline comment explaining why (e.g. `UP037` is disabled because unquoting an `Annotated[...]` forward reference to a `TYPE_CHECKING`-only import once broke FastAPI request parsing silently — see that comment before re-enabling it). When fixing lint violations by hand (not just `--fix`), treat every change as a potential behavior change, not pure style — re-run tests, and for anything touching `Annotated[...]`/`Depends(...)` or enum base classes, double-check runtime behavior didn't shift.
 
 ### Querying the database
 

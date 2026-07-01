@@ -19,11 +19,11 @@ from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.trading import ledger
 from freqpred.trading.ledger import _row_to_position as _row_to_position_local
-from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
+from freqpred.trading.risk import RiskEngine
 
 if TYPE_CHECKING:
-    from freqpred.markets.kalshi import KalshiClient
     from freqpred.llm.client import LLMClient
+    from freqpred.markets.kalshi import KalshiClient
     from freqpred.metrics.models import SignalAssessment
     from freqpred.runtime.telemetry import RuntimeTelemetry
 
@@ -116,7 +116,7 @@ def map_order_to_status(
 
 
 async def _poll_order_terminal(
-    kalshi_client: "KalshiClient",
+    kalshi_client: KalshiClient,
     initial_order: Order,
     *,
     max_polls: int = 5,
@@ -171,7 +171,7 @@ class OrderManager:
         kalshi_client: KalshiClient | None = None,
         llm_client: LLMClient | None = None,
         judgment_model: str | None = None,
-        runtime_telemetry: "RuntimeTelemetry | None" = None,
+        runtime_telemetry: RuntimeTelemetry | None = None,
         strategies: dict[str, IPredictionStrategy] | None = None,
         pending_order_timeout_seconds: float = DEFAULT_PENDING_ORDER_TIMEOUT_SECONDS,
     ) -> None:
@@ -200,7 +200,7 @@ class OrderManager:
         signal: Signal,
         bankroll: float,
         existing_market_exposure: float,
-        assessment: "SignalAssessment | None",
+        assessment: SignalAssessment | None,
     ) -> float:
         """Call strategy.position_size() without breaking legacy overrides."""
         method = strategy.position_size
@@ -354,9 +354,9 @@ class OrderManager:
 
             assessment = None
             if self._llm_client is not None and self._judgment_model:
-                from freqpred.metrics.assessment import assess_signal_context  # noqa: PLC0415
                 from freqpred.ingestion.fetchers.factbase import phrase_row_to_data  # noqa: PLC0415
                 from freqpred.ingestion.models import FactbasePhraseRow  # noqa: PLC0415
+                from freqpred.metrics.assessment import assess_signal_context  # noqa: PLC0415
 
                 phrase_data = None
                 fb_allowlist = getattr(strategy.config, "factbase_series_allowlist", [])

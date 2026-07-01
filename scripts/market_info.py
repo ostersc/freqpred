@@ -8,14 +8,13 @@ from __future__ import annotations
 import asyncio
 import sys
 
-import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.rag.models        # noqa: F401
-import freqpred.signal.models     # noqa: F401
-import freqpred.markets.models    # noqa: F401
-
 from sqlalchemy import text
 
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.markets.kalshi import KalshiClient
@@ -63,7 +62,10 @@ async def run(ticker: str) -> None:
         print("  No positions on record.")
         return
 
-    print(f"  {'dir':<4} {'qty':>5} {'entry':>7} {'exit':>7} {'reason':<26} {'pnl':>8} {'pnl%':>7}  {'status':<10} entry_time")
+    print(
+        f"  {'dir':<4} {'qty':>5} {'entry':>7} {'exit':>7} {'reason':<26} "
+        f"{'pnl':>8} {'pnl%':>7}  {'status':<10} entry_time"
+    )
     print(f"  {'─'*4} {'─'*5} {'─'*7} {'─'*7} {'─'*26} {'─'*8} {'─'*7}  {'─'*10} {'─'*20}")
     for r in rows:
         exit_px  = f"{r.exit_price:.4f}" if r.exit_price is not None else "      —"

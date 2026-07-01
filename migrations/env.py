@@ -7,15 +7,16 @@ import os
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import freqpred.ingestion.models  # noqa: F401 — registers CatalystRunRow, CatalystQueryRow
+import freqpred.llm.models  # noqa: F401 — registers LLMQueryRow
+import freqpred.markets.models  # noqa: F401 — registers MarketRow, PositionRow
+import freqpred.metrics.models  # noqa: F401 — registers SourceQualityScoreRow, SignalAssessmentRow
+import freqpred.rag.models  # noqa: F401 — registers DocumentRow, DocumentMarketLinkRow
+import freqpred.signal.models  # noqa: F401 — registers SignalRow
+
 # Import Base and all ORM models so Alembic can detect schema changes.
 # The order matters: db.Base must be imported before any model that uses it.
 from freqpred.db import Base  # noqa: F401
-import freqpred.markets.models  # noqa: F401 — registers MarketRow, PositionRow
-import freqpred.signal.models  # noqa: F401 — registers SignalRow
-import freqpred.rag.models  # noqa: F401 — registers DocumentRow, DocumentMarketLinkRow
-import freqpred.llm.models  # noqa: F401 — registers LLMQueryRow
-import freqpred.ingestion.models  # noqa: F401 — registers CatalystRunRow, CatalystQueryRow
-import freqpred.metrics.models  # noqa: F401 — registers SourceQualityScoreRow, SignalAssessmentRow
 
 config = context.config
 

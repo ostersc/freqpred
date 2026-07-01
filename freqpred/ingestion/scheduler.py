@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from tavily.errors import ForbiddenError, UsageLimitExceededError
 
 from freqpred.ingestion.backoff import record_rate_limit, record_success, tick_and_load
 from freqpred.ingestion.cursors import delete_cursors, get_cursor, set_cursor
@@ -40,16 +41,25 @@ from freqpred.ingestion.fetchers.gdelt import GDELTRateLimitError
 from freqpred.ingestion.fetchers.guardian import GuardianRateLimitError
 from freqpred.ingestion.fetchers.newsapi import NewsAPIRateLimitError
 from freqpred.ingestion.fetchers.reddit import RedditBlockedError
-from tavily.errors import ForbiddenError, UsageLimitExceededError
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
-from freqpred.ingestion.quota import current_window, get_daily_count, get_window_count, increment_window_count
-from freqpred.ingestion.store import DocumentSkipped, UpsertStatus, link_document_to_market, upsert_document
+from freqpred.ingestion.quota import (
+    current_window,
+    get_daily_count,
+    get_window_count,
+    increment_window_count,
+)
+from freqpred.ingestion.store import (
+    DocumentSkipped,
+    UpsertStatus,
+    link_document_to_market,
+    upsert_document,
+)
 from freqpred.markets.models import Market, MarketRow, PositionRow
 from freqpred.rag.embedder import LocalEmbedder
 
 if TYPE_CHECKING:
-    from freqpred.llm.client import LLMClient
     from freqpred.ingestion.selector import StrategyProtocol
+    from freqpred.llm.client import LLMClient
     from freqpred.runtime.telemetry import RuntimeTelemetry
 
 # Backoff services owned by this scheduler — passed to tick_and_load so the
@@ -115,8 +125,8 @@ def _subreddits_for_category(category: str) -> list[str]:
 async def run_cycle(
     session_factory: async_sessionmaker[AsyncSession],
     embedder: LocalEmbedder,
-    strategy: "StrategyProtocol | None" = None,
-    llm_client: "LLMClient | None" = None,
+    strategy: StrategyProtocol | None = None,
+    llm_client: LLMClient | None = None,
     cheap_model: str = "claude-haiku-4-5-20251001",
     tavily_api_key: str = "",
     tavily_daily_cap: int = 33,
@@ -132,7 +142,7 @@ async def run_cycle(
     reddit_user_agent: str = "freqpred/0.1",
     reddit_min_fetch_interval_hours: float = 2.0,
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
-    telemetry: "RuntimeTelemetry | None" = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> dict[str, int]:
     """Run one full ingestion cycle.
 
@@ -364,7 +374,9 @@ async def run_cycle(
                 # NewsAPI: adaptive cursor gate first, then per-query window cap check.
                 newsapi_queued = False
                 if newsapi_due_this_market and not newsapi_limit_hit:
-                    window_count = await get_window_count(market_session, "newsapi", newsapi_window_date, newsapi_hour_slot)
+                    window_count = await get_window_count(
+                        market_session, "newsapi", newsapi_window_date, newsapi_hour_slot
+                    )
                     if window_count >= newsapi_max_window_requests:
                         if not newsapi_limit_logged:
                             log.warning(
@@ -418,7 +430,7 @@ async def run_cycle(
                 results = await asyncio.gather(*fetch_coros, return_exceptions=True)
 
                 raw_docs = []
-                for name, result in zip(fetch_names, results):
+                for name, result in zip(fetch_names, results, strict=True):
                     if isinstance(result, BaseException):
                         fetcher_error_messages[name] = str(result)
                         if name == "tavily" and isinstance(result, (ForbiddenError, UsageLimitExceededError)):
@@ -468,7 +480,9 @@ async def run_cycle(
                                             count=tavily_daily_count, cap=tavily_daily_cap)
                         if name == "newsapi" and newsapi_queued:
                             newsapi_fetched_this_market = True
-                            await increment_window_count(market_session, "newsapi", newsapi_window_date, newsapi_hour_slot)
+                            await increment_window_count(
+                                market_session, "newsapi", newsapi_window_date, newsapi_hour_slot
+                            )
                         if name == "reddit":
                             reddit_fetched_this_market = True
                         if name == "guardian":
@@ -611,8 +625,8 @@ async def run_scheduler(
     session_factory: async_sessionmaker[AsyncSession],
     embedder: LocalEmbedder,
     interval_seconds: int = 1800,
-    strategy: "StrategyProtocol | None" = None,
-    llm_client: "LLMClient | None" = None,
+    strategy: StrategyProtocol | None = None,
+    llm_client: LLMClient | None = None,
     cheap_model: str = "claude-haiku-4-5-20251001",
     tavily_api_key: str = "",
     tavily_daily_cap: int = 33,
@@ -628,7 +642,7 @@ async def run_scheduler(
     reddit_user_agent: str = "freqpred/0.1",
     reddit_min_fetch_interval_hours: float = 2.0,
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
-    telemetry: "RuntimeTelemetry | None" = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> None:
     """Async loop: runs run_cycle every *interval_seconds*.
 
@@ -715,8 +729,8 @@ _CATALYST_REFRESH_INTERVAL = timedelta(hours=24)
 
 async def _ensure_catalysts(
     session: AsyncSession,
-    strategy: "StrategyProtocol",
-    llm_client: "LLMClient",
+    strategy: StrategyProtocol,
+    llm_client: LLMClient,
     embedder: LocalEmbedder,
     *,
     model: str = "claude-haiku-4-5-20251001",
@@ -845,7 +859,8 @@ def _market_row_to_domain(row: MarketRow) -> Market:
 async def _load_active_market_queries(
     session: AsyncSession,
 ) -> list[tuple[str, str, str, datetime, list[tuple[str, str | None]]]]:
-    """Return (market_id, category, market_question, close_time, [(query_text, tv_query), ...]) for all active catalyst runs.
+    """Return (market_id, category, market_question, close_time,
+    [(query_text, tv_query), ...]) for all active catalyst runs.
 
     Only the latest active CatalystRun per market is considered.
     Markets whose latest run has is_active=False are excluded.

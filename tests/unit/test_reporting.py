@@ -8,17 +8,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.llm.models import LLMResponse
-from freqpred.metrics.calibration import CalibrationReport, CalibrationBucket
-from freqpred.metrics.reporting import generate_daily_digest
-
 # Register ORM models to avoid mapper errors
-import freqpred.ingestion.models   # noqa: F401
-import freqpred.llm.models         # noqa: F401
-import freqpred.markets.models     # noqa: F401
-import freqpred.rag.models         # noqa: F401
-import freqpred.signal.models      # noqa: F401
-
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
+from freqpred.llm.models import LLMResponse
+from freqpred.metrics.calibration import CalibrationBucket, CalibrationReport
+from freqpred.metrics.reporting import generate_daily_digest
 
 _FAKE_DIGEST = "freqpred holds 2 open positions with $50.00 exposure. Yesterday returned +$3.20."
 _FAKE_LLM_RESPONSE = LLMResponse(
@@ -60,13 +58,15 @@ def _make_session(
     open_count: int = 2,
     total_exposure: float = 50.0,
     session_pnl: float = 3.20,
-    session_exit_rows: list = [],
+    session_exit_rows: list | None = None,
     yesterday_llm_spend: float = 0.38,
     today_llm_spend: float = 0.05,
     llm_errors: int = 0,
-    backed_off_services: list = [],
+    backed_off_services: list | None = None,
 ) -> AsyncMock:
     """Return a mock AsyncSession with pre-configured execute responses."""
+    session_exit_rows = session_exit_rows if session_exit_rows is not None else []
+    backed_off_services = backed_off_services if backed_off_services is not None else []
     session = AsyncMock()
 
     # execute() calls in order:

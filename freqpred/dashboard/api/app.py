@@ -22,13 +22,13 @@ if TYPE_CHECKING:
 def create_app(
     session_factory: async_sessionmaker[AsyncSession],
     daily_cap_usd: float = 10.0,
-    risk_config: "RiskConfig | None" = None,
+    risk_config: RiskConfig | None = None,
     bankroll_usd: float = 0.0,
     signal_pipeline: object | None = None,
-    order_manager: "OrderManager | None" = None,
-    runtime_telemetry: "RuntimeTelemetry | None" = None,
+    order_manager: OrderManager | None = None,
+    runtime_telemetry: RuntimeTelemetry | None = None,
     kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2",
-    kalshi_client: "KalshiClient | None" = None,
+    kalshi_client: KalshiClient | None = None,
 ) -> FastAPI:
     """Create and configure the dashboard FastAPI application.
 

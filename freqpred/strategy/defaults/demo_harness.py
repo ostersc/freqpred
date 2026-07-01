@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select, update
@@ -73,12 +73,12 @@ class DemoHarness(IAlgoStrategy):
         self._failed_markets: set[str] = set()
         self._has_open_position: bool = False
 
-    def is_market_interesting(self, market: "Market") -> bool:
+    def is_market_interesting(self, market: Market) -> bool:
         if market.id in self._failed_markets:
             return False
 
         if self._pinned_market_id is None:
-            now = datetime.now(tz=timezone.utc)
+            now = datetime.now(tz=UTC)
             if (
                 market.status == "active"
                 and market.yes_ask is not None
@@ -92,7 +92,7 @@ class DemoHarness(IAlgoStrategy):
                 self._pinned_market_id = market.id
         return market.id == self._pinned_market_id
 
-    def populate_exit_trend(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+    def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """Always signal exit — demo harness exits on every complete candle.
 
         In practice DemoHarness overrides force_exit to exit immediately
@@ -103,7 +103,7 @@ class DemoHarness(IAlgoStrategy):
         df["exit_long"] = True
         return df
 
-    def force_exit(self, position: "Position", market: "Market") -> str | None:
+    def force_exit(self, position: Position, market: Market) -> str | None:
         """Exit the demo position on the first confirmed (open) tick.
 
         PositionMonitor only passes status='open' positions here, so any call
@@ -114,29 +114,29 @@ class DemoHarness(IAlgoStrategy):
 
     async def on_position_opened(
         self,
-        position: "Position",
-        market: "Market",
-        session_factory: "Any",
+        position: Position,
+        market: Market,
+        session_factory: Any,
     ) -> None:
         """Record that a position is open; keep the market pinned so synthesize_signal
         can detect closure via the DB and re-enable entry."""
         self._has_open_position = True
 
-    def on_order_failed(self, market: "Market") -> None:
+    def on_order_failed(self, market: Market) -> None:
         """Immediately abandon a market that rejected our order at the exchange."""
         self._failed_markets.add(market.id)
         if self._pinned_market_id == market.id:
             self._pinned_market_id = None
 
-    def should_trade(self, _signal: "Signal", _market: "Market") -> bool:
+    def should_trade(self, _signal: Signal, _market: Market) -> bool:
         return True
 
-    def position_size(self, _signal: "Signal", _bankroll: float, _existing_market_exposure: float = 0.0) -> float:
+    def position_size(self, _signal: Signal, _bankroll: float, _existing_market_exposure: float = 0.0) -> float:
         return 0.0 if self._has_open_position else 1.0
 
     async def synthesize_signal(
-        self, session: "AsyncSession", market: "Market"
-    ) -> "Signal | None":
+        self, session: AsyncSession, market: Market
+    ) -> Signal | None:
         """Create or reuse a synthetic signal so the order path can be exercised.
 
         - Returns None immediately if there is already an open/pending position.
@@ -185,7 +185,7 @@ class DemoHarness(IAlgoStrategy):
         existing_row = existing_result.scalar_one_or_none()
 
         if existing_row is not None:
-            age = datetime.now(tz=timezone.utc) - existing_row.created_at
+            age = datetime.now(tz=UTC) - existing_row.created_at
             if age < _SIGNAL_REUSE_WINDOW:
                 # Reuse the recent signal — no need to write a new row.
                 return Signal(
@@ -226,7 +226,7 @@ class DemoHarness(IAlgoStrategy):
             model_used="demo_harness",
             prompt_version="demo",
             trigger="demo_harness",
-            created_at=datetime.now(tz=timezone.utc),
+            created_at=datetime.now(tz=UTC),
             raw_context="",
         )
         session.add(row)

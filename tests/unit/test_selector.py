@@ -2,19 +2,18 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.selector import select_markets, deactivate_stale_catalysts
+import freqpred.ingestion.models  # noqa: F401 — register CatalystRunRow/CatalystQueryRow
+import freqpred.llm.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
+from freqpred.ingestion.selector import deactivate_stale_catalysts, select_markets
 from freqpred.markets.models import Market
 
-import freqpred.ingestion.models  # noqa: F401 — register CatalystRunRow/CatalystQueryRow
-import freqpred.llm.models        # noqa: F401
-import freqpred.signal.models     # noqa: F401
-
-NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
 FUTURE = NOW + timedelta(days=10)
 PAST = NOW - timedelta(days=1)
 

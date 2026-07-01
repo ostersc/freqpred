@@ -5,7 +5,7 @@ LLMClient is mocked — no real API or DB calls.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,7 +27,7 @@ _VALID_SUMMARY = {
 
 
 def _make_raw_doc(i: int = 1) -> RawDocument:
-    now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
     return RawDocument(
         source_url=f"https://reddit.com/r/politics/comments/{i}/",
         title=f"Post {i} about the election",

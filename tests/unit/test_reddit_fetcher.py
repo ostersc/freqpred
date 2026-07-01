@@ -4,7 +4,7 @@ All HTTP calls are mocked — no real Reddit calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,7 +15,7 @@ from freqpred.ingestion.store import RawDocument
 _SUBREDDITS = ["politics"]
 _QUERY = "election results"
 
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 _RECENT = (_NOW - timedelta(days=1)).isoformat()
 _OLD = (_NOW - timedelta(days=_MAX_AGE_DAYS + 1)).isoformat()
 

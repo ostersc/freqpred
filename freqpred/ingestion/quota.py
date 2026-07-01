@@ -7,8 +7,7 @@ Upserts are atomic so concurrent processes see consistent counts.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-
+from datetime import UTC, date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +19,7 @@ def current_window(now: datetime | None = None) -> tuple[date, int]:
     hour_slot is 0 for 00:00–11:59 UTC and 1 for 12:00–23:59 UTC.
     """
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     return now.date(), now.hour // 12
 
 

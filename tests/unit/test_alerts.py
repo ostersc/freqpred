@@ -5,7 +5,7 @@ All HTTP calls are mocked — no real network requests made.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,75 +14,79 @@ from freqpred.alerts.discord import DiscordSender
 from freqpred.alerts.dispatcher import AlertDispatcher
 from freqpred.alerts.telegram import TelegramSender
 from freqpred.markets.models import Market, Position
-from freqpred.runtime.telemetry import FreshnessSpec, RuntimeTelemetry, ServiceFreshnessState, run_stale_service_watchdog
+from freqpred.runtime.telemetry import (
+    FreshnessSpec,
+    RuntimeTelemetry,
+    ServiceFreshnessState,
+    run_stale_service_watchdog,
+)
 from freqpred.signal.models import Signal
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _make_market(**overrides: object) -> Market:
-    defaults = dict(
-        id="MKTTEST-1",
-        platform="kalshi",
-        question="Will the Fed cut rates in May 2026?",
-        category="economics",
-        close_time=datetime(2026, 5, 31, tzinfo=timezone.utc),
-        yes_bid=0.42,
-        yes_ask=0.44,
-        mid_price=0.43,
-        volume_24h=1000.0,
-        open_interest=500.0,
-        last_fetched_at=datetime(2026, 3, 18, tzinfo=timezone.utc),
-        price_updated_at=datetime(2026, 3, 18, tzinfo=timezone.utc),
-        metadata_fetched_at=None,
-        current_signal_id=None,
-        metadata={},
-    )
+    defaults = {
+        "id": "MKTTEST-1",
+        "platform": "kalshi",
+        "question": "Will the Fed cut rates in May 2026?",
+        "category": "economics",
+        "close_time": datetime(2026, 5, 31, tzinfo=UTC),
+        "yes_bid": 0.42,
+        "yes_ask": 0.44,
+        "mid_price": 0.43,
+        "volume_24h": 1000.0,
+        "open_interest": 500.0,
+        "last_fetched_at": datetime(2026, 3, 18, tzinfo=UTC),
+        "price_updated_at": datetime(2026, 3, 18, tzinfo=UTC),
+        "metadata_fetched_at": None,
+        "current_signal_id": None,
+        "metadata": {},
+    }
     defaults.update(overrides)
     return Market(**defaults)
 
 
 def _make_signal(**overrides: object) -> Signal:
-    defaults = dict(
-        id="sig-abc",
-        market_id="MKTTEST-1",
-        estimated_probability=0.60,
-        confidence=0.75,
-        edge=0.17,
-        market_mid_at_signal=0.43,
-        direction="YES",
-        reasoning="Strong signals point to a rate cut.",
-        sources=[],
-        retrieval_hash="abc123",
-        model_used="claude-sonnet-4-6",
-        prompt_version="signal-v1",
-        trigger="scheduled",
-        created_at=datetime(2026, 3, 18, tzinfo=timezone.utc),
-        raw_context="",
-    )
+    defaults = {
+        "id": "sig-abc",
+        "market_id": "MKTTEST-1",
+        "estimated_probability": 0.60,
+        "confidence": 0.75,
+        "edge": 0.17,
+        "market_mid_at_signal": 0.43,
+        "direction": "YES",
+        "reasoning": "Strong signals point to a rate cut.",
+        "sources": [],
+        "retrieval_hash": "abc123",
+        "model_used": "claude-sonnet-4-6",
+        "prompt_version": "signal-v1",
+        "trigger": "scheduled",
+        "created_at": datetime(2026, 3, 18, tzinfo=UTC),
+        "raw_context": "",
+    }
     defaults.update(overrides)
     return Signal(**defaults)
 
 
 def _make_position(**overrides: object) -> Position:
-    defaults = dict(
-        id="pos-xyz",
-        market_id="MKTTEST-1",
-        signal_id="sig-abc",
-        strategy_name="ConservativeDefault",
-        strategy_version="0.1",
-        signal_confidence=0.75,
-        signal_edge=0.17,
-        signal_estimated_prob=0.60,
-        direction="YES",
-        contracts=5,
-        entry_price=0.43,
-        entry_time=datetime(2026, 3, 18, tzinfo=timezone.utc),
-        mode="paper",
-        status="open",
-    )
+    defaults = {
+        "id": "pos-xyz",
+        "market_id": "MKTTEST-1",
+        "signal_id": "sig-abc",
+        "strategy_name": "ConservativeDefault",
+        "strategy_version": "0.1",
+        "signal_confidence": 0.75,
+        "signal_edge": 0.17,
+        "signal_estimated_prob": 0.60,
+        "direction": "YES",
+        "contracts": 5,
+        "entry_price": 0.43,
+        "entry_time": datetime(2026, 3, 18, tzinfo=UTC),
+        "mode": "paper",
+        "status": "open",
+    }
     defaults.update(overrides)
     return Position(**defaults)
 
@@ -232,7 +236,7 @@ async def test_resolution_alert_win_vs_loss_prefix() -> None:
     win_pos = _make_position(
         pnl=1.25,
         exit_price=1.0,
-        exit_time=datetime(2026, 3, 18, tzinfo=timezone.utc),
+        exit_time=datetime(2026, 3, 18, tzinfo=UTC),
         resolution=1,
         status="closed",
     )
@@ -241,7 +245,7 @@ async def test_resolution_alert_win_vs_loss_prefix() -> None:
     loss_pos = _make_position(
         pnl=-0.50,
         exit_price=0.0,
-        exit_time=datetime(2026, 3, 18, tzinfo=timezone.utc),
+        exit_time=datetime(2026, 3, 18, tzinfo=UTC),
         resolution=0,
         status="closed",
     )

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import random
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import anthropic
@@ -20,10 +20,9 @@ import click
 
 # Register all ORM models before any SQLAlchemy mapper is instantiated.
 import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.rag.models        # noqa: F401
-import freqpred.signal.models     # noqa: F401
-
+import freqpred.llm.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.config import load_config
 from freqpred.ingestion.catalyst_generator import generate_catalysts
 from freqpred.ingestion.fetchers import newsapi, reddit, tavily
@@ -53,7 +52,7 @@ def _print_docs(docs: list[RawDocument], max_body: int = 200) -> None:
         click.echo("  (no results)")
         return
     for i, doc in enumerate(docs, 1):
-        age = datetime.now(timezone.utc) - doc.published_at
+        age = datetime.now(UTC) - doc.published_at
         age_str = f"{int(age.total_seconds() // 3600)}h ago"
         click.echo(f"  [{i}] {doc.title or '(no title)'}")
         click.echo(f"      {doc.source_url}")
@@ -93,7 +92,7 @@ def _make_stub_session() -> MagicMock:
 
     session.add.side_effect = lambda row: (
         setattr(row, "id", 999),
-        setattr(row, "created_at", datetime.now(timezone.utc)),
+        setattr(row, "created_at", datetime.now(UTC)),
     )
 
     return session
@@ -125,7 +124,7 @@ def _raw_to_document(raw: RawDocument, category: str) -> Document:
         category=category,
         tags=[],
         published_at=raw.published_at,
-        fetched_at=datetime.now(timezone.utc),
+        fetched_at=datetime.now(UTC),
         embedding=[],
         embedding_model="none",
         summary=None,
@@ -191,7 +190,9 @@ async def _run_signal_analysis(
 
 
 @click.command()
-@click.option("--market-id", default=None, help="Specific Kalshi market ID to analyze (e.g. kxpresmention-djt26mar17c).")
+@click.option(
+    "--market-id", default=None, help="Specific Kalshi market ID to analyze (e.g. kxpresmention-djt26mar17c)."
+)
 @click.option("--category", default=None, help="Kalshi category to filter when picking a random market.")
 @click.option("--max-results", default=5, show_default=True, help="Results per source per catalyst.")
 @click.option("--dry-run", is_flag=True, default=False, help="Generate catalysts only, skip fetching and signal.")

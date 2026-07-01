@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -81,7 +81,7 @@ async def fetch(
     Raises:
         GuardianRateLimitError: if the API returns HTTP 429.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     query = _sanitize_query(query)
     if not query:
         log.debug("guardian.fetch.skip", reason="empty_query_after_sanitize")

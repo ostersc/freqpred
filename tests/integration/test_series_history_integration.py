@@ -20,13 +20,19 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 
 pytestmark = pytest.mark.skipif(
     "freqpred_test" not in os.environ.get("DATABASE_URL", ""),
     reason="Integration tests require DATABASE_URL pointing to freqpred_test",
 )
 
+# Register all ORM models before create_all.
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
+import freqpred.runtime.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.markets.models import MarketRow
 from freqpred.metrics.models import SeriesOptionHistoryRow
@@ -36,13 +42,6 @@ from freqpred.metrics.series_history import (
     refresh_series_history,
 )
 from freqpred.signal.models import SignalRow
-
-# Register all ORM models before create_all.
-import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.metrics.models    # noqa: F401
-import freqpred.runtime.models    # noqa: F401
-import freqpred.signal.models     # noqa: F401
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",

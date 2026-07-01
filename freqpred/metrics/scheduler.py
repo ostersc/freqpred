@@ -51,7 +51,7 @@ async def run_source_quality_scheduler(
     refresh_time: str = "07:00",
     refresh_timezone: str = "America/New_York",
     lookback_days: int = 90,
-    kalshi_client: "KalshiClient | None" = None,
+    kalshi_client: KalshiClient | None = None,
     series_lookback_days: int = 7,
     telemetry: object | None = None,
 ) -> None:
@@ -79,7 +79,9 @@ async def run_source_quality_scheduler(
                     rows_written=rows_written,
                 )
                 if telemetry is not None:
-                    from freqpred.runtime.telemetry import SERVICE_SOURCE_QUALITY_SCHEDULER  # noqa: PLC0415
+                    from freqpred.runtime.telemetry import (
+                        SERVICE_SOURCE_QUALITY_SCHEDULER,  # noqa: PLC0415
+                    )
 
                     await telemetry.mark_success(
                         SERVICE_SOURCE_QUALITY_SCHEDULER,
@@ -89,15 +91,21 @@ async def run_source_quality_scheduler(
                 sq_error = exc
                 log.exception("source_quality_scheduler.error", reason=reason)
                 if telemetry is not None:
-                    from freqpred.runtime.telemetry import SERVICE_SOURCE_QUALITY_SCHEDULER  # noqa: PLC0415
+                    from freqpred.runtime.telemetry import (
+                        SERVICE_SOURCE_QUALITY_SCHEDULER,  # noqa: PLC0415
+                    )
 
                     await telemetry.mark_error(SERVICE_SOURCE_QUALITY_SCHEDULER, str(exc))
 
             # Series history — independent heartbeat
             if kalshi_client is not None:
                 try:
-                    from freqpred.metrics.series_history import refresh_series_history  # noqa: PLC0415
-                    from freqpred.runtime.telemetry import SERVICE_SERIES_HISTORY_SCHEDULER  # noqa: PLC0415
+                    from freqpred.metrics.series_history import (
+                        refresh_series_history,  # noqa: PLC0415
+                    )
+                    from freqpred.runtime.telemetry import (
+                        SERVICE_SERIES_HISTORY_SCHEDULER,  # noqa: PLC0415
+                    )
 
                     series_rows = await refresh_series_history(
                         session,
@@ -117,7 +125,9 @@ async def run_source_quality_scheduler(
                 except Exception as exc:
                     log.exception("series_history.scheduler.error", reason=reason)
                     if telemetry is not None:
-                        from freqpred.runtime.telemetry import SERVICE_SERIES_HISTORY_SCHEDULER  # noqa: PLC0415
+                        from freqpred.runtime.telemetry import (
+                            SERVICE_SERIES_HISTORY_SCHEDULER,  # noqa: PLC0415
+                        )
 
                         await telemetry.mark_error(SERVICE_SERIES_HISTORY_SCHEDULER, str(exc))
 

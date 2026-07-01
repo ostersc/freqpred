@@ -9,19 +9,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from fastapi.testclient import TestClient
 
-import freqpred.alerts.models     # noqa: F401
+import freqpred.alerts.models  # noqa: F401
 import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.markets.models    # noqa: F401
-import freqpred.metrics.models    # noqa: F401
-import freqpred.rag.models        # noqa: F401
-import freqpred.runtime.models    # noqa: F401
-import freqpred.signal.models     # noqa: F401
-import freqpred.strategy.models   # noqa: F401
-
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.runtime.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
+import freqpred.strategy.models  # noqa: F401
 from freqpred.dashboard.api.app import create_app
 from freqpred.dashboard.api.routes import get_db
 from freqpred.runtime.telemetry import FreshnessSpec, RuntimeTelemetry, ServiceFreshnessState

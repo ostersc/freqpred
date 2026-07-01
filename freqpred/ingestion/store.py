@@ -13,13 +13,15 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import select, text as sa_text
+from sqlalchemy import select
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,10 +40,7 @@ class DocumentSkipped(Exception):
     """Raised when a document is intentionally skipped (e.g. empty body after cleaning)."""
 
 
-from enum import Enum
-
-
-class UpsertStatus(str, Enum):
+class UpsertStatus(StrEnum):
     INSERTED = "inserted"   # brand-new document
     UPDATED = "updated"     # existing URL, content changed
     DEDUPED = "deduped"     # existing URL, content unchanged — no DB write
@@ -54,7 +53,8 @@ _MAX_EMBED_CHARS = 2_000
 # _MIN_BM25_SCORE is the ts_rank floor against the market question's first line;
 # documents scoring below this are off-topic and not worth summarizing.
 _SUMMARY_THRESHOLD = 2_000   # 4 × the 500-char evidence excerpt limit in signal/llm.py
-_MIN_BM25_SCORE = 0.01       # ~42% of long linked docs score below this when using first-line market question (live data)
+# ~42% of long linked docs score below this when using first-line market question (live data)
+_MIN_BM25_SCORE = 0.01
 _MAX_BODY_CHARS = 50_000     # skip docs still larger than this after HTML stripping — likely markup/boilerplate soup
 
 # Process-level cache of URLs permanently rejected as body_too_large.
@@ -383,7 +383,7 @@ async def link_document_to_market(
             market_id=market_id,
             signal_id=None,
             relevance_score=0.0,
-            linked_at=datetime.now(tz=timezone.utc),
+            linked_at=datetime.now(tz=UTC),
         )
         .on_conflict_do_nothing()
     )

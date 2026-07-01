@@ -6,24 +6,23 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Ensure all ORM relationships resolve before any test runs
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.signal.cache import should_skip, should_skip_scheduled
 from freqpred.signal.llm import SYSTEM_PROMPT, build_prompt, parse_signal_response
-from freqpred.signal.pipeline import SignalPipeline
 from freqpred.signal.models import Signal
+from freqpred.signal.pipeline import SignalPipeline
 
-# Ensure all ORM relationships resolve before any test runs
-import freqpred.ingestion.models   # noqa: F401
-import freqpred.llm.models         # noqa: F401
-import freqpred.markets.models     # noqa: F401
-import freqpred.rag.models         # noqa: F401
-import freqpred.signal.models      # noqa: F401
-
-NOW = datetime(2026, 3, 17, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 17, 12, 0, 0, tzinfo=UTC)
 FAKE_HASH = "a" * 64
 FAKE_SIGNAL_ID = str(uuid.uuid4())
 FAKE_MARKET_ID = "MARKET-001"
@@ -48,7 +47,7 @@ def _make_market(
         platform="kalshi",
         question="Will the Fed raise rates in June 2026?",
         category="economics",
-        close_time=datetime(2026, 6, 30, tzinfo=timezone.utc),
+        close_time=datetime(2026, 6, 30, tzinfo=UTC),
         yes_bid=yes_bid,
         yes_ask=yes_ask,
         mid_price=mid_price,
@@ -227,8 +226,8 @@ def _make_scheduled_session(
 
 class TestShouldSkipScheduled:
     MIN_HOURS = 24.0
-    RECENT = datetime(2026, 3, 17, 0, 0, 0, tzinfo=timezone.utc)   # 12 h before NOW
-    OLD    = datetime(2026, 3, 16, 0, 0, 0, tzinfo=timezone.utc)   # 36 h before NOW
+    RECENT = datetime(2026, 3, 17, 0, 0, 0, tzinfo=UTC)   # 12 h before NOW
+    OLD    = datetime(2026, 3, 16, 0, 0, 0, tzinfo=UTC)   # 36 h before NOW
 
     @pytest.mark.asyncio
     async def test_no_prior_signal_returns_false(self) -> None:
@@ -261,7 +260,7 @@ class TestShouldSkipScheduled:
 
     @pytest.mark.asyncio
     async def test_factbase_updated_since_last_signal_returns_false(self) -> None:
-        fb_updated = datetime(2026, 3, 17, 6, 0, 0, tzinfo=timezone.utc)  # after RECENT
+        fb_updated = datetime(2026, 3, 17, 6, 0, 0, tzinfo=UTC)  # after RECENT
         session = _make_scheduled_session(FAKE_HASH, self.RECENT, fb_last_fetched_at=fb_updated)
         with patch("freqpred.signal.cache.datetime") as mock_dt:
             mock_dt.now.return_value = NOW
@@ -270,7 +269,7 @@ class TestShouldSkipScheduled:
 
     @pytest.mark.asyncio
     async def test_factbase_older_than_last_signal_returns_true(self) -> None:
-        fb_stale = datetime(2026, 3, 16, 20, 0, 0, tzinfo=timezone.utc)  # before RECENT
+        fb_stale = datetime(2026, 3, 16, 20, 0, 0, tzinfo=UTC)  # before RECENT
         session = _make_scheduled_session(FAKE_HASH, self.RECENT, fb_last_fetched_at=fb_stale)
         with patch("freqpred.signal.cache.datetime") as mock_dt:
             mock_dt.now.return_value = NOW
@@ -312,7 +311,7 @@ def _make_signal_row(
 
 
 class TestCloneAtPrice:
-    def _make_pipeline_instance(self) -> "SignalPipeline":
+    def _make_pipeline_instance(self) -> SignalPipeline:
         session_factory = MagicMock()
         return SignalPipeline(
             session_factory=session_factory,
@@ -550,7 +549,7 @@ class TestBuildPrompt:
     def test_includes_issuance_date_when_open_time_set(self) -> None:
         """Prompt must include the market open/issuance date when available."""
         market = _make_market()
-        market.open_time = datetime(2026, 3, 30, tzinfo=timezone.utc)
+        market.open_time = datetime(2026, 3, 30, tzinfo=UTC)
         prompt = build_prompt(market, [])
         assert "Market Opened (Issuance Date):" in prompt
         assert "2026-03-30" in prompt
@@ -576,11 +575,11 @@ class TestBuildPrompt:
 
     def test_build_prompt_includes_factbase_block(self) -> None:
         from datetime import UTC
+
         from freqpred.ingestion.fetchers.factbase import FactbasePhraseData
-        from freqpred.markets.models import Market
 
         market = _make_market()
-        market.open_time = datetime(2026, 6, 23, tzinfo=timezone.utc)
+        market.open_time = datetime(2026, 6, 23, tzinfo=UTC)
         phrase_data = FactbasePhraseData(
             display_phrase="witch hunt",
             api_query='"witch hunt"',
@@ -626,11 +625,6 @@ class TestSignalPipelineAnalyze:
         current_signal_hash: str | None = None,
     ) -> tuple[SignalPipeline, AsyncMock, AsyncMock]:
         """Return (pipeline, mock_session, mock_llm_client)."""
-        from freqpred.rag.retriever import compute_retrieval_hash
-
-        doc_ids = [d.id for d in docs]
-        new_hash = compute_retrieval_hash(doc_ids)
-
         # Session: set up execute side_effect for sequential calls:
         #   call 1 — should_skip: scalar_one_or_none returns current_signal_hash
         #   call 2 — _clone_at_price (if hash matched): scalar_one_or_none returns None

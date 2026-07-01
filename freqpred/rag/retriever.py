@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import structlog
@@ -34,7 +34,7 @@ _VECTOR_WEIGHT = 0.7  # weight for cosine similarity; (1 - this) goes to BM25
 
 def _dot(a: list[float], b: list[float]) -> float:
     """Dot product ≈ cosine similarity for unit-norm embeddings."""
-    return sum(x * y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 class Embedder(Protocol):
@@ -75,7 +75,7 @@ async def retrieve(
     blended_score is in [0.0, 1.0] after normalisation.
     """
     query_vector = await embedder.embed_text(question)
-    reference = now if now is not None else datetime.now(timezone.utc)
+    reference = now if now is not None else datetime.now(UTC)
     cutoff = reference - timedelta(days=max_age_days)
 
     embed_col = embedder.embedding_column  # "embedding" or "embedding_768"
@@ -139,7 +139,7 @@ async def retrieve(
 
     scored = [
         (row, vector_weight * nc + (1.0 - vector_weight) * nb)
-        for (row, _, _), nc, nb in zip(candidates, norm_cosine, norm_bm25)
+        for (row, _, _), nc, nb in zip(candidates, norm_cosine, norm_bm25, strict=True)
     ]
     scored.sort(key=lambda x: x[1], reverse=True)
 

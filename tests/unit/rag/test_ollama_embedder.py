@@ -4,11 +4,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import httpx
 
 from freqpred.rag.embedder import OllamaEmbedder
-from freqpred.rag.retriever import Embedder
-
 
 # ---------------------------------------------------------------------------
 # test_embed_text_calls_ollama

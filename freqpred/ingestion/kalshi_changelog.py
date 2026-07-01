@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import xml.etree.ElementTree as ET
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import TYPE_CHECKING
 
 import httpx
 import structlog
@@ -28,7 +29,6 @@ from freqpred.runtime.models import KalshiChangelogStateRow
 from freqpred.runtime.telemetry import SERVICE_KALSHI_CHANGELOG
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator as _AG
 
     from freqpred.alerts.dispatcher import AlertDispatcher
     from freqpred.runtime.telemetry import RuntimeTelemetry

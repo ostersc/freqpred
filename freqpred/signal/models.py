@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import ARRAY, Float, ForeignKey, Text, VARCHAR
+from sqlalchemy import ARRAY, VARCHAR, Float, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -53,15 +53,15 @@ class SignalRow(Base):
     llm_query_id: Mapped[int | None] = mapped_column(nullable=True)
 
     # Relationships
-    market: Mapped["MarketRow"] = relationship(  # type: ignore[name-defined]  # noqa: F821
+    market: Mapped[MarketRow] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "MarketRow",
         back_populates="signals",
         foreign_keys=[market_id],
     )
-    positions: Mapped[list["PositionRow"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
+    positions: Mapped[list[PositionRow]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "PositionRow", back_populates="signal"
     )
-    document_links: Mapped[list["DocumentMarketLinkRow"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
+    document_links: Mapped[list[DocumentMarketLinkRow]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "DocumentMarketLinkRow", back_populates="signal"
     )
 

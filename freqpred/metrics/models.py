@@ -6,10 +6,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Float, ForeignKey, Integer, Text, VARCHAR
+from sqlalchemy import VARCHAR, Float, ForeignKey, Integer, Text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.schema import PrimaryKeyConstraint
 
 from freqpred.db import Base
 

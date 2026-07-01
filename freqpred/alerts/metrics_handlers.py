@@ -21,13 +21,14 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.alerts.command_handlers import _clip, _truncate
+from freqpred.alerts.command_handlers import _clip
 from freqpred.alerts.run_state import get_drawdown_window
 from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
 from freqpred.trading.ledger import get_portfolio_summary
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
+
     from freqpred.alerts.telegram_commands import TelegramCommandHandler
     from freqpred.config import Settings
     from freqpred.llm.client import LLMClient
@@ -91,11 +92,11 @@ def _hold_duration(entry: datetime, exit_: datetime) -> str:
 
 
 def register_metrics_commands(
-    cmd_handler: "TelegramCommandHandler",
-    session_factory: "async_sessionmaker[AsyncSession]",
-    config: "Settings",
+    cmd_handler: TelegramCommandHandler,
+    session_factory: async_sessionmaker[AsyncSession],
+    config: Settings,
     mode: str,
-    llm_client: "LLMClient | None" = None,
+    llm_client: LLMClient | None = None,
 ) -> None:
     """Register all T29 metrics commands onto *cmd_handler*."""
 
@@ -634,7 +635,8 @@ def register_metrics_commands(
         tbl_header = f"{'Source':<22} {'Brier':>6} {'Delta':>7} {'Uses':>6}"
         divider = "-" * len(tbl_header)
         tbl_rows = [
-            f"{s.source_name:<22} {s.weighted_brier_score:>6.4f} {s.weighted_brier_score - overall:>+7.4f} {s.total_doc_appearances:>6}"
+            f"{s.source_name:<22} {s.weighted_brier_score:>6.4f} "
+            f"{s.weighted_brier_score - overall:>+7.4f} {s.total_doc_appearances:>6}"
             for s in scores
         ]
 

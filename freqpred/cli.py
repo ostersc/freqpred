@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import signal as _signal
+from datetime import UTC
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import click
 import structlog
@@ -13,7 +13,12 @@ import structlog
 from freqpred.config import load_config
 
 
-def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int = 14, log_module_levels: dict[str, str] | None = None) -> None:
+def _configure_logging(
+    log_level: str,
+    log_file: str = "",
+    log_backup_days: int = 14,
+    log_module_levels: dict[str, str] | None = None,
+) -> None:
     """Set up structlog with stdlib integration at the given level.
 
     Uses ProcessorFormatter so that console output gets colors while the
@@ -116,10 +121,10 @@ def _configure_logging(log_level: str, log_file: str = "", log_backup_days: int 
 
 
 # Module-level log buffer shared between _configure_logging and _run_main.
-_log_buffer: "LogBuffer | None" = None
+_log_buffer: LogBuffer | None = None
 
 
-def _kalshi_credentials(config: "Any") -> tuple[str, str]:
+def _kalshi_credentials(config: Any) -> tuple[str, str]:
     """Return (api_key, private_key_path) for the active Kalshi endpoint.
 
     When base_url contains "demo", uses demo_api_key / demo_private_key_path so
@@ -131,7 +136,7 @@ def _kalshi_credentials(config: "Any") -> tuple[str, str]:
     return config.kalshi.api_key, config.kalshi.private_key_path
 
 
-def _get_or_create_log_buffer() -> "LogBuffer":
+def _get_or_create_log_buffer() -> LogBuffer:
     from freqpred.alerts.command_handlers import LogBuffer, install_log_buffer
 
     global _log_buffer
@@ -152,7 +157,12 @@ def main(ctx: click.Context) -> None:
     """freqpred — LLM-driven prediction market trading framework."""
     ctx.ensure_object(dict)
     config = load_config()
-    _configure_logging(config.log_level, log_file=config.log_file, log_backup_days=config.log_backup_days, log_module_levels=config.log_module_levels)
+    _configure_logging(
+        config.log_level,
+        log_file=config.log_file,
+        log_backup_days=config.log_backup_days,
+        log_module_levels=config.log_module_levels,
+    )
     ctx.obj["config"] = config
 
 
@@ -188,20 +198,21 @@ def run(ctx: click.Context, strategy: str, mode: str, bankroll: float | None) ->
 
 
 async def _run_main(config: object, strategy_name: str, mode: str) -> None:
-    from datetime import UTC, datetime as _datetime  # noqa: PLC0415
+    from datetime import UTC  # noqa: PLC0415
+    from datetime import datetime as _datetime
 
     _process_started_at = _datetime.now(UTC)
 
     import anthropic
+    from sqlalchemy import select
 
     import freqpred.ingestion.models  # noqa: F401
     import freqpred.metrics.models  # noqa: F401
-    import freqpred.signal.models  # noqa: F401
     import freqpred.rag.models  # noqa: F401
-
+    import freqpred.signal.models  # noqa: F401
     from freqpred.db import make_engine, make_session_factory
-    from freqpred.ingestion.scheduler import run_scheduler
     from freqpred.ingestion.realtime_scheduler import run_realtime_scheduler
+    from freqpred.ingestion.scheduler import run_scheduler
     from freqpred.llm.audit import LLMBudgetExceededError
     from freqpred.llm.client import LLMClient, LLMConsecutiveErrorsError
     from freqpred.markets.kalshi import KalshiClient
@@ -211,8 +222,6 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     from freqpred.signal.llm import PROMPT_VERSION
     from freqpred.signal.pipeline import SignalPipeline
     from freqpred.strategy.loader import load_strategy
-
-    from sqlalchemy import select
 
     if not config.database.url:
         click.echo("ERROR: DATABASE_URL not configured.", err=True)
@@ -253,10 +262,10 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         max_scheduled_interval_hours=config.signal.max_scheduled_interval_hours,
     )
 
-    from freqpred.alerts.telegram import TelegramSender
-    from freqpred.alerts.telegram_commands import TelegramCommandHandler
     from freqpred.alerts.discord import DiscordSender
     from freqpred.alerts.dispatcher import AlertDispatcher
+    from freqpred.alerts.telegram import TelegramSender
+    from freqpred.alerts.telegram_commands import TelegramCommandHandler
 
     senders = []
     telegram = TelegramSender(
@@ -301,8 +310,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         mode=mode,
         llm_client=llm_client,
     )
-    from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
     from freqpred.trading.order_manager import OrderManager
+    from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
     runtime_telemetry = RuntimeTelemetry(
         session_factory=session_factory,
         freshness_specs=build_freshness_specs(
@@ -541,7 +550,11 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                             f"direction={signal.direction} "
                             f"signal_id={signal.id}"
                         )
-                        if mode == "signal-only" and signal.edge >= strategy.config.min_edge and signal.direction != "SKIP":
+                        if (
+                            mode == "signal-only"
+                            and signal.edge >= strategy.config.min_edge
+                            and signal.direction != "SKIP"
+                        ):
                             await alert_dispatcher.signal_alert(signal, market)
                         if (
                             order_manager is not None
@@ -613,7 +626,8 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     ) as kalshi_client:
         if mode == "live":
             import structlog as _sl
-            from sqlalchemy import select, func
+            from sqlalchemy import func, select
+
             from freqpred.markets.models import PositionRow as _PositionRow
             _log = _sl.get_logger("freqpred.cli")
             balance = await kalshi_client.get_balance()
@@ -715,14 +729,15 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
 
         # Embed the API server inside run so it shares the live OrderManager.
         if config.dashboard.api_enabled:
-            import freqpred.alerts.models     # noqa: F401
-            import freqpred.ingestion.models  # noqa: F401
-            import freqpred.llm.models        # noqa: F401
-            import freqpred.rag.models        # noqa: F401
-            import freqpred.signal.models     # noqa: F401
-            import freqpred.strategy.models   # noqa: F401
-            from freqpred.dashboard.api.app import create_app as _create_app  # noqa: PLC0415
             import uvicorn as _uvicorn  # noqa: PLC0415
+
+            import freqpred.alerts.models  # noqa: F401
+            import freqpred.ingestion.models  # noqa: F401
+            import freqpred.llm.models  # noqa: F401
+            import freqpred.rag.models  # noqa: F401
+            import freqpred.signal.models  # noqa: F401
+            import freqpred.strategy.models  # noqa: F401
+            from freqpred.dashboard.api.app import create_app as _create_app  # noqa: PLC0415
 
             _dash_app = _create_app(
                 session_factory=session_factory,
@@ -885,7 +900,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             from freqpred.strategy.config_store import save_overrides  # noqa: PLC0415
             _prev_strategy = await get_strategy_name(_startup_session)
             if _prev_strategy is not None and _prev_strategy != strategy_name:
-                log.info(
+                structlog.get_logger("freqpred.cli").info(
                     "startup.strategy_changed",
                     prev=_prev_strategy,
                     current=strategy_name,
@@ -917,8 +932,9 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             open_live_positions = 0
             if mode == "live":
                 try:
-                    from freqpred.markets.models import PositionRow
                     from sqlalchemy import func as _func
+
+                    from freqpred.markets.models import PositionRow
                     async with session_factory() as _shutdown_session:
                         _result = await _shutdown_session.execute(
                             select(_func.count()).select_from(PositionRow).where(
@@ -983,11 +999,11 @@ async def _markets_list(
     max_days: float | None,
     skip_db: bool,
 ) -> None:
+    import freqpred.rag.models  # noqa: F401 — register DocumentMarketLinkRow with SQLAlchemy mapper
+    import freqpred.signal.models  # noqa: F401 — register SignalRow with SQLAlchemy mapper
     from freqpred.db import make_engine, make_session_factory
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.markets.repository import upsert_markets
-    import freqpred.signal.models  # noqa: F401 — register SignalRow with SQLAlchemy mapper
-    import freqpred.rag.models  # noqa: F401 — register DocumentMarketLinkRow with SQLAlchemy mapper
 
     _kalshi_api_key, _kalshi_pk_path = _kalshi_credentials(config)
     async with KalshiClient(
@@ -996,7 +1012,7 @@ async def _markets_list(
         private_key_path=_kalshi_pk_path,
     ) as client:
         click.echo(
-            f"Fetching markets from Kalshi"
+            "Fetching markets from Kalshi"
             + (f" [category={category}]" if category else "")
             + " ..."
         )
@@ -1007,8 +1023,8 @@ async def _markets_list(
         return
 
     # Apply optional client-side filters
-    from datetime import datetime, timezone
-    now = datetime.now(tz=timezone.utc)
+    from datetime import datetime
+    now = datetime.now(tz=UTC)
     if min_volume is not None:
         market_list = [m for m in market_list if m.volume_24h >= min_volume]
     if max_days is not None:
@@ -1101,21 +1117,20 @@ async def _ingestion_run(
     min_volume: float,
     dry_run: bool,
 ) -> None:
-    import freqpred.ingestion.models  # noqa: F401
-    import freqpred.metrics.models  # noqa: F401
-    import freqpred.signal.models     # noqa: F401
-    import freqpred.rag.models        # noqa: F401
-
-    import anthropic
     from datetime import UTC, datetime
 
+    import anthropic
     from sqlalchemy import select
 
+    import freqpred.ingestion.models  # noqa: F401
+    import freqpred.metrics.models  # noqa: F401
+    import freqpred.rag.models  # noqa: F401
+    import freqpred.signal.models  # noqa: F401
     from freqpred.db import make_engine, make_session_factory
     from freqpred.ingestion.catalyst_generator import CatalystGenerationError, generate_catalysts
-    from freqpred.llm.client import LLMClient
-    from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
+    from freqpred.ingestion.models import CatalystQueryRow
     from freqpred.ingestion.store import RawDocument, upsert_document
+    from freqpred.llm.client import LLMClient
     from freqpred.markets.models import MarketRow
     from freqpred.rag.embedder import make_embedder
 
@@ -1228,10 +1243,11 @@ async def _ingestion_run(
 
         # Run fetchers against each catalyst query.
         click.echo("\nFetching news...")
-        from freqpred.ingestion.fetchers import tavily as tavily_fetcher
+        from datetime import timedelta
+
         from freqpred.ingestion.fetchers import newsapi as newsapi_fetcher
         from freqpred.ingestion.fetchers import reddit as reddit_fetcher
-        from datetime import timedelta
+        from freqpred.ingestion.fetchers import tavily as tavily_fetcher
 
         raw_docs: list[RawDocument] = []
 
@@ -1320,7 +1336,10 @@ def signal() -> None:
 @signal.command(name="analyze")
 @click.option("--market-id", required=True, help="Kalshi market ID to analyze.")
 @click.option("--force", is_flag=True, default=False, help="Bypass hash deduplication and force a new LLM call.")
-@click.option("--strategy", "strategy_name", default="PoliticsEdgeStrategy", show_default=True, help="Strategy to load (determines factbase allowlist and other config).")
+@click.option(
+    "--strategy", "strategy_name", default="PoliticsEdgeStrategy", show_default=True,
+    help="Strategy to load (determines factbase allowlist and other config).",
+)
 @click.pass_context
 def signal_analyze(ctx: click.Context, market_id: str, force: bool, strategy_name: str) -> None:
     """One-shot signal analysis for a specific market."""
@@ -1328,14 +1347,14 @@ def signal_analyze(ctx: click.Context, market_id: str, force: bool, strategy_nam
     asyncio.run(_signal_analyze(config, market_id, force=force, strategy_name=strategy_name))
 
 
-async def _signal_analyze(config: object, market_id: str, *, force: bool = False, strategy_name: str = "PoliticsEdgeStrategy") -> None:
+async def _signal_analyze(
+    config: object, market_id: str, *, force: bool = False, strategy_name: str = "PoliticsEdgeStrategy"
+) -> None:
     import anthropic
-
-    import freqpred.signal.models  # noqa: F401
-    import freqpred.rag.models  # noqa: F401
-
     from sqlalchemy import select
 
+    import freqpred.rag.models  # noqa: F401
+    import freqpred.signal.models  # noqa: F401
     from freqpred.db import make_engine, make_session_factory
     from freqpred.llm.client import LLMClient
     from freqpred.markets.models import Market, MarketRow
@@ -1472,12 +1491,13 @@ async def _positions_list(
     strategy: str | None,
     days: float | None,
 ) -> None:
-    from datetime import UTC, datetime as _datetime, timedelta  # noqa: PLC0415
-    import freqpred.signal.models  # noqa: F401
-    import freqpred.rag.models     # noqa: F401
+    from datetime import UTC, timedelta  # noqa: PLC0415
+    from datetime import datetime as _datetime
 
     from sqlalchemy import select
 
+    import freqpred.rag.models  # noqa: F401
+    import freqpred.signal.models  # noqa: F401
     from freqpred.db import make_engine, make_session_factory
     from freqpred.markets.models import PositionRow
 
@@ -1509,7 +1529,7 @@ async def _positions_list(
 
     now = _datetime.now(tz=UTC)
 
-    def _fmt_held(r: "PositionRow") -> str:
+    def _fmt_held(r: PositionRow) -> str:
         end = r.exit_time if r.exit_time is not None else now
         if end.tzinfo is None:
             end = end.replace(tzinfo=UTC)
@@ -1563,12 +1583,12 @@ def positions_resolve(ctx: click.Context, position_id: str, resolution: str) -> 
 
 
 async def _positions_resolve(config: object, position_id: str, resolution: str) -> None:
-    import freqpred.signal.models  # noqa: F401
-    import freqpred.rag.models     # noqa: F401
-
     import uuid as _uuid
+
     from sqlalchemy import select
 
+    import freqpred.rag.models  # noqa: F401
+    import freqpred.signal.models  # noqa: F401
     from freqpred.db import make_engine, make_session_factory
     from freqpred.markets.models import PositionRow
     from freqpred.trading import ledger
@@ -1655,9 +1675,8 @@ def metrics_calibration(ctx: click.Context, days: int | None, period: str | None
 
 
 async def _metrics_calibration(config: object, lookback_days: int | None = None) -> None:
+    import freqpred.rag.models  # noqa: F401
     import freqpred.signal.models  # noqa: F401
-    import freqpred.rag.models     # noqa: F401
-
     from freqpred.db import make_engine, make_session_factory
     from freqpred.metrics.calibration import compute_calibration
 
@@ -1738,9 +1757,8 @@ async def _metrics_source_calibration(
     lookback_days: int | None = None,
     min_docs: int = 50,
 ) -> None:
+    import freqpred.rag.models  # noqa: F401
     import freqpred.signal.models  # noqa: F401
-    import freqpred.rag.models     # noqa: F401
-
     from freqpred.db import make_engine, make_session_factory
     from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
 
@@ -1815,9 +1833,8 @@ async def _report_digest(config: object, *, send: bool, trading_mode: str = "pap
 
     import freqpred.ingestion.models  # noqa: F401
     import freqpred.metrics.models  # noqa: F401
-    import freqpred.signal.models     # noqa: F401
-    import freqpred.rag.models        # noqa: F401
-
+    import freqpred.rag.models  # noqa: F401
+    import freqpred.signal.models  # noqa: F401
     from freqpred.db import make_engine, make_session_factory
     from freqpred.llm.client import LLMClient
     from freqpred.metrics.reporting import generate_daily_digest
@@ -1877,8 +1894,8 @@ def alerts_test(ctx: click.Context, channel: str) -> None:
 
 
 async def _alerts_test(config: object, channel: str) -> None:
-    from freqpred.alerts.telegram import TelegramSender
     from freqpred.alerts.discord import DiscordSender
+    from freqpred.alerts.telegram import TelegramSender
 
     test_msg = "freqpred alert test — if you see this, alerts are working."
 

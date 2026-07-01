@@ -4,17 +4,21 @@ All HTTP calls are mocked — no real network calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.fetchers.tv_archive import _strip_highlight_markers, _build_filter_map, fetch
+from freqpred.ingestion.fetchers.tv_archive import (
+    _build_filter_map,
+    _strip_highlight_markers,
+    fetch,
+)
 from freqpred.ingestion.store import RawDocument
 
 _QUERY = 'trump AND ("communist" OR "communism")'
-_NOW = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
-_CLOSE_TIME = datetime(2026, 3, 30, 0, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 3, 20, 12, 0, 0, tzinfo=UTC)
+_CLOSE_TIME = datetime(2026, 3, 30, 0, 0, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +94,7 @@ def test_strip_highlight_markers_no_markers():
 
 
 def test_build_filter_map_uses_close_time():
-    close = datetime(2026, 3, 30, tzinfo=timezone.utc)
+    close = datetime(2026, 3, 30, tzinfo=UTC)
     fm = _build_filter_map(close)
     assert fm["language"] == {"English": "inc"}
     assert "collection" in fm
@@ -168,7 +172,7 @@ async def test_fetch_parses_broadcast_date():
     with patch("freqpred.ingestion.fetchers.tv_archive.httpx.AsyncClient", return_value=client):
         docs = await fetch(_QUERY)
 
-    assert docs[0].published_at == datetime(2026, 3, 15, tzinfo=timezone.utc)
+    assert docs[0].published_at == datetime(2026, 3, 15, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

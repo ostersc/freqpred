@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import select
@@ -92,7 +92,7 @@ async def should_skip_scheduled(
         return False
 
     last_hash, last_created_at = row
-    age_hours = (datetime.now(tz=timezone.utc) - last_created_at).total_seconds() / 3600
+    age_hours = (datetime.now(tz=UTC) - last_created_at).total_seconds() / 3600
 
     if age_hours >= max_interval_hours:
         return False
@@ -138,7 +138,7 @@ async def scheduled_cooldown_remaining(
         return 0.0
 
     confidence, created_at = row
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     age_hours = (now - created_at).total_seconds() / 3600
 
     if confidence < _VERY_LOW_CONF_THRESHOLD:

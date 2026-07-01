@@ -5,12 +5,11 @@ All HTTP calls are mocked — no real Telegram API requests made.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from freqpred.alerts.telegram_commands import TelegramCommandHandler
-
 
 # ---------------------------------------------------------------------------
 # Helpers

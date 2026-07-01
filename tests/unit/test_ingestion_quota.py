@@ -1,7 +1,7 @@
 """Unit tests for freqpred.ingestion.quota."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -46,20 +46,20 @@ async def test_increment_window_count_executes_upsert():
 
 
 def test_current_window_midnight_slot():
-    now = datetime(2026, 3, 18, 3, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 18, 3, 0, 0, tzinfo=UTC)
     d, slot = current_window(now)
     assert d == date(2026, 3, 18)
     assert slot == 0
 
 
 def test_current_window_noon_slot():
-    now = datetime(2026, 3, 18, 14, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 18, 14, 0, 0, tzinfo=UTC)
     d, slot = current_window(now)
     assert d == date(2026, 3, 18)
     assert slot == 1
 
 
 def test_current_window_boundary_noon():
-    now = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
     _, slot = current_window(now)
     assert slot == 1

@@ -28,14 +28,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.ingestion.backoff import record_rate_limit, record_success, tick_and_load
 from freqpred.ingestion.cursors import get_cursor, set_cursor
-from freqpred.ingestion.fetchers import tv_chyron as tv_chyron_fetcher
 from freqpred.ingestion.fetchers import truthsocial as truthsocial_fetcher
+from freqpred.ingestion.fetchers import tv_chyron as tv_chyron_fetcher
 from freqpred.ingestion.fetchers.truthsocial import (
     LoginErrorException as TruthSocialLoginError,
+)
+from freqpred.ingestion.fetchers.truthsocial import (
     patch_api_for_block_detection,
 )
 from freqpred.ingestion.scheduler import _load_active_market_queries
-from freqpred.ingestion.store import DocumentSkipped, UpsertStatus, link_document_to_market, upsert_document
+from freqpred.ingestion.store import (
+    DocumentSkipped,
+    UpsertStatus,
+    link_document_to_market,
+    upsert_document,
+)
 from freqpred.rag.embedder import LocalEmbedder
 
 if TYPE_CHECKING:
@@ -58,9 +65,9 @@ async def run_realtime_cycle(
     truthsocial_enabled: bool = False,
     truthsocial_username: str = "",
     truthsocial_password: str = "",
-    truthsocial_accounts: "list[TruthSocialAccountConfig] | None" = None,
+    truthsocial_accounts: list[TruthSocialAccountConfig] | None = None,
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
-    telemetry: "RuntimeTelemetry | None" = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> dict[str, int]:
     """Run one real-time ingestion cycle (chyrons + Truth Social account feeds).
 
@@ -209,7 +216,9 @@ async def run_realtime_cycle(
             except TruthSocialLoginError as exc:
                 truthsocial_login_failed = True
                 skip_cycles = await record_rate_limit(session, "truthsocial")
-                from freqpred.ingestion.fetchers.truthsocial import TruthSocialBlockedError  # noqa: PLC0415
+                from freqpred.ingestion.fetchers.truthsocial import (
+                    TruthSocialBlockedError,  # noqa: PLC0415
+                )
 
                 if isinstance(exc, TruthSocialBlockedError):
                     log.warning(
@@ -254,9 +263,9 @@ async def run_realtime_scheduler(
     truthsocial_enabled: bool = False,
     truthsocial_username: str = "",
     truthsocial_password: str = "",
-    truthsocial_accounts: "list[TruthSocialAccountConfig] | None" = None,
+    truthsocial_accounts: list[TruthSocialAccountConfig] | None = None,
     domain_blacklist: frozenset[str] = frozenset({"kalshi.com"}),
-    telemetry: "RuntimeTelemetry | None" = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> None:
     """Async loop: runs run_realtime_cycle every *interval_seconds*.
 

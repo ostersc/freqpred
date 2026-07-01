@@ -99,7 +99,7 @@ class AlgoExampleStrategy(IAlgoStrategy):
         min_days_to_close=0.5,
     )
 
-    def populate_indicators(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+    def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """Per-candle oscillation: wide range but small body (price moved but reversed).
 
         range_ = high - low (total swing)
@@ -111,7 +111,7 @@ class AlgoExampleStrategy(IAlgoStrategy):
         df["body"] = (df["close"] - df["open"]).abs()
         return df
 
-    def populate_exit_trend(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+    def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """Exit on asymmetric ceiling or thesis-displacement + choppiness for 3 consecutive candles.
 
         Signal 1 — Asymmetric ceiling:
@@ -164,5 +164,5 @@ class AlgoExampleStrategy(IAlgoStrategy):
         )
         return df
 
-    def should_trade(self, signal: "Signal", market: "Market") -> bool:
+    def should_trade(self, signal: Signal, market: Market) -> bool:
         return super().should_trade(signal, market)

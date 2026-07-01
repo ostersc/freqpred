@@ -13,7 +13,6 @@ import pytest
 from freqpred.alerts.metrics_handlers import register_metrics_commands
 from freqpred.alerts.telegram_commands import TelegramCommandHandler
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

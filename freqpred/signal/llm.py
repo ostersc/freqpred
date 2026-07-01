@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -401,7 +401,7 @@ def _build_base_rate_block(series_history: dict) -> list[str]:
 
 
 def _build_factbase_block(
-    data: "FactbasePhraseData",
+    data: FactbasePhraseData,
     days_to_close: float,
     days_elapsed: float | None,
     total_window_days: float | None,
@@ -492,14 +492,14 @@ def build_prompt(
     market: Market,
     docs: list[Document],
     series_history: dict | None = None,
-    phrase_data: "FactbasePhraseData | None" = None,
+    phrase_data: FactbasePhraseData | None = None,
 ) -> str:
     """Build the user prompt for signal analysis.
 
     Contains only per-market data: market context, optional historical base
     rate block, and retrieved evidence. All instructions live in SYSTEM_PROMPT.
     """
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     days_to_close = (market.close_time - now).total_seconds() / 86400
     days_elapsed = (
         (now - market.open_time).total_seconds() / 86400

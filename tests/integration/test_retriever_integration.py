@@ -11,26 +11,26 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from freqpred.db import Base, make_engine, make_session_factory
-from freqpred.markets.models import MarketRow
-from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
-from freqpred.rag.retriever import compute_retrieval_hash, retrieve
-from freqpred.rag.embedder import LocalEmbedder
+import freqpred.llm.models  # noqa: F401
 
 # Import all models so Base.metadata is fully populated before create_all.
 import freqpred.markets.models  # noqa: F401
 import freqpred.metrics.models  # noqa: F401
-import freqpred.signal.models   # noqa: F401
-import freqpred.llm.models      # noqa: F401
+import freqpred.signal.models  # noqa: F401
+from freqpred.db import Base, make_engine, make_session_factory
+from freqpred.markets.models import MarketRow
+from freqpred.rag.embedder import LocalEmbedder
+from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
+from freqpred.rag.retriever import compute_retrieval_hash, retrieve
 
-NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
 FUTURE = NOW + timedelta(days=30)
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",

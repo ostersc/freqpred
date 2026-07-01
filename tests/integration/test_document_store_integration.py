@@ -10,7 +10,7 @@ Run with:
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,18 +23,18 @@ pytestmark = pytest.mark.skipif(
     reason="Integration tests require DATABASE_URL pointing to freqpred_test",
 )
 
+import freqpred.llm.models  # noqa: F401
+
+# Import all models so Base.metadata is fully populated before create_all.
+import freqpred.markets.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.ingestion.store import RawDocument, upsert_document
 from freqpred.rag.embedder import LocalEmbedder
 from freqpred.rag.models import DocumentRow
 
-# Import all models so Base.metadata is fully populated before create_all.
-import freqpred.markets.models  # noqa: F401
-import freqpred.metrics.models  # noqa: F401
-import freqpred.signal.models   # noqa: F401
-import freqpred.llm.models      # noqa: F401
-
-NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
 FAKE_EMBEDDING = [0.1] * 384
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",

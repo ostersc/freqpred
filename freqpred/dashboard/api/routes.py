@@ -14,9 +14,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from freqpred.ingestion.models import FactbasePhraseRow
 from freqpred.llm.audit import get_daily_spend_usd
 from freqpred.llm.models import LLMQueryRow
-from freqpred.ingestion.models import FactbasePhraseRow
 from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.metrics.calibration import (
@@ -34,7 +34,11 @@ from freqpred.runtime.telemetry import (
     list_service_heartbeats,
 )
 from freqpred.signal.models import SignalRow
-from freqpred.trading.ledger import get_llm_spend_time_series, get_pnl_time_series, get_portfolio_summary
+from freqpred.trading.ledger import (
+    get_llm_spend_time_series,
+    get_pnl_time_series,
+    get_portfolio_summary,
+)
 from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
 
 from .schemas import (
@@ -47,8 +51,10 @@ from .schemas import (
     CalibrationResponse,
     CalibrationTimeSeriesPointOut,
     CalibrationTimeSeriesResponse,
+    ChangelogStatusOut,
     CircuitBreakerStateOut,
     DocumentLinkOut,
+    ExchangeStatusOut,
     HealthResponse,
     KalshiApiTierOut,
     LedgerResponse,
@@ -61,12 +67,13 @@ from .schemas import (
     MarketListResponse,
     MarketOut,
     PendingOrderSummary,
+    PnLDayOut,
+    PnLTimeSeriesResponse,
     PositionDetailOut,
     PositionListResponse,
     PositionOut,
-    PnLDayOut,
-    PnLTimeSeriesResponse,
     PromptVersionStart,
+    ServiceFreshnessOut,
     SettlementSourceSummaryOut,
     SettlementSourceSummaryResponse,
     SignalAssessmentOut,
@@ -79,9 +86,6 @@ from .schemas import (
     StrategyConfigUpdateRequest,
     StrategyDecisionListResponse,
     StrategyDecisionOut,
-    ChangelogStatusOut,
-    ExchangeStatusOut,
-    ServiceFreshnessOut,
     SystemHealthResponse,
     WebSocketStateOut,
 )
@@ -153,7 +157,7 @@ def _runtime_telemetry(request: Request) -> RuntimeTelemetry | None:
     return telemetry if isinstance(telemetry, RuntimeTelemetry) else None
 
 
-def _kalshi_client(request: Request) -> "KalshiClient | None":
+def _kalshi_client(request: Request) -> KalshiClient | None:
     from freqpred.markets.kalshi import KalshiClient as _KC  # noqa: PLC0415
     client = getattr(request.app.state, "kalshi_client", None)
     return client if isinstance(client, _KC) else None
@@ -520,8 +524,8 @@ async def get_signal(
 ) -> SignalDetailOut:
     try:
         uid = _uuid.UUID(signal_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Signal not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Signal not found") from exc
 
     result = (
         await session.execute(
@@ -600,8 +604,8 @@ async def get_position(
 ) -> PositionOut:
     try:
         uid = _uuid.UUID(position_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Position not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Position not found") from exc
 
     row = (
         await session.execute(select(PositionRow).where(PositionRow.id == uid))
@@ -619,8 +623,8 @@ async def get_position_detail(
 ) -> PositionDetailOut:
     try:
         uid = _uuid.UUID(position_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Position not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Position not found") from exc
 
     pos_row = (
         await session.execute(select(PositionRow).where(PositionRow.id == uid))
@@ -693,8 +697,8 @@ async def force_exit_position(
         )
     try:
         uid = _uuid.UUID(position_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Position not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Position not found") from exc
 
     # Delegate all checks to the order manager — no preflight query here.
     try:
@@ -859,12 +863,8 @@ async def list_strategy_decisions(
 
     total = int((await session.execute(count_stmt)).scalar_one())
     rows = (await session.execute(stmt)).all()
-    distinct_strategies = [
-        s for s in (await session.execute(distinct_strategies_stmt)).scalars().all()
-    ]
-    distinct_exit_reasons = [
-        r for r in (await session.execute(distinct_exit_reasons_stmt)).scalars().all()
-    ]
+    distinct_strategies = list((await session.execute(distinct_strategies_stmt)).scalars().all())
+    distinct_exit_reasons = list((await session.execute(distinct_exit_reasons_stmt)).scalars().all())
 
     items = [
         _decision_row_to_out(
@@ -1821,6 +1821,7 @@ async def get_system_health(
     kalshi_client: Annotated["KalshiClient | None", Depends(_kalshi_client)],
 ) -> SystemHealthResponse:
     import httpx as _httpx  # noqa: PLC0415
+
     import freqpred.alerts.models  # noqa: F401 — ensure RunStateRow is registered  # noqa: PLC0415
     from freqpred.alerts.models import RunStateRow as _RunStateRow  # noqa: PLC0415
     from freqpred.trading.ledger import get_net_bankroll  # noqa: PLC0415
@@ -1978,7 +1979,9 @@ async def get_system_health(
         )
         kalshi_errors_last_hour = int(kalshi_errors_result.scalar_one())
 
-        from freqpred.runtime.models import KalshiChangelogStateRow as _ChangelogRow  # noqa: PLC0415
+        from freqpred.runtime.models import (
+            KalshiChangelogStateRow as _ChangelogRow,  # noqa: PLC0415
+        )
         _cl_result = await session.execute(select(_ChangelogRow).where(_ChangelogRow.id == 1))
         _cl_row = _cl_result.scalar_one_or_none()
         if _cl_row is not None:

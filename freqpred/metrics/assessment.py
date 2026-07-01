@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -43,10 +43,14 @@ Guidelines:
 - Be conservative when sample sizes are small, mixed, or noisy.
 - Prefer neutral output when the data is weak or conflicting.
 - Exact-family history is more important than broad analogies.
-- If source quality and similar-market history disagree, explain the conflict and stay closer to neutral unless one side clearly has stronger data.
+- If source quality and similar-market history disagree, explain the conflict \
+and stay closer to neutral unless one side clearly has stronger data.
 - Treat this as a sizing-confidence judgment, not a market-prediction task.
-- If you populate the warnings field with any concern, your trust_score MUST be ≤ 0.5. Warnings and a trust_score above 0.5 are contradictory — do not do both.
-- Unusually large edge (> 0.4) is a warning sign of stale/illiquid pricing, not genuine alpha. Treat it as a reason to stay neutral or go below 0.5 unless you have strong calibration data that supports the edge.
+- If you populate the warnings field with any concern, your trust_score MUST \
+be ≤ 0.5. Warnings and a trust_score above 0.5 are contradictory — do not do both.
+- Unusually large edge (> 0.4) is a warning sign of stale/illiquid pricing, not \
+genuine alpha. Treat it as a reason to stay neutral or go below 0.5 unless you \
+have strong calibration data that supports the edge.
 
 Call the submit_assessment tool with your judgment:
 - trust_score: 0.0–1.0; 0.5 = neutral, < 0.5 = lower confidence, > 0.5 = higher confidence
@@ -159,8 +163,8 @@ def _parse_assessment_response(content: str) -> dict[str, Any]:
 
 async def _load_source_breakdown(
     session: AsyncSession,
-    signal: "Signal",
-    market: "Market",
+    signal: Signal,
+    market: Market,
 ) -> list[dict[str, Any]]:
     counts_result = await session.execute(
         select(
@@ -218,7 +222,7 @@ async def _load_source_breakdown(
 
 async def _load_similar_market_summary(
     session: AsyncSession,
-    market: "Market",
+    market: Market,
     strategy_name: str,
     *,
     min_signals: int,
@@ -368,14 +372,14 @@ async def _load_similar_market_summary(
 
 
 def _build_prompt_payload(
-    signal: "Signal",
-    market: "Market",
+    signal: Signal,
+    market: Market,
     strategy_name: str,
     source_breakdown: list[dict[str, Any]],
     similar_market_summary: dict[str, Any],
     scale_min: float = 0.80,
     scale_max: float = 1.20,
-    phrase_data: "FactbasePhraseData | None" = None,
+    phrase_data: FactbasePhraseData | None = None,
 ) -> dict[str, Any]:
     weighted_delta = None
     if source_breakdown:
@@ -389,9 +393,12 @@ def _build_prompt_payload(
     if exact_subset.get("small_sample"):
         notes.append("Exact-question history is a small sample.")
     if source_breakdown and similar_market_summary.get("available"):
-        notes.append("Weight family-level history more than the exact-question subset unless the exact sample is substantial.")
+        notes.append(
+            "Weight family-level history more than the exact-question subset "
+            "unless the exact sample is substantial."
+        )
 
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     days_to_close = (market.close_time - now).total_seconds() / 86400
 
     # Show the LLM what its trust_score output actually does to position size.
@@ -407,11 +414,20 @@ def _build_prompt_payload(
     }
 
     return {
-        "task": "Assess whether the trade should be sized down, left neutral, or sized up relative to the base Kelly target.",
+        "task": (
+            "Assess whether the trade should be sized down, left neutral, "
+            "or sized up relative to the base Kelly target."
+        ),
         "sizing_scale": {
-            "description": "Your trust_score maps to a position-size multiplier via linear interpolation. Use this table to calibrate your output.",
+            "description": (
+                "Your trust_score maps to a position-size multiplier via linear "
+                "interpolation. Use this table to calibrate your output."
+            ),
             "score_to_multiplier_examples": score_examples,
-            "neutral_dead_band": "Scores between 0.45 and 0.55 will display as 'neutral' — reserve values outside this range for cases where you have meaningful signal.",
+            "neutral_dead_band": (
+                "Scores between 0.45 and 0.55 will display as 'neutral' — reserve "
+                "values outside this range for cases where you have meaningful signal."
+            ),
         },
         "market": {
             "market_id": market.id,
@@ -438,7 +454,11 @@ def _build_prompt_payload(
             "volume_24h": market.volume_24h,
             "open_interest": market.open_interest,
             "price_updated_at": market.price_updated_at.isoformat(),
-            "note": "Wide spread, very low volume_24h, or small book depth (yes_bid_size/yes_ask_size) suggests thin/illiquid pricing — a large edge in this context is likely artificial.",
+            "note": (
+                "Wide spread, very low volume_24h, or small book depth "
+                "(yes_bid_size/yes_ask_size) suggests thin/illiquid pricing — "
+                "a large edge in this context is likely artificial."
+            ),
         },
         "source_quality_summary": {
             "lookback_days": _LOOKBACK_DAYS,
@@ -491,8 +511,8 @@ def _row_to_assessment(row: SignalAssessmentRow) -> SignalAssessment:
 
 async def _load_prior_assessment_by_hash(
     session: AsyncSession,
-    signal: "Signal",
-    market: "Market",
+    signal: Signal,
+    market: Market,
 ) -> SignalAssessmentRow | None:
     """Return the most recent non-neutral assessment for the same retrieval_hash on this market.
 
@@ -516,12 +536,12 @@ async def _load_prior_assessment_by_hash(
 
 async def assess_signal_context(
     session: AsyncSession,
-    signal: "Signal",
-    market: "Market",
-    strategy: "IPredictionStrategy",
-    llm_client: "LLMClient",
+    signal: Signal,
+    market: Market,
+    strategy: IPredictionStrategy,
+    llm_client: LLMClient,
     judgment_model: str,
-    phrase_data: "FactbasePhraseData | None" = None,
+    phrase_data: FactbasePhraseData | None = None,
 ) -> SignalAssessment:
     """Return and persist one signal assessment row for trade sizing."""
     source_breakdown = await _load_source_breakdown(session, signal, market)

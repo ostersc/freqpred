@@ -12,7 +12,12 @@ import anthropic
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from freqpred.llm.audit import LLMBudgetExceededError, calculate_cost, get_daily_spend_usd, log_llm_query
+from freqpred.llm.audit import (
+    LLMBudgetExceededError,
+    calculate_cost,
+    get_daily_spend_usd,
+    log_llm_query,
+)
 from freqpred.llm.models import LLMResponse
 
 log = structlog.get_logger(__name__)
@@ -129,11 +134,11 @@ class LLMClient:
 
         start = time.monotonic()
 
-        create_kwargs: dict = dict(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        create_kwargs: dict = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
         if system:
             if cache_system:
                 create_kwargs["system"] = [

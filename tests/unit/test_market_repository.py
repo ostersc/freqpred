@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from freqpred.markets.models import Market
 from freqpred.markets.repository import upsert_market, upsert_markets
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -16,22 +15,22 @@ from freqpred.markets.repository import upsert_market, upsert_markets
 
 def _make_market(**overrides) -> Market:
     now = datetime.now(UTC)
-    defaults = dict(
-        id="KXPRES-25-DEM",
-        platform="kalshi",
-        question="Will the Dem candidate win?",
-        category="politics",
-        close_time=now + timedelta(days=30),
-        yes_bid=0.45,
-        yes_ask=0.47,
-        mid_price=0.46,
-        volume_24h=1000.0,
-        open_interest=5000.0,
-        last_fetched_at=now,
-        price_updated_at=now,
-        metadata_fetched_at=now,
-        metadata={"event_ticker": "KXPRES-25"},
-    )
+    defaults = {
+        "id": "KXPRES-25-DEM",
+        "platform": "kalshi",
+        "question": "Will the Dem candidate win?",
+        "category": "politics",
+        "close_time": now + timedelta(days=30),
+        "yes_bid": 0.45,
+        "yes_ask": 0.47,
+        "mid_price": 0.46,
+        "volume_24h": 1000.0,
+        "open_interest": 5000.0,
+        "last_fetched_at": now,
+        "price_updated_at": now,
+        "metadata_fetched_at": now,
+        "metadata": {"event_ticker": "KXPRES-25"},
+    }
     return Market(**{**defaults, **overrides})
 
 

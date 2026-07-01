@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -83,7 +83,7 @@ async def fetch(
     Returns:
         List of RawDocument objects with source_type="news", source_name="GDELT".
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     sanitized = _sanitize_query(query)
     if sanitized is None:
@@ -127,7 +127,7 @@ async def fetch(
             return []
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
-                raise GDELTRateLimitError(f"GDELT rate limited (429)") from exc
+                raise GDELTRateLimitError("GDELT rate limited (429)") from exc
             log.warning("gdelt.fetch.error", query=query, status_code=exc.response.status_code)
             return []
         except Exception:
@@ -136,12 +136,12 @@ async def fetch(
 
         try:
             data = response.json()
-        except Exception:
+        except Exception as exc:
             # GDELT returns plain-text error messages with HTTP 200.
             # "querying too quickly" means we're rate-limited; raise so the scheduler backs off.
             body = response.text.strip()
             if "too quickly" in body.lower() or "rate limit" in body.lower():
-                raise GDELTRateLimitError(f"GDELT rate limited (plain-text): {body}")
+                raise GDELTRateLimitError(f"GDELT rate limited (plain-text): {body}") from exc
             log.warning("gdelt.fetch.non_json_response", query=query, body=body)
             return []
 
@@ -187,7 +187,7 @@ async def fetch(
         )
 
     docs: list[RawDocument] = []
-    for article, body in zip(candidates, bodies):
+    for article, body in zip(candidates, bodies, strict=True):
         if not body or not body.strip():
             log.debug("gdelt.fetch.skip", reason="empty_body", url=article.get("url"))
             continue
@@ -199,7 +199,7 @@ async def fetch(
         try:
             # GDELT seendate format: "20260101T120000Z"
             published_at = datetime.strptime(seen_date_str, "%Y%m%dT%H%M%SZ").replace(
-                tzinfo=timezone.utc
+                tzinfo=UTC
             )
         except (ValueError, TypeError):
             published_at = None

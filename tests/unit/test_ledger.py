@@ -5,11 +5,17 @@ All DB interactions are mocked — no external dependencies.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+# Ensure ORM relationships resolve
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.markets.models import Market, Position, PositionRow
 from freqpred.signal.models import Signal
 from freqpred.trading.ledger import (
@@ -22,14 +28,7 @@ from freqpred.trading.ledger import (
     update_position_excursions,
 )
 
-# Ensure ORM relationships resolve
-import freqpred.ingestion.models   # noqa: F401
-import freqpred.llm.models         # noqa: F401
-import freqpred.markets.models     # noqa: F401
-import freqpred.rag.models         # noqa: F401
-import freqpred.signal.models      # noqa: F401
-
-NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
 MARKET_ID = "MKT-ABC"
 SIGNAL_ID = str(uuid.uuid4())
 

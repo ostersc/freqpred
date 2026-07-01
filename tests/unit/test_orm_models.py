@@ -10,29 +10,28 @@ They verify:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-import pytest
-from sqlalchemy import inspect
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from freqpred.alerts.models import RunStateRow  # registers the table
+import freqpred.alerts.models  # noqa: F401 — registers RunStateRow
+import freqpred.runtime.models  # noqa: F401 — registers ServiceHeartbeatRow, RuntimeEventRow, KalshiChangelogStateRow
+import freqpred.strategy.models  # noqa: F401 — registers RuntimeConfigOverrideRow
 from freqpred.db import Base, make_engine, make_session_factory
-from freqpred.ingestion.models import ApiDailyCounterRow  # registers the table
 from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow, PositionRow
-from freqpred.metrics.models import SeriesOptionHistoryRow, SignalAssessmentRow, SourceQualityScoreRow
+from freqpred.metrics.models import (
+    SignalAssessmentRow,
+    SourceQualityScoreRow,
+)
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
-from freqpred.runtime.models import RuntimeEventRow, ServiceHeartbeatRow  # registers the tables
 from freqpred.signal.models import SignalRow
-from freqpred.strategy.models import RuntimeConfigOverrideRow  # registers the table
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
 MARKET_ID = "MARKET-001"
 SIGNAL_ID = uuid.uuid4()
 DOCUMENT_ID = uuid.uuid4()

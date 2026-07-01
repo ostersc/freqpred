@@ -37,8 +37,8 @@ def run_migrations(database_url: str) -> None:
 
     Safe to call on every startup — Alembic is a no-op when already up to date.
     """
-    from alembic.config import Config as AlembicConfig
     from alembic import command as alembic_command
+    from alembic.config import Config as AlembicConfig
 
     os.environ.setdefault("DATABASE_URL", database_url)
     cfg = AlembicConfig(str(_ALEMBIC_INI))

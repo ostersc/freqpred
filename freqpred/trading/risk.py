@@ -6,7 +6,7 @@ Strategy position_size() output is ALWAYS passed through here before any order.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -65,7 +65,7 @@ class RiskEngine:
             PositionRow.mode == mode,
         ]
         if not block_reentry_after_stoploss:
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=stoploss_cooldown_hours)
+            cutoff = datetime.now(UTC) - timedelta(hours=stoploss_cooldown_hours)
             loss_where.append(PositionRow.exit_time >= cutoff)
         loss_count_result = await session.execute(
             select(func.count(PositionRow.id)).where(*loss_where)
@@ -203,7 +203,7 @@ class RiskEngine:
     async def pre_signal_gate(
         self,
         session: AsyncSession,
-        market: "Market",
+        market: Market,
         mode: str,
         *,
         effective_max_spread: float,
@@ -347,7 +347,7 @@ class RiskEngine:
         capped_size = min(capped_size, remaining_total_capacity)
 
         # 6. Daily loss check
-        today_start = datetime.now(timezone.utc).replace(
+        today_start = datetime.now(UTC).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
         # If the operator acknowledged the circuit breaker via /start, measure
@@ -397,8 +397,8 @@ class RiskEngine:
         session: AsyncSession,
         bankroll: float,
         mode: str,
-        drawdown_reset_bankroll: "float | None" = None,
-        daily_loss_ack_at: "datetime | None" = None,
+        drawdown_reset_bankroll: float | None = None,
+        daily_loss_ack_at: datetime | None = None,
     ) -> None:
         """Query current state and raise TradingCircuitBreakerError if:
         - daily loss > config.max_daily_loss_pct * bankroll
@@ -417,7 +417,7 @@ class RiskEngine:
         re-trip it on the next cycle.
         """
         # Daily loss circuit breaker
-        today_start = datetime.now(timezone.utc).replace(
+        today_start = datetime.now(UTC).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
         loss_window_start = (

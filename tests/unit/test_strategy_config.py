@@ -10,17 +10,17 @@ from freqpred.strategy.defaults.tech import TechNewsStrategy
 
 
 def _minimal_config(**overrides) -> StrategyConfig:
-    defaults = dict(
-        name="TestStrategy",
-        min_edge=0.10,
-        min_confidence=0.70,
-        max_exposure_per_market=0.05,
-        kelly_fraction=0.25,
-        categories=[],
-        min_volume_24h=0.0,
-        max_days_to_close=90,
-        min_days_to_close=1,
-    )
+    defaults = {
+        "name": "TestStrategy",
+        "min_edge": 0.10,
+        "min_confidence": 0.70,
+        "max_exposure_per_market": 0.05,
+        "kelly_fraction": 0.25,
+        "categories": [],
+        "min_volume_24h": 0.0,
+        "max_days_to_close": 90,
+        "min_days_to_close": 1,
+    }
     defaults.update(overrides)
     return StrategyConfig(**defaults)
 

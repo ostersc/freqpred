@@ -20,7 +20,6 @@ from freqpred.markets.models import (
     Fill,
     KalshiEventSchema,
     KalshiEventsResponse,
-    KalshiMarketsResponse,
     KalshiSingleMarketResponse,
     Market,
     Order,

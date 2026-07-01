@@ -26,7 +26,7 @@ import html
 import re
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import structlog
@@ -86,7 +86,7 @@ def _parse_published(raw: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -131,7 +131,7 @@ async def fetch(
     if not subreddits:
         return []
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff = now - timedelta(days=_MAX_AGE_DAYS)
     headers = {"User-Agent": user_agent}
     docs: list[RawDocument] = []

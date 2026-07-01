@@ -25,7 +25,7 @@ import os
 import signal
 import subprocess
 import uuid as _uuid
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -35,8 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from freqpred.alerts.run_state import get_run_state, reset_drawdown, set_cb_state, set_run_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Awaitable
     from sqlalchemy.ext.asyncio import async_sessionmaker
+
     from freqpred.alerts.telegram_commands import TelegramCommandHandler
     from freqpred.config import Settings
 
@@ -123,9 +123,9 @@ def _clip(text: str) -> str:
 
 
 def register_system_commands(
-    cmd_handler: "TelegramCommandHandler",
-    session_factory: "async_sessionmaker[AsyncSession]",
-    config: "Settings",
+    cmd_handler: TelegramCommandHandler,
+    session_factory: async_sessionmaker[AsyncSession],
+    config: Settings,
     mode: str,
     strategy_name: str,
     log_buffer: LogBuffer | None = None,
@@ -328,7 +328,8 @@ def register_system_commands(
             pos, question = row
             time_open = "N/A"
             if pos.entry_time:
-                delta = datetime.now(timezone.utc) - pos.entry_time.replace(tzinfo=timezone.utc if pos.entry_time.tzinfo is None else pos.entry_time.tzinfo)
+                entry_tzinfo = UTC if pos.entry_time.tzinfo is None else pos.entry_time.tzinfo
+                delta = datetime.now(UTC) - pos.entry_time.replace(tzinfo=entry_tzinfo)
                 hours, rem = divmod(int(delta.total_seconds()), 3600)
                 mins = rem // 60
                 time_open = f"{hours}h {mins}m"
@@ -423,6 +424,7 @@ def register_system_commands(
 
     async def handle_count(chat_id: int, args: list[str]) -> str:
         from sqlalchemy import func
+
         from freqpred.markets.models import PositionRow
 
         async with session_factory() as session:
@@ -472,9 +474,9 @@ def register_system_commands(
                 entry = pos.entry_time
                 exit_ = pos.exit_time
                 if entry.tzinfo is None:
-                    entry = entry.replace(tzinfo=timezone.utc)
+                    entry = entry.replace(tzinfo=UTC)
                 if exit_.tzinfo is None:
-                    exit_ = exit_.replace(tzinfo=timezone.utc)
+                    exit_ = exit_.replace(tzinfo=UTC)
                 delta = exit_ - entry
                 hours, rem = divmod(int(delta.total_seconds()), 3600)
                 mins = rem // 60

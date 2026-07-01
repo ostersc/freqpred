@@ -8,11 +8,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, JSON, SmallInteger, Text, VARCHAR
+from sqlalchemy import JSON, VARCHAR, Boolean, Date, ForeignKey, Integer, SmallInteger, Text
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.schema import PrimaryKeyConstraint
-from sqlalchemy import text as sa_text
 
 from freqpred.db import Base
 
@@ -49,7 +49,7 @@ class CatalystRunRow(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default="now()"
     )
 
-    queries: Mapped[list["CatalystQueryRow"]] = relationship(
+    queries: Mapped[list[CatalystQueryRow]] = relationship(
         "CatalystQueryRow", back_populates="run", lazy="raise"
     )
 
@@ -76,7 +76,7 @@ class CatalystQueryRow(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default="now()"
     )
 
-    run: Mapped["CatalystRunRow"] = relationship(
+    run: Mapped[CatalystRunRow] = relationship(
         "CatalystRunRow", back_populates="queries"
     )
 

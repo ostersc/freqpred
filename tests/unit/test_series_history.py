@@ -3,12 +3,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from freqpred.metrics.series_history import (
-    MIN_SAMPLE,
     _SERIES_AGGREGATE_CODE,
     _upsert_series,
     refresh_series_history,
@@ -200,8 +199,6 @@ async def test_refresh_series_history_type_b_series():
     assert rows > 0
     kalshi.get_series_settled_history.assert_awaited_once_with("KXTRUMPPHOTO")
 
-    # Capture what was passed to the upsert
-    upsert_call_stmt = session.execute.call_args_list[2]
     # The upsert path went through; aggregate should be 2 YES / 1 NO (series_yes=2, series_no=1)
     # We verify indirectly that the aggregate row was built correctly by calling _upsert_series
     # directly below in a separate test.

@@ -4,7 +4,7 @@ LLMClient is mocked — no real API or DB calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,9 +14,12 @@ from freqpred.ingestion.store import RawDocument
 from freqpred.llm.client import LLMError
 from freqpred.llm.models import LLMResponse
 
-_NOW = datetime(2026, 4, 4, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 4, 4, 12, 0, 0, tzinfo=UTC)
 _QUERY = "Federal Reserve interest rate decision March 2026"
-_MARKET = "Will the Federal Reserve raise rates before June 2026?\nIf the Federal Reserve raises rates before June 2026 this market resolves Yes."
+_MARKET = (
+    "Will the Federal Reserve raise rates before June 2026?\n"
+    "If the Federal Reserve raises rates before June 2026 this market resolves Yes."
+)
 _LONG_BODY = "a" * 2000  # well over the 1000-char threshold
 
 

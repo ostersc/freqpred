@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import structlog
@@ -68,7 +68,7 @@ async def summarize(
     Returns:
         A single RawDocument with source_type="reddit_summary" and body as JSON.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     prompt_text = _build_prompt(docs, topic)
     synthetic_url = f"reddit_summary://{topic}/{uuid4()}"
 

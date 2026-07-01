@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import select, update
@@ -11,11 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.llm.client import LLMClient, LLMError
 from freqpred.markets.models import Market, MarketRow
+from freqpred.metrics.series_history import get_series_history_for_market
 from freqpred.rag.models import Document, DocumentMarketLinkRow
 from freqpred.rag.retriever import Embedder, compute_retrieval_hash, retrieve
-from freqpred.metrics.series_history import get_series_history_for_market
 from freqpred.signal.cache import scheduled_cooldown_remaining, should_skip, should_skip_scheduled
-from freqpred.signal.llm import PROMPT_VERSION, SIGNAL_ANALYSIS_TOOL, SYSTEM_PROMPT, build_prompt, parse_signal_response
+from freqpred.signal.llm import (
+    PROMPT_VERSION,
+    SIGNAL_ANALYSIS_TOOL,
+    SYSTEM_PROMPT,
+    build_prompt,
+    parse_signal_response,
+)
 from freqpred.signal.models import Signal, SignalRow
 
 log = structlog.get_logger(__name__)
@@ -194,8 +200,8 @@ class SignalPipeline:
 
             phrase_data = None
             if market.series_ticker and market.series_ticker in self._factbase_series_allowlist:
-                from freqpred.ingestion.models import FactbasePhraseRow
                 from freqpred.ingestion.fetchers.factbase import phrase_row_to_data
+                from freqpred.ingestion.models import FactbasePhraseRow
                 fb_result = await session.execute(
                     select(FactbasePhraseRow).where(FactbasePhraseRow.market_id == market.id)
                 )
@@ -293,7 +299,7 @@ class SignalPipeline:
 
         All writes use the caller's session; the caller is responsible for commit.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         signal_id = uuid.uuid4()
         estimated_probability = parsed["probability"]
         direction = parsed["direction"]
@@ -404,7 +410,7 @@ class SignalPipeline:
         if abs(market.mid_price - current.market_mid_at_signal) <= price_move_threshold:
             return None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         new_id = uuid.uuid4()
 
         if current.direction == "NO":

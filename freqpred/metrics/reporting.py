@@ -47,7 +47,7 @@ async def generate_daily_digest(
     yesterday_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # --- Run state + drawdown ---
-    from freqpred.alerts.run_state import get_run_state, get_drawdown_window  # noqa: PLC0415
+    from freqpred.alerts.run_state import get_drawdown_window, get_run_state  # noqa: PLC0415
     run_state = await get_run_state(session)
     drawdown_reset_at, drawdown_reset_bankroll = await get_drawdown_window(session)
 
@@ -181,7 +181,7 @@ async def generate_daily_digest(
 
     if backoff_rows:
         parts = []
-        for service, remaining, next_skip, tripped_at in backoff_rows:
+        for service, remaining, _next_skip, tripped_at in backoff_rows:
             tripped_str = tripped_at.strftime("%H:%MZ") if tripped_at else "unknown"
             if remaining > 0:
                 parts.append(f"{service} backed off ({remaining} cycles remaining, tripped {tripped_str})")
@@ -280,7 +280,7 @@ def _seconds_until_next(time_str: str, tz: ZoneInfo) -> float:
 
 async def run_digest_scheduler(
     session_factory: async_sessionmaker[AsyncSession],
-    llm_client: "LLMClient",
+    llm_client: LLMClient,
     alert_dispatcher: object,
     digest_time: str = "07:00",
     digest_timezone: str = "America/New_York",

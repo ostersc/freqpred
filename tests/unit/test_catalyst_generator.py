@@ -6,11 +6,14 @@ No real API calls are made.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.ingestion.catalyst_generator import (
     CatalystGenerationError,
     _build_prompt,
@@ -22,11 +25,7 @@ from freqpred.llm.models import LLMResponse
 from freqpred.markets.models import Market
 from freqpred.rag.models import Document
 
-import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.signal.models     # noqa: F401
-
-NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
 FUTURE = NOW + timedelta(days=14)
 FAKE_QUERIES = ["February CPI release 2026", "Fed Powell testimony", "January jobs report"]
 
@@ -272,7 +271,6 @@ class TestGenerateCatalysts:
     @pytest.mark.asyncio
     async def test_unparseable_response_raises_catalyst_error(self) -> None:
         """If LLM returns bad JSON, generate_catalysts raises CatalystGenerationError."""
-        import json
         session = _make_session(prior_run_row=None)
         # Return a valid LLMResponse but with unparseable content
         client = MagicMock()

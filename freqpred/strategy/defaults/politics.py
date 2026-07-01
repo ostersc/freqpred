@@ -80,7 +80,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         super().__init__()
         self._phrase_cache = phrase_cache
 
-    def populate_indicators(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+    def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """Per-candle oscillation: wide range but small body (price moved but reversed).
 
         range_ = high - low (total swing)
@@ -95,7 +95,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         df["body"] = body
         return df
 
-    def populate_exit_trend(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+    def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """Exit when outside thesis range AND choppy for 3 consecutive candles (15 min).
 
         Safe zone = [min(entry, p_est) - min_edge, max(entry, p_est) + min_edge].
@@ -135,7 +135,7 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         )
         return df
 
-    def is_market_interesting(self, market: "Market") -> bool:
+    def is_market_interesting(self, market: Market) -> bool:
         if not market.series_ticker or market.series_ticker not in self.config.factbase_series_allowlist:
             return False
         if self._phrase_cache is not None and not self._phrase_cache.is_ready(market.id):
