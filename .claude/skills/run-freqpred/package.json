@@ -1,0 +1,9 @@
+{
+  "name": "run-freqpred-driver",
+  "private": true,
+  "type": "module",
+  "description": "Playwright dependency for the driver.mjs REPL used by the run-freqpred skill. Not part of the freqpred app itself.",
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}
