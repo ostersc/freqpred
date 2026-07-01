@@ -292,10 +292,18 @@ export default function SystemHealth() {
                       {tier != null && (
                         <R label="API tier">
                           <span style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end' }}>
-                            <Badge kind={tier.api_usage_level?.toLowerCase() === 'advanced' ? 'pos' : 'info'}>
-                              {tier.api_usage_level ?? 'unknown'}
+                            {/* After a successful upgrade, suppress the stale "basic" badge until
+                                Kalshi's /account/limits propagates the change (can take a few
+                                seconds). Show "advanced" optimistically instead. */}
+                            <Badge kind={
+                              (upgradeTierMutation.isSuccess || tier.api_usage_level?.toLowerCase() === 'advanced')
+                                ? 'pos' : 'info'
+                            }>
+                              {upgradeTierMutation.isSuccess
+                                ? 'advanced'
+                                : (tier.api_usage_level ?? 'unknown')}
                             </Badge>
-                            {tier.can_upgrade && (
+                            {tier.can_upgrade && !upgradeTierMutation.isSuccess && (
                               <button
                                 className="btn btn-sm"
                                 disabled={upgradeTierMutation.isPending}
