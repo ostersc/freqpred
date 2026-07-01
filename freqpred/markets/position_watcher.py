@@ -546,28 +546,39 @@ class PositionWatcher:
         external actor) touch our position outside freqpred?" — for which only
         the net Kalshi position is informative.
 
-        For each open live PositionRow in DB:
-          - If Kalshi net contracts differ from DB contracts: update DB, log warning.
-          - If Kalshi has no position for this market (net=0): auto-close at
-            current market mid_price, log warning.
+        Kalshi reports one aggregate net position per (market, side), but
+        freqpred may hold several open PositionRows for the same market — one
+        per entry/signal (see CLAUDE.md data model). Rows are grouped by
+        market_id so the *sum* of DB rows is what gets compared against the
+        Kalshi net, never a single row in isolation:
+          - If Kalshi net is 0: no position remains on the exchange for this
+            market — auto-close every DB row for it at current market mid_price.
+          - If Kalshi net differs from the DB sum: adjust the most-recently
+            entered row by the delta, so sibling rows keep their own
+            fill-confirmed counts instead of one row being overwritten with
+            the full aggregate.
 
         For each Kalshi position with no matching DB record:
           - Log info and skip (manual trade placed outside freqpred).
         """
-        # Load DB live positions.
+        # Load DB live positions, oldest-first so "most recent" is rows[-1].
         result = await session.execute(
-            select(PositionRow).where(
+            select(PositionRow)
+            .where(
                 PositionRow.mode == "live",
                 PositionRow.status == "open",
             )
+            .order_by(PositionRow.entry_time)
         )
-        db_rows = {row.market_id: row for row in result.scalars().all()}
+        db_rows_by_market: dict[str, list[PositionRow]] = {}
+        for row in result.scalars().all():
+            db_rows_by_market.setdefault(row.market_id, []).append(row)
 
-        # Fetch Kalshi positions (always needed — kalshi-only logging runs even when db_rows empty).
+        # Fetch Kalshi positions (always needed — kalshi-only logging runs even when db_rows_by_market empty).
         kalshi_positions = await self._kalshi_client.get_positions()
         kalshi_net: dict[str, int] = {p.market_id: p.contracts for p in kalshi_positions}
 
-        if db_rows:
+        if db_rows_by_market:
             # Guard: if Kalshi returned 0 positions but we have open DB positions,
             # this is almost certainly a transient API error on reconnect — not a
             # genuine mass-settlement. Auto-closing here would be catastrophic (all
@@ -578,7 +589,7 @@ class PositionWatcher:
             if not kalshi_positions:
                 log.critical(
                     "position_watcher.reconcile_skipped_empty_response",
-                    db_open_count=len(db_rows),
+                    db_open_count=len(db_rows_by_market),
                     hint="get_positions returned 0 with open DB positions — likely transient; skipping auto-close",
                 )
                 return
@@ -586,7 +597,7 @@ class PositionWatcher:
             # Load current market mid_prices for auto-close exits.
             market_result = await session.execute(
                 select(MarketRow.id, MarketRow.mid_price).where(
-                    MarketRow.id.in_(db_rows.keys())
+                    MarketRow.id.in_(db_rows_by_market.keys())
                 )
             )
             market_mids: dict[str, float] = {
@@ -595,28 +606,45 @@ class PositionWatcher:
 
             # Sync DB → Kalshi.
             rows_to_auto_close: list[tuple[str, float]] = []  # (position_id, exit_price)
-            for market_id, row in db_rows.items():
+            for market_id, rows in db_rows_by_market.items():
                 net = kalshi_net.get(market_id, 0)
+                db_total = sum(row.contracts for row in rows)
                 if net == 0:
-                    # Kalshi has no position — auto-close at effective price.
+                    # Kalshi has no position — auto-close every row at effective price.
                     mid = market_mids.get(market_id, 0.0)
-                    exit_price = 1.0 - mid if row.direction == "NO" else mid
-                    rows_to_auto_close.append((str(row.id), exit_price))
-                    log.warning(
-                        "position_watcher.reconcile_auto_close",
-                        market_id=market_id,
-                        position_id=str(row.id),
-                        exit_price=exit_price,
-                    )
-                elif net != row.contracts:
+                    for row in rows:
+                        exit_price = 1.0 - mid if row.direction == "NO" else mid
+                        rows_to_auto_close.append((str(row.id), exit_price))
+                        log.warning(
+                            "position_watcher.reconcile_auto_close",
+                            market_id=market_id,
+                            position_id=str(row.id),
+                            exit_price=exit_price,
+                        )
+                elif net != db_total:
+                    newest = rows[-1]
+                    delta = net - db_total
+                    adjusted = newest.contracts + delta
                     log.warning(
                         "position_watcher.reconcile_contracts_updated",
                         market_id=market_id,
-                        position_id=str(row.id),
-                        db_contracts=row.contracts,
+                        position_id=str(newest.id),
+                        db_contracts=newest.contracts,
+                        db_total=db_total,
                         kalshi_contracts=net,
+                        adjusted_contracts=adjusted,
                     )
-                    row.contracts = net
+                    if adjusted > 0:
+                        newest.contracts = adjusted
+                    else:
+                        log.critical(
+                            "position_watcher.reconcile_drift_unresolved",
+                            market_id=market_id,
+                            position_id=str(newest.id),
+                            db_total=db_total,
+                            kalshi_contracts=net,
+                            hint="delta would make newest row's contracts <= 0 — needs manual review",
+                        )
 
             await session.commit()
 
@@ -633,7 +661,7 @@ class PositionWatcher:
 
         # Log Kalshi-only positions (manual trades outside freqpred).
         for market_id in kalshi_net:
-            if market_id not in db_rows:
+            if market_id not in db_rows_by_market:
                 log.info(
                     "position_watcher.reconcile_kalshi_only",
                     market_id=market_id,

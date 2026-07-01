@@ -950,7 +950,12 @@ class OrderManager:
                     )
 
                 # Reconcile against the exchange before any live close path so resolved
-                # manual exits use the actual net size held on Kalshi.
+                # manual exits use the actual net size held on Kalshi. Kalshi reports one
+                # aggregate net position per (market, side), but freqpred may hold several
+                # open PositionRows for the same market (one per entry/signal) — sibling
+                # rows' contracts must be subtracted out before comparing against this row
+                # alone, or force-exiting one row would inflate it to the full account
+                # total and oversell relative to what siblings still separately hold.
                 kalshi_positions = await self._kalshi_client.get_positions()
                 exchange_pos = next(
                     (
@@ -964,8 +969,35 @@ class OrderManager:
                         f"No live exchange position found for {position_id!r}; "
                         "reconciliation required before force exit"
                     )
-                if exchange_pos.contracts != pos_row.contracts:
-                    pos_row.contracts = exchange_pos.contracts
+                sibling_result = await session.execute(
+                    select(func.coalesce(func.sum(PositionRow.contracts), 0)).where(
+                        PositionRow.market_id == pos_row.market_id,
+                        PositionRow.direction == pos_row.direction,
+                        PositionRow.mode == "live",
+                        PositionRow.status == "open",
+                        PositionRow.id != pos_row.id,
+                    )
+                )
+                sibling_contracts = sibling_result.scalar_one()
+                this_row_share = exchange_pos.contracts - sibling_contracts
+                if this_row_share != pos_row.contracts:
+                    if this_row_share <= 0:
+                        raise ValueError(
+                            f"Exchange position for {pos_row.market_id!r} "
+                            f"({exchange_pos.contracts}) does not cover sibling open rows "
+                            f"({sibling_contracts}) plus {position_id!r}; "
+                            "reconciliation required before force exit"
+                        )
+                    logger.warning(
+                        "order_manager.force_exit_contracts_adjusted",
+                        position_id=position_id,
+                        market_id=pos_row.market_id,
+                        db_contracts=pos_row.contracts,
+                        sibling_contracts=sibling_contracts,
+                        exchange_contracts=exchange_pos.contracts,
+                        adjusted_contracts=this_row_share,
+                    )
+                    pos_row.contracts = this_row_share
 
                 # If settlement result is already known, close at payout price
                 if mkt_row.result is not None:

@@ -420,6 +420,91 @@ async def test_reconcile_updates_contracts_when_kalshi_differs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_multiple_rows_same_market_sums_before_comparing() -> None:
+    """Two open PositionRows for the same market must be summed before comparing
+    to Kalshi net — the drift adjustment must land on the newest row only, not
+    stomp an arbitrary row (or every row) with the full aggregate.
+
+    Regression test: the previous implementation keyed DB rows by market_id in
+    a plain dict, so a second row for the same market silently overwrote the
+    first in that dict, and the survivor got its .contracts set to the *full*
+    Kalshi aggregate while its sibling kept its own original count — inflating
+    the true total every time a market had more than one open entry.
+    """
+    watcher, kalshi_client, session_factory, _, _ = _make_watcher()
+
+    row_old = _make_position_row(market_id="MKT-X", contracts=4, status="open")
+    row_new = _make_position_row(market_id="MKT-X", contracts=1, status="open")
+    market_row = MagicMock()
+    market_row.id = "MKT-X"
+    market_row.mid_price = 0.55
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _make_db_result([row_old, row_new])
+        return _make_db_result([market_row])
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    # Kalshi reports 9 total for MKT-X (true fills sum to 5; the extra 4
+    # represents drift that must be absorbed by the newest row only).
+    kalshi_client.get_positions = AsyncMock(
+        return_value=[_make_kalshi_position("MKT-X", 9)]
+    )
+
+    async with session_factory() as session:
+        await watcher._detect_external_drift(session)
+
+    assert row_old.contracts == 4
+    assert row_new.contracts == 5
+
+
+@pytest.mark.asyncio
+async def test_reconcile_multiple_rows_same_market_auto_closes_all_when_net_zero() -> None:
+    """Kalshi net is 0 for a market with multiple open DB rows → every row for
+    that market is auto-closed, not just whichever row happened to survive a
+    dict collision."""
+    watcher, kalshi_client, session_factory, _, _ = _make_watcher()
+
+    row_a = _make_position_row(market_id="MKT-X", contracts=4, status="open")
+    row_b = _make_position_row(market_id="MKT-X", contracts=1, status="open")
+    market_row = MagicMock()
+    market_row.id = "MKT-X"
+    market_row.mid_price = 0.55
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _make_db_result([row_a, row_b])
+        return _make_db_result([market_row])
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    other_pos = MagicMock()
+    other_pos.market_id = "OTHER-MKT"
+    other_pos.contracts = 5
+    kalshi_client.get_positions = AsyncMock(return_value=[other_pos])
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        mock_ledger.close_position = AsyncMock()
+        async with session_factory() as session:
+            await watcher._detect_external_drift(session)
+
+    assert mock_ledger.close_position.await_count == 2
+    closed_ids = {c.args[1] for c in mock_ledger.close_position.call_args_list}
+    assert closed_ids == {str(row_a.id), str(row_b.id)}
+
+
+@pytest.mark.asyncio
 async def test_reconcile_closes_position_when_kalshi_has_zero() -> None:
     """Kalshi has positions for other markets but not for DB market → auto-close fires.
 

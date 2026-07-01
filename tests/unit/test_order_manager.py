@@ -1088,12 +1088,29 @@ async def test_no_position_blocks_yes_entry() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_force_exit_session(pos_row: MagicMock | None = None, mkt_row: MagicMock | None = None) -> AsyncMock:
-    """Return a mock AsyncSession for force_exit() that yields (pos_row, mkt_row)."""
+def _make_force_exit_session(
+    pos_row: MagicMock | None = None,
+    mkt_row: MagicMock | None = None,
+    *,
+    sibling_contracts: int = 0,
+) -> AsyncMock:
+    """Return a mock AsyncSession for force_exit() that yields (pos_row, mkt_row)
+    on the first execute() call, then a sibling-contracts sum result (the live
+    exchange-reconciliation sibling-sum lookup) on any subsequent call."""
     session = AsyncMock()
     result = MagicMock()
     result.one_or_none.return_value = (pos_row, mkt_row) if pos_row is not None else None
-    session.execute = AsyncMock(return_value=result)
+    sibling_result = MagicMock()
+    sibling_result.scalar_one.return_value = sibling_contracts
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        return result if call_count == 1 else sibling_result
+
+    session.execute = AsyncMock(side_effect=fake_execute)
     return session
 
 
@@ -1732,6 +1749,96 @@ async def test_force_exit_live_uses_reconciled_net_size(monkeypatch: pytest.Monk
     assert placed.action == "sell"
     assert placed.time_in_force == "fill_or_kill"
     assert pos.contracts == 5
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_subtracts_sibling_rows_from_exchange_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A market with multiple open PositionRows must not have one row's contracts
+    stamped to the full exchange aggregate — this row's share is the exchange
+    total minus whatever sibling rows already account for."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    # This row started at 3 contracts; a sibling row (not loaded here, but
+    # present on the exchange) accounts for 6 of the 9 total on Kalshi.
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live", contracts=3)
+    mkt = _mock_mkt_row(yes_bid=0.55, yes_ask=0.65, result=None)
+    session = _make_force_exit_session(pos, mkt, sibling_contracts=6)
+    sf = _make_force_exit_sf(session)
+
+    exchange_pos = MagicMock()
+    exchange_pos.market_id = MARKET_ID
+    exchange_pos.direction = "YES"
+    exchange_pos.contracts = 9
+
+    filled = Order(
+        market_id=MARKET_ID, direction="YES", contracts=3, price=0.55, mode="live", status="executed",
+    )
+
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+    mock_kalshi.place_order = AsyncMock(return_value=filled)
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    closed_pos = _make_position()
+    with patch(
+        "freqpred.trading.order_manager.ledger.partial_close_position",
+        new_callable=AsyncMock,
+        return_value=closed_pos,
+    ):
+        await om.force_exit(str(pos_id))
+
+    placed: Order = mock_kalshi.place_order.call_args.args[0]
+    # 9 exchange total - 6 sibling contracts = this row's true share (3), not 9.
+    assert placed.contracts == 3
+    assert pos.contracts == 3
+
+
+@pytest.mark.asyncio
+async def test_force_exit_live_raises_when_siblings_exceed_exchange_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If sibling rows alone account for >= the exchange total, this row's computed
+    share would be <= 0 — that's unresolved drift, so force_exit must raise rather
+    than place a nonsensical or oversized sell order."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    pos_id = uuid.uuid4()
+    pos = _mock_pos_row(pos_id=pos_id, status="open", direction="YES", mode="live", contracts=3)
+    mkt = _mock_mkt_row(yes_bid=0.55, yes_ask=0.65, result=None)
+    session = _make_force_exit_session(pos, mkt, sibling_contracts=9)
+    sf = _make_force_exit_sf(session)
+
+    exchange_pos = MagicMock()
+    exchange_pos.market_id = MARKET_ID
+    exchange_pos.direction = "YES"
+    exchange_pos.contracts = 9
+
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_positions = AsyncMock(return_value=[exchange_pos])
+    mock_kalshi.place_order = AsyncMock()
+
+    om = OrderManager(
+        risk=MagicMock(spec=RiskEngine),
+        session_factory=sf,
+        bankroll=BANKROLL,
+        mode="live",
+        kalshi_client=mock_kalshi,
+    )
+
+    with pytest.raises(ValueError, match="reconciliation required"):
+        await om.force_exit(str(pos_id))
+
+    mock_kalshi.place_order.assert_not_called()
 
 
 @pytest.mark.asyncio
