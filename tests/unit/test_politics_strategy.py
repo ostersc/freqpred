@@ -1,9 +1,7 @@
 """Unit tests for PoliticsEdgeStrategy — factbase phrase cache gate."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 from freqpred.ingestion.fetchers.factbase import FactbasePhraseCache
 from freqpred.markets.models import Market
@@ -18,7 +16,7 @@ def _make_market(
     volume_24h: float = 5000.0,
     days_to_close: float = 3.0,
 ) -> Market:
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     return Market(
         id=market_id,
         platform="kalshi",

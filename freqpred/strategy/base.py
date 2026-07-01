@@ -1,8 +1,8 @@
 """IPredictionStrategy abstract base class."""
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from abc import ABC
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -79,7 +79,7 @@ class IPredictionStrategy(ABC):
         signal: Signal,
         bankroll: float,
         existing_market_exposure: float = 0.0,
-        assessment: "SignalAssessment | None" = None,
+        assessment: SignalAssessment | None = None,
     ) -> float:
         """Confidence-blended Kelly sizing, returning only the *incremental*
         exposure needed beyond what is already open in this market.
@@ -139,7 +139,7 @@ class IPredictionStrategy(ABC):
         Default implementation applies StrategyConfig filters (category, volume,
         days-to-close). Override for custom market selection logic.
         """
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         days_to_close = (market.close_time - now).total_seconds() / 86400
         if self.config.min_mid_price is not None and market.mid_price < self.config.min_mid_price:
             return False
@@ -173,7 +173,7 @@ class IPredictionStrategy(ABC):
             and signal.confidence >= self.config.min_confidence
         )
 
-    def force_exit(self, position: "Position", market: "Market") -> str | None:
+    def force_exit(self, position: Position, market: Market) -> str | None:
         """Signal-independent exit hook. Called on every PositionMonitor tick.
 
         Return a non-None exit reason string to force exit regardless of signal
@@ -191,7 +191,7 @@ class IPredictionStrategy(ABC):
         """
         return None
 
-    def custom_exit(self, position: "Position", signal: "Signal", market: "Market") -> str | None:
+    def custom_exit(self, position: Position, signal: Signal, market: Market) -> str | None:
         """Signal-informed custom exit hook.
 
         Return a non-None exit reason tag to force exit.
@@ -205,7 +205,7 @@ class IPredictionStrategy(ABC):
         """
         return None
 
-    def custom_entry_price(self, signal: "Signal", market: "Market") -> float | None:
+    def custom_entry_price(self, signal: Signal, market: Market) -> float | None:
         """Custom resting limit entry price override.
 
         Called when order_types.entry == "limit". Return a per-contract price
@@ -216,9 +216,9 @@ class IPredictionStrategy(ABC):
 
     def custom_exit_price(
         self,
-        position: "Position",
-        signal: "Signal | None",
-        market: "Market",
+        position: Position,
+        signal: Signal | None,
+        market: Market,
         exit_reason: str,
     ) -> float | None:
         """Custom limit exit price override.
@@ -229,8 +229,8 @@ class IPredictionStrategy(ABC):
         return None
 
     async def synthesize_signal(
-        self, session: "AsyncSession", market: "Market"
-    ) -> "Signal | None":
+        self, session: AsyncSession, market: Market
+    ) -> Signal | None:
         """Optional hook: generate and persist a synthetic signal when the pipeline has no docs.
 
         Called by the run loop as a fallback when ``pipeline.analyze()`` returns ``None``.
@@ -243,8 +243,8 @@ class IPredictionStrategy(ABC):
 
     async def on_position_opened(
         self,
-        position: "Position",
-        market: "Market",
+        position: Position,
+        market: Market,
         session_factory: Any,
     ) -> None:
         """Optional async hook called immediately after a position is opened.
@@ -256,7 +256,7 @@ class IPredictionStrategy(ABC):
         Default: no-op.
         """
 
-    def on_order_failed(self, market: "Market") -> None:
+    def on_order_failed(self, market: Market) -> None:
         """Optional hook called when order placement fails for a market.
 
         Called by the signal loop when ``order_manager.submit()`` returns None

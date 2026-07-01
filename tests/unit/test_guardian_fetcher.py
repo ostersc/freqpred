@@ -4,17 +4,22 @@ All HTTP calls are mocked — no real Guardian API calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.fetchers.guardian import GuardianRateLimitError, _sanitize_query, _strip_html, fetch
+from freqpred.ingestion.fetchers.guardian import (
+    GuardianRateLimitError,
+    _sanitize_query,
+    _strip_html,
+    fetch,
+)
 from freqpred.ingestion.store import RawDocument
 
 _API_KEY = "test-guardian-key"
 _QUERY = "UK election results"
-_FROM = datetime(2026, 3, 10, 0, 0, 0, tzinfo=timezone.utc)
+_FROM = datetime(2026, 3, 10, 0, 0, 0, tzinfo=UTC)
 
 
 def _make_item(
@@ -160,7 +165,7 @@ async def test_fetch_parses_published_at(mock_http):
         _make_item(published_at="2026-03-15T10:00:00Z")
     ])
     docs = await fetch(_API_KEY, _QUERY, _FROM)
-    assert docs[0].published_at == datetime(2026, 3, 15, 10, 0, 0, tzinfo=timezone.utc)
+    assert docs[0].published_at == datetime(2026, 3, 15, 10, 0, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

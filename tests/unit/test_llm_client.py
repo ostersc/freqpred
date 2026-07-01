@@ -8,13 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.llm.audit import LLMBudgetExceededError
 from freqpred.llm.client import LLMClient, LLMConsecutiveErrorsError, LLMError
 from freqpred.llm.models import LLMResponse
-
-import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.signal.models     # noqa: F401
 
 MODEL = "claude-haiku-4-5-20251001"
 PROMPT = "Will the Fed raise rates?"

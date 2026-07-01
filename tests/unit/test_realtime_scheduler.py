@@ -6,17 +6,17 @@ No real API calls or DB connections are made.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from freqpred.ingestion.realtime_scheduler import run_realtime_cycle
-from freqpred.ingestion.store import DocumentSkipped, UpsertStatus, RawDocument
+from freqpred.ingestion.store import DocumentSkipped, RawDocument, UpsertStatus
 from freqpred.rag.models import Document
 
-NOW = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
-CLOSE_TIME = datetime(2026, 3, 30, 0, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 23, 12, 0, 0, tzinfo=UTC)
+CLOSE_TIME = datetime(2026, 3, 30, 0, 0, 0, tzinfo=UTC)
 FAKE_EMBEDDING = [0.1] * 384
 
 
@@ -189,7 +189,9 @@ class TestChyronPhase:
         embedder = _make_embedder()
         raw_doc = _make_raw_doc()
         doc = _make_document()
-        market_queries = [("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("fed rate", 'trump AND "iran"')])]
+        market_queries = [
+            ("MKT-1", "politics", "Will this market resolve Yes?", CLOSE_TIME, [("fed rate", 'trump AND "iran"')])
+        ]
 
         with (
             patch(

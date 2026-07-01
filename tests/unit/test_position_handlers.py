@@ -6,8 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,7 +15,6 @@ from freqpred.alerts.position_handlers import register_position_commands
 from freqpred.alerts.telegram_commands import TelegramCommandHandler
 from freqpred.markets.models import Position
 from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -63,7 +61,7 @@ def _make_position(pos_id: str | None = None, status: str = "open") -> Position:
         direction="YES",
         contracts=10,
         entry_price=0.50,
-        entry_time=datetime.now(tz=timezone.utc),
+        entry_time=datetime.now(tz=UTC),
         mode="paper",
         status=status,
         pnl=0.10,

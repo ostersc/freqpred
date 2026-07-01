@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -142,7 +142,7 @@ class FactbasePhraseCache:
 
 async def extract_search_terms(
     question: str,
-    llm_client: "LLMClient",
+    llm_client: LLMClient,
     market_id: str | None = None,
 ) -> FactbaseSearchTerms | None:
     """Use Haiku to extract search terms from a KXTRUMPSAY market question.
@@ -340,7 +340,7 @@ def phrase_row_to_data(row: FactbasePhraseRow) -> FactbasePhraseData:
 
 
 async def _upsert_phrase_row(
-    session: "AsyncSession",
+    session: AsyncSession,
     market_id: str,
     data: FactbasePhraseData,
 ) -> None:
@@ -381,19 +381,18 @@ async def _upsert_phrase_row(
 
 
 async def run_factbase_scheduler(
-    session_factory: "async_sessionmaker[AsyncSession]",
+    session_factory: async_sessionmaker[AsyncSession],
     series_allowlist: frozenset[str],
     phrase_cache: FactbasePhraseCache,
-    llm_client: "LLMClient",
+    llm_client: LLMClient,
     interval_seconds: int = 300,
-    telemetry: "RuntimeTelemetry | None" = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> None:
     """Background scheduler: keep factbase_phrase_frequency rows fresh.
 
     On startup, immediately marks any existing rows as ready so markets are
     unblocked after a restart without waiting for the first full cycle.
     """
-    from freqpred.markets.models import MarketRow
     from freqpred.runtime.telemetry import SERVICE_FACTBASE_SCHEDULER
 
     log.info("factbase.scheduler.starting", allowlist=list(series_allowlist), interval_seconds=interval_seconds)
@@ -429,10 +428,10 @@ async def run_factbase_scheduler(
 
 
 async def _run_cycle(
-    session_factory: "async_sessionmaker[AsyncSession]",
+    session_factory: async_sessionmaker[AsyncSession],
     series_allowlist: frozenset[str],
     phrase_cache: FactbasePhraseCache,
-    llm_client: "LLMClient",
+    llm_client: LLMClient,
 ) -> None:
     """One scheduler cycle: process all active allowlist markets."""
     from freqpred.markets.models import MarketRow

@@ -24,8 +24,8 @@ Usage::
 from __future__ import annotations
 
 from abc import abstractmethod
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 
@@ -93,12 +93,12 @@ class IAlgoStrategy(IPredictionStrategy):
     # Abstract interface
     # ------------------------------------------------------------------
 
-    def populate_indicators(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+    def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """Add indicator columns to the OHLC DataFrame.  Default: passthrough."""
         return df
 
     @abstractmethod
-    def populate_exit_trend(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+    def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         """Add ``exit_long`` (bool) column.  ``exit_long=True`` → trigger exit."""
         ...
 
@@ -133,7 +133,7 @@ class IAlgoStrategy(IPredictionStrategy):
     # force_exit override
     # ------------------------------------------------------------------
 
-    def force_exit(self, position: "Position", market: "Market") -> str | None:
+    def force_exit(self, position: Position, market: Market) -> str | None:
         """Return ``"algo_exit"`` when the last complete candle has exit_long=True.
 
         Returns None when:
@@ -193,7 +193,7 @@ class IAlgoStrategy(IPredictionStrategy):
     # Internal resampling
     # ------------------------------------------------------------------
 
-    def _resample(self, market_id: str) -> "pd.DataFrame | None":
+    def _resample(self, market_id: str) -> pd.DataFrame | None:
         """Resample the raw tick buffer into a complete-candle OHLC DataFrame.
 
         - Only complete buckets are returned (the partial current bucket is dropped).
@@ -261,7 +261,7 @@ class IAlgoStrategy(IPredictionStrategy):
 # ---------------------------------------------------------------------------
 
 
-def _invert_ohlc(df: "pd.DataFrame") -> "pd.DataFrame":
+def _invert_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     """Return a copy of *df* with OHLC columns flipped to the NO-contract perspective.
 
     In a binary market ``no_price = 1 - yes_price``.  The high/low columns
@@ -290,9 +290,7 @@ def _invert_ohlc(df: "pd.DataFrame") -> "pd.DataFrame":
 def _ts_gte(ts: datetime, cutoff: datetime) -> bool:
     """Return True if ts >= cutoff, handling mixed tz-aware / naive datetimes."""
     if ts.tzinfo is None and cutoff.tzinfo is not None:
-        from datetime import timezone
-        ts = ts.replace(tzinfo=timezone.utc)
+        ts = ts.replace(tzinfo=UTC)
     elif ts.tzinfo is not None and cutoff.tzinfo is None:
-        from datetime import timezone
-        cutoff = cutoff.replace(tzinfo=timezone.utc)
+        cutoff = cutoff.replace(tzinfo=UTC)
     return ts >= cutoff

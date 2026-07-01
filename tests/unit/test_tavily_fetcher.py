@@ -4,7 +4,7 @@ All HTTP calls are mocked — no real Tavily API calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,7 +15,7 @@ from freqpred.ingestion.store import RawDocument
 
 _API_KEY = "test-key"
 _QUERY = "election results"
-_NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
 
 
 def _make_item(
@@ -91,7 +91,7 @@ async def test_fetch_parses_published_date(mock_tavily_client):
         "results": [_make_item(published_date="2026-03-10T08:30:00")]
     }
     docs = await fetch(_API_KEY, _QUERY)
-    assert docs[0].published_at == datetime(2026, 3, 10, 8, 30, 0, tzinfo=timezone.utc)
+    assert docs[0].published_at == datetime(2026, 3, 10, 8, 30, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

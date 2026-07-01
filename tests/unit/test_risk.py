@@ -5,37 +5,34 @@ All DB calls are mocked — no external dependencies.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
 
+# Ensure ORM relationships resolve
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.config import RiskConfig
 from freqpred.markets.models import Market
 from freqpred.signal.models import Signal
-from freqpred.trading.risk import RiskDecision, RiskEngine, TradingCircuitBreakerError
+from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
 
-# Ensure ORM relationships resolve
-import freqpred.ingestion.models   # noqa: F401
-import freqpred.llm.models         # noqa: F401
-import freqpred.markets.models     # noqa: F401
-import freqpred.rag.models         # noqa: F401
-import freqpred.signal.models      # noqa: F401
-
-from datetime import timedelta
-
-NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
 BANKROLL = 2000.0
 
 
 def _make_config(**overrides: object) -> RiskConfig:
-    defaults = dict(
-        max_position_pct=0.05,
-        max_daily_loss_pct=0.15,
-        max_total_exposure_pct=0.40,
-        min_edge_floor=0.10,
-        max_open_positions=20,
-    )
+    defaults = {
+        "max_position_pct": 0.05,
+        "max_daily_loss_pct": 0.15,
+        "max_total_exposure_pct": 0.40,
+        "min_edge_floor": 0.10,
+        "max_open_positions": 20,
+    }
     defaults.update(overrides)
     return RiskConfig(**defaults)  # type: ignore[arg-type]
 

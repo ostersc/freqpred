@@ -2,26 +2,24 @@
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 # Register all ORM models so relationship forward-refs resolve.
-import freqpred.alerts.models     # noqa: F401
+import freqpred.alerts.models  # noqa: F401
 import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.markets.models    # noqa: F401
-import freqpred.metrics.models    # noqa: F401
-import freqpred.rag.models        # noqa: F401
-import freqpred.runtime.models    # noqa: F401
-import freqpred.signal.models     # noqa: F401
-import freqpred.strategy.models   # noqa: F401
-
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.runtime.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
+import freqpred.strategy.models  # noqa: F401
 from freqpred.dashboard.api.app import create_app
 from freqpred.dashboard.api.routes import get_db
 from freqpred.trading.ledger import get_llm_spend_time_series, get_pnl_time_series
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -249,8 +247,6 @@ async def test_endpoint_available_filters_stable() -> None:
     """available_* arrays come from the unfiltered set regardless of active filters."""
     strategy_row = MagicMock()
     strategy_row.__iter__ = lambda self: iter(["TestStrategy"])
-    # Use a simple tuple to represent a row with a single string value
-    available = [("TestStrategy",)]
 
     pnl_rows = [(date(2026, 1, 1), 5.0, 1)]
     llm_rows = []
@@ -259,7 +255,6 @@ async def test_endpoint_available_filters_stable() -> None:
     mode_r = _mode_result("paper")
     pnl_r = _all_result(pnl_rows)
     llm_r = _all_result(llm_rows)
-    strat_r = _all_result([("TestStrategy",)])
 
     results = [mode_r, pnl_r, llm_r] + [_all_result([("TestStrategy",)])] * 7
 

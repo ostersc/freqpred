@@ -13,7 +13,6 @@ Apply the fix:
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -21,15 +20,14 @@ import click
 
 # Register all ORM models before any SQLAlchemy mapper is instantiated.
 sys.path.insert(0, str(Path(__file__).parent.parent))
-import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.markets.models    # noqa: F401
-import freqpred.rag.models        # noqa: F401
-import freqpred.signal.models     # noqa: F401
-
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.markets.models import MarketRow, PositionRow

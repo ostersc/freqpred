@@ -6,11 +6,17 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Ensure ORM relationships resolve
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import Fill, Market, Order, Position
 from freqpred.metrics.models import SignalAssessment
@@ -20,14 +26,7 @@ from freqpred.strategy.config import StrategyConfig
 from freqpred.trading.order_manager import OrderManager, PositionNotFoundError, PositionNotOpenError
 from freqpred.trading.risk import RiskDecision, RiskEngine, TradingCircuitBreakerError
 
-# Ensure ORM relationships resolve
-import freqpred.ingestion.models   # noqa: F401
-import freqpred.llm.models         # noqa: F401
-import freqpred.markets.models     # noqa: F401
-import freqpred.rag.models         # noqa: F401
-import freqpred.signal.models      # noqa: F401
-
-NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
 MARKET_ID = "MKT-TEST"
 SIGNAL_ID = str(uuid.uuid4())
 BANKROLL = 10_000.0
@@ -895,9 +894,12 @@ async def test_existing_exposure_passed_to_position_size() -> None:
 
     # Mock DB: report $25.00 of existing same-direction exposure, no opposite-side positions.
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = 25.0
-    _count = MagicMock(); _count.scalar_one.return_value = 0
-    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = None
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = 25.0
+    _count = MagicMock()
+    _count.scalar_one.return_value = 0
+    _avg = MagicMock()
+    _avg.scalar_one_or_none.return_value = None
     mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     # Use a spy strategy to capture the args passed to position_size.
@@ -984,9 +986,12 @@ async def test_assessment_enabled_keeps_legacy_three_arg_override_working() -> N
     signal = _make_signal()
     market = _make_market()
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = 25.0
-    _count = MagicMock(); _count.scalar_one.return_value = 0
-    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = None
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = 25.0
+    _count = MagicMock()
+    _count.scalar_one.return_value = 0
+    _avg = MagicMock()
+    _avg.scalar_one_or_none.return_value = None
     mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
     assessment = SignalAssessment(
         signal_id=signal.id,
@@ -1049,9 +1054,12 @@ async def test_assessment_enabled_passes_assessment_to_supported_strategy() -> N
     signal = _make_signal()
     market = _make_market()
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = 10.0
-    _count = MagicMock(); _count.scalar_one.return_value = 0
-    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = None
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = 10.0
+    _count = MagicMock()
+    _count.scalar_one.return_value = 0
+    _avg = MagicMock()
+    _avg.scalar_one_or_none.return_value = None
     mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
     assessment = SignalAssessment(
         signal_id=signal.id,
@@ -1124,9 +1132,12 @@ async def test_doubledown_allowed_when_edge_increases() -> None:
     # DB reports existing exposure = low_ideal (same direction, no opposite-side positions).
     # avg_entry=0.60 > yes_ask=0.56, so price-improvement gate passes.
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = low_ideal
-    _count = MagicMock(); _count.scalar_one.return_value = 0
-    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.60
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = low_ideal
+    _count = MagicMock()
+    _count.scalar_one.return_value = 0
+    _avg = MagicMock()
+    _avg.scalar_one_or_none.return_value = 0.60
     mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     expected_position = _make_position()
@@ -1157,9 +1168,12 @@ async def test_reentry_blocked_when_conviction_drops() -> None:
 
     # DB reports existing exposure = high_ideal (same direction, no opposite-side positions).
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = high_ideal
-    _count = MagicMock(); _count.scalar_one.return_value = 0
-    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.40
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = high_ideal
+    _count = MagicMock()
+    _count.scalar_one.return_value = 0
+    _avg = MagicMock()
+    _avg.scalar_one_or_none.return_value = 0.40
     mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
@@ -1177,9 +1191,12 @@ async def test_reentry_blocked_at_worse_price() -> None:
     market = _make_market(yes_bid=0.50, yes_ask=0.54)  # yes_ask = 0.54
 
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = 20.0
-    _count = MagicMock(); _count.scalar_one.return_value = 0   # same-direction existing position
-    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.50  # avg entry better than 0.54
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = 20.0
+    _count = MagicMock()
+    _count.scalar_one.return_value = 0   # same-direction existing position
+    _avg = MagicMock()
+    _avg.scalar_one_or_none.return_value = 0.50  # avg entry better than 0.54
     mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
@@ -1197,9 +1214,12 @@ async def test_reentry_blocked_at_equal_price() -> None:
     market = _make_market(yes_bid=0.50, yes_ask=0.54)  # yes_ask = 0.54
 
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = 20.0
-    _count = MagicMock(); _count.scalar_one.return_value = 0
-    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.54  # equal → blocked
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = 20.0
+    _count = MagicMock()
+    _count.scalar_one.return_value = 0
+    _avg = MagicMock()
+    _avg.scalar_one_or_none.return_value = 0.54  # equal → blocked
     mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
@@ -1217,9 +1237,12 @@ async def test_reentry_allowed_at_better_price() -> None:
     market = _make_market(yes_bid=0.50, yes_ask=0.46)  # yes_ask 0.46 < avg_entry 0.54
 
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = 20.0
-    _count = MagicMock(); _count.scalar_one.return_value = 0   # same-direction existing
-    _avg = MagicMock(); _avg.scalar_one_or_none.return_value = 0.54  # avg worse than new ask
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = 20.0
+    _count = MagicMock()
+    _count.scalar_one.return_value = 0   # same-direction existing
+    _avg = MagicMock()
+    _avg.scalar_one_or_none.return_value = 0.54  # avg worse than new ask
     mock_session.execute = AsyncMock(side_effect=[_exp, _count, _avg])
 
     expected_position = _make_position()
@@ -1262,8 +1285,10 @@ async def test_yes_position_blocks_no_entry() -> None:
     market = _make_market(yes_bid=0.85, yes_ask=0.88)
 
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = 20.0   # total exposure > 0
-    _count = MagicMock(); _count.scalar_one.return_value = 1  # one YES position (opposite of NO signal)
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = 20.0   # total exposure > 0
+    _count = MagicMock()
+    _count.scalar_one.return_value = 1  # one YES position (opposite of NO signal)
     mock_session.execute = AsyncMock(side_effect=[_exp, _count])
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:
@@ -1281,8 +1306,10 @@ async def test_no_position_blocks_yes_entry() -> None:
     market = _make_market(yes_bid=0.12, yes_ask=0.15)
 
     mock_session = sf.return_value.__aenter__.return_value
-    _exp = MagicMock(); _exp.scalar_one.return_value = 10.0   # total exposure > 0
-    _count = MagicMock(); _count.scalar_one.return_value = 1  # one NO position (opposite of YES signal)
+    _exp = MagicMock()
+    _exp.scalar_one.return_value = 10.0   # total exposure > 0
+    _count = MagicMock()
+    _count.scalar_one.return_value = 1  # one NO position (opposite of YES signal)
     mock_session.execute = AsyncMock(side_effect=[_exp, _count])
 
     with patch("freqpred.trading.order_manager.ledger.open_position") as mock_ledger:

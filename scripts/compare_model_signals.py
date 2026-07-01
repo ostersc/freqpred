@@ -44,7 +44,7 @@ import argparse
 import asyncio
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean, median
 
@@ -53,15 +53,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import aliased
 
 import freqpred.ingestion.models  # noqa: F401 — registers mapper
-import freqpred.rag.models        # noqa: F401 — registers mapper
-import freqpred.llm.models        # noqa: F401 — registers mapper
-
+import freqpred.llm.models  # noqa: F401 — registers mapper
+import freqpred.rag.models  # noqa: F401 — registers mapper
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.llm.client import LLMClient, LLMConsecutiveErrorsError, LLMError
 from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow
-from freqpred.signal.llm import PROMPT_VERSION, SIGNAL_ANALYSIS_TOOL, SYSTEM_PROMPT, parse_signal_response
+from freqpred.signal.llm import (
+    PROMPT_VERSION,
+    SIGNAL_ANALYSIS_TOOL,
+    SYSTEM_PROMPT,
+    parse_signal_response,
+)
 from freqpred.signal.models import SignalRow
 
 
@@ -391,7 +395,10 @@ def print_market_block(row: ComparisonRow) -> None:
     elif new.thinking_tokens == 0:
         print("    thinking   : model used 0 thinking tokens (adaptive thinking chose not to reason)")
     elif new.thinking_tokens:
-        print(f"    thinking   : {new.thinking_tokens} thinking tokens used but no text returned (check display setting)")
+        print(
+            f"    thinking   : {new.thinking_tokens} thinking tokens used but no text "
+            "returned (check display setting)"
+        )
     else:
         print("    thinking   : unavailable (thinking_tokens not reported)")
 
@@ -521,7 +528,7 @@ def to_json_dict(rows: list[ComparisonRow], candidate_model: str, run_started_at
     return {
         "candidate_model": candidate_model,
         "run_started_at": run_started_at.isoformat(),
-        "run_finished_at": datetime.now(timezone.utc).isoformat(),
+        "run_finished_at": datetime.now(UTC).isoformat(),
         "rows": out_rows,
     }
 
@@ -529,7 +536,7 @@ def to_json_dict(rows: list[ComparisonRow], candidate_model: str, run_started_at
 async def main(
     candidate_model: str, market_id: str | None, limit: int, json_out: Path | None, resolved: bool
 ) -> None:
-    run_started_at = datetime.now(timezone.utc)
+    run_started_at = datetime.now(UTC)
     config = load_config()
 
     if not config.database.url:
@@ -600,9 +607,13 @@ async def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Candidate Anthropic model ID, e.g. claude-sonnet-5")
-    parser.add_argument("--market-id", default=None, help="Evaluate a single market instead of scanning all open markets")
+    parser.add_argument(
+        "--market-id", default=None, help="Evaluate a single market instead of scanning all open markets"
+    )
     parser.add_argument("--limit", type=int, default=20, help="Max markets to evaluate (caps cost; default: 20)")
-    parser.add_argument("--json-out", type=Path, default=None, help="Optional path to write full structured comparison JSON")
+    parser.add_argument(
+        "--json-out", type=Path, default=None, help="Optional path to write full structured comparison JSON"
+    )
     parser.add_argument(
         "--resolved", action="store_true",
         help="Compare against the most recently RESOLVED markets instead of active ones, scoring each "

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -85,7 +85,7 @@ def _build_filter_map(close_time: datetime | None) -> dict[str, Any]:
 
     Date format must be YYYY-MM (month-level) for range operators to work.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     end = min(close_time, now) if close_time else now
     start = end - timedelta(days=60)
 
@@ -116,7 +116,7 @@ async def fetch(
         List of RawDocument objects with source_type="tv_transcript",
         source_name="TVArchive".
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     filter_map = _build_filter_map(close_time)
 
     # Strip '%' from the query — it is not a valid Lucene operator and the
@@ -194,7 +194,7 @@ async def fetch(
         date_str = fields.get("date") or ""
         try:
             published_at = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc
+                tzinfo=UTC
             )
         except (ValueError, TypeError):
             published_at = None

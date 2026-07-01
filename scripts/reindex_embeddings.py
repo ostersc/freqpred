@@ -24,15 +24,13 @@ import click
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Register all ORM models before any SQLAlchemy mapper is instantiated.
-import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.markets.models    # noqa: F401
-import freqpred.rag.models        # noqa: F401
-import freqpred.signal.models     # noqa: F401
-
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.rag.embedder import make_embedder
@@ -46,7 +44,6 @@ async def _reindex(
     embedder: object,
     apply: bool,
 ) -> None:
-    from freqpred.rag.embedder import LocalEmbedder, OllamaEmbedder  # noqa: PLC0415
 
     engine_session = session_factory
     embed_col: str = embedder.embedding_column  # type: ignore[union-attr]
@@ -126,7 +123,6 @@ def main(apply: bool) -> None:
 
     embedder = make_embedder(config.embedding)
 
-    from freqpred.db import make_engine, make_session_factory  # noqa: PLC0415
     engine = make_engine(config.database.url)
     factory = make_session_factory(engine)
 

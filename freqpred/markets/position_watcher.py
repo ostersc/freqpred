@@ -25,7 +25,7 @@ import websockets
 from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from freqpred.markets.models import MarketRow, Order, PositionRow
+from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.trading import ledger
 
 if TYPE_CHECKING:
@@ -51,14 +51,14 @@ class PositionWatcher:
 
     def __init__(
         self,
-        kalshi_client: "KalshiClient",
+        kalshi_client: KalshiClient,
         ws_url: str,
         session_factory: async_sessionmaker[AsyncSession],
-        position_monitor: "PositionMonitor",
-        order_manager: "OrderManager",
+        position_monitor: PositionMonitor,
+        order_manager: OrderManager,
         price_move_threshold: float = 0.05,
-        alert_dispatcher: "AlertDispatcher | None" = None,
-        runtime_telemetry: "RuntimeTelemetry | None" = None,
+        alert_dispatcher: AlertDispatcher | None = None,
+        runtime_telemetry: RuntimeTelemetry | None = None,
     ) -> None:
         self._kalshi_client = kalshi_client
         self._ws_url = ws_url
@@ -117,7 +117,9 @@ class PositionWatcher:
                 raise
             except Exception as exc:
                 if self._runtime_telemetry is not None:
-                    from freqpred.runtime.telemetry import SERVICE_POSITION_WATCHER_LAST_MESSAGE  # noqa: PLC0415
+                    from freqpred.runtime.telemetry import (
+                        SERVICE_POSITION_WATCHER_LAST_MESSAGE,  # noqa: PLC0415
+                    )
                     await self._runtime_telemetry.record_kalshi_error(
                         SERVICE_POSITION_WATCHER_LAST_MESSAGE,
                         f"websocket disconnected: {exc}",

@@ -1,8 +1,8 @@
 """Discord alert sender."""
 from __future__ import annotations
 
-import structlog
 import httpx
+import structlog
 
 log = structlog.get_logger(__name__)
 

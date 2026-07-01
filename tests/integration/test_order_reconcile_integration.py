@@ -21,21 +21,20 @@ pytestmark = pytest.mark.skipif(
     reason="Integration tests require DATABASE_URL pointing to freqpred_test",
 )
 
+import freqpred.alerts.models  # noqa: F401
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.runtime.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
+import freqpred.strategy.models  # noqa: F401
 from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.markets.models import MarketRow, Order, PositionRow
 from freqpred.signal.models import SignalRow
 from freqpred.trading.order_manager import OrderManager
 from freqpred.trading.risk import RiskEngine
-
-import freqpred.alerts.models      # noqa: F401
-import freqpred.ingestion.models   # noqa: F401
-import freqpred.llm.models         # noqa: F401
-import freqpred.markets.models     # noqa: F401
-import freqpred.metrics.models     # noqa: F401
-import freqpred.rag.models         # noqa: F401
-import freqpred.runtime.models     # noqa: F401
-import freqpred.signal.models      # noqa: F401
-import freqpred.strategy.models    # noqa: F401
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",

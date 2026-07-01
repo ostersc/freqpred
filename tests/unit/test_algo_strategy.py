@@ -10,14 +10,14 @@ Tests cover:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from freqpred.markets.models import Market, Position
-from freqpred.strategy.algo_base import IAlgoStrategy, _Tick, _invert_ohlc
+from freqpred.strategy.algo_base import IAlgoStrategy, _invert_ohlc
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
 from freqpred.trading.position_monitor import PositionMonitor
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_BASE_TS = datetime(2026, 3, 22, 10, 0, 0, tzinfo=timezone.utc)
+_BASE_TS = datetime(2026, 3, 22, 10, 0, 0, tzinfo=UTC)
 
 
 def _ts(offset_seconds: float) -> datetime:
@@ -108,7 +108,7 @@ def _make_algo(
         )
         _exit_val = exit_long_value
 
-        def populate_exit_trend(self, df: "pd.DataFrame", metadata: dict) -> "pd.DataFrame":
+        def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
             df["exit_long"] = self._exit_val
             return df
 
@@ -295,7 +295,6 @@ def test_max_candles_trims_raw_buffer() -> None:
     # Last bucket (bucket 6, tick at 360s) is dropped as partial.
     # Retained: candles 3, 4, 5 → ticks at 180s, 240s, 300s.
     # Tick at 360s is in the dropped partial bucket — it's included in the cutoff range.
-    retained_ts = {t.ts for t in algo._ticks["MKT-1"]}
     cutoff = result.index[0].to_pydatetime()
     for tick in algo._ticks["MKT-1"]:
         assert tick.ts >= cutoff

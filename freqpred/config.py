@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-
-from dotenv import load_dotenv
-from typing import Any, Literal, Literal
+from typing import Any, Literal
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -57,7 +56,9 @@ class GuardianConfig(BaseModel):
     api_key: str = Field(default="")
     enabled: bool = Field(default=True)
     daily_cap: int = Field(default=490, description="Max requests per day (Guardian free tier: 500; leave headroom).")
-    min_fetch_interval_hours: float = Field(default=1.0, description="Floor on per-market fetch interval regardless of market count.")
+    min_fetch_interval_hours: float = Field(
+        default=1.0, description="Floor on per-market fetch interval regardless of market count."
+    )
 
 
 class RedditConfig(BaseModel):
@@ -98,8 +99,12 @@ class TruthSocialIngestionConfig(BaseModel):
 
 class IngestionConfig(BaseModel):
     schedule_interval_seconds: int = Field(default=1800)
-    realtime_interval_seconds: int = Field(default=300, description="Interval for the realtime scheduler (chyrons, Truth Social). Default 5 min.")
-    tv_chyron_enabled: bool = Field(default=True, description="Enable Third Eye TV chyron fetching in the realtime scheduler.")
+    realtime_interval_seconds: int = Field(
+        default=300, description="Interval for the realtime scheduler (chyrons, Truth Social). Default 5 min."
+    )
+    tv_chyron_enabled: bool = Field(
+        default=True, description="Enable Third Eye TV chyron fetching in the realtime scheduler."
+    )
     categories: list[str] = Field(default_factory=lambda: ["politics", "technology"])
     truthsocial: TruthSocialIngestionConfig = Field(default_factory=TruthSocialIngestionConfig)
 

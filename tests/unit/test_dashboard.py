@@ -13,16 +13,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 # Register all ORM models so relationship forward-refs resolve.
-import freqpred.alerts.models     # noqa: F401
+import freqpred.alerts.models  # noqa: F401
 import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.markets.models    # noqa: F401
-import freqpred.metrics.models    # noqa: F401
-import freqpred.rag.models        # noqa: F401
-import freqpred.runtime.models    # noqa: F401
-import freqpred.signal.models     # noqa: F401
-import freqpred.strategy.models   # noqa: F401
-
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.runtime.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
+import freqpred.strategy.models  # noqa: F401
 from freqpred.dashboard.api.app import create_app
 from freqpred.dashboard.api.routes import get_db
 from freqpred.markets.kalshi import KalshiAPIError
@@ -30,24 +29,23 @@ from freqpred.runtime.telemetry import RuntimeTelemetry, build_freshness_specs
 from freqpred.strategy.config import StrategyConfig
 from freqpred.trading.order_manager import PositionNotFoundError, PositionNotOpenError
 
-
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
 
 
 def _make_strategy_config(**overrides: object) -> StrategyConfig:
-    defaults = dict(
-        name="TestStrategy",
-        min_edge=0.15,
-        min_confidence=0.70,
-        max_exposure_per_market=0.10,
-        kelly_fraction=0.25,
-        categories=["politics"],
-        min_volume_24h=500.0,
-        max_days_to_close=30.0,
-        min_days_to_close=1.0,
-    )
+    defaults = {
+        "name": "TestStrategy",
+        "min_edge": 0.15,
+        "min_confidence": 0.70,
+        "max_exposure_per_market": 0.10,
+        "kelly_fraction": 0.25,
+        "categories": ["politics"],
+        "min_volume_24h": 500.0,
+        "max_days_to_close": 30.0,
+        "min_days_to_close": 1.0,
+    }
     defaults.update(overrides)
     return StrategyConfig(**defaults)  # type: ignore[arg-type]
 
@@ -376,7 +374,8 @@ def test_positions_endpoint_filters_by_status() -> None:
     session.execute = _execute_side_effects(
         _mode_result(),              # _get_mode
         _scalar_result(1),
-        _all_result([(open_pos, 0.20, 0.18, 0.22, 0.20, None, 0)]),   # (PositionRow, mid_price, yes_bid, yes_ask, last_price, series_ticker, has_factbase)
+        # (PositionRow, mid_price, yes_bid, yes_ask, last_price, series_ticker, has_factbase)
+        _all_result([(open_pos, 0.20, 0.18, 0.22, 0.20, None, 0)]),
     )
 
     client = TestClient(_make_app(session))
@@ -398,7 +397,8 @@ def test_positions_endpoint_all_statuses() -> None:
     session.execute = _execute_side_effects(
         _mode_result(),              # _get_mode
         _scalar_result(2),
-        _all_result([(r, 0.50, 0.48, 0.52, 0.50, None, 0) for r in rows]),   # (PositionRow, mid_price, yes_bid, yes_ask, last_price, series_ticker, has_factbase)
+        # (PositionRow, mid_price, yes_bid, yes_ask, last_price, series_ticker, has_factbase)
+        _all_result([(r, 0.50, 0.48, 0.52, 0.50, None, 0) for r in rows]),
     )
 
     client = TestClient(_make_app(session))
@@ -1561,14 +1561,14 @@ def _decisions_mock_session(
 
 def _make_closed_position(**kw) -> MagicMock:
     """Convenience wrapper for _make_position_row that defaults to a closed position."""
-    defaults = dict(
-        status="closed",
-        exit_price=0.25,
-        exit_time=datetime(2026, 2, 1, tzinfo=UTC),
-        exit_reason="stoploss",
-        pnl=-2.5,
-        pnl_pct=-0.5,
-    )
+    defaults = {
+        "status": "closed",
+        "exit_price": 0.25,
+        "exit_time": datetime(2026, 2, 1, tzinfo=UTC),
+        "exit_reason": "stoploss",
+        "pnl": -2.5,
+        "pnl_pct": -0.5,
+    }
     defaults.update(kw)
     return _make_position_row(**defaults)
 
@@ -2043,8 +2043,8 @@ def test_upgrade_api_tier_route_503_no_client() -> None:
 
 def test_upgrade_api_tier_route_403_insufficient_scope() -> None:
     """A 403 with 'insufficient_scope' in the body maps to a key-permission message."""
-    from freqpred.markets.kalshi import KalshiAPIError
     from freqpred.dashboard.api.routes import _kalshi_client as _dep
+    from freqpred.markets.kalshi import KalshiAPIError
 
     mock_kc = AsyncMock()
     mock_kc.upgrade_api_tier = AsyncMock(
@@ -2066,8 +2066,8 @@ def test_upgrade_api_tier_route_403_insufficient_scope() -> None:
 
 def test_upgrade_api_tier_route_403_no_api_order() -> None:
     """A 403 with no 'insufficient_scope' marker maps to the API-order requirement message."""
-    from freqpred.markets.kalshi import KalshiAPIError
     from freqpred.dashboard.api.routes import _kalshi_client as _dep
+    from freqpred.markets.kalshi import KalshiAPIError
 
     mock_kc = AsyncMock()
     mock_kc.upgrade_api_tier = AsyncMock(side_effect=KalshiAPIError(403, ""))

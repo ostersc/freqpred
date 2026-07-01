@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import textwrap
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -21,7 +21,7 @@ from freqpred.strategy.loader import load_strategy
 # Helpers
 # ---------------------------------------------------------------------------
 
-NOW = datetime.now(tz=timezone.utc)
+NOW = datetime.now(tz=UTC)
 
 
 def _market(

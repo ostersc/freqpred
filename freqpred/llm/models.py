@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, Text, VARCHAR
+from sqlalchemy import VARCHAR, Boolean, Float, Integer, Text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 

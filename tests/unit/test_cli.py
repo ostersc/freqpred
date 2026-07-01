@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,12 +12,14 @@ from click.testing import CliRunner
 
 from freqpred.cli import main
 
+if TYPE_CHECKING:
+    from freqpred.signal.models import Signal
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-NOW = datetime(2026, 3, 17, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 17, 12, 0, 0, tzinfo=UTC)
 
 
 def _make_config(
@@ -44,7 +47,7 @@ def _make_config(
     return cfg
 
 
-def _make_fake_signal(direction: str = "YES") -> "Signal":
+def _make_fake_signal(direction: str = "YES") -> Signal:
     from freqpred.signal.models import Signal
     return Signal(
         id=str(uuid.uuid4()),
@@ -65,7 +68,7 @@ def _make_fake_signal(direction: str = "YES") -> "Signal":
     )
 
 
-def _make_run_mocks(market_row: MagicMock, signal: "Signal | None"):
+def _make_run_mocks(market_row: MagicMock, signal: Signal | None):
     """Build the full set of mocks needed to run _run_main for one signal loop cycle."""
     # DB session returns the market row
     mock_scalars = MagicMock()
@@ -277,32 +280,6 @@ class TestSignalAnalyzeCommand:
         runner = CliRunner()
         config = _make_config()
 
-        from freqpred.signal.models import Signal
-
-        fake_signal = Signal(
-            id=str(uuid.uuid4()),
-            market_id="MKT-1",
-            estimated_probability=0.65,
-            confidence=0.82,
-            edge=0.23,
-            market_mid_at_signal=0.42,
-            direction="YES",
-            reasoning="Strong evidence.",
-            sources=[],
-            retrieval_hash="abc",
-            model_used="claude-sonnet-4-6",
-            prompt_version="v1",
-            trigger="manual",
-            created_at=NOW,
-            raw_context="{}",
-        )
-
-        async def fake_analyze(cfg, market_id):
-            from freqpred.cli import _signal_analyze
-            # Patch internals inline
-            import freqpred.cli as cli_mod
-            click_echo_calls: list[str] = []
-
         with patch("freqpred.cli.load_config", return_value=config), \
              patch("freqpred.cli._signal_analyze", new_callable=AsyncMock) as mock_analyze:
             result = runner.invoke(main, ["signal", "analyze", "--market-id", "MKT-1"])
@@ -398,7 +375,7 @@ class TestDbMigrate:
         with patch("freqpred.cli.load_config", return_value=_make_config()), \
              patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
-            result = runner.invoke(main, ["db", "migrate"])
+            runner.invoke(main, ["db", "migrate"])
 
         mock_run.assert_called_once()
         cmd_args = mock_run.call_args.args[0]
@@ -749,7 +726,6 @@ class TestPositionsResolve:
         output_lines: list[str] = []
 
         import freqpred.cli as cli_mod
-        original_echo = cli_mod.click.echo
 
         def capture_echo(msg: str = "", **kwargs) -> None:
             if not kwargs.get("err"):

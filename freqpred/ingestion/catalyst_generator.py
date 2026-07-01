@@ -23,7 +23,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.ingestion.models import CatalystQuery, CatalystQueryRow, CatalystRun, CatalystRunRow
+from freqpred.ingestion.models import CatalystQueryRow, CatalystRun, CatalystRunRow
 from freqpred.llm.client import LLMClient, LLMError
 from freqpred.markets.models import Market, MarketRow, PositionRow
 from freqpred.rag.models import Document
@@ -271,11 +271,14 @@ def _build_prompt(market: Market, rag_docs: list[Document]) -> str:
         'TV null is fine for data/price markets where TV transcripts add little signal.',
         "",
         'Example for a word-mention market (Trump says "communist"):',
-        '[{"query_text": "how often does Trump use word communist in speeches", "tv_query": "trump AND (\\"communist\\" OR \\"communism\\")"}]',
+        '[{"query_text": "how often does Trump use word communist in speeches", '
+        '"tv_query": "trump AND (\\"communist\\" OR \\"communism\\")"}]',
         'Example for a price market:',
-        '[{"query_text": "Bitcoin price forecast March 2026", "tv_query": null}, {"query_text": "BTC ETF inflows trend", "tv_query": null}]',
+        '[{"query_text": "Bitcoin price forecast March 2026", "tv_query": null}, '
+        '{"query_text": "BTC ETF inflows trend", "tv_query": null}]',
         'Example for a Fed policy market:',
-        '[{"query_text": "Fed interest rate cut probability 2026", "tv_query": "\\"federal reserve\\" AND (\\"rate cut\\" OR \\"interest rates\\")"}]',
+        '[{"query_text": "Fed interest rate cut probability 2026", '
+        '"tv_query": "\\"federal reserve\\" AND (\\"rate cut\\" OR \\"interest rates\\")"}]',
         "",
         "Return the JSON array and nothing else.",
     ]

@@ -150,7 +150,7 @@ class OllamaEmbedder:
         return resp.json()["embeddings"][0]
 
 
-def make_embedder(config: "EmbeddingConfig") -> "LocalEmbedder | OllamaEmbedder":
+def make_embedder(config: EmbeddingConfig) -> LocalEmbedder | OllamaEmbedder:
     """Construct the configured embedder from EmbeddingConfig."""
     if config.backend == "ollama":
         return OllamaEmbedder(

@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,11 +23,10 @@ import freqpred.llm.models  # noqa: F401
 import freqpred.markets.models  # noqa: F401
 import freqpred.rag.models  # noqa: F401
 import freqpred.signal.models  # noqa: F401
-
 from freqpred.markets.models import Position
 from freqpred.markets.position_watcher import PositionWatcher
 
-NOW = datetime(2026, 3, 22, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 22, 12, 0, 0, tzinfo=UTC)
 
 # ---------------------------------------------------------------------------
 # Helpers

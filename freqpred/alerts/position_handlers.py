@@ -27,11 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid as _uuid
-from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import delete as sa_delete, select
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import select
 
 from freqpred.markets.models import PositionRow
 
@@ -63,11 +63,11 @@ def _clip(text: str) -> str:
 
 
 def register_position_commands(
-    cmd_handler: "TelegramCommandHandler",
-    session_factory: "async_sessionmaker[AsyncSession]",
-    config: "Settings",
+    cmd_handler: TelegramCommandHandler,
+    session_factory: async_sessionmaker[AsyncSession],
+    config: Settings,
     mode: str,
-    order_manager: "OrderManager | None" = None,
+    order_manager: OrderManager | None = None,
 ) -> None:
     """Register all T30 position management commands onto *cmd_handler*."""
 
@@ -158,7 +158,7 @@ def register_position_commands(
     async def _require_confirmation(
         chat_id: int,
         prompt: str,
-        action_fn: "Callable[[], Awaitable[str]]",
+        action_fn: Callable[[], Awaitable[str]],
     ) -> None:
         """Send an inline keyboard confirmation prompt and wire up callbacks.
 

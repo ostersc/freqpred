@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -41,7 +41,7 @@ async def fetch(
         List of RawDocument objects with source_type="news".
     """
     client = TavilyClient(api_key=api_key)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         response: dict[str, Any] = await asyncio.to_thread(
@@ -80,7 +80,7 @@ async def fetch(
             try:
                 published_at = datetime.fromisoformat(published_str)
                 if published_at.tzinfo is None:
-                    published_at = published_at.replace(tzinfo=timezone.utc)
+                    published_at = published_at.replace(tzinfo=UTC)
             except ValueError:
                 pass
 

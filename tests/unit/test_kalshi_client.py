@@ -1,14 +1,14 @@
 """Unit tests for freqpred.markets.kalshi.KalshiClient."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from freqpred.markets.kalshi import KalshiAPIError, KalshiClient
-from freqpred.markets.models import Market, Order
+from freqpred.markets.models import Order
 
 BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
 
@@ -541,7 +541,9 @@ class TestPost:
         """_post() calls _make_auth_headers with method='POST'."""
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.hazmat.primitives.serialization import (
-            Encoding, NoEncryption, PrivateFormat,
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
         )
 
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -981,7 +983,10 @@ class TestCancelOrder:
             result = await client.cancel_order("ORD-9")
 
         assert mock_delete.await_count == 1
-        delete_url = mock_delete.call_args.args[0] if mock_delete.call_args.args else mock_delete.call_args.kwargs.get("url", "")
+        delete_url = (
+            mock_delete.call_args.args[0] if mock_delete.call_args.args
+            else mock_delete.call_args.kwargs.get("url", "")
+        )
         assert delete_url.endswith("/portfolio/events/orders/ORD-9")
         assert mock_get.await_count == 1
         get_url = mock_get.call_args.args[0] if mock_get.call_args.args else mock_get.call_args.kwargs.get("url", "")

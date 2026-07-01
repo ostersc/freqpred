@@ -5,14 +5,12 @@ All DB sessions and external calls are mocked — no real DB or API requests.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from freqpred.alerts.command_handlers import LogBuffer, _LogBufferHandler, register_system_commands
 from freqpred.alerts.telegram_commands import TelegramCommandHandler
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -261,8 +259,6 @@ async def test_version_handles_missing_package():
 
 @pytest.mark.asyncio
 async def test_count_returns_open_and_max():
-    from sqlalchemy import func
-    from freqpred.markets.models import PositionRow
 
     session_factory, session = _async_session_ctx()
 

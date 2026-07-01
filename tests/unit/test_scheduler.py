@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timedelta, timezone
-from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -22,8 +22,8 @@ from freqpred.ingestion.scheduler import (
 from freqpred.ingestion.store import DocumentSkipped, RawDocument, UpsertStatus
 from freqpred.rag.models import Document
 
-NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
-CLOSE_TIME = datetime(2026, 3, 30, 0, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
+CLOSE_TIME = datetime(2026, 3, 30, 0, 0, 0, tzinfo=UTC)
 FAKE_EMBEDDING = [0.1] * 384
 
 
@@ -209,7 +209,12 @@ class TestRunCycleFetchersCalled:
         doc = _make_document()
         raw_doc = _make_raw_doc()
 
-        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("Fed rate decision March 2026", None)])]
+        market_queries = [
+            (
+                "MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME,
+                [("Fed rate decision March 2026", None)],
+            )
+        ]
 
         with (
             patch(
@@ -793,7 +798,9 @@ class TestAdaptiveLimits:
         """Guardian must use query_text when tv_query is None."""
         session = AsyncMock()
         embedder = _make_embedder()
-        market_queries = [("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("Fed rate hike 2026", None)])]
+        market_queries = [
+            ("MKT-1", "economics", "Will this market resolve Yes?", CLOSE_TIME, [("Fed rate hike 2026", None)])
+        ]
 
         with (
             patch("freqpred.ingestion.scheduler._load_active_market_queries",
@@ -866,7 +873,7 @@ class TestAdaptiveLimits:
     async def test_tavily_skipped_for_market_when_cursor_is_recent(self, monkeypatch) -> None:
         """Tavily must be skipped for a market whose cursor is within the fetch interval."""
         # Cursor was set 30 minutes ago (relative to actual now); interval is 1 hour → not due.
-        recent = datetime.now(timezone.utc) - timedelta(minutes=30)
+        recent = datetime.now(UTC) - timedelta(minutes=30)
         monkeypatch.setattr(
             "freqpred.ingestion.scheduler.get_cursor",
             AsyncMock(return_value=recent),
@@ -896,7 +903,7 @@ class TestAdaptiveLimits:
     async def test_tavily_runs_for_market_when_cursor_is_stale(self, monkeypatch) -> None:
         """Tavily must run for a market whose cursor is beyond the fetch interval."""
         # Cursor was set 2 hours ago (relative to actual now); interval is 1 hour → due.
-        stale = datetime.now(timezone.utc) - timedelta(hours=2)
+        stale = datetime.now(UTC) - timedelta(hours=2)
         monkeypatch.setattr(
             "freqpred.ingestion.scheduler.get_cursor",
             AsyncMock(return_value=stale),
@@ -987,7 +994,7 @@ class TestAdaptiveLimits:
     @pytest.mark.asyncio
     async def test_set_cursor_not_called_when_tavily_skipped_by_cursor(self, monkeypatch) -> None:
         """set_cursor must not be called for a market that was skipped due to a recent cursor."""
-        recent = datetime.now(timezone.utc) - timedelta(minutes=10)
+        recent = datetime.now(UTC) - timedelta(minutes=10)
         mock_set_cursor = AsyncMock(return_value=None)
         monkeypatch.setattr("freqpred.ingestion.scheduler.set_cursor", mock_set_cursor)
         monkeypatch.setattr(

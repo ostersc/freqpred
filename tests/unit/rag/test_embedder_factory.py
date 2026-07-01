@@ -1,8 +1,6 @@
 """Unit tests for the make_embedder factory in freqpred/rag/embedder.py."""
 from __future__ import annotations
 
-import pytest
-
 from freqpred.config import EmbeddingConfig
 from freqpred.rag.embedder import LocalEmbedder, OllamaEmbedder, make_embedder
 

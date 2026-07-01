@@ -8,8 +8,8 @@ Revision ID: 0009
 Revises: 0008
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision: str = "0009"
 down_revision: str = "0008"

@@ -8,8 +8,8 @@ Revision ID: 0046
 Revises: 0045
 Create Date: 2026-06-07
 """
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from pgvector.sqlalchemy import Vector
 
 revision = "0046"

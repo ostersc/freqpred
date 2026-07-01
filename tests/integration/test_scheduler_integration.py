@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +27,11 @@ pytestmark = pytest.mark.skipif(
     reason="Integration tests require DATABASE_URL pointing to freqpred_test",
 )
 
+# Register all models with Base.metadata before create_all.
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.db import Base, make_engine, make_session_factory
 from freqpred.ingestion.models import CatalystQueryRow, CatalystRunRow
 from freqpred.ingestion.scheduler import run_cycle
@@ -34,13 +39,7 @@ from freqpred.ingestion.store import RawDocument
 from freqpred.markets.models import MarketRow
 from freqpred.rag.models import DocumentRow
 
-# Register all models with Base.metadata before create_all.
-import freqpred.ingestion.models  # noqa: F401
-import freqpred.llm.models        # noqa: F401
-import freqpred.metrics.models    # noqa: F401
-import freqpred.signal.models     # noqa: F401
-
-NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 16, 12, 0, 0, tzinfo=UTC)
 FUTURE = NOW + timedelta(days=30)
 FAKE_EMBEDDING = [0.1] * 384
 DATABASE_URL = os.environ.get(
@@ -153,11 +152,11 @@ async def _seed_catalyst_queries(
     session, run_id: uuid.UUID, query_texts: list[str]
 ) -> list[CatalystQueryRow]:
     rows = []
-    for text in query_texts:
+    for query_text in query_texts:
         row = CatalystQueryRow(
             id=uuid.uuid4(),
             run_id=run_id,
-            query_text=text,
+            query_text=query_text,
         )
         session.add(row)
         rows.append(row)

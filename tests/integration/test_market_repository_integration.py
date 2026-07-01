@@ -21,16 +21,16 @@ pytestmark = pytest.mark.skipif(
     reason="Integration tests require DATABASE_URL pointing to freqpred_test",
 )
 
-from freqpred.db import Base, make_engine, make_session_factory
-from freqpred.markets.models import Market, MarketRow
-from freqpred.markets.repository import upsert_market, upsert_markets
+import freqpred.llm.models  # noqa: F401
 
 # Import all models so Base.metadata is fully populated before create_all.
 import freqpred.markets.models  # noqa: F401
 import freqpred.metrics.models  # noqa: F401
-import freqpred.signal.models   # noqa: F401
-import freqpred.rag.models      # noqa: F401
-import freqpred.llm.models      # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
+from freqpred.db import Base, make_engine, make_session_factory
+from freqpred.markets.models import Market, MarketRow
+from freqpred.markets.repository import upsert_market, upsert_markets
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
@@ -64,22 +64,22 @@ async def session(engine):
 
 
 def _make_market(**overrides) -> Market:
-    defaults = dict(
-        id="KXPRES-25-DEM",
-        platform="kalshi",
-        question="Will the Dem candidate win?",
-        category="politics",
-        close_time=NOW + timedelta(days=30),
-        yes_bid=0.45,
-        yes_ask=0.47,
-        mid_price=0.46,
-        volume_24h=1000.0,
-        open_interest=5000.0,
-        last_fetched_at=NOW,
-        price_updated_at=NOW,
-        metadata_fetched_at=NOW,
-        metadata={"event_ticker": "KXPRES-25", "subtitle": "2026 election"},
-    )
+    defaults = {
+        "id": "KXPRES-25-DEM",
+        "platform": "kalshi",
+        "question": "Will the Dem candidate win?",
+        "category": "politics",
+        "close_time": NOW + timedelta(days=30),
+        "yes_bid": 0.45,
+        "yes_ask": 0.47,
+        "mid_price": 0.46,
+        "volume_24h": 1000.0,
+        "open_interest": 5000.0,
+        "last_fetched_at": NOW,
+        "price_updated_at": NOW,
+        "metadata_fetched_at": NOW,
+        "metadata": {"event_ticker": "KXPRES-25", "subtitle": "2026 election"},
+    }
     return Market(**{**defaults, **overrides})
 
 

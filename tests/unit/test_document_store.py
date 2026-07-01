@@ -5,20 +5,25 @@ All database and embedder calls are mocked — no external dependencies.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from freqpred.ingestion.store import RawDocument, UpsertStatus, _sha256, _strip_html, upsert_document
+from freqpred.ingestion.store import (
+    RawDocument,
+    UpsertStatus,
+    _sha256,
+    _strip_html,
+    upsert_document,
+)
 from freqpred.rag.models import DocumentRow
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 15, 12, 0, 0, tzinfo=UTC)
 
 FAKE_EMBEDDING = [0.1] * 384
 
@@ -38,17 +43,17 @@ def _make_raw_doc(
     body: str = "Plain body text.",
     **kwargs,
 ) -> RawDocument:
-    defaults = dict(
-        source_url=url,
-        title="Example Article",
-        body=body,
-        source_type="news",
-        source_name="Reuters",
-        category="politics",
-        tags=["election"],
-        published_at=NOW,
-        fetched_at=NOW,
-    )
+    defaults = {
+        "source_url": url,
+        "title": "Example Article",
+        "body": body,
+        "source_type": "news",
+        "source_name": "Reuters",
+        "category": "politics",
+        "tags": ["election"],
+        "published_at": NOW,
+        "fetched_at": NOW,
+    }
     defaults.update(kwargs)
     return RawDocument(**defaults)
 
@@ -323,6 +328,7 @@ async def test_embed_called_with_stripped_body():
 async def test_local_embedder_embed_text():
     """embed_text must return the first embedding from a single-text batch."""
     import numpy as np
+
     from freqpred.rag.embedder import LocalEmbedder
 
     with patch("freqpred.rag.embedder.SentenceTransformer") as MockST:
@@ -503,6 +509,7 @@ async def test_upsert_low_bm25_skips_summarizer():
 async def test_local_embedder_embed_batch_multiple():
     """embed_batch must return one vector per input text."""
     import numpy as np
+
     from freqpred.rag.embedder import LocalEmbedder
 
     texts = ["text 1", "text 2", "text 3"]

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,7 +51,7 @@ async def open_position(
         direction=direction,
         contracts=contracts,
         entry_price=entry_price,
-        entry_time=datetime.now(tz=timezone.utc),
+        entry_time=datetime.now(tz=UTC),
         mode=mode,
         status=status,
         exchange_order_id=exchange_order_id,
@@ -86,7 +86,7 @@ async def close_position(
     pnl_pct = pnl / cost_basis if cost_basis else 0.0
 
     row.exit_price = exit_price
-    row.exit_time = datetime.now(tz=timezone.utc)
+    row.exit_time = datetime.now(tz=UTC)
     row.exit_reason = exit_reason
     row.resolution = resolution
     row.status = "closed"
@@ -99,7 +99,7 @@ async def close_position(
 
 async def partial_close_position(
     session: AsyncSession,
-    position: "Position",
+    position: Position,
     *,
     filled_contracts: int,
     fill_price: float,
@@ -109,7 +109,7 @@ async def partial_close_position(
     exit_requested_contracts: int | None = None,
     resolution: int | None = None,
     _now: datetime | None = None,
-) -> "Position":
+) -> Position:
     """Realize P&L on a subset of contracts; leave the residual open.
 
     Accumulates gross P&L (without entry fee) into realized_pnl_accumulator
@@ -117,7 +117,7 @@ async def partial_close_position(
     drops to 0) the position is transitioned to 'closed' with a weighted-avg
     exit_price and net P&L that includes both entry and all exit fees.
     """
-    now = _now or datetime.now(tz=timezone.utc)
+    now = _now or datetime.now(tz=UTC)
 
     result = await session.execute(
         select(PositionRow).where(PositionRow.id == uuid.UUID(str(position.id)))
@@ -249,7 +249,7 @@ async def promote_pending_to_open(
 
 async def get_daily_pnl(session: AsyncSession, mode: str = "paper") -> float:
     """Sum of pnl for all positions closed today (UTC) matching *mode*. Returns 0.0 if none."""
-    today_start = datetime.now(tz=timezone.utc).replace(
+    today_start = datetime.now(tz=UTC).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     result = await session.execute(
@@ -291,7 +291,7 @@ async def get_pnl_time_series(
     ]
 
     if lookback_days is not None:
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)
+        cutoff = datetime.now(tz=UTC) - timedelta(days=lookback_days)
         base_filters.append(PositionRow.exit_time >= cutoff)
 
     if direction:
@@ -363,7 +363,7 @@ async def get_llm_spend_time_series(
     """
     filters = []
     if lookback_days is not None:
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=lookback_days)
+        cutoff = datetime.now(tz=UTC) - timedelta(days=lookback_days)
         filters.append(LLMQueryRow.timestamp >= cutoff)
 
     stmt = (

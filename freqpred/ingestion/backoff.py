@@ -27,7 +27,6 @@ from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.ingestion.models import FetcherRateLimitRow

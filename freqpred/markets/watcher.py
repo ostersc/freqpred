@@ -76,8 +76,8 @@ class MarketWatcher:
         session_factory: async_sessionmaker[AsyncSession],
         polling_interval: int = 300,
         price_move_threshold: float = PRICE_MOVE_THRESHOLD,
-        alert_dispatcher: "AlertDispatcher | None" = None,
-        runtime_telemetry: "RuntimeTelemetry | None" = None,
+        alert_dispatcher: AlertDispatcher | None = None,
+        runtime_telemetry: RuntimeTelemetry | None = None,
     ) -> None:
         self._client = client
         self._session_factory = session_factory
@@ -350,7 +350,10 @@ class MarketWatcher:
         # Pass 1: markets already resolved in DB.
         async with self._session_factory() as session:
             result = await session.execute(
-                select(PositionRow.id, PositionRow.direction, PositionRow.market_id, MarketRow.result, MarketRow.settlement_value)
+                select(
+                    PositionRow.id, PositionRow.direction, PositionRow.market_id,
+                    MarketRow.result, MarketRow.settlement_value,
+                )
                 .join(MarketRow, PositionRow.market_id == MarketRow.id)
                 .where(
                     PositionRow.status.in_(["open", "pending"]),
@@ -404,7 +407,10 @@ class MarketWatcher:
             # Re-query now that markets may have been updated.
             async with self._session_factory() as session:
                 result = await session.execute(
-                    select(PositionRow.id, PositionRow.direction, PositionRow.market_id, MarketRow.result, MarketRow.settlement_value)
+                    select(
+                        PositionRow.id, PositionRow.direction, PositionRow.market_id,
+                        MarketRow.result, MarketRow.settlement_value,
+                    )
                     .join(MarketRow, PositionRow.market_id == MarketRow.id)
                     .where(
                         PositionRow.status.in_(["open", "pending"]),

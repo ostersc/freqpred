@@ -4,7 +4,7 @@ All HTTP calls are mocked — no real network calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,7 +22,7 @@ def _no_gdelt_sleep():
         yield
 
 _QUERY = "election results 2026"
-_NOW = datetime(2026, 3, 19, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 3, 19, 12, 0, 0, tzinfo=UTC)
 
 
 def _make_article(
@@ -121,7 +121,7 @@ async def test_fetch_parses_seendate():
     with patch("freqpred.ingestion.fetchers.gdelt.httpx.AsyncClient", return_value=client_mock):
         docs = await fetch(_QUERY)
 
-    assert docs[0].published_at == datetime(2026, 3, 10, 8, 30, 0, tzinfo=timezone.utc)
+    assert docs[0].published_at == datetime(2026, 3, 10, 8, 30, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -284,6 +284,7 @@ async def test_fetch_returns_empty_on_http_error():
 @pytest.mark.asyncio
 async def test_fetch_raises_on_429():
     import httpx as _httpx
+
     from freqpred.ingestion.fetchers.gdelt import GDELTRateLimitError
 
     mock_response = MagicMock()

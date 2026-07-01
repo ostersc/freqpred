@@ -10,10 +10,9 @@ import pytest
 from freqpred.ingestion.fetchers.factbase import (
     FactbasePhraseCache,
     FactbaseSearchTerms,
-    fetch_phrase_frequency,
     extract_search_terms,
+    fetch_phrase_frequency,
 )
-
 
 # ---------------------------------------------------------------------------
 # FactbasePhraseCache

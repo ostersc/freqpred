@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 from newsapi import NewsApiClient
@@ -51,14 +51,14 @@ async def fetch(
         List of RawDocument objects with source_type="news".
     """
     client = NewsApiClient(api_key=api_key)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
-    kwargs: dict = dict(
-        q=query,
-        page_size=min(max_results, 100),
-        sort_by="relevancy",
-        language="en",
-    )
+    kwargs: dict = {
+        "q": query,
+        "page_size": min(max_results, 100),
+        "sort_by": "relevancy",
+        "language": "en",
+    }
     if from_date is not None:
         kwargs["from_param"] = from_date.strftime("%Y-%m-%dT%H:%M:%S")
 

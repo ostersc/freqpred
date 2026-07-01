@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import (
@@ -89,13 +89,13 @@ class MarketRow(Base):
     )
 
     # Relationships (back-populated in other models)
-    signals: Mapped[list["SignalRow"]] = relationship(  # type: ignore[name-defined]  # noqa: F821
+    signals: Mapped[list[SignalRow]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "SignalRow",
         back_populates="market",
         foreign_keys="SignalRow.market_id",
         lazy="raise",
     )
-    positions: Mapped[list["PositionRow"]] = relationship(
+    positions: Mapped[list[PositionRow]] = relationship(
         "PositionRow",
         back_populates="market",
         lazy="raise",
@@ -185,8 +185,8 @@ class PositionRow(Base):
         server_default="now()",
     )
 
-    market: Mapped["MarketRow"] = relationship("MarketRow", back_populates="positions")
-    signal: Mapped["SignalRow"] = relationship(  # type: ignore[name-defined]  # noqa: F821
+    market: Mapped[MarketRow] = relationship("MarketRow", back_populates="positions")
+    signal: Mapped[SignalRow] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "SignalRow", back_populates="positions"
     )
 
@@ -221,7 +221,7 @@ class Market:
     current_signal_id: str | None = None
 
     metadata: dict = field(default_factory=dict)
-    created_at: datetime = field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=UTC))
     open_time: datetime | None = None
     status: str = "active"
     result: str | None = None
@@ -441,7 +441,9 @@ class Position:
     # Filled after resolution
     exit_price: float | None = None
     exit_time: datetime | None = None
-    exit_reason: str | None = None  # "stoploss" | "trailing_stop" | "roi" | "signal" | "custom_exit:<tag>" | "market_resolved" | "force_exit:<tag>" (e.g. "force_exit:manual")
+    # "stoploss" | "trailing_stop" | "roi" | "signal" | "custom_exit:<tag>" |
+    # "market_resolved" | "force_exit:<tag>" (e.g. "force_exit:manual")
+    exit_reason: str | None = None
     resolution: int | None = None   # 1 = YES won, 0 = NO won
     pnl: float | None = None
     pnl_pct: float | None = None

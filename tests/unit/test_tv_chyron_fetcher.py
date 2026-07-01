@@ -4,7 +4,7 @@ All HTTP calls are mocked — no real network calls.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,9 +15,8 @@ from freqpred.ingestion.fetchers.tv_chyron import (
     filter_chyrons,
     parse_and_groups,
 )
-from freqpred.ingestion.store import RawDocument
 
-_NOW = datetime(2026, 3, 23, 23, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 3, 23, 23, 0, 0, tzinfo=UTC)
 
 
 def _make_row(
@@ -38,7 +37,8 @@ def _make_row(
 
 _SAMPLE_TSV = (
     "date_time_(UTC)\tchannel\tduration\thttps://archive.org/details/\ttext\n"
-    "2026-03-23 23:01:00\tFOXNEWSW\t17\tFOXNEWSW_20260323_230100_Fox_News_Tonight/start/60\tTRUMP: IRAN WANTS TO MAKE A DEAL\n"
+    "2026-03-23 23:01:00\tFOXNEWSW\t17\tFOXNEWSW_20260323_230100_Fox_News_Tonight/start/60\t"
+    "TRUMP: IRAN WANTS TO MAKE A DEAL\n"
     "2026-03-23 23:02:00\tCNNW\t15\tCNNW_20260323_230200_CNN_Tonight/start/120\tFED CUTS RATES\n"
 )
 
@@ -104,8 +104,8 @@ def test_filter_chyrons_and_no_match():
 
 
 def test_filter_chyrons_since_cursor():
-    old_dt = datetime(2026, 3, 23, 22, 0, 0, tzinfo=timezone.utc)
-    new_dt = datetime(2026, 3, 23, 23, 0, 0, tzinfo=timezone.utc)
+    old_dt = datetime(2026, 3, 23, 22, 0, 0, tzinfo=UTC)
+    new_dt = datetime(2026, 3, 23, 23, 0, 0, tzinfo=UTC)
     rows = [
         _make_row(dt=old_dt, text="trump communist"),
         _make_row(dt=new_dt, text="trump communist"),
@@ -156,7 +156,7 @@ async def test_fetch_all_parses_tsv():
     assert rows[0].duration_s == 17
     assert rows[0].identifier_path == "FOXNEWSW_20260323_230100_Fox_News_Tonight/start/60"
     assert rows[0].text == "TRUMP: IRAN WANTS TO MAKE A DEAL"
-    assert rows[0].dt == datetime(2026, 3, 23, 23, 1, 0, tzinfo=timezone.utc)
+    assert rows[0].dt == datetime(2026, 3, 23, 23, 1, 0, tzinfo=UTC)
     assert rows[1].channel == "CNNW"
 
 

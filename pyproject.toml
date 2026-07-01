@@ -44,6 +44,8 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-env>=1.6.0",
     "pytest-mock>=3.14.0",
+    "ruff>=0.15.20",
+    "pre-commit>=3.7.0",
 ]
 
 [tool.pytest.ini_options]
@@ -55,3 +57,51 @@ env = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["freqpred"]
+
+[tool.ruff]
+target-version = "py312"
+# 100 flagged 403 lines that were mostly just slightly over (p50=107,
+# p90=122) — structlog calls with many kwargs, not a real readability
+# problem. 120 clears ~90% of those while still catching genuine outliers.
+line-length = 120
+
+[tool.ruff.lint]
+# Starter rule set: correctness (F/E), import sorting (I), syntax
+# modernization (UP), and common bug patterns (B/C4). Deliberately excludes
+# stricter/noisier sets (e.g. ANN, D, S) until the initial backlog is clear.
+select = ["E", "F", "I", "UP", "B", "C4"]
+ignore = [
+    # UP037 (unquote annotations) assumes `from __future__ import annotations`
+    # makes quoting always redundant, but that's false for a name nested
+    # inside Annotated[...] that's only imported under TYPE_CHECKING (e.g.
+    # dashboard/api/routes.py's `Annotated["KalshiClient | None", Depends(...)]`
+    # pattern) — FastAPI resolves these at runtime via get_type_hints(), and
+    # unquoting broke request handling (misclassified as a body field, 422)
+    # without raising any import-time error. Caught by the test suite once,
+    # not worth the recurring risk of a silent runtime break on every --fix.
+    "UP037",
+    # E402 (import not at top of file) is 96% the codebase's own documented
+    # "Ensure ORM relationships resolve" pattern in tests/ — imports placed
+    # after other code specifically to register SQLAlchemy models before
+    # Base.metadata is used, not accidental placement. The tool can't tell
+    # that apart from a real ordering mistake, so it's noise here.
+    "E402",
+    # B027 flags empty methods on an ABC with no @abstractmethod decorator as
+    # a likely-forgotten override, but IPredictionStrategy.on_position_opened
+    # / on_order_failed / on_resolution are intentionally optional lifecycle
+    # hooks — each docstring says so explicitly ("Optional hook... Default:
+    # no-op"). Making them abstract would force every strategy to implement
+    # hooks most don't need.
+    "B027",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# B008 flags a function call in an argument default as a mutable-default
+# footgun, but FastAPI's Query/Depends/Body/etc. are specifically designed
+# to be called as defaults — that's the framework's own API. Most instances
+# in dashboard/api/routes.py already sit on ruff's builtin allowlist; this
+# extends it to cover the couple that didn't (e.g. `Query` combined with a
+# `datetime | None` annotation).
+extend-immutable-calls = [
+    "fastapi.Query", "fastapi.Depends", "fastapi.Body", "fastapi.Header", "fastapi.Cookie", "fastapi.Path",
+]

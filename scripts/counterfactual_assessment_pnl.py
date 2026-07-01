@@ -25,10 +25,10 @@ from sqlalchemy import select
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.markets.models import MarketRow, PositionRow
-from freqpred.metrics.models import SignalAssessmentRow
 from freqpred.metrics.assessment import _trust_score_to_multiplier
-from freqpred.signal.models import SignalRow  # noqa: F401 — registers mapper
+from freqpred.metrics.models import SignalAssessmentRow
 from freqpred.rag.models import DocumentMarketLinkRow  # noqa: F401 — registers mapper
+from freqpred.signal.models import SignalRow  # noqa: F401 — registers mapper
 
 
 @dataclass
@@ -197,7 +197,10 @@ async def main(
     # ── Per-position detail ──────────────────────────────────────────────────
     mult_header = "Act.M  CF.M" if using_custom_scale else "Mult "
     print(f"\n{'─'*76}")
-    print(f"  {'Market':<32} {'Dir':<4} {mult_header}  {'Act.C':>5} {'CF.C':>5}  {'Act.P&L':>8} {'CF.P&L':>8} {'Delta':>8}")
+    print(
+        f"  {'Market':<32} {'Dir':<4} {mult_header}  {'Act.C':>5} {'CF.C':>5}  "
+        f"{'Act.P&L':>8} {'CF.P&L':>8} {'Delta':>8}"
+    )
     print(f"{'─'*76}")
     for r in rows:
         question_short = r.market_question[:30].rstrip()

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -94,7 +94,7 @@ async def fetch_all(lookback_hours: int = 1) -> list[ChyronRow]:
             continue
         try:
             dt = datetime.strptime(cols[0].strip(), "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=timezone.utc
+                tzinfo=UTC
             )
             channel = cols[1].strip()
             duration_s = int(cols[2].strip())
@@ -174,7 +174,7 @@ def filter_chyrons(
     if not and_groups:
         return []
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     docs: list[RawDocument] = []
 
     for row in chyrons:

@@ -10,11 +10,17 @@ Tests cover:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Ensure ORM relationships resolve (needed for MarketRow joins)
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import Market, Order, Position
 from freqpred.signal.models import Signal
@@ -28,14 +34,7 @@ from freqpred.trading.position_monitor import (
     _compute_trailing_stop_level,
 )
 
-# Ensure ORM relationships resolve (needed for MarketRow joins)
-import freqpred.ingestion.models   # noqa: F401
-import freqpred.llm.models         # noqa: F401
-import freqpred.markets.models     # noqa: F401
-import freqpred.rag.models         # noqa: F401
-import freqpred.signal.models      # noqa: F401
-
-NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 3, 18, 12, 0, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +79,7 @@ def _make_market(
         platform="kalshi",
         question="Will X happen?",
         category="politics",
-        close_time=close_time or (datetime.now(timezone.utc) + timedelta(days=10)),
+        close_time=close_time or (datetime.now(UTC) + timedelta(days=10)),
         yes_bid=mid_price - 0.02,
         yes_ask=mid_price + 0.02,
         mid_price=mid_price,
@@ -438,7 +437,7 @@ class TestEvaluateExit:
         # Use real now so this test doesn't break as calendar time advances.
         market = _make_market(
             mid_price=0.52,
-            close_time=datetime.now(tz=timezone.utc) + timedelta(days=5),
+            close_time=datetime.now(tz=UTC) + timedelta(days=5),
         )
         market.metadata["status"] = "open"
 
@@ -697,8 +696,6 @@ class TestCheckAllPositions:
             )
 
             # Override check_all_positions to use our injected market
-            original = monitor.check_all_positions
-
             async def _patched_check(**kwargs):  # type: ignore[no-untyped-def]
                 # Replicate check_all_positions but with known market
                 from freqpred.trading import ledger as _ledger
@@ -752,7 +749,10 @@ class TestCheckAllPositions:
         )
 
         closed_pos = Position(
-            **{**pos.__dict__, "status": "closed", "exit_price": 1.0, "exit_reason": "market_resolved", "resolution": 1, "pnl": 50.0, "pnl_pct": 1.0}
+            **{
+                **pos.__dict__, "status": "closed", "exit_price": 1.0,
+                "exit_reason": "market_resolved", "resolution": 1, "pnl": 50.0, "pnl_pct": 1.0,
+            }
         )
 
         # Market is Kalshi-resolved YES — exit_price must be 1.0 (payout), not mid_price
@@ -848,7 +848,6 @@ class TestCheckAllPositions:
         """check_all_positions(fresh_signals=...) fires should_exit when direction flips."""
         strategy = _make_strategy(min_confidence=0.70)
         pos = _make_position(entry_price=0.60, direction="YES", strategy_name="TestStrategy")
-        pos_id = pos.id
 
         session = MagicMock()
         session.__aenter__ = AsyncMock(return_value=session)
@@ -1293,7 +1292,7 @@ class TestLiveExitPolling:
             new_callable=AsyncMock,
             return_value=MagicMock(status="open", contracts=4),
         ) as mock_partial:
-            result = await monitor._execute_live_exit(
+            await monitor._execute_live_exit(
                 session=session, position=pos, market=market,
                 exit_reason="stoploss", resolution=None,
             )
@@ -1394,7 +1393,7 @@ class TestLiveExitPolling:
     @pytest.mark.asyncio
     async def test_live_exit_no_side_both_yes_and_no(self) -> None:
         """YES and NO positions both submit sell orders at the correct side bid."""
-        for direction, expected_price in [("YES", 0.61), ("NO", 0.38)]:
+        for direction in ("YES", "NO"):
             pos = _make_position(direction=direction, contracts=5, mode="live")
             market = _make_market(mid_price=0.62)
             # yes_bid = 0.61, yes_ask = 0.63; no_bid = 1 - 0.63 = 0.37, limit for NO = 1 - 0.63 = 0.37
@@ -1444,7 +1443,7 @@ class TestPendingPositionFillCheck:
         direction: str = "YES",
         entry_price: float = 0.50,
         entry_time: datetime | None = None,
-    ) -> "Position":
+    ) -> Position:
         return _make_position(
             entry_price=entry_price,
             direction=direction,

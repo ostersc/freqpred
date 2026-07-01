@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,21 +13,19 @@ import freqpred.markets.models  # noqa: F401
 import freqpred.metrics.models  # noqa: F401
 import freqpred.rag.models  # noqa: F401
 import freqpred.signal.models  # noqa: F401
-
 from freqpred.markets.models import Market
 from freqpred.metrics.assessment import (
-    assess_signal_context,
     _build_prompt_payload,
-    _load_prior_assessment_by_hash,
     _parse_assessment_response,
     _trust_score_to_multiplier,
+    assess_signal_context,
 )
 from freqpred.metrics.models import SignalAssessmentRow
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.strategy.config import StrategyConfig
 
-NOW = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
 
 
 def _make_market() -> Market:
@@ -339,6 +337,7 @@ async def test_scheduled_signal_with_no_data_still_returns_neutral() -> None:
 
 def _make_phrase_data() -> object:
     from datetime import UTC
+
     from freqpred.ingestion.fetchers.factbase import FactbasePhraseData
 
     return FactbasePhraseData(

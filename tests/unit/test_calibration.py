@@ -9,6 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Ensure ORM relationships resolve
+import freqpred.ingestion.models  # noqa: F401
+import freqpred.llm.models  # noqa: F401
+import freqpred.markets.models  # noqa: F401
+import freqpred.metrics.models  # noqa: F401
+import freqpred.rag.models  # noqa: F401
+import freqpred.signal.models  # noqa: F401
 from freqpred.metrics.calibration import (
     CalibrationReport,
     SourceBrierScore,
@@ -18,14 +25,6 @@ from freqpred.metrics.calibration import (
     compute_source_brier_scores,
     refresh_source_quality_scores,
 )
-
-# Ensure ORM relationships resolve
-import freqpred.ingestion.models   # noqa: F401
-import freqpred.llm.models         # noqa: F401
-import freqpred.markets.models     # noqa: F401
-import freqpred.metrics.models     # noqa: F401
-import freqpred.rag.models         # noqa: F401
-import freqpred.signal.models      # noqa: F401
 
 
 def _make_session(rows: list[tuple[float, float, int]]) -> AsyncMock:

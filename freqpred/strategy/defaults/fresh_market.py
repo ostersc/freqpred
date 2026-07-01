@@ -5,7 +5,7 @@ Short-dated only (max 7 days), low volume threshold to catch markets early.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from freqpred.strategy.base import IPredictionStrategy
@@ -40,7 +40,7 @@ class FreshMarketStrategy(IPredictionStrategy):
     def is_market_interesting(self, market: Market) -> bool:
         if market.open_time is None:
             return False
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         freshness_cutoff = now - timedelta(hours=_FRESHNESS_HOURS)
         spread = market.yes_ask - market.yes_bid
         return (

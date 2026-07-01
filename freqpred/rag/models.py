@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ARRAY, Float, ForeignKey, Text, UniqueConstraint, VARCHAR
+from sqlalchemy import ARRAY, VARCHAR, Float, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,7 +63,7 @@ class DocumentRow(Base):
     )
 
     # Relationships
-    market_links: Mapped[list["DocumentMarketLinkRow"]] = relationship(
+    market_links: Mapped[list[DocumentMarketLinkRow]] = relationship(
         "DocumentMarketLinkRow", back_populates="document"
     )
 
@@ -93,10 +93,10 @@ class DocumentMarketLinkRow(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default="now()"
     )
 
-    document: Mapped["DocumentRow"] = relationship(
+    document: Mapped[DocumentRow] = relationship(
         "DocumentRow", back_populates="market_links"
     )
-    signal: Mapped["SignalRow | None"] = relationship(  # type: ignore[name-defined]  # noqa: F821
+    signal: Mapped[SignalRow | None] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "SignalRow", back_populates="document_links"
     )
 
