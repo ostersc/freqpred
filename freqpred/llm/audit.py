@@ -134,6 +134,9 @@ _COST_PER_TOKEN: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001": (0.80 / 1_000_000, 4.00 / 1_000_000),
     "claude-sonnet-4-6":         (3.00 / 1_000_000, 15.00 / 1_000_000),
     "claude-opus-4-6":           (15.00 / 1_000_000, 75.00 / 1_000_000),
+    # Introductory pricing through 2026-08-31; standard rate is $3.00/$15.00 per MTok.
+    # TODO: update to (3.00/1e6, 15.00/1e6) after the introductory window ends.
+    "claude-sonnet-5":           (2.00 / 1_000_000, 10.00 / 1_000_000),
 }
 _DEFAULT_COST_PER_TOKEN = (3.00 / 1_000_000, 15.00 / 1_000_000)
 

@@ -71,6 +71,7 @@ class LLMClient:
         prompt_version: str | None = None,
         max_tokens: int = 1024,
         json_tool: dict | None = None,
+        thinking: dict | None = None,
     ) -> LLMResponse:
         """Call the Anthropic messages API and return an ``LLMResponse``.
 
@@ -91,6 +92,17 @@ class LLMClient:
                         The tool input dict is serialised to JSON and returned
                         as ``LLMResponse.content``, guaranteeing valid JSON
                         output without any prose preamble.
+            thinking:   Optional ``thinking`` config passed straight through to
+                        the Anthropic API (e.g. ``{"type": "adaptive", "display":
+                        "summarized"}``). Omitted by default so existing callers
+                        keep relying on each model's own default thinking
+                        behavior unchanged. When thinking blocks come back with
+                        visible text, they're concatenated into
+                        ``LLMResponse.thinking``; the actual thinking token
+                        count (including 0 when adaptive thinking chose not to
+                        think at all) is reported separately on
+                        ``LLMResponse.thinking_tokens`` so "no visible text" and
+                        "no thinking happened" aren't conflated.
 
         Returns:
             ``LLMResponse`` on success.
@@ -135,6 +147,8 @@ class LLMClient:
                 tool_entry["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
             create_kwargs["tools"] = [tool_entry]
             create_kwargs["tool_choice"] = {"type": "tool", "name": json_tool["name"]}
+        if thinking:
+            create_kwargs["thinking"] = thinking
 
         try:
             message = await self._client.messages.create(**create_kwargs)
@@ -174,6 +188,12 @@ class LLMClient:
                 content = next((b.text for b in message.content if hasattr(b, "text")), "")
         else:
             content = message.content[0].text
+
+        thinking_text = "".join(
+            b.thinking for b in message.content
+            if getattr(b, "type", None) == "thinking" and getattr(b, "thinking", "")
+        ) or None
+        thinking_tokens = (getattr(message.usage, "output_tokens_details", None) or {}).get("thinking_tokens")
 
         tokens_in = message.usage.input_tokens
         tokens_out = message.usage.output_tokens
@@ -220,6 +240,8 @@ class LLMClient:
             cost_usd=cost,
             latency_ms=latency_ms,
             llm_query_id=llm_query_id,
+            thinking=thinking_text,
+            thinking_tokens=thinking_tokens,
         )
 
     async def _write_audit(self, prompt_version: str, **kwargs) -> int:

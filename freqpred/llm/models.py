@@ -75,6 +75,8 @@ class LLMResponse:
     cost_usd: float
     latency_ms: int
     llm_query_id: int
+    thinking: str | None = None
+    thinking_tokens: int | None = None
 
 
 @dataclass

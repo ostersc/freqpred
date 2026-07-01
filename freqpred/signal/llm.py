@@ -310,6 +310,7 @@ Call submit_analysis with:
 SIGNAL_ANALYSIS_TOOL: dict = {
     "name": "submit_analysis",
     "description": "Submit probability analysis for a prediction market question.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {
@@ -326,6 +327,7 @@ SIGNAL_ANALYSIS_TOOL: dict = {
                         "reason": {"type": "string"},
                     },
                     "required": ["doc_id", "direction", "magnitude", "reason"],
+                    "additionalProperties": False,
                 },
             },
             "posterior": {"type": "number"},
@@ -338,6 +340,7 @@ SIGNAL_ANALYSIS_TOOL: dict = {
             "prior", "prior_basis", "updates_applied", "posterior",
             "probability", "confidence", "direction", "reasoning",
         ],
+        "additionalProperties": False,
     },
 }
 

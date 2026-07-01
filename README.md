@@ -243,6 +243,16 @@ cd freqpred/dashboard/ui && npm install && npm run dev
 
 Adminer (database UI): `docker-compose up -d adminer` → `http://localhost:8080` (server: `db`, user/pass/db: `freqpred`)
 
+### Utility scripts
+
+One-off analysis and maintenance scripts live in `scripts/` — see each script's module docstring for full usage. Notable ones:
+
+```bash
+# Compare a candidate Claude model against the model that produced each
+# open market's latest real signal, replaying the exact stored prompt
+uv run python scripts/compare_model_signals.py --model claude-sonnet-5 --limit 20
+```
+
 ---
 
 ## Tech stack
