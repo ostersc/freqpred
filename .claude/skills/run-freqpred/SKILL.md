@@ -108,7 +108,7 @@ side-effect-free. Don't start this without checking with the user first
 ## Test
 
 ```bash
-uv run pytest tests/unit/ -q   # 1179 passed, no DB/API needed
+uv run pytest tests/unit/ -q   # ~1200 tests, all must pass; no DB/API needed
 ```
 
 ## Direct invocation (non-UI changes)

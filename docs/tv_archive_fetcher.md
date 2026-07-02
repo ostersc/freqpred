@@ -1,5 +1,7 @@
 # Internet Archive TV News Archive — Research Notes
 
+> **Status: implemented.** The fetcher lives at `freqpred/ingestion/fetchers/tv_archive.py` and is wired into the main ingestion scheduler. The query-construction question below was resolved with dual-format catalyst generation — the catalyst generator (Haiku) emits both a natural-language `query_text` and a Solr/Lucene `tv_query` per catalyst (see SPEC.md §7, `CatalystQuery.tv_query`). This document remains as the API reference and design rationale.
+
 ## What it is
 
 The [Internet Archive TV News Archive](https://archive.org/details/tv) is a searchable corpus of ~3 million U.S. television broadcasts with closed-caption transcripts. Data runs from July 2009 to **present day** (verified current as of March 20, 2026).
@@ -114,32 +116,18 @@ The `highlight.text` field is the gold — it contains the transcript excerpt th
 
 ## Query construction for freqpred
 
-### The architecture problem
+### The architecture problem (resolved)
 
-The ingestion scheduler passes a plain `query_text: str` to each fetcher — no market context. By the time `TVArchiveFetcher.fetch(query)` is called, the original market question is gone.
+The ingestion scheduler originally passed a plain `query_text: str` to each fetcher — no market context. Two options were considered:
 
-The catalyst generator is where market context is available. Two options:
+- **Option A — per-fetcher query translation:** catalyst generator emits plain keywords; the fetcher mechanically joins tokens with `AND`. No schema changes, but the transform can't know which terms must be *said on air* vs merely topical.
+- **Option B — catalyst generator emits TV-aware queries:** the catalyst prompt produces proper boolean syntax alongside the web query.
 
-**Option A — Per-fetcher query translation (preferred)**
+**Option B won.** `CatalystQuery` carries both `query_text` (natural-language web search for Tavily/NewsAPI/GDELT/Reddit) and `tv_query` (Solr/Lucene boolean syntax), generated in one Haiku call; `tv_query` is `null` when TV transcripts aren't a useful signal for that catalyst. The scheduler passes `tv_query` to `tv_archive.fetch()` (and reuses it for Guardian, which also accepts Solr syntax); `tv_chyron.py` reuses the same `tv_query` AND-groups for local chyron filtering. Stored documents use `source_type="tv_transcript"`.
 
-Catalyst generator emits plain keywords as usual (e.g. `trump communist communism`). The `TVArchiveFetcher` applies its own internal transform before hitting the API:
+### Catalyst design for TV
 
-```python
-def _to_tv_query(query: str) -> str:
-    tokens = query.split()
-    return " AND ".join(f'"{t}"' for t in tokens if len(t) > 3)
-# "trump communist communism" → '"trump" AND "communist" AND "communism"'
-```
-
-Pros: no schema changes, catalyst gen stays dumb, fits existing architecture (cf. GDELT's `_sanitize_query`).
-
-**Option B — Catalyst generator emits TV-aware queries**
-
-Add TV-specific query generation to the catalyst generator prompt, emitting proper boolean syntax. Requires catalyst gen to know about the target fetcher — more coupling, harder to maintain.
-
-### Open question: catalyst design for TV
-
-The TV archive indexes *what people said*, not what was written about them. This changes how catalysts should be framed:
+The TV archive indexes *what people said*, not what was written about them. This changes how catalysts are framed (and is reflected in the catalyst generator prompt):
 
 - **Good:** `trump AND ("communist" OR "communism")` — finds Trump saying the word
 - **Bad:** `trump communist policy china` — too broad, finds any clip mentioning Trump near communist
@@ -147,8 +135,6 @@ The TV archive indexes *what people said*, not what was written about them. This
 - **Bad:** `"will trump impose tariffs"` — no one says this phrase on air
 
 For "Will X say Y?" markets specifically, the pattern is clear and mechanical. For more complex probability markets ("Will the Fed cut rates in Q2?"), the catalysts need to surface *evidence* — expert commentary, Fed chair statements, economic data being reported. The query `"federal reserve" AND ("rate cut" OR "interest rates")` gets closer.
-
-This is the main open question before implementing the fetcher: **how should the catalyst generator be modified to produce TV-optimized queries, or should that logic live entirely in the fetcher itself?**
 
 ---
 
@@ -161,10 +147,9 @@ This is the main open question before implementing the fetcher: **how should the
 
 ---
 
-## Next steps before implementing
+## Implementation summary
 
-1. Decide on query construction strategy (Option A vs B above)
-2. Define the catalyst prompt additions (or fetcher transform) for TV-optimized queries
-3. Implement `TVArchiveFetcher` following the same pattern as `GDELTFetcher`
-4. Add to scheduler alongside existing fetchers (can run in the non-GDELT parallel batch)
-5. Consider adding a `source` field to documents or filtering by `collection:tvnews` in retrieval
+1. ✅ Query construction: Option B — dual-format catalyst generation (`query_text` + `tv_query`)
+2. ✅ Fetcher: `freqpred/ingestion/fetchers/tv_archive.py`, same pattern as the GDELT fetcher
+3. ✅ Wired into the main ingestion scheduler's per-query loop (fires only when `tv_query` is present)
+4. ✅ Documents stored with `source_type="tv_transcript"`; the related Third Eye chyron fetcher (`tv_chyron.py`, `source_type="tv_chyron"`) runs in the realtime scheduler — see SPEC.md §9

@@ -28,7 +28,8 @@ freqpred/
 │   ├── strategy/           # IPredictionStrategy interface + bundled strategies
 │   ├── trading/            # order manager, risk, ledger
 │   ├── llm/                # Claude client + LLM audit logging
-│   ├── metrics/            # calibration, assessment, reporting
+│   ├── metrics/            # calibration, assessment, reporting, series history
+│   ├── runtime/            # freshness telemetry (heartbeats per scheduled service)
 │   ├── dashboard/          # FastAPI backend + React frontend
 │   │   ├── api/            # routes.py, schemas.py, app.py
 │   │   └── ui/             # React app (Vite, Tailwind, TanStack Query)
@@ -37,7 +38,7 @@ freqpred/
 │   │       └── src/
 │   │           ├── api/    # typed fetch wrappers
 │   │           ├── components/
-│   │           └── pages/  # 9 dashboard pages
+│   │           └── pages/  # 10 dashboard pages
 │   └── alerts/             # Telegram, Discord
 ├── strategies/             # user strategy files (gitignored)
 ├── config/                 # config.example.yaml + local config.yaml (gitignored)

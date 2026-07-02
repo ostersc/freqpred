@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-06-30 (ad-hoc: enabled Anthropic strict tool-use mode — `strict: true` + `additionalProperties: false` — on `SIGNAL_ANALYSIS_TOOL` in `freqpred/signal/llm.py`, so the API rejects/repairs malformed tool calls server-side instead of `parse_signal_response()` silently dropping a signal on a missing required field (e.g. `updates_applied`) — observed during ad-hoc evaluation of `claude-sonnet-5` as a candidate model via `scripts/compare_model_signals.py`, also extended `LLMClient.complete()` with an optional `thinking` passthrough (default `None`, no change to existing callers) so candidate-model reasoning can be captured during such evaluations. Previously — 2026-06-29 — completed T91: fixed `KalshiClient.place_order`/`get_order`/`cancel_order`, which sent the wrong Kalshi V2 order schema entirely — discovered on the first-ever live order attempt; verified the fix against Kalshi demo before resuming live trading. Added T90: mode-scope drawdown/daily-loss circuit breaker baselines in `run_state` — discovered live when a stale paper-mode drawdown baseline was reused after switching to live mode, firing a false-positive 97.9% drawdown halt. Also completed T88: capture Kalshi `settlement_sources` field on `Market.metadata`/`Market.settlement_sources`, `GET /api/markets/settlement-sources/summary` dashboard endpoint, `KalshiClient.get_events_by_tickers()` backfill helper. Also completed T89: batch `_sweep_closed_markets` via `/markets?tickers=` instead of per-ticker GETs, and raised `_RESOLVED_SWEEP_BATCH` 200 → 1000 now that the batched call removed the per-market round-trip cost. Also: T77 removed legacy `/portfolio/orders` fallback in `place_order` — Kalshi deprecated the legacy mutation endpoints; missing `event_ticker` now raises `ValueError` instead of falling back; T86 Reddit fetcher migrated to RSS after JSON API shutdown; backoff cap lowered to 8 cycles; per-fetcher telemetry heartbeats; side-aware entry price floor in should_trade; added T87 trust gate task)
+**Last updated:** 2026-07-01 (docs-consistency pass: checked off completed T70/T75/T85; corrected `judgment_model` default to `claude-opus-4-7`; §12 dashboard page list now includes P&L Over Time (10 pages) and the Telegram command tables were replaced with a pointer to COMMANDS.md, which is authoritative; §12 Telegram config example now matches the real `alerts.*` keys; §8 bundled strategy table gains `FreshMarketStrategy`/`DemoHarness`; §7 `Document.source_type` values updated to those actually written by fetchers; §15 repo tree updated to match the codebase with planned Phase 4 Polymarket files marked as such. Previously — 2026-06-30 — ad-hoc: enabled Anthropic strict tool-use mode — `strict: true` + `additionalProperties: false` — on `SIGNAL_ANALYSIS_TOOL` in `freqpred/signal/llm.py`, so the API rejects/repairs malformed tool calls server-side instead of `parse_signal_response()` silently dropping a signal on a missing required field (e.g. `updates_applied`) — observed during ad-hoc evaluation of `claude-sonnet-5` as a candidate model via `scripts/compare_model_signals.py`, also extended `LLMClient.complete()` with an optional `thinking` passthrough (default `None`, no change to existing callers) so candidate-model reasoning can be captured during such evaluations. Previously — 2026-06-29 — completed T91: fixed `KalshiClient.place_order`/`get_order`/`cancel_order`, which sent the wrong Kalshi V2 order schema entirely — discovered on the first-ever live order attempt; verified the fix against Kalshi demo before resuming live trading. Added T90: mode-scope drawdown/daily-loss circuit breaker baselines in `run_state` — discovered live when a stale paper-mode drawdown baseline was reused after switching to live mode, firing a false-positive 97.9% drawdown halt. Also completed T88: capture Kalshi `settlement_sources` field on `Market.metadata`/`Market.settlement_sources`, `GET /api/markets/settlement-sources/summary` dashboard endpoint, `KalshiClient.get_events_by_tickers()` backfill helper. Also completed T89: batch `_sweep_closed_markets` via `/markets?tickers=` instead of per-ticker GETs, and raised `_RESOLVED_SWEEP_BATCH` 200 → 1000 now that the batched call removed the per-market round-trip cost. Also: T77 removed legacy `/portfolio/orders` fallback in `place_order` — Kalshi deprecated the legacy mutation endpoints; missing `event_ticker` now raises `ValueError` instead of falling back; T86 Reddit fetcher migrated to RSS after JSON API shutdown; backoff cap lowered to 8 cycles; per-fetcher telemetry heartbeats; side-aware entry price floor in should_trade; added T87 trust gate task)
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
 ---
@@ -732,8 +732,10 @@ class Document:
     title: str
     body: str                        # cleaned full text (HTML stripped)
     summary: str | None              # LLM-generated summary (populated lazily on first use)
-    source_type: str                 # "news" | "reddit" | "social" | "twitter" | "kalshi_comment" | "manifold"
-                                     # "social" is used for Truth Social posts
+    source_type: str                 # "news" | "reddit" | "reddit_summary" | "social"
+                                     #   | "tv_transcript" | "tv_chyron"
+                                     # "social" is used for Truth Social posts;
+                                     # "twitter" | "kalshi_comment" | "manifold" reserved for future fetchers
     source_name: str                 # e.g. "Reuters", "r/politics", "Kalshi"
 
     # --- Classification ---
@@ -1134,6 +1136,8 @@ Every closed position records an `exit_reason` string for analysis:
 | `PoliticsEdgeStrategy` | US politics markets, min edge 0.18, conservative Kelly 0.25x |
 | `TechNewsStrategy` | Technology/fintech markets, skewed toward shorter-dated markets |
 | `ConservativeDefault` | High-confidence only (0.80+), tiny sizing — good starting point |
+| `FreshMarketStrategy` | Politics/tech markets opened within the last 24h with tight spreads, short-dated — targets new listings before pricing turns efficient |
+| `DemoHarness` | Not a trading strategy — order-plumbing verification against the Kalshi demo environment only (refuses to run unless `KALSHI_BASE_URL` contains `"demo"`; see §14) |
 
 ---
 
@@ -1295,7 +1299,7 @@ This two-pass approach keeps social signal cost-efficient: a cheap summarization
 
 - **primary_model:** market probability analysis (default `claude-sonnet-4-6`)
 - **cheap_model:** catalyst generation, body/social summarization, and daily digests (default `claude-haiku-4-5-20251001`)
-- **judgment_model:** trade sizing and future trade-override judgment tasks (default `claude-opus-4-6`)
+- **judgment_model:** trade sizing and future trade-override judgment tasks (default `claude-opus-4-7`)
 - **Output format:** Structured JSON via tool use (not free-form text parsing)
 - **Prompt versioning:** Prompts are versioned and stored; every signal logs the prompt version used
 - **Deduplication:** Non-scheduled triggers skip the LLM when the retrieval hash matches the last signal (same docs → same output). Scheduled triggers use a three-part gate: skip only when hash is unchanged AND FactBase has not been refreshed AND fewer than `signal.max_scheduled_interval_hours` (default 24h) have passed since the last scheduled LLM call. This guarantees at least one temporal-reasoning re-run per day while reacting immediately to new evidence or new FactBase data.
@@ -1434,11 +1438,12 @@ Built with **FastAPI** (backend) + **React 18 + TypeScript** (frontend), served 
 2. **Positions** — current paper/live positions with unrealized P&L, strategy filters, and force-exit controls
 3. **Decisions** — strategy entry/exit decision analysis, including exit counterfactuals and prior-signal comparisons
 4. **Markets** — searchable market browser with current signal detail and manual analyze-now actions
-5. **Calibration** — scatter plot of estimated probability vs. resolution rate; Brier score trend. Brier score is computed per-signal across all analyzed markets — not just traded ones. Supports lookback windows and category filtering. Baseline comparison is `market_brier_score` (market mid-price at signal time vs. outcome).
-6. **Source Quality** — per-source weighted Brier analysis vs overall baseline, with lookback and category filtering
-7. **LLM Cost & Audit** — daily/weekly spend charts, cost by query type and strategy, query log with full prompt/response drilldown, budget burn rate vs. daily cap
-8. **Strategy Config** — view/edit active strategy parameters (no code changes needed for threshold tuning)
-9. **System Health** — API status, error rates, circuit breaker state, LLM budget circuit breaker status
+5. **Calibration** — scatter plot of estimated probability vs. resolution rate; Brier score trend. Brier score is computed per-signal across all analyzed markets — not just traded ones. Supports lookback windows and category filtering. Baseline comparison is `market_brier_score` (market mid-price at signal time vs. outcome). Tabs: Distribution, Over Time, By Option (T74).
+6. **P&L Over Time** — daily/cumulative P&L chart with EMA overlay, LLM spend on a dual axis, 7 filter dimensions, and a projection tab (T72)
+7. **Source Quality** — per-source weighted Brier analysis vs overall baseline, with lookback and category filtering
+8. **LLM Cost & Audit** — daily/weekly spend charts, cost by query type and strategy, query log with full prompt/response drilldown, budget burn rate vs. daily cap
+9. **Strategy Config** — view/edit active strategy parameters (no code changes needed for threshold tuning)
+10. **System Health** — API status, error rates, circuit breaker state, LLM budget circuit breaker status, Kalshi API tier, ops freshness telemetry, Kalshi changelog review state
 
 ### Telegram / Discord Alerts
 
@@ -1454,72 +1459,28 @@ Push notifications sent on key events (outbound only for Discord; Telegram suppo
 
 ### Telegram Management Commands
 
-The Telegram bot supports inbound slash commands for monitoring and control. Commands are processed via long-polling. Only users listed in `telegram.authorized_users` may issue commands; all others receive the push alerts but are silently ignored on commands.
+The Telegram bot supports inbound slash commands for monitoring and control. Commands are processed via long-polling. Only users listed in `alerts.telegram_authorized_users` may issue commands; all others receive the push alerts but are silently ignored on commands.
 
-**Configuration:**
+**Configuration** (env-overridable via `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_AUTHORIZED_USERS`):
 ```yaml
-telegram:
-  enabled: true
-  bot_token: "..."
-  chat_id: "..."           # personal or group chat id (include leading - for groups)
-  authorized_users:        # list of telegram user IDs allowed to run commands
-    - "123456789"
-  notification_settings:
-    new_signal: "on"       # on | silent | off
-    position_opened: "on"
-    position_closed: "on"
-    circuit_breaker: "on"
-    daily_digest: "silent"
+alerts:
+  telegram_bot_token: "..."
+  telegram_chat_id: "..."        # personal or group chat id (include leading - for groups)
+  telegram_authorized_users:     # Telegram usernames or numeric user IDs (as strings)
+    - "123456789"                # empty list = no one can send commands
 ```
 
-**System commands:**
+**Commands:** the full, authoritative command reference (including defaults, arguments, and confirmation flows) is maintained in [COMMANDS.md](COMMANDS.md#telegram-bot-commands). Command families:
 
-| Command | Description |
-|---|---|
-| `/start` | Resume trading after a pause. Changes run-loop state to `running`. |
-| `/pause` | Stop entering new positions. Open positions continue to be managed. |
-| `/stop` | Halt the run loop entirely (requires restart to resume). |
-| `/show_config` | Print active strategy name, mode (paper/live), key thresholds. |
-| `/logs [n]` | Show the last *n* structured log lines (default: 20). |
-| `/help` | List all available commands. |
-| `/version` | Show freqpred version and git commit hash. |
-
-**Status commands:**
-
-| Command | Description |
-|---|---|
-| `/status` | List all open positions: market question, direction, entry price, estimated prob, unrealized P&L. |
-| `/status <position_id>` | Detailed view of one position including the signal that triggered entry. |
-| `/count` | Current open position count vs. configured maximum. |
-| `/trades [n]` | List the last *n* resolved/closed positions (default: 10) in a table. |
-| `/signals [n]` | List the last *n* signals generated (default: 10): market, our prob, market price, edge. |
-
-**Metrics commands:**
-
-| Command | Description |
-|---|---|
-| `/profit [n]` | P&L summary over the last *n* days (default: all time): total, win rate, Brier score. |
-| `/daily [n]` | P&L broken down by day for the last *n* days (default: 7). |
-| `/weekly [n]` | P&L broken down by week for the last *n* weeks (default: 8). |
-| `/monthly [n]` | P&L broken down by month for the last *n* months (default: 6). |
-| `/stats` | Win/loss counts by exit reason (stoploss, ROI, signal flip, manual). |
-| `/balance` | Current Kalshi account balance and available capital. |
-| `/budget` | LLM spend today vs. daily cap, breakdown by query type. |
-| `/calibration` | Current Brier score and calibration summary (last 30/90/all-time). |
-
-**Position management commands:**
-
-| Command | Description |
-|---|---|
-| `/forceexit <position_id>` | Force-close a specific open position immediately (submits a sell order). Works in both paper and live mode. |
-| `/forceexit all` | Force-close all open positions. Prompts for confirmation before executing. |
-| `/fx <position_id>` | Alias for `/forceexit`. |
-| `/delete <position_id>` | Delete a paper position from the DB without placing an order. Paper mode only; rejected in live mode. |
+- **System control** — `/start`, `/pause`, `/stop`, `/shutdown`, `/reset_drawdown`, `/show_config`, `/logs`, `/version`, `/help`
+- **Status queries** — `/status [position_id]`, `/count`, `/trades [n]`, `/signals [n]`
+- **Metrics & performance** — `/profit`, `/daily`, `/weekly`, `/monthly`, `/stats`, `/balance`, `/budget`, `/calibration [days]`, `/source_calibration [days] [min_docs]`, `/digest`
+- **Position management** — `/forceexit <position_id_or_market_ticker>` (alias `/fx`), `/forceexit all`, `/delete <position_id>` (paper mode only)
 
 **Implementation notes:**
 - Command polling runs as a background asyncio task inside the main run loop.
 - Each inbound update is checked against `authorized_users` before dispatch; unauthorized senders receive no response.
-- `/forceexit` and `/delete` in live mode require a confirmation reply within 30 seconds (inline keyboard with Confirm / Cancel buttons) to prevent accidental execution.
+- `/forceexit all` (any mode), `/forceexit <id>` in live mode, and `/delete <id>` require inline-keyboard confirmation (Confirm / Cancel, 30 s timeout) to prevent accidental execution.
 - All command responses are sent as reply messages to the original command.
 - The polling task logs every inbound command to `structlog` at INFO level (not to `llm_queries` — these are not LLM calls).
 
@@ -1613,11 +1574,11 @@ Each task has a linked GitHub issue (same number) with full implementation scope
 - [x] **T76** [#76](https://github.com/ostersc/freqpred/issues/76) — Live order-state hardening (exit side): `_execute_live_exit` polls `get_order` until terminal; `ledger.partial_close_position` handles partial IOC fills (residual stays open, weighted-avg exit_price on final close); exit-side columns on `PositionRow` (`exit_order_id`, `exit_fee_usd`, `exit_requested_contracts`, `exit_filled_contracts`, `realized_pnl_accumulator`); `force_exit` uses same polling + `partial_close_position`; dashboard `PositionOut` exposes exit fields; Positions page shows "mid-exit" status indicator. Depends on: T67.
 - [x] **T68** [#68](https://github.com/ostersc/freqpred/issues/68) — Ops freshness telemetry: persist heartbeat/freshness timestamps for ingestion, signal, source-quality, and WebSocket loops; expose real websocket connectivity + last-message telemetry and stale-loop indicators in System Health; optional alerts when critical loops stop making progress. Depends on: T41.
 - [ ] **T69** [#69](https://github.com/ostersc/freqpred/issues/69) — Correlated exposure caps: enforce series/category/event-family risk limits so multiple related markets cannot collectively exceed configured exposure even when per-market limits pass. Depends on: T17.
-- [ ] **T70** [#70](https://github.com/ostersc/freqpred/issues/70) — Series option base-rate history: `series_option_history` table keyed by `(series_ticker, option_code)`; background refresh fetches all settled markets per active series from Kalshi API and upserts YES/NO counts + label; signal prompt receives a base-rate context block when `n >= 3`; Type B single-option series degrade gracefully via low counts.
+- [x] **T70** [#70](https://github.com/ostersc/freqpred/issues/70) — Series option base-rate history: `series_option_history` table keyed by `(series_ticker, option_code)`; background refresh fetches all settled markets per active series from Kalshi API and upserts YES/NO counts + label; signal prompt receives a base-rate context block when `n >= 3`; Type B single-option series degrade gracefully via low counts.
 - [x] **T71** [#71](https://github.com/ostersc/freqpred/issues/71) — Pre-signal risk gate: skip LLM analysis for new-entry markets where risk would block the resulting trade (global capacity caps, spread too wide, stoploss re-entry blocked); gate is opt-out via `StrategyConfig.pre_signal_risk_gate` (default `True`); markets with open positions always bypass the gate.
 - [x] **T72** [#72](https://github.com/ostersc/freqpred/issues/72) — Dashboard: P&L over time page; `GET /api/pnl/time-series` with 7 filter dimensions (strategy, signal model, prompt version, direction, category, series, market); Recharts `ComposedChart` with daily P&L bars, cumulative P&L line, EMA overlay, dual Y-axis for P&L vs LLM spend; projection tab with CAGR extrapolation, linear LLM spend projection, and "days until broke" countdown (broke = initial_bankroll + projected_trading_pnl − projected_llm_spend ≤ 0).
 - [x] **T74** [#74](https://github.com/ostersc/freqpred/issues/74) — Calibration page tabs: Distribution (existing scatter plot), Over Time (daily Brier time-series with EMA + prompt-version flags), By Option (heatmap of `series_ticker × option_code` rows vs prompt-version columns, colored by Brier-vs-market delta, with vs-avg delta, n-bar, market-difficulty bar, and row sparkline).
-- [ ] **T75** [#75](https://github.com/ostersc/freqpred/issues/75) — Kalshi changelog monitor: daily RSS fetch of `https://docs.kalshi.com/changelog/rss.xml`, `kalshi_changelog_state` DB singleton tracking `last_reviewed_at` / `unreviewed_count` / `has_unreviewed_breaking_change`, warning/critical alerts on new entries, system health surface, telemetry heartbeat.
+- [x] **T75** [#75](https://github.com/ostersc/freqpred/issues/75) — Kalshi changelog monitor: daily RSS fetch of `https://docs.kalshi.com/changelog/rss.xml`, `kalshi_changelog_state` DB singleton tracking `last_reviewed_at` / `unreviewed_count` / `has_unreviewed_breaking_change`, warning/critical alerts on new entries, system health surface, telemetry heartbeat.
 - [x] **T73** [#73](https://github.com/ostersc/freqpred/issues/73) — FactBase phrase frequency gate + signal enrichment for KXTRUMPSAY markets: Haiku extracts search terms (slash variants + plurals/possessives) once per market; `factbase_phrase_frequency` table caches window counts (`in_market_count`, 7d, 30d, 365d) + top Trump quotes; `is_market_interesting()` blocks until cache is ready; signal prompt gets a `PHRASE FREQUENCY DATA` block; assessor payload gets `phrase_frequency`; `SERVICE_FACTBASE_SCHEDULER` telemetry heartbeat; bumps signal prompt to `signal-v8`. Depends on: T70, T71.
 - [x] **T77** [#77](https://github.com/ostersc/freqpred/issues/77) — Migrate order endpoints from legacy `/portfolio/orders` to V2 `/portfolio/events/orders`: add `event_ticker` to `Order` dataclass; update `place_order`, `get_order`, `cancel_order` in `kalshi.py`; populate `event_ticker` from `market.metadata` at entry time and via `MarketRow` join at exit time. The legacy-path fallback for an empty `event_ticker` was removed 2026-06-22 (Kalshi deprecated `/portfolio/orders` mutation endpoints between 2026-06-18 and 2026-06-25 per their changelog) — `place_order` now raises `ValueError` on a missing `event_ticker` instead of falling back, and `order_manager._submit_live_order` catches `ValueError` alongside `KalshiAPIError` so a data gap fails the order safely rather than crashing the loop.
 
@@ -1666,7 +1627,7 @@ Each task has a linked GitHub issue with full implementation scope, test plan, a
 
 - [ ] **T82** [#82](https://github.com/ostersc/freqpred/issues/82) — Cross-platform dashboard page: `GET /api/polymarket/dashboard` summary endpoint; new "Cross-Platform" React page with: divergence table (all matched markets, Kalshi vs Polymarket price, delta column, toxic-flow indicator), price comparison chart for selected market (Kalshi mid vs Polymarket mid, last 24h), whale trade feed (market, wallet short-hash with "Known sharp" / "Known whale" badge, direction, size, % of volume, pct_of_liquidity, age). Depends on: T79, T81.
 - [x] **T83** [#83](https://github.com/ostersc/freqpred/issues/83) — nomic-embed-text migration: `OllamaEmbedder` class satisfying the `Embedder` protocol; `EmbeddingConfig` section in `Settings` (`backend`, `model`, `ollama_base_url`, `max_embed_chars`); embedder factory in `cli.py`; `ALTER TABLE documents ALTER COLUMN embedding TYPE vector(768)` migration; `scripts/reindex_embeddings.py` to re-embed all docs with new model; make embed truncation config-driven in `ingestion/store.py`. Evaluation showed nomic has higher avg top-10 retrieval score on 65% of markets vs 26% for miniLM across 113 active markets.
-- [ ] **T85** [#85](https://github.com/ostersc/freqpred/issues/85) — Kalshi API tier display + self-serve upgrade: `get_account_limits()` + `upgrade_api_tier()` on `KalshiClient`; `KalshiApiTierOut` schema + `api_tier` field in `SystemHealthResponse`; `_kalshi_client` dep in dashboard routes; tier fetched (fail-open) in `GET /system/health`; `POST /system/api-tier/upgrade` route; System Health page shows tier badge + "Upgrade to Advanced" button hidden when already Advanced.
+- [x] **T85** [#85](https://github.com/ostersc/freqpred/issues/85) — Kalshi API tier display + self-serve upgrade: `get_account_limits()` + `upgrade_api_tier()` on `KalshiClient`; `KalshiApiTierOut` schema + `api_tier` field in `SystemHealthResponse`; `_kalshi_client` dep in dashboard routes; tier fetched (fail-open) in `GET /system/health`; `POST /system/api-tier/upgrade` route; System Health page shows tier badge + "Upgrade to Advanced" button hidden when already Advanced.
 - [x] **T86** [#86](https://github.com/ostersc/freqpred/issues/86) — Fetcher reliability: Reddit fetcher migrated from the shut-down unauthenticated JSON API to public Atom/RSS search feeds (`/r/{sub}/search.rss`; OAuth was rejected — Reddit's June 2026 Responsible Builder Policy gates all API access behind a weeks-long pre-approval that prohibits LLM use of the data). Blanket failure across all subreddits raises `RedditBlockedError` → error-level log + backoff trip (single-subreddit 403/404 stays a soft skip); backoff `skip_cycles_next` capped at 8 (was 32) with error-level log at cap; per-fetcher telemetry heartbeats (`SERVICE_FETCHER_*` constants + 24h `FreshnessSpec` per ingestion fetcher, marked from the scheduler cycle end) so a dead source surfaces as stale within a day.
 - [ ] **T87** [#87](https://github.com/ostersc/freqpred/issues/87) — Assessment trust gate: new `StrategyConfig.min_trust_score: float | None = None`; `OrderManager.submit()` skips new entries whose assessment `trust_score` falls below the threshold (fail-open when no assessment; never blocks exits); blocked entries logged + emitted as runtime events; `PoliticsEdgeStrategy` ships with `min_trust_score=0.45`. Motivated by DB evidence: v9-era trades with trust < 0.45 lost $125 over 113 trades (35.4% win) vs +$8 over 16 trades (43.8% win) at or above it. Depends on: T57.
 - [x] **T88** [#88](https://github.com/ostersc/freqpred/issues/88) — Capture Kalshi `settlement_sources` field (added to the Events API 2026-06-18) on `Market.metadata["settlement_sources"]` (and mirrored onto `Market.settlement_sources` on the domain dataclass); `KalshiEventSchema.settlement_sources: list[KalshiSettlementSourceSchema]` parses it, defaulting to `[]` for events that predate the field. New `GET /api/markets/settlement-sources/summary` dashboard endpoint groups active markets by source name/url with market counts — lets us spot a dominant official source per category programmatically, the way FactBase was found manually for KXTRUMPSAY (T73). `KalshiClient.get_events_by_tickers()` (chunked at 200, mirrors T89's `get_markets_by_tickers`) supports a targeted backfill for a known subset of events instead of re-paginating all open events.
@@ -1707,88 +1668,114 @@ Each task has a linked GitHub issue with full implementation scope, test plan, a
 
 ## 15. Repository Structure
 
+Planned Phase 4 files (not yet implemented) are marked *(planned)*.
+
 ```
 freqpred/
 ├── freqpred/
 │   ├── __init__.py
-│   ├── cli.py                   # entry point: freqpred run/backtest/etc
-│   ├── config.py                # config loading (YAML + env vars)
+│   ├── cli.py                   # entry point: freqpred run/markets/signal/positions/metrics/report/alerts/db/dashboard
+│   ├── config.py                # config loading (YAML + env var overrides via _ENV_OVERRIDES)
+│   ├── db.py                    # async engine/session factory + programmatic migrations
 │   ├── markets/
 │   │   ├── base.py              # IMarketClient abstract interface
-│   │   ├── kalshi.py            # Kalshi adapter
-│   │   ├── polymarket.py        # Polymarket adapter (Gamma + CLOB APIs, read-only; no auth)
-│   │   ├── watcher.py           # polling loop: price refresh, staleness detection
-│   │   └── models.py            # Market, Order, Position dataclasses
+│   │   ├── kalshi.py            # Kalshi adapter (REST + auth)
+│   │   ├── polymarket.py        # (planned) Polymarket adapter (Gamma + CLOB APIs, read-only; no auth)
+│   │   ├── watcher.py           # polling loop: price refresh, staleness detection, closed-market sweep
+│   │   ├── position_watcher.py  # WebSocket: ticker/lifecycle/user_orders/fill channels, external drift detection
+│   │   ├── repository.py        # market row queries/upserts
+│   │   └── models.py            # Market, Order dataclasses + MarketRow ORM
 │   ├── ingestion/
 │   │   ├── selector.py          # market selector: calls strategy.is_market_interesting()
 │   │   ├── catalyst_generator.py# LLM (Haiku) derives catalyst queries per market; manages CatalystRun/CatalystQuery
-│   │   ├── polymarket_matcher.py# daily batch: match Kalshi markets to Polymarket via embedding + optional Haiku confirm
-│   │   ├── scheduler.py         # main ingestion scheduler (30 min): catalyst queries → Tavily/NewsAPI/Guardian/Reddit/GDELT/TV Archive + Polymarket matching
-│   │   ├── realtime_scheduler.py# fast scheduler (5 min): TV chyrons + Truth Social + Polymarket prices + whale trades
+│   │   ├── polymarket_matcher.py# (planned) daily batch: match Kalshi markets to Polymarket via embedding + Haiku confirm
+│   │   ├── scheduler.py         # main ingestion scheduler (30 min): catalyst queries → Tavily/NewsAPI/Guardian/Reddit/GDELT/TV Archive
+│   │   ├── realtime_scheduler.py# fast scheduler (5 min): TV chyrons + Truth Social
+│   │   ├── kalshi_changelog.py  # daily Kalshi API changelog RSS monitor (T75)
+│   │   ├── backoff.py           # per-service failure backoff (skip-cycle counters)
+│   │   ├── quota.py             # api_daily_counters quota tracking
+│   │   ├── cursors.py           # fetcher_cursors (per-fetcher/per-market last-run tracking)
+│   │   ├── body_summarizer.py   # cheap LLM article-body summarizer
 │   │   ├── fetchers/
 │   │   │   ├── tavily.py        # Tavily Search API fetcher
 │   │   │   ├── newsapi.py       # NewsAPI fetcher
 │   │   │   ├── guardian.py      # The Guardian Content API fetcher (full body, free tier, Solr query support)
 │   │   │   ├── gdelt.py         # GDELT Doc API fetcher + article body fetch
-│   │   │   ├── reddit.py        # Reddit API fetcher
+│   │   │   ├── reddit.py        # Reddit fetcher (public Atom/RSS search feeds)
 │   │   │   ├── tv_archive.py    # Internet Archive TV transcript search fetcher
 │   │   │   ├── tv_chyron.py     # Internet Archive Third Eye chyron fetcher (bulk-pull + local-filter)
-│   │   │   ├── truthsocial.py   # Truth Social fetcher (search + account feeds via truthbrush)
-│   │   │   ├── polymarket_prices.py  # Polymarket CLOB price poller (5 min, matched markets only)
-│   │   │   └── twitter.py       # Twitter/X API fetcher (optional)
-│   │   ├── store.py             # dedup, embed (sentence-transformers), insert into Document store
+│   │   │   ├── truthsocial.py   # Truth Social fetcher (account feeds via truthbrush)
+│   │   │   ├── factbase.py      # FactBase phrase-frequency API fetcher (T73)
+│   │   │   ├── polymarket_prices.py  # (planned) Polymarket CLOB price poller
+│   │   │   └── twitter.py       # Twitter/X API fetcher (optional, gated on API cost)
+│   │   ├── store.py             # dedup, embed, insert into Document store
 │   │   └── social_summarizer.py # cheap LLM pre-summarizer for raw social posts
 │   ├── rag/
-│   │   ├── embedder.py          # local sentence-transformers embedding client
-│   │   ├── retriever.py         # vector search against Document store (pgvector)
+│   │   ├── embedder.py          # embedding backends: sentence-transformers (default) + Ollama; make_embedder factory
+│   │   ├── retriever.py         # slot-budgeted hybrid search against Document store (pgvector + BM25)
 │   │   └── models.py            # Document, DocumentMarketLink dataclasses
 │   ├── signal/
 │   │   ├── pipeline.py          # orchestrates retrieval + LLM analysis
-│   │   ├── llm.py               # Claude client, structured output
+│   │   ├── llm.py               # signal prompt build + strict tool-use schema
 │   │   ├── cache.py             # retrieval hash check, signal dedup
 │   │   └── models.py            # Signal dataclass
 │   ├── strategy/
 │   │   ├── base.py              # IPredictionStrategy interface
-│   │   ├── config.py            # StrategyConfig dataclass
-│   │   └── defaults/
-│   │       ├── politics.py      # PoliticsEdgeStrategy
-│   │       ├── tech.py          # TechNewsStrategy
-│   │       └── conservative.py  # ConservativeDefault
+│   │   ├── algo_base.py         # IAlgoStrategy: DataFrame-driven exits (T49)
+│   │   ├── config.py            # StrategyConfig + OrderTypes dataclasses
+│   │   ├── config_store.py      # runtime strategy-config persistence (dashboard edits)
+│   │   ├── loader.py            # built-in name registry + user .py file loading
+│   │   └── defaults/            # ConservativeDefault, PoliticsEdgeStrategy, TechNewsStrategy,
+│   │                            #   FreshMarketStrategy, DemoHarness, AlgoExampleStrategy
 │   ├── trading/
-│   │   ├── order_manager.py     # paper + live order execution
+│   │   ├── order_manager.py     # paper + live order execution, reconciliation, assessment wiring
+│   │   ├── position_monitor.py  # exit evaluation loop (stoploss/trailing/custom/signal)
 │   │   ├── risk.py              # hard cap enforcement, circuit breakers
-│   │   └── ledger.py            # position tracking, P&L calc
+│   │   └── ledger.py            # position tracking, P&L calc, partial closes
 │   ├── llm/
 │   │   ├── client.py            # LLM API wrapper (Claude)
 │   │   ├── audit.py             # LLMQuery logging, cost tracking, budget circuit breaker
 │   │   └── models.py            # LLMQuery dataclass
 │   ├── metrics/
-│   │   ├── assessment.py        # source-quality + similar-market sizing judgment
+│   │   ├── assessment.py        # source-quality + similar-market sizing judgment (T57)
 │   │   ├── calibration.py       # Brier score, calibration curve, source quality
+│   │   ├── series_history.py    # series option base-rate refresh (T70)
 │   │   ├── models.py            # signal assessment + source-quality ORM models
 │   │   ├── reporting.py         # daily digest generation
-│   │   └── scheduler.py         # source-quality refresh scheduler
+│   │   └── scheduler.py         # source-quality + series-history refresh schedulers
+│   ├── runtime/
+│   │   ├── telemetry.py         # per-service freshness heartbeats (FreshnessSpec, mark_success/mark_error) (T68)
+│   │   └── models.py            # telemetry ORM models
 │   ├── dashboard/
-│   │   ├── api/                 # FastAPI routes + schemas
+│   │   ├── api/                 # FastAPI app.py, routes.py, schemas.py
 │   │   └── ui/                  # React frontend (Vite, Tailwind, TanStack Query)
 │   │       ├── package.json
 │   │       ├── vite.config.ts
 │   │       └── src/
 │   │           ├── api/         # typed fetch wrappers per endpoint
-│   │           ├── components/  # NavBar, StatusBadge, LoadingSpinner, ErrorBanner
-│   │           └── pages/       # 9 dashboard pages
+│   │           ├── components/  # shared components (NavBar, PriceTimeline, SignalDetail, ...)
+│   │           └── pages/       # 10 dashboard pages (see §12)
 │   └── alerts/
-│       ├── telegram.py
-│       └── discord.py
+│       ├── telegram.py          # outbound Telegram alerts
+│       ├── discord.py           # outbound Discord alerts
+│       ├── dispatcher.py        # fan-out to configured channels
+│       ├── telegram_commands.py # inbound long-polling command handler + registration
+│       ├── command_handlers.py  # system control + status commands
+│       ├── metrics_handlers.py  # metrics/performance commands
+│       ├── position_handlers.py # forceexit/delete commands
+│       └── run_state.py         # persisted run-loop state (running/paused/stopped)
 ├── strategies/                  # user strategy files (gitignored by default)
+├── scripts/                     # one-off analysis/maintenance scripts (see each module docstring)
 ├── config/
 │   ├── config.example.yaml      # template config
 │   └── config.yaml              # local config (gitignored)
-├── tests/
+├── tests/                       # unit/ + integration/
+├── migrations/                  # Alembic migrations (NNNN_description.py)
 ├── docker-compose.yml
 ├── Dockerfile
 ├── pyproject.toml
 ├── SPEC.md                      # this file
+├── COMMANDS.md                  # CLI + Telegram command reference
 └── README.md
 ```
 

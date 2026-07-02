@@ -11,7 +11,7 @@ freqpred uses retrieval-augmented LLM analysis to estimate the "true" probabilit
 ## What it does
 
 1. **Monitors** active markets on Kalshi (Politics, Technology, Economics, ...)
-2. **Ingests** targeted news via Tavily, NewsAPI, Reddit, GDELT, TV archives (catalyst-driven RAG)
+2. **Ingests** targeted news via Tavily, NewsAPI, The Guardian, Reddit, GDELT, TV transcripts + chyrons, and Truth Social (catalyst-driven RAG)
 3. **Estimates** event probability using Claude Sonnet with structured output
 4. **Identifies** markets where LLM probability diverges meaningfully from market price
 5. **Sizes and trades** via a pluggable strategy interface, assessment-aware sizing, and hard risk controls
@@ -51,9 +51,12 @@ docker-compose up -d adminer
 ANTHROPIC_API_KEY=...     # Claude — signal analysis + catalyst generation
 DATABASE_URL=postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred
 
-# Optional — enables news fetching
+# Optional — enables news/social fetching (Reddit, GDELT, and TV sources need no key)
 TAVILY_API_KEY=...
 NEWSAPI_KEY=...
+GUARDIAN_API_KEY=...
+TRUTHSOCIAL_USERNAME=...
+TRUTHSOCIAL_PASSWORD=...
 
 # Optional — enables live Kalshi trading
 KALSHI_API_KEY=...
@@ -86,7 +89,7 @@ Point `--strategy` at a `.py` file to load a custom strategy:
 uv run freqpred run --strategy strategies/my_strategy.py --mode paper
 ```
 
-Bundled strategies: `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy`
+Bundled strategies: `ConservativeDefault`, `PoliticsEdgeStrategy`, `TechNewsStrategy`, `FreshMarketStrategy` — plus `DemoHarness`, which only runs against the Kalshi demo environment to verify order plumbing (see SPEC.md §14).
 
 ---
 
@@ -215,18 +218,25 @@ uv run freqpred dashboard  # dev-only Vite launcher (requires freqpred run for A
 
 **Alerts** — Telegram and Discord are independently optional. Missing credentials silently disable that channel. Set `telegram_authorized_users` in `config.yaml` to enable inbound bot commands (status queries, position management, circuit breaker control). See [COMMANDS.md — Telegram bot commands](COMMANDS.md#telegram-bot-commands).
 
-**Dashboard** — the current UI includes Signal Feed, Positions, Decisions, Markets, Calibration, Source Quality, LLM Cost, Strategy Config, and System Health. Signal and position detail views also show persisted assessment summaries and deep-link into the LLM audit page.
+**Dashboard** — the current UI includes Signal Feed, Positions, Decisions, Markets, Calibration, P&L Over Time, Source Quality, LLM Cost, Strategy Config, and System Health. Signal and position detail views also show persisted assessment summaries and deep-link into the LLM audit page.
 
 ---
 
 ## Development
 
 ```bash
+# Install dev dependencies + lint hook (one-time)
+uv sync --group dev
+uv run pre-commit install
+
 # Run all unit tests
 uv run pytest tests/unit/
 
 # Run integration tests (requires running Postgres)
 uv run pytest tests/
+
+# Lint (also runs in pre-commit and CI)
+uv run ruff check .
 
 # Create a new migration
 uv run alembic revision --autogenerate -m "description"

@@ -18,7 +18,7 @@ uv run freqpred run --strategy <name|path> --mode <signal-only|paper|live>
 | `--mode` | `paper` | `signal-only` — no orders; `paper` — simulated orders; `live` — real orders (requires `LIVE_TRADING_ENABLED=true`) |
 | `--bankroll` | _(from config)_ | Override `trading.bankroll_usd` for this run (useful for demo env where balance < prod bankroll) |
 
-Starts the trading loop plus the embedded API server (port 8000 by default, controlled by `dashboard.port` in `config.yaml`). The API server runs inside this process so it shares the live `OrderManager` — required for force-exit from the dashboard or Telegram. Press **Ctrl+C** to stop all tasks cleanly.
+Starts the trading loop plus the embedded API server (port 8000 by default, controlled by `dashboard.port` in `config.yaml`). Pending Alembic migrations are applied automatically at startup. The API server runs inside this process so it shares the live `OrderManager` — required for force-exit from the dashboard or Telegram. Press **Ctrl+C** to stop all tasks cleanly.
 
 To disable the embedded API, set `dashboard.api_enabled: false` in `config.yaml`.
 
@@ -50,6 +50,12 @@ Fetches live markets from the Kalshi API, writes them to the `markets` table, an
 uv run freqpred signal analyze --market-id <KALSHI-TICKER>
 uv run freqpred signal analyze --market-id <KALSHI-TICKER> --force
 ```
+
+| Option | Default | Description |
+|---|---|---|
+| `--market-id` | required | Kalshi market ticker to analyze |
+| `--force` | false | Bypass hash deduplication and force a new LLM call |
+| `--strategy` | `PoliticsEdgeStrategy` | Strategy to load (determines FactBase allowlist and other config) |
 
 Embeds the market question, retrieves relevant documents via vector search, and calls Claude for a probability estimate. Prints the full signal (probability, edge, confidence, direction, reasoning).
 
@@ -146,7 +152,13 @@ Options:
 
 ```bash
 uv run freqpred report digest
+uv run freqpred report digest --send --mode live
 ```
+
+| Option | Default | Description |
+|---|---|---|
+| `--send` | false | Also send the digest via configured Telegram/Discord alert channels |
+| `--mode` | `paper` | Trading mode label to display in the digest (`paper`, `live`, `signal-only`) |
 
 Uses Claude to produce a natural-language summary of system health: open positions, P&L, LLM spend, and calibration. Output goes to stdout.
 
