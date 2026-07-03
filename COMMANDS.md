@@ -160,7 +160,7 @@ uv run freqpred report digest --send --mode live
 | `--send` | false | Also send the digest via configured Telegram/Discord alert channels |
 | `--mode` | `paper` | Trading mode label to display in the digest (`paper`, `live`, `signal-only`) |
 
-Uses Claude to produce a natural-language summary of system health: open positions, P&L, LLM spend, and calibration. Output goes to stdout.
+Produces the daily digest in two parts: a **deterministic stat header** (run state, open positions vs cap, exposure, unrealized P&L, session P&L with win/loss counts, drawdown, LLM spend vs cap, calibration vs market baseline, 24h signal activity, and per-service health from telemetry heartbeats) followed by a Claude Haiku **analyst take** — 3–5 prioritized bullets flagging only what deserves attention (the model receives per-position P&L, top signals by edge, exit breakdown, and stale-service errors, and is instructed not to restate header numbers). Output goes to stdout.
 
 ---
 
@@ -215,11 +215,15 @@ alerts:
     - "123456789"   # matched against numeric user ID
 ```
 
+### Reply formatting
+
+Command replies are sent with Telegram's HTML parse mode: bold section headers, `<pre>` blocks for aligned tables, prices in cents (`43¢`), P&L in signed dollars (`+$1.20`), and ages as compact durations (`2h 15m`). If Telegram rejects a reply's markup, the bot automatically re-sends it as plain text so the content is never lost. Long replies are truncated at a line boundary under the 4096-char message limit; tables drop rows with a `... and N more` footer instead of cutting mid-row.
+
 ### Built-in commands
 
 | Command | Description |
 |---|---|
-| `/help` | List all registered commands |
+| `/help` | List all registered commands, grouped by category (System / Positions / Performance / Diagnostics) with a one-line description each |
 
 ### System control commands
 
@@ -230,8 +234,8 @@ alerts:
 | `/stop` | Halt signal analysis entirely; use `/start` to resume |
 | `/shutdown` | Gracefully shut down the freqpred process. Requires inline keyboard confirmation (30 s timeout). Sends a shutdown alert to all configured channels before exiting. |
 | `/reset_drawdown` | Reset the drawdown circuit breaker. Stores the current timestamp; drawdown is measured only from this point forward. |
-| `/show_config` | Show strategy name, mode, min edge, max position size, LLM budget |
-| `/logs [n]` | Last *n* log lines (default 20); truncated at 4096 chars |
+| `/show_config` | Show strategy name, mode, min edge, max position size, max open positions, LLM budget |
+| `/logs [n] [filter]` | Last *n* log lines (default 20), optionally filtered by logger name segment; rendered in a monospace block |
 | `/version` | freqpred version + short git commit hash |
 
 State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a process restart picks up the last state.
@@ -240,28 +244,30 @@ State changes (`/start`, `/pause`, `/stop`) are persisted in the database — a 
 
 | Command | Description |
 |---|---|
-| `/status` | List all open positions: market question, direction, entry price, est. prob, unrealized P&L, MAE, MFE |
-| `/status <position_id>` | Detailed single-position view: confidence, edge at entry, MAE/MFE (with dollar value), time open |
-| `/count` | `Open: N / Max: M` |
-| `/trades [n]` | Last *n* resolved positions (default 10): market, exit reason, P&L, hold duration |
-| `/signals [n]` | Last *n* signals (default 10): market, our prob, market price, edge, direction |
+| `/status` | Summary header (run state, mode, strategy, open count vs cap, total unrealized P&L, drawdown vs baseline) followed by one block per open position: direction, contracts, ticker, question, entry → current price in cents, unrealized P&L ($ and %), time open. NO positions show NO-side prices. |
+| `/status <position_id_or_market_ticker>` | Detailed single-position view: status, entry → current price, unrealized (or realized) P&L, cost basis, signal snapshot at entry (est. prob, edge, confidence), MAE/MFE in dollars, position UUID. Accepts either a UUID or a market ticker (open position preferred). |
+| `/trades [n]` | Last *n* closed positions (default 10) with a net P&L header: win/loss icon, P&L ($ and %), direction, exit reason, hold duration, question |
+| `/signals [n]` | Last *n* signals (default 10): direction icon, ticker, age, question, est. prob vs market price, edge, confidence, trigger |
+| `/health` | Freshness of every scheduled service and fetcher (from runtime telemetry heartbeats): ok/stale/idle/unknown per service with last-success age, stale services first with their last error, plus WebSocket connection state |
+
+`/count` was removed — its `Open: N / Max: M` information is in the `/status` header.
 
 ### Metrics and performance commands
 
 | Command | Description |
 |---|---|
-| `/profit [n]` | P&L summary over the last *n* days (default: all time): total P&L ($, %), win rate, trade count, avg hold duration, best/worst trade, Brier score |
+| `/profit [n]` | P&L summary over the last *n* days (default: all time): trade count, win rate, total P&L ($ and % on invested), best/worst trade, avg hold duration, Brier score |
 | `/daily [n]` | Table: date \| trade count \| P&L $ \| P&L % — last *n* days (default 7) |
 | `/weekly [n]` | Table: week start \| trade count \| P&L $ \| P&L % — last *n* weeks (default 8) |
 | `/monthly [n]` | Table: month \| trade count \| P&L $ \| P&L % — last *n* months (default 6) |
-| `/stats` | All-time aggregate stats: total trades, P&L, win rate, best/worst trade, avg hold duration, breakdown by exit reason |
+| `/stats` | All-time aggregate stats: total trades, P&L, win rate, best/worst trade, avg hold duration, plus an aligned exit-reason breakdown table |
 | `/balance` | Portfolio snapshot: bankroll, all-time P&L, net value, gross/net exposure, unrealized P&L, today's P&L, open position count, contract-weighted portfolio MAE/MFE |
-| `/budget` | LLM cost breakdown: today vs daily cap (%), per-query-type breakdown, this week, this month, all-time |
+| `/budget` | LLM cost: today vs daily cap (%) with time until reset, per-query-type breakdown table, this week, this month, all-time |
 | `/calibration [days]` | Brier score vs market baseline, improvement, sample count, per-probability-bucket breakdown. Optional `days` arg limits to last N days (e.g. `/calibration 30`); omit for all-time. |
 | `/source_calibration [days] [min_docs]` | Weighted Brier score per document source name. Optional `days` limits lookback; optional `min_docs` sets minimum doc appearances threshold (default 50). E.g. `/source_calibration 30 100`. |
-| `/digest` | On-demand daily digest: Claude Haiku natural-language summary of open positions, P&L, LLM spend, and calibration |
+| `/digest` | On-demand daily digest: deterministic stat header (state, positions vs cap, session P&L with W/L, drawdown, LLM spend vs cap, calibration vs market, 24h signals, service health) + a Claude Haiku analyst take of 3–5 prioritized bullets flagging what deserves attention. Same content as the scheduled morning digest. |
 
-Tabular responses use monospace code blocks. Rows are truncated at 4096 chars with `... and N more` footer.
+Tabular responses use HTML `<pre>` blocks (monospace, aligned in the Telegram client). Rows are truncated under the 4096-char limit with a `... and N more` footer.
 
 ---
 
@@ -288,7 +294,9 @@ handler = TelegramCommandHandler(bot_token=..., authorized_users=[...])
 async def my_handler(chat_id: int, args: list[str]) -> str:
     return f"Hello from freqpred! Args: {args}"
 
-handler.register("greet", my_handler)
+handler.register("greet", my_handler, description="Say hello", category="Other")
 ```
 
-Handler receives `(chat_id: int, args: list[str])` and should return a plain-text reply string (or `None` to send no reply).
+Handler receives `(chat_id: int, args: list[str])` and should return a reply string (or `None` to send no reply). `description` and `category` are optional and drive the grouped `/help` output.
+
+Replies are sent with `parse_mode=HTML` — handlers may use `<b>`, `<code>`, and `<pre>` markup, and **must HTML-escape any dynamic content** (market questions, error messages, LLM output) with `html.escape` / the `_esc` helper in `command_handlers.py`. If Telegram rejects the markup, the reply is automatically re-sent as plain text with tags stripped.

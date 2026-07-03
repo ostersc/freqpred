@@ -193,7 +193,8 @@ async def test_daily_with_data():
     reply = await cmd_handler._handlers["daily"](42, [])
     assert "Date" in reply
     assert "Trades" in reply
-    assert "P&L" in reply
+    assert "P&amp;L" in reply
+    assert reply.startswith("<pre>") or "<pre>" in reply
 
 
 @pytest.mark.asyncio
@@ -242,7 +243,7 @@ async def test_weekly_with_data():
 
     reply = await cmd_handler._handlers["weekly"](42, [])
     assert "Week start" in reply
-    assert "P&L" in reply
+    assert "P&amp;L" in reply
 
 
 @pytest.mark.asyncio
@@ -289,7 +290,7 @@ async def test_monthly_with_data():
 
     reply = await cmd_handler._handlers["monthly"](42, [])
     assert "Month" in reply
-    assert "P&L" in reply
+    assert "P&amp;L" in reply
 
 
 @pytest.mark.asyncio
@@ -455,7 +456,7 @@ async def test_budget_zero_spend():
 
     assert "LLM budget" in reply
     assert "$10.00 cap" in reply
-    assert "0.0%" in reply or "0.0000" in reply
+    assert "(0%)" in reply
 
 
 @pytest.mark.asyncio
@@ -481,10 +482,11 @@ async def test_budget_with_spend():
     )
     reply = await cmd_handler._handlers["budget"](42, [])
 
-    assert "0.0173" in reply or "0.017" in reply  # today total
+    assert "$0.02 / $10.00 cap" in reply  # today total, 2dp
     assert "signal" in reply
-    assert "0.0847" in reply  # week
-    assert "2.45" in reply    # all-time
+    assert "0.0123" in reply  # per-type breakdown keeps 4dp
+    assert "This week: $0.08" in reply
+    assert "All-time: $2.45" in reply
 
 
 # ---------------------------------------------------------------------------

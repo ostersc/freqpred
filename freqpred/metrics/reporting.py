@@ -1,14 +1,36 @@
-"""Daily digest and report generation."""
+"""Daily digest and report generation.
+
+The digest has two parts:
+
+1. A **deterministic stat header** assembled in code — run state, open
+   positions vs cap, exposure, unrealized P&L, session P&L with win/loss
+   counts, drawdown, LLM spend vs cap, calibration vs market baseline,
+   signal activity, and service health. Numbers never pass through the LLM,
+   so they cannot be garbled.
+2. An **LLM analyst take** — Claude Haiku receives the header plus detail
+   the reader does not see (per-position P&L, top signals, exit breakdown,
+   stale-service errors) and writes 3–5 prioritized bullets flagging only
+   what deserves attention. It is explicitly told not to restate header
+   numbers.
+
+The digest is plain text (no HTML/markdown) because it is dispatched to
+both Telegram and Discord via the alert path.
+"""
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+if TYPE_CHECKING:
+    from freqpred.runtime.telemetry import RuntimeTelemetry
+
+from freqpred.alerts.command_handlers import _fmt_age_secs, _fmt_usd, _truncate
 from freqpred.ingestion.models import FetcherRateLimitRow
 from freqpred.llm.audit import get_daily_spend_usd
 from freqpred.llm.client import LLMClient
@@ -20,10 +42,17 @@ log = structlog.get_logger(__name__)
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _DIGEST_SYSTEM = (
-    "You are a concise trading system reporter. "
-    "Write a single paragraph of ≤150 words summarizing the state of a "
-    "prediction market trading system. Use plain English, include all key "
-    "numbers, and highlight anything worth attention. No bullet points."
+    "You are the daily-brief analyst for a prediction-market trading system. "
+    "The reader already sees a deterministic stat header above your output; "
+    "your job is the analyst take underneath it. Write 3-5 bullets, each on "
+    "its own line starting with '• ', each at most 18 words. Surface only "
+    "what deserves attention or action: risks, anomalies, win/loss streaks, "
+    "stale or erroring services, unusual LLM spend, calibration shifts, "
+    "positions deep underwater or near resolution, halted run state. Order "
+    "by importance, most important first. Never restate a number the header "
+    "already shows unless you are flagging it as a problem. If everything is "
+    "routine, write one bullet saying so plus at most one observation. "
+    "Plain text only - no markdown, no headers, no preamble."
 )
 
 
@@ -33,12 +62,15 @@ async def generate_daily_digest(
     trading_mode: str = "paper",
     bankroll: float = 0.0,
     model: str = _HAIKU_MODEL,
+    llm_daily_cap: float = 0.0,
+    max_open_positions: int | None = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> str:
     """
-    Assembles a structured data snapshot (open positions, yesterday P&L,
-    LLM spend, calibration score) and passes it to Claude Haiku for a
-    concise natural-language summary. Logs the LLM call via audit.
-    Returns the formatted digest string.
+    Assembles a deterministic stat header (positions, P&L, drawdown, LLM
+    spend, calibration, signal activity, service health) and asks Claude
+    Haiku for a short prioritized analyst take underneath it. Logs the LLM
+    call via audit. Returns header + analyst bullets as plain text.
     """
     now = datetime.now(UTC)
     yesterday_start = (now - timedelta(days=1)).replace(
@@ -76,6 +108,8 @@ async def generate_daily_digest(
             PositionRow.mae,
             PositionRow.mfe,
             MarketRow.mid_price,
+            PositionRow.market_id,
+            MarketRow.question,
         )
         .join(MarketRow, PositionRow.market_id == MarketRow.id)
         .where(PositionRow.status == "open", PositionRow.mode == trading_mode)
@@ -86,14 +120,27 @@ async def generate_daily_digest(
     mfe_dollar_sum = 0.0
     mae_contract_sum = 0
     mfe_contract_sum = 0
-    for contracts, entry_price, entry_fee_usd, direction, mae, mfe, mid_price in unreal_rows_result.all():
+    position_details: list[tuple[float, str]] = []  # (unrealized, detail line for LLM)
+    for (
+        contracts, entry_price, entry_fee_usd, direction, mae, mfe,
+        mid_price, market_id, question,
+    ) in unreal_rows_result.all():
         fee = entry_fee_usd or 0.0
         if direction == "YES":
-            unrealized_pnl += contracts * (mid_price - entry_price) - fee
+            pos_unreal = contracts * (mid_price - entry_price) - fee
             net_exposure += contracts * entry_price
+            current_price = mid_price
         else:
-            unrealized_pnl += contracts * ((1.0 - mid_price) - entry_price) - fee
+            pos_unreal = contracts * ((1.0 - mid_price) - entry_price) - fee
             net_exposure -= contracts * entry_price
+            current_price = 1.0 - mid_price
+        unrealized_pnl += pos_unreal
+        position_details.append((
+            pos_unreal,
+            f"{direction} {contracts}x {market_id} "
+            f"(entry {entry_price * 100:.0f}c, now {current_price * 100:.0f}c, "
+            f"unrealized ${pos_unreal:+.2f}): {_truncate(question, 70)}",
+        ))
         if mae is not None:
             mae_dollar_sum += mae * contracts
             mae_contract_sum += contracts
@@ -135,6 +182,19 @@ async def generate_daily_digest(
         session_exit_str = "; ".join(exit_parts)
     else:
         session_exit_str = "no closed trades in session"
+
+    # Win/loss counts for the same window
+    winloss_result = await session.execute(
+        select(
+            func.coalesce(func.sum(case((PositionRow.pnl > 0, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((PositionRow.pnl < 0, 1), else_=0)), 0),
+        ).where(
+            PositionRow.status == "closed",
+            PositionRow.exit_time >= yesterday_start,
+            PositionRow.mode == trading_mode,
+        )
+    )
+    session_wins, session_losses = (int(v) for v in winloss_result.one())
 
     # --- Drawdown: current net vs stored baseline at reset time ---
     # net_value derived from bankroll + all-time closed P&L (unrealized excluded to match ledger)
@@ -191,29 +251,121 @@ async def generate_daily_digest(
     else:
         fetcher_status = "all fetchers healthy"
 
-    # --- Drawdown string for prompt ---
+    # --- Signal activity (last 24h) ---
+    from freqpred.signal.models import SignalRow  # noqa: PLC0415
+
+    signals_result = await session.execute(
+        select(
+            SignalRow.direction,
+            SignalRow.edge,
+            SignalRow.estimated_probability,
+            SignalRow.market_mid_at_signal,
+            SignalRow.confidence,
+            SignalRow.market_id,
+        ).where(SignalRow.created_at >= now - timedelta(hours=24))
+    )
+    signal_rows = signals_result.all()
+    n_signals = len(signal_rows)
+    actionable = [r for r in signal_rows if (r.direction or "").upper() != "SKIP"]
+    top_signals = sorted(actionable, key=lambda r: abs(r.edge), reverse=True)[:3]
+    top_signal_lines = [
+        f"{r.direction.upper()} {r.market_id} edge {r.edge:+.1%} "
+        f"(est {r.estimated_probability:.0%} vs mkt {r.market_mid_at_signal:.0%}, "
+        f"conf {r.confidence:.2f})"
+        for r in top_signals
+    ]
+
+    # --- Service health (runtime freshness telemetry) ---
+    health_line: str | None = None
+    stale_detail_lines: list[str] = []
+    if telemetry is not None:
+        from freqpred.runtime.telemetry import list_service_heartbeats  # noqa: PLC0415
+
+        heartbeats = await list_service_heartbeats(session)
+        states = telemetry.evaluate_service_states(heartbeats, run_state=run_state)
+        ok_count = sum(1 for s in states if s.status == "ok")
+        stale = [s for s in states if s.status == "stale"]
+        health_line = f"Health {ok_count}/{len(states)} services ok"
+        if stale:
+            shown = ", ".join(
+                f"{s.label} ({_fmt_age_secs(s.age_seconds)})" if s.age_seconds is not None
+                else f"{s.label} (never)"
+                for s in stale[:3]
+            )
+            more = f" +{len(stale) - 3} more" if len(stale) > 3 else ""
+            health_line += f" · stale: {shown}{more}"
+            stale_detail_lines = [
+                f"{s.label}: stale for {_fmt_age_secs(s.age_seconds) if s.age_seconds is not None else 'ever'}"
+                + (f"; last error: {_truncate(s.last_error_message, 140)}" if s.last_error_message else "")
+                for s in stale
+            ]
+
+    # --- Drawdown line ---
     if drawdown_reset_bankroll is not None and drawdown_reset_bankroll > 0:
         drawdown = max(0.0, (drawdown_reset_bankroll - net_value) / drawdown_reset_bankroll)
         reset_label = (
-            drawdown_reset_at.strftime("%Y-%m-%d %H:%MZ")
+            drawdown_reset_at.strftime("%m-%d %H:%MZ")
             if drawdown_reset_at is not None
             else "unknown"
         )
-        drawdown_str = f"{drawdown:.1%} from ${drawdown_reset_bankroll:,.2f} at reset ({reset_label})"
-        drawdown_footer = f"Drawdown: {drawdown_str}"
+        drawdown_str = f"Drawdown {drawdown:.1%} from ${drawdown_reset_bankroll:,.2f} (baseline {reset_label})"
     elif bankroll > 0:
-        drawdown_str = "no baseline set (use /reset_drawdown)"
-        drawdown_footer = f"Drawdown: {drawdown_str}"
+        drawdown_str = "Drawdown: no baseline set (use /reset_drawdown)"
     else:
-        drawdown_str = "unknown (bankroll not provided)"
-        drawdown_footer = None
+        drawdown_str = "Drawdown: unknown (bankroll not provided)"
 
-    # --- Build prompt ---
-    calibration_str = (
-        f"Brier score {calibration.brier_score:.3f} over {calibration.n_samples} resolved markets"
-        if calibration.n_samples > 0
-        else "no resolved markets yet (calibration unavailable)"
+    # ------------------------------------------------------------------
+    # Deterministic stat header — shown verbatim to the reader
+    # ------------------------------------------------------------------
+    mode_label = trading_mode.upper()
+    state_str = run_state if run_state == "running" else f"{run_state} (!)"
+    open_cap = f"{open_count}/{max_open_positions}" if max_open_positions else str(open_count)
+
+    session_line = (
+        f"Session P&L {_fmt_usd(session_pnl)} ({session_wins}W/{session_losses}L)"
     )
+    if bankroll > 0:
+        session_line += f" · net value ${net_value:,.2f}"
+
+    llm_line = f"LLM ${today_llm_spend:.2f} today"
+    if llm_daily_cap > 0:
+        llm_line += f" / ${llm_daily_cap:.2f} cap ({today_llm_spend / llm_daily_cap:.0%})"
+    llm_line += f" · ${yesterday_llm_spend:.2f} yesterday"
+    if llm_errors:
+        llm_line += f" · (!) {llm_errors} LLM errors 24h"
+
+    if calibration.n_samples > 0:
+        improvement = calibration.market_brier_score - calibration.brier_score
+        better = "better" if improvement >= 0 else "worse"
+        calibration_line = (
+            f"Brier {calibration.brier_score:.3f} vs market "
+            f"{calibration.market_brier_score:.3f} ({improvement:+.3f} {better}, "
+            f"n={calibration.n_samples})"
+        )
+    else:
+        calibration_line = "Calibration: no resolved markets yet"
+
+    signals_line = (
+        f"Signals 24h: {n_signals} ({len(actionable)} actionable)"
+        if n_signals else "Signals 24h: none"
+    )
+
+    header_lines = [
+        f"[{mode_label}] Daily digest — {now.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"State {state_str} · open {open_cap} · exposure ${total_exposure:,.2f}"
+        f" · unrealized {_fmt_usd(unrealized_pnl)}",
+        session_line,
+        drawdown_str,
+        llm_line,
+        f"{calibration_line} · {signals_line}",
+    ]
+    if health_line:
+        header_lines.append(health_line)
+    header = "\n".join(header_lines)
+
+    # ------------------------------------------------------------------
+    # LLM analyst take — gets the header plus detail the reader can't see
+    # ------------------------------------------------------------------
     portfolio_mae_str = (
         f"${mae_dollar_sum:+.2f} ({mae_dollar_sum / mae_contract_sum:+.4f} wtd avg)"
         if mae_contract_sum > 0 else "N/A (no excursion data yet)"
@@ -223,26 +375,38 @@ async def generate_daily_digest(
         if mfe_contract_sum > 0 else "N/A (no excursion data yet)"
     )
 
-    mode_label = trading_mode.upper()
+    top_positions = sorted(position_details, key=lambda t: abs(t[0]), reverse=True)[:8]
+    position_block = (
+        "\n".join(f"  - {line}" for _, line in top_positions)
+        if top_positions else "  (none)"
+    )
+    top_signal_block = (
+        "\n".join(f"  - {line}" for line in top_signal_lines)
+        if top_signal_lines else "  (none actionable)"
+    )
+    stale_block = (
+        "\n".join(f"  - {line}" for line in stale_detail_lines)
+        if stale_detail_lines
+        else ("  (telemetry unavailable)" if telemetry is None else "  (none stale)")
+    )
+
     run_state_note = (
-        f"{run_state} (INACTIVE — signal analysis halted)" if run_state != "running" else run_state
+        f"{run_state} — signal analysis HALTED" if run_state != "running" else "running"
     )
     prompt = (
-        f"Daily digest as of {now.strftime('%Y-%m-%d %H:%M UTC')} [mode: {mode_label}]:\n"
-        f"- System run state: {run_state_note}\n"
-        f"- Trading mode: {mode_label} ({'real money' if trading_mode == 'live' else 'simulated / no real money'})\n"
-        f"- Open positions: {open_count} with ${total_exposure:.2f} gross exposure, "
-        f"${net_exposure:+.2f} net exposure, ${unrealized_pnl:+.2f} unrealized P&L\n"
-        f"- Portfolio MAE (worst excursion seen): {portfolio_mae_str}\n"
-        f"- Portfolio MFE (best excursion seen): {portfolio_mfe_str}\n"
-        f"- Session closed P&L (yesterday through now): ${session_pnl:+.2f} — breakdown: {session_exit_str}\n"
-        f"- LLM spend yesterday: ${yesterday_llm_spend:.4f}; today so far: ${today_llm_spend:.4f}\n"
-        f"- LLM errors (last 24h): {llm_errors}\n"
-        f"- Signal calibration: {calibration_str}\n"
-        f"- Fetcher status: {fetcher_status}\n"
-        f"- Drawdown: {drawdown_str}\n\n"
-        "Write a single natural-language paragraph (≤150 words) summarizing "
-        "system health and anything worth attention."
+        f"STAT HEADER (already shown to the reader — do not restate these numbers):\n"
+        f"{header}\n\n"
+        f"DETAIL (not shown to the reader):\n"
+        f"- Run state: {run_state_note}; mode {mode_label} "
+        f"({'real money' if trading_mode == 'live' else 'simulated, no real money'})\n"
+        f"- Open positions by |unrealized P&L| (worst/best first):\n{position_block}\n"
+        f"- Portfolio MAE (worst excursion seen): {portfolio_mae_str}; "
+        f"MFE (best seen): {portfolio_mfe_str}\n"
+        f"- Session closed trades (yesterday through now): {session_exit_str}\n"
+        f"- Top signals by |edge| in last 24h:\n{top_signal_block}\n"
+        f"- Stale services:\n{stale_block}\n"
+        f"- Fetcher rate-limit status: {fetcher_status}\n\n"
+        "Write the analyst take now."
     )
 
     response = await llm_client.complete(
@@ -259,13 +423,12 @@ async def generate_daily_digest(
         session_pnl=round(session_pnl, 4),
         brier_score=round(calibration.brier_score, 4),
         n_samples=calibration.n_samples,
+        n_signals_24h=n_signals,
         llm_query_id=response.llm_query_id,
         trading_mode=trading_mode,
     )
 
-    mode_banner = f"[{mode_label} MODE]\n"
-    footer = f"\n{drawdown_footer}" if drawdown_footer else ""
-    return mode_banner + response.content + footer
+    return f"{header}\n\n{response.content.strip()}"
 
 
 def _seconds_until_next(time_str: str, tz: ZoneInfo) -> float:
@@ -287,6 +450,9 @@ async def run_digest_scheduler(
     trading_mode: str = "paper",
     bankroll: float = 0.0,
     model: str = _HAIKU_MODEL,
+    llm_daily_cap: float = 0.0,
+    max_open_positions: int | None = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> None:
     """Background task: generate and send the daily digest at the configured time.
 
@@ -313,6 +479,9 @@ async def run_digest_scheduler(
                     trading_mode=trading_mode,
                     bankroll=bankroll,
                     model=model,
+                    llm_daily_cap=llm_daily_cap,
+                    max_open_positions=max_open_positions,
+                    telemetry=telemetry,
                 )
             await alert_dispatcher.digest_alert(digest)
             log.info("digest_scheduler.sent")

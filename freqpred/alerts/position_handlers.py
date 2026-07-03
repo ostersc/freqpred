@@ -33,6 +33,7 @@ import structlog
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 
+from freqpred.alerts.command_handlers import _fmt_price, _fmt_usd
 from freqpred.markets.models import PositionRow
 
 if TYPE_CHECKING:
@@ -85,11 +86,12 @@ def register_position_commands(
             return str(exc)
         except Exception as exc:
             return f"Force exit failed: {exc}"
-        pnl_str = f"{closed.pnl:+.4f}" if closed.pnl is not None else "N/A"
+        pnl_str = _fmt_usd(closed.pnl) if closed.pnl is not None else "N/A"
         log.info("telegram.forceexit", position_id=position_id, pnl=closed.pnl)
         return (
             f"Position {position_id} closed.\n"
-            f"  exit_price={closed.exit_price:.4f}  pnl={pnl_str}  reason={closed.exit_reason}"
+            f"Exit price {_fmt_price(closed.exit_price)} · P&L {pnl_str}"
+            f" · reason {closed.exit_reason}"
         )
 
     async def _close_all_positions() -> str:
@@ -114,8 +116,8 @@ def register_position_commands(
         for pos_id in pos_ids:
             try:
                 closed = await order_manager.force_exit(pos_id, exit_reason="force_exit:manual")
-                pnl_str = f"{closed.pnl:+.4f}" if closed.pnl is not None else "N/A"
-                closed_summaries.append(f"  {pos_id}  pnl={pnl_str}")
+                pnl_str = _fmt_usd(closed.pnl) if closed.pnl is not None else "N/A"
+                closed_summaries.append(f"  {pos_id}  {pnl_str}")
             except Exception as exc:
                 errors.append(f"  {pos_id}: {exc}")
 
@@ -308,6 +310,12 @@ def register_position_commands(
     # Register all handlers
     # ------------------------------------------------------------------
 
-    cmd_handler.register("forceexit", handle_forceexit)
-    cmd_handler.register("fx", handle_fx)
-    cmd_handler.register("delete", handle_delete)
+    cmd_handler.register(
+        "forceexit", handle_forceexit,
+        description="<id|ticker>|all — force-close position(s)", category="Positions")
+    cmd_handler.register(
+        "fx", handle_fx,
+        description="Alias for /forceexit", category="Positions")
+    cmd_handler.register(
+        "delete", handle_delete,
+        description="<id> — delete a paper position record", category="Positions")

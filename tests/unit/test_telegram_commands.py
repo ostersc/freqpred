@@ -264,6 +264,89 @@ async def test_help_command_lists_registered_commands() -> None:
 
 
 # ---------------------------------------------------------------------------
+# test_help_groups_and_describes_commands
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_help_groups_and_describes_commands() -> None:
+    """/help groups commands by category and shows descriptions (HTML-escaped)."""
+    h = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
+    h.register("status", _make_handler(),
+               description="<id> — open positions", category="Positions")
+    h.register("pause", _make_handler(),
+               description="Pause new entries", category="System")
+
+    reply = await h._help_handler(77, [])
+    assert "<b>System</b>" in reply
+    assert "<b>Positions</b>" in reply
+    assert "/pause — Pause new entries" in reply
+    # Angle brackets in descriptions are escaped for HTML parse mode
+    assert "&lt;id&gt;" in reply
+    assert "<id>" not in reply
+    # System sorts before Positions
+    assert reply.index("<b>System</b>") < reply.index("<b>Positions</b>")
+
+
+# ---------------------------------------------------------------------------
+# test_send_reply_html_parse_mode_and_fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_reply_uses_html_parse_mode() -> None:
+    h = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("freqpred.alerts.telegram_commands.httpx.AsyncClient", return_value=mock_client):
+        await h._send_reply(55, "<b>bold</b> text")
+
+    payload = mock_client.post.call_args.kwargs["json"]
+    assert payload["parse_mode"] == "HTML"
+    assert payload["text"] == "<b>bold</b> text"
+
+
+@pytest.mark.asyncio
+async def test_send_reply_falls_back_to_plain_text_on_bad_html() -> None:
+    """If Telegram rejects the HTML (400), the reply is re-sent with tags stripped."""
+    h = TelegramCommandHandler(bot_token="TOKEN", authorized_users=["alice"])
+
+    bad_response = MagicMock()
+    bad_response.status_code = 400
+    bad_response.text = "Bad Request: can't parse entities"
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    ok_response.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(side_effect=[bad_response, ok_response])
+
+    with patch("freqpred.alerts.telegram_commands.httpx.AsyncClient", return_value=mock_client):
+        await h._send_reply(55, "<b>broken <html &amp; stuff")
+
+    assert mock_client.post.call_count == 2
+    retry_payload = mock_client.post.call_args_list[1].kwargs["json"]
+    assert "parse_mode" not in retry_payload
+    assert retry_payload["text"] == "broken <html & stuff"  # tags stripped, entities unescaped
+
+
+def test_strip_html_removes_tags_and_unescapes() -> None:
+    from freqpred.alerts.telegram_commands import strip_html
+
+    assert strip_html("<b>P&amp;L</b> <pre>x &lt; y</pre>") == "P&L x < y"
+
+
+# ---------------------------------------------------------------------------
 # test_unknown_command_returns_error_message
 # ---------------------------------------------------------------------------
 

@@ -294,24 +294,6 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         run_stale_service_watchdog,
     )
 
-    log_buffer = _get_or_create_log_buffer()
-    register_system_commands(
-        cmd_handler=telegram_cmd_handler,
-        session_factory=session_factory,
-        config=config,
-        mode=mode,
-        strategy_name=strategy_name,
-        log_buffer=log_buffer,
-    )
-    register_metrics_commands(
-        cmd_handler=telegram_cmd_handler,
-        session_factory=session_factory,
-        config=config,
-        mode=mode,
-        llm_client=llm_client,
-    )
-    from freqpred.trading.order_manager import OrderManager
-    from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
     runtime_telemetry = RuntimeTelemetry(
         session_factory=session_factory,
         freshness_specs=build_freshness_specs(
@@ -321,6 +303,27 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
             market_watcher_interval_seconds=config.kalshi.polling_interval_seconds,
         ),
     )
+
+    log_buffer = _get_or_create_log_buffer()
+    register_system_commands(
+        cmd_handler=telegram_cmd_handler,
+        session_factory=session_factory,
+        config=config,
+        mode=mode,
+        strategy_name=strategy_name,
+        log_buffer=log_buffer,
+        telemetry=runtime_telemetry,
+    )
+    register_metrics_commands(
+        cmd_handler=telegram_cmd_handler,
+        session_factory=session_factory,
+        config=config,
+        mode=mode,
+        llm_client=llm_client,
+        telemetry=runtime_telemetry,
+    )
+    from freqpred.trading.order_manager import OrderManager
+    from freqpred.trading.risk import RiskEngine, TradingCircuitBreakerError
 
     order_manager = None
     position_watcher = None
@@ -854,6 +857,9 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                     trading_mode=mode,
                     bankroll=config.trading.bankroll_usd,
                     model=config.anthropic.cheap_model,
+                    llm_daily_cap=config.risk.max_daily_llm_spend_usd,
+                    max_open_positions=config.risk.max_open_positions,
+                    telemetry=runtime_telemetry,
                 ),
                 name="digest_scheduler",
             )
@@ -1856,13 +1862,29 @@ async def _report_digest(config: object, *, send: bool, trading_mode: str = "pap
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
     )
 
+    from freqpred.runtime.telemetry import RuntimeTelemetry, build_freshness_specs
+
+    telemetry = RuntimeTelemetry(
+        session_factory=session_factory,
+        freshness_specs=build_freshness_specs(
+            ingestion_interval_seconds=config.ingestion.schedule_interval_seconds,
+            realtime_interval_seconds=config.ingestion.realtime_interval_seconds,
+            signal_interval_seconds=config.signal.interval_seconds,
+            market_watcher_interval_seconds=config.kalshi.polling_interval_seconds,
+        ),
+    )
+
     try:
         async with session_factory() as session:
             digest = await generate_daily_digest(
                 session,
                 llm_client,
                 trading_mode=trading_mode,
+                bankroll=config.trading.bankroll_usd,
                 model=config.anthropic.cheap_model,
+                llm_daily_cap=config.risk.max_daily_llm_spend_usd,
+                max_open_positions=config.risk.max_open_positions,
+                telemetry=telemetry,
             )
     finally:
         await engine.dispose()

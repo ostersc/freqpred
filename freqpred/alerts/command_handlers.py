@@ -1,7 +1,10 @@
 """Telegram bot command handlers for T28: system + status commands.
 
 Registers all /start /pause /stop /show_config /logs /version
-/status /count /trades /signals handlers onto a TelegramCommandHandler.
+/status /trades /signals /health handlers onto a TelegramCommandHandler.
+
+Replies use Telegram HTML markup (see TelegramCommandHandler._send_reply):
+dynamic strings must be escaped with _esc() before interpolation.
 
 Usage::
 
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import html
 import importlib.metadata
 import logging
 import os
@@ -39,6 +43,7 @@ if TYPE_CHECKING:
 
     from freqpred.alerts.telegram_commands import TelegramCommandHandler
     from freqpred.config import Settings
+    from freqpred.runtime.telemetry import RuntimeTelemetry
 
 log = structlog.get_logger(__name__)
 
@@ -101,20 +106,82 @@ def install_log_buffer(buf: LogBuffer) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Formatting helpers (shared by metrics_handlers)
 # ---------------------------------------------------------------------------
 
 
+def _esc(text: str) -> str:
+    """HTML-escape a dynamic string for a parse_mode=HTML reply."""
+    return html.escape(str(text), quote=False)
+
+
 def _truncate(text: str, n: int) -> str:
-    return text[:n] + "…" if len(text) > n else text
+    """Truncate to at most *n* chars, cutting at a word boundary."""
+    if len(text) <= n:
+        return text
+    cut = text[:n]
+    space = cut.rfind(" ")
+    # Only back up to the word boundary when it doesn't eat most of the text.
+    if space > n * 2 // 3:
+        cut = cut[:space]
+    return cut.rstrip() + "…"
 
 
 def _clip(text: str) -> str:
-    """Truncate to Telegram's 4096-char message limit."""
+    """Truncate to Telegram's 4096-char message limit at a line boundary."""
     if len(text) <= _TELEGRAM_MAX_LEN:
         return text
-    suffix = "\n...[truncated]"
-    return text[: _TELEGRAM_MAX_LEN - len(suffix)] + suffix
+    suffix = "\n…[truncated]"
+    cut = text[: _TELEGRAM_MAX_LEN - len(suffix)]
+    nl = cut.rfind("\n")
+    if nl > _TELEGRAM_MAX_LEN // 2:
+        cut = cut[:nl]
+    return cut + suffix
+
+
+def _fmt_usd(value: float) -> str:
+    """Format a signed dollar amount: +$1.20 / -$0.35."""
+    sign = "-" if value < 0 else "+"
+    return f"{sign}${abs(value):,.2f}"
+
+
+def _fmt_price(price: float) -> str:
+    """Format a 0–1 contract price in cents: 43¢, or 43.5¢ if fractional."""
+    cents = price * 100
+    if abs(cents - round(cents)) < 0.05:
+        return f"{round(cents):d}¢"
+    return f"{cents:.1f}¢"
+
+
+def _fmt_age_secs(secs: int) -> str:
+    """Format an age in seconds: 12s / 5m / 2h 15m / 3d 4h."""
+    if secs < 60:
+        return f"{secs}s"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m"
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return f"{hours}h {mins}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h"
+
+
+def _ago(dt: datetime, now: datetime | None = None) -> str:
+    """Format a past datetime as an age string ('2h 15m'). Naive dt = UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    current = now or datetime.now(UTC)
+    return _fmt_age_secs(max(0, int((current - dt).total_seconds())))
+
+
+def _unrealized_pnl(direction: str, contracts: int, entry_price: float, mid: float) -> float:
+    """Unrealized P&L in dollars. NO positions are valued at (1 - mid)."""
+    current = mid if direction.upper() == "YES" else 1.0 - mid
+    return contracts * (current - entry_price)
+
+
+_STATE_ICONS = {"running": "▶️", "paused": "⏸", "stopped": "⛔"}
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +196,7 @@ def register_system_commands(
     mode: str,
     strategy_name: str,
     log_buffer: LogBuffer | None = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> None:
     """Register all T28 commands onto *cmd_handler*."""
 
@@ -239,17 +307,18 @@ def register_system_commands(
 
     async def handle_show_config(chat_id: int, args: list[str]) -> str:
         lines = [
-            "Current configuration:",
-            f"  strategy    : {strategy_name}",
-            f"  mode        : {mode}",
-            f"  min edge    : {config.risk.min_edge_floor:.2%}",
-            f"  max position: {config.risk.max_position_pct:.2%} of bankroll",
-            f"  llm budget  : ${config.risk.max_daily_llm_spend_usd:.2f}/day",
+            "<b>Current configuration</b>",
+            f"Strategy: {_esc(strategy_name)}",
+            f"Mode: {mode}",
+            f"Min edge: {config.risk.min_edge_floor:.2%}",
+            f"Max position: {config.risk.max_position_pct:.2%} of bankroll",
+            f"Max open positions: {config.risk.max_open_positions}",
+            f"LLM budget: ${config.risk.max_daily_llm_spend_usd:.2f}/day",
         ]
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
-    # /logs [n]                                                            #
+    # /logs [n] [filter]                                                   #
     # ------------------------------------------------------------------ #
 
     async def handle_logs(chat_id: int, args: list[str]) -> str:
@@ -272,9 +341,14 @@ def register_system_commands(
         if not lines:
             filter_str = f" matching {log_filter!r}" if log_filter else ""
             return f"No log lines captured yet{filter_str}."
-        body = "\n".join(lines)
-        filter_label = f" [{log_filter}]" if log_filter else ""
-        return _clip(f"Last {len(lines)} log line(s){filter_label}:\n```\n{body}\n```")
+        filter_label = f" [{_esc(log_filter)}]" if log_filter else ""
+        header = f"Last {len(lines)} log line(s){filter_label}:"
+        # Budget the <pre> body so the wrapped message stays under the limit.
+        budget = _TELEGRAM_MAX_LEN - len(header) - len("\n<pre></pre>") - 20
+        body = _esc("\n".join(lines))
+        if len(body) > budget:
+            body = "…" + body[-budget:]
+        return f"{header}\n<pre>{body}</pre>"
 
     # ------------------------------------------------------------------ #
     # /version                                                             #
@@ -300,63 +374,96 @@ def register_system_commands(
         return f"freqpred {version} (git {git_hash})"
 
     # ------------------------------------------------------------------ #
-    # /status [position_id]                                               #
+    # /status [position_id_or_market_ticker]                              #
     # ------------------------------------------------------------------ #
 
+    async def _status_detail(target: str) -> str:
+        """Detailed single-position view. Accepts a UUID or market ticker."""
+        from freqpred.markets.models import MarketRow, PositionRow  # noqa: PLC0415
+
+        stmt = (
+            select(PositionRow, MarketRow.question, MarketRow.mid_price)
+            .join(MarketRow, PositionRow.market_id == MarketRow.id)
+        )
+        try:
+            stmt = stmt.where(PositionRow.id == _uuid.UUID(target))
+        except ValueError:
+            # Not a UUID — treat as a market ticker; prefer the open position.
+            stmt = (
+                stmt.where(PositionRow.market_id == target)
+                .order_by(PositionRow.status != "open", PositionRow.entry_time.desc())
+                .limit(1)
+            )
+
+        async with session_factory() as session:
+            result = await session.execute(stmt)
+            row = result.first()
+
+        if row is None:
+            return f"No position found for: {_esc(target)}"
+
+        pos, question, mid = row
+        direction = pos.direction.upper()
+        cost = pos.contracts * pos.entry_price
+        current_price = mid if direction == "YES" else 1.0 - mid
+
+        lines = [
+            f"<b>{direction} {pos.contracts}×</b> {_esc(pos.market_id)}",
+            _esc(question),
+            "",
+            f"Status: {pos.status}"
+            + (f" · open {_ago(pos.entry_time)}" if pos.status == "open" and pos.entry_time else ""),
+        ]
+
+        if pos.status == "open":
+            unreal = _unrealized_pnl(direction, pos.contracts, pos.entry_price, mid)
+            unreal_pct = unreal / cost if cost > 0 else 0.0
+            lines.append(
+                f"Price: {_fmt_price(pos.entry_price)} → {_fmt_price(current_price)}"
+                f" · P&L {_fmt_usd(unreal)} ({unreal_pct:+.1%})"
+            )
+        else:
+            exit_bits = []
+            if pos.exit_price is not None:
+                exit_bits.append(f"Price: {_fmt_price(pos.entry_price)} → {_fmt_price(pos.exit_price)}")
+            if pos.pnl is not None:
+                pct = f" ({pos.pnl_pct:+.1%})" if pos.pnl_pct is not None else ""
+                exit_bits.append(f"P&L {_fmt_usd(pos.pnl)}{pct}")
+            if exit_bits:
+                lines.append(" · ".join(exit_bits))
+            if pos.exit_reason:
+                lines.append(f"Exit reason: {_esc(pos.exit_reason)}")
+
+        lines.append(f"Cost basis: ${cost:,.2f}")
+
+        # Signal snapshot at entry
+        sig_bits = []
+        if pos.signal_estimated_prob is not None:
+            sig_bits.append(f"est {pos.signal_estimated_prob:.0%}")
+        if pos.signal_edge is not None:
+            sig_bits.append(f"edge {pos.signal_edge:+.1%}")
+        if pos.signal_confidence is not None:
+            sig_bits.append(f"conf {pos.signal_confidence:.2f}")
+        if sig_bits:
+            lines.append("Signal at entry: " + " · ".join(sig_bits))
+
+        def _excursion(delta: float | None) -> str:
+            if delta is None:
+                return "—"
+            return f"{_fmt_usd(delta * pos.contracts)} ({delta:+.3f}/contract)"
+
+        lines += [
+            f"MAE (worst seen): {_excursion(pos.mae)}",
+            f"MFE (best seen): {_excursion(pos.mfe)}",
+            f"ID: <code>{pos.id}</code>",
+        ]
+        return "\n".join(lines)
+
     async def handle_status(chat_id: int, args: list[str]) -> str:
-        from freqpred.markets.models import MarketRow, PositionRow
+        from freqpred.markets.models import MarketRow, PositionRow  # noqa: PLC0415
 
         if args:
-            # Detailed single-position view
-            pos_id_str = args[0]
-            try:
-                pos_uuid = _uuid.UUID(pos_id_str)
-            except ValueError:
-                return f"Invalid position ID: {pos_id_str!r}"
-
-            async with session_factory() as session:
-                result = await session.execute(
-                    select(PositionRow, MarketRow.question)
-                    .join(MarketRow, PositionRow.market_id == MarketRow.id)
-                    .where(PositionRow.id == pos_uuid)
-                )
-                row = result.one_or_none()
-
-            if row is None:
-                return f"Position {pos_id_str} not found."
-
-            pos, question = row
-            time_open = "N/A"
-            if pos.entry_time:
-                entry_tzinfo = UTC if pos.entry_time.tzinfo is None else pos.entry_time.tzinfo
-                delta = datetime.now(UTC) - pos.entry_time.replace(tzinfo=entry_tzinfo)
-                hours, rem = divmod(int(delta.total_seconds()), 3600)
-                mins = rem // 60
-                time_open = f"{hours}h {mins}m"
-
-            conf_str = f"{pos.signal_confidence:.2f}" if pos.signal_confidence is not None else "N/A"
-            edge_str = f"{pos.signal_edge:+.3f}" if pos.signal_edge is not None else "N/A"
-            prob_str = f"{pos.signal_estimated_prob:.3f}" if pos.signal_estimated_prob is not None else "N/A"
-
-            def _excursion_str(delta: float | None, contracts: int) -> str:
-                if delta is None:
-                    return "N/A"
-                return f"{delta:+.4f}  (${delta * contracts:+.2f})"
-
-            lines = [
-                f"Position: {pos.id}",
-                f"Market  : {_truncate(question, 60)}",
-                f"Direction: {pos.direction}  |  Contracts: {pos.contracts}",
-                f"Entry price     : {pos.entry_price:.4f}",
-                f"Est. probability: {prob_str}",
-                f"Edge at entry   : {edge_str}",
-                f"Confidence      : {conf_str}",
-                f"MAE (worst seen): {_excursion_str(pos.mae, pos.contracts)}",
-                f"MFE (best seen) : {_excursion_str(pos.mfe, pos.contracts)}",
-                f"Status  : {pos.status}",
-                f"Time open: {time_open}",
-            ]
-            return "\n".join(lines)
+            return await _status_detail(args[0])
 
         # List all open positions
         from freqpred.alerts.run_state import get_drawdown_window  # noqa: PLC0415
@@ -381,69 +488,61 @@ def register_system_commands(
             )
             rows = result.all()
 
-        if reset_bankroll is not None and reset_at is not None:
-            reset_label = f" from ${reset_bankroll:,.0f} (reset {reset_at.strftime('%m-%d %H:%M')})"
-        else:
-            reset_label = " (no baseline)"
-        drawdown_str = f"drawdown={drawdown_pct:.1f}%{reset_label}"
-        if drawdown_pct >= 30.0:
-            drawdown_str += " *** CIRCUIT BREAKER ACTIVE ***"
+        icon = _STATE_ICONS.get(current_state, "❓")
+        header = [
+            f"{icon} <b>{current_state.upper()}</b> · {mode} · {_esc(strategy_name)}",
+        ]
 
-        state_line = f"state={current_state} | strategy={strategy_name} | mode={mode} | {drawdown_str}"
+        if reset_bankroll is not None and reset_at is not None:
+            drawdown_line = (
+                f"Drawdown {drawdown_pct:.1f}% from ${reset_bankroll:,.0f}"
+                f" (baseline {reset_at.strftime('%m-%d %H:%M')})"
+            )
+        else:
+            drawdown_line = "Drawdown: no baseline (use /reset_drawdown)"
+        if drawdown_pct >= 30.0:
+            drawdown_line = f"🚨 {drawdown_line} — CIRCUIT BREAKER ACTIVE"
+
         if current_state != "running":
-            state_line += f"\n*** signal loop is {current_state.upper()} — use /start to resume ***"
+            header.append(f"⚠️ Signal loop is {current_state} — /start to resume")
 
         if not rows:
-            return f"{state_line}\nNo open positions."
+            header.append(f"Open 0/{config.risk.max_open_positions} · no open positions")
+            header.append(drawdown_line)
+            return "\n".join(header)
 
-        lines = [state_line, "Open positions:"]
         total_unrealized = 0.0
+        blocks: list[str] = []
         for pos, question, mid in rows:
-            q = _truncate(question, 60)
-            # Unrealized P&L estimate
-            if pos.direction == "YES":
-                unreal_pnl = pos.contracts * (mid - pos.entry_price)
-            else:
-                unreal_pnl = pos.contracts * ((1.0 - mid) - pos.entry_price)
-            total_unrealized += unreal_pnl
-            prob_str = f"{pos.signal_estimated_prob:.3f}" if pos.signal_estimated_prob is not None else "N/A"
-            mae_str = f"{pos.mae:+.4f}" if pos.mae is not None else "—"
-            mfe_str = f"{pos.mfe:+.4f}" if pos.mfe is not None else "—"
-            lines.append(
-                f"  [{pos.direction}] {pos.market_id}\n"
-                f"    {q}\n"
-                f"    entry={pos.entry_price:.4f}  prob={prob_str}  unreal_pnl=${unreal_pnl:+.2f}"
-                f"  mae={mae_str}  mfe={mfe_str}"
+            direction = pos.direction.upper()
+            unreal = _unrealized_pnl(direction, pos.contracts, pos.entry_price, mid)
+            total_unrealized += unreal
+            cost = pos.contracts * pos.entry_price
+            unreal_pct = unreal / cost if cost > 0 else 0.0
+            current_price = mid if direction == "YES" else 1.0 - mid
+            age = f" · open {_ago(pos.entry_time)}" if pos.entry_time else ""
+            blocks.append(
+                f"<b>{direction} {pos.contracts}×</b> {_esc(pos.market_id)}\n"
+                f"{_esc(_truncate(question, 80))}\n"
+                f"{_fmt_price(pos.entry_price)} → {_fmt_price(current_price)}"
+                f" · {_fmt_usd(unreal)} ({unreal_pct:+.1%}){age}"
             )
-        lines.append(f"\nTotal unrealized P&L: ${total_unrealized:+.2f}")
-        return _clip("\n".join(lines))
 
-    # ------------------------------------------------------------------ #
-    # /count                                                               #
-    # ------------------------------------------------------------------ #
-
-    async def handle_count(chat_id: int, args: list[str]) -> str:
-        from sqlalchemy import func
-
-        from freqpred.markets.models import PositionRow
-
-        async with session_factory() as session:
-            result = await session.execute(
-                select(func.count()).select_from(PositionRow).where(
-                    PositionRow.status == "open", PositionRow.mode == mode,
-                )
-            )
-            open_count: int = result.scalar_one()
-
-        max_pos = config.risk.max_open_positions
-        return f"Open: {open_count} / Max: {max_pos}"
+        header.append(
+            f"Open {len(rows)}/{config.risk.max_open_positions}"
+            f" · unrealized {_fmt_usd(total_unrealized)}"
+        )
+        header.append(drawdown_line)
+        body = "\n".join(header) + "\n\n" + "\n\n".join(blocks)
+        body += "\n\n/status &lt;ticker&gt; for detail · /fx &lt;ticker&gt; to close"
+        return _clip(body)
 
     # ------------------------------------------------------------------ #
     # /trades [n]                                                          #
     # ------------------------------------------------------------------ #
 
     async def handle_trades(chat_id: int, args: list[str]) -> str:
-        from freqpred.markets.models import MarketRow, PositionRow
+        from freqpred.markets.models import MarketRow, PositionRow  # noqa: PLC0415
 
         n = 10
         if args:
@@ -465,33 +564,35 @@ def register_system_commands(
         if not rows:
             return "No resolved positions yet."
 
-        lines = [f"Last {len(rows)} resolved position(s):"]
+        blocks: list[str] = []
+        total_pnl = 0.0
         for pos, question in rows:
-            q = _truncate(question, 80)
-            pnl_str = f"{pos.pnl:+.4f}" if pos.pnl is not None else "N/A"
-            duration = "N/A"
+            pnl = pos.pnl if pos.pnl is not None else 0.0
+            total_pnl += pnl
+            icon = "✅" if pnl > 0 else ("❌" if pnl < 0 else "➖")
+            pct = f" ({pos.pnl_pct:+.1%})" if pos.pnl_pct is not None else ""
+            held = ""
             if pos.entry_time and pos.exit_time:
-                entry = pos.entry_time
-                exit_ = pos.exit_time
-                if entry.tzinfo is None:
-                    entry = entry.replace(tzinfo=UTC)
-                if exit_.tzinfo is None:
-                    exit_ = exit_.replace(tzinfo=UTC)
-                delta = exit_ - entry
-                hours, rem = divmod(int(delta.total_seconds()), 3600)
-                mins = rem // 60
-                duration = f"{hours}h {mins}m"
+                entry = pos.entry_time if pos.entry_time.tzinfo else pos.entry_time.replace(tzinfo=UTC)
+                exit_ = pos.exit_time if pos.exit_time.tzinfo else pos.exit_time.replace(tzinfo=UTC)
+                held = f" · held {_fmt_age_secs(max(0, int((exit_ - entry).total_seconds())))}"
             reason = pos.exit_reason or "resolved"
-            lines.append(f"  {q}\n    exit={reason}  pnl={pnl_str}  held={duration}")
-        return _clip("\n".join(lines))
+            blocks.append(
+                f"{icon} {_fmt_usd(pnl)}{pct} · {pos.direction.upper()}"
+                f" · {_esc(reason)}{held}\n"
+                f"{_esc(_truncate(question, 80))}"
+            )
+
+        header = f"<b>Last {len(rows)} closed trade(s)</b> · net {_fmt_usd(total_pnl)}"
+        return _clip(header + "\n\n" + "\n\n".join(blocks))
 
     # ------------------------------------------------------------------ #
     # /signals [n]                                                         #
     # ------------------------------------------------------------------ #
 
     async def handle_signals(chat_id: int, args: list[str]) -> str:
-        from freqpred.markets.models import MarketRow
-        from freqpred.signal.models import SignalRow
+        from freqpred.markets.models import MarketRow  # noqa: PLC0415
+        from freqpred.signal.models import SignalRow  # noqa: PLC0415
 
         n = 10
         if args:
@@ -512,29 +613,96 @@ def register_system_commands(
         if not rows:
             return "No signals recorded yet."
 
-        lines = [f"Last {len(rows)} signal(s):"]
+        blocks: list[str] = []
         for sig, question in rows:
-            q = _truncate(question, 80)
-            lines.append(
-                f"  {q}\n"
-                f"    prob={sig.estimated_probability:.3f}  mid={sig.market_mid_at_signal:.3f}"
-                f"  edge={sig.edge:+.3f}  dir={sig.direction}"
+            age = f"{_ago(sig.created_at)} ago" if sig.created_at else "?"
+            direction = sig.direction.upper()
+            icon = {"YES": "🟢", "NO": "🔴", "SKIP": "⏭"}.get(direction, "•")
+            blocks.append(
+                f"{icon} <b>{direction}</b> · {_esc(sig.market_id)} · {age}\n"
+                f"{_esc(_truncate(question, 80))}\n"
+                f"est {sig.estimated_probability:.0%} vs mkt {sig.market_mid_at_signal:.0%}"
+                f" → edge {sig.edge:+.1%} · conf {sig.confidence:.2f}"
+                f" · {_esc(sig.trigger)}"
             )
+
+        header = f"<b>Last {len(rows)} signal(s)</b>"
+        return _clip(header + "\n\n" + "\n\n".join(blocks))
+
+    # ------------------------------------------------------------------ #
+    # /health — scheduled-service freshness telemetry                      #
+    # ------------------------------------------------------------------ #
+
+    async def handle_health(chat_id: int, args: list[str]) -> str:
+        if telemetry is None:
+            return "Health telemetry not available in this run mode."
+        from freqpred.runtime.telemetry import list_service_heartbeats  # noqa: PLC0415
+
+        async with session_factory() as session:
+            current_state = await get_run_state(session)
+            heartbeats = await list_service_heartbeats(session)
+        states = telemetry.evaluate_service_states(heartbeats, run_state=current_state)
+
+        icons = {"ok": "✅", "stale": "🔴", "idle": "⏸", "unknown": "⚪"}
+        rank = {"stale": 0, "unknown": 1, "idle": 2, "ok": 3}
+        ok_count = sum(1 for s in states if s.status == "ok")
+
+        lines = [f"<b>Service health</b> — {ok_count}/{len(states)} ok"]
+        ws = telemetry.websocket_state()
+        if ws["connected"] is not None:
+            ws_icon = "✅" if ws["connected"] else "🔴"
+            markets = ws["subscribed_markets"]
+            markets_str = f" · {markets} markets" if markets is not None else ""
+            lines.append(f"{ws_icon} WebSocket {'connected' if ws['connected'] else 'disconnected'}{markets_str}")
+        lines.append("")
+
+        for s in sorted(states, key=lambda s: (rank.get(s.status, 1), s.label)):
+            icon = icons.get(s.status, "❓")
+            age = _fmt_age_secs(s.age_seconds) + " ago" if s.age_seconds is not None else "never"
+            line = f"{icon} {_esc(s.label)} · {age}"
+            if s.status == "stale" and s.last_error_message:
+                line += f"\n    ↳ {_esc(_truncate(s.last_error_message, 120))}"
+            lines.append(line)
         return _clip("\n".join(lines))
 
     # ------------------------------------------------------------------ #
-    # Register all handlers
+    # Register all handlers                                                #
     # ------------------------------------------------------------------ #
 
-    cmd_handler.register("start", handle_start)
-    cmd_handler.register("pause", handle_pause)
-    cmd_handler.register("stop", handle_stop)
-    cmd_handler.register("shutdown", handle_shutdown)
-    cmd_handler.register("reset_drawdown", handle_reset_drawdown)
-    cmd_handler.register("show_config", handle_show_config)
-    cmd_handler.register("logs", handle_logs)
-    cmd_handler.register("version", handle_version)
-    cmd_handler.register("status", handle_status)
-    cmd_handler.register("count", handle_count)
-    cmd_handler.register("trades", handle_trades)
-    cmd_handler.register("signals", handle_signals)
+    cmd_handler.register(
+        "start", handle_start,
+        description="Resume the signal loop", category="System")
+    cmd_handler.register(
+        "pause", handle_pause,
+        description="Pause new entries (exits still run)", category="System")
+    cmd_handler.register(
+        "stop", handle_stop,
+        description="Halt signal analysis entirely", category="System")
+    cmd_handler.register(
+        "shutdown", handle_shutdown,
+        description="Gracefully shut down the process", category="System")
+    cmd_handler.register(
+        "reset_drawdown", handle_reset_drawdown,
+        description="Reset the drawdown circuit-breaker baseline", category="System")
+    cmd_handler.register(
+        "show_config", handle_show_config,
+        description="Show strategy, mode, and risk limits", category="System")
+    cmd_handler.register(
+        "logs", handle_logs,
+        description="[n] [filter] — recent log lines", category="Diagnostics")
+    cmd_handler.register(
+        "version", handle_version,
+        description="Version and git commit", category="Diagnostics")
+    cmd_handler.register(
+        "health", handle_health,
+        description="Freshness of schedulers and fetchers", category="Diagnostics")
+    cmd_handler.register(
+        "status", handle_status,
+        description="[id|ticker] — open positions or one position in detail",
+        category="Positions")
+    cmd_handler.register(
+        "trades", handle_trades,
+        description="[n] — recent closed trades", category="Positions")
+    cmd_handler.register(
+        "signals", handle_signals,
+        description="[n] — recent signals", category="Positions")

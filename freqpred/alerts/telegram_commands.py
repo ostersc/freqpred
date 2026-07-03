@@ -17,6 +17,8 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import html as _html
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -26,6 +28,15 @@ import structlog
 log = structlog.get_logger(__name__)
 
 _API_BASE = "https://api.telegram.org"
+
+# Tags we emit in command replies; used to strip markup when falling back
+# to a plain-text send after Telegram rejects the HTML.
+_HTML_TAG_RE = re.compile(r"</?(?:b|i|u|s|code|pre|a)(?:\s[^>]*)?>")
+
+
+def strip_html(text: str) -> str:
+    """Strip the HTML tags used in replies and unescape entities."""
+    return _html.unescape(_HTML_TAG_RE.sub("", text))
 
 # Callable type: receives (chat_id, args) and returns a reply string or None.
 CommandHandler = Callable[[int, list[str]], Awaitable[str | None]]
@@ -62,25 +73,36 @@ class TelegramCommandHandler:
         self._enabled = bool(bot_token)
         self._offset: int = 0
         self._handlers: dict[str, CommandHandler] = {}
+        self._command_meta: dict[str, tuple[str, str]] = {}  # cmd -> (description, category)
         self._callback_handlers: dict[str, CallbackHandler] = {}
 
         if not self._enabled:
             log.info("telegram_commands_disabled", reason="missing bot_token")
         else:
             # Register built-in /help command.
-            self.register("help", self._help_handler)
+            self.register("help", self._help_handler, description="List all commands")
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def register(self, command: str, handler: CommandHandler) -> None:
+    def register(
+        self,
+        command: str,
+        handler: CommandHandler,
+        *,
+        description: str = "",
+        category: str = "Other",
+    ) -> None:
         """Register *handler* for */command*.
 
         ``command`` should be given without the leading ``/``.
         Re-registering the same command replaces the previous handler.
+        *description* and *category* drive the grouped /help output.
         """
-        self._handlers[command.lstrip("/")] = handler
+        cmd = command.lstrip("/")
+        self._handlers[cmd] = handler
+        self._command_meta[cmd] = (description, category)
         log.debug("telegram_command_registered", command=command)
 
     def register_callback(self, data: str, handler: CallbackHandler) -> None:
@@ -286,15 +308,32 @@ class TelegramCommandHandler:
             log.warning("telegram_answer_callback_error", error=str(exc))
 
     async def _send_reply(self, chat_id: int, text: str) -> None:
-        """Send a plain-text reply to chat_id."""
+        """Send a reply to chat_id.
+
+        Replies are sent with ``parse_mode=HTML`` so handlers can use
+        ``<b>``/``<pre>``/``<code>`` markup. If Telegram rejects the markup
+        (HTTP 400), the reply is re-sent as plain text with tags stripped so
+        the user always receives the content.
+        """
         url = f"{_API_BASE}/bot{self._token}/sendMessage"
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     url,
-                    json={"chat_id": chat_id, "text": text},
+                    json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
                     timeout=10.0,
                 )
+                if response.status_code == 400:
+                    log.warning(
+                        "telegram_send_reply_html_rejected",
+                        chat_id=chat_id,
+                        body=response.text[:200],
+                    )
+                    response = await client.post(
+                        url,
+                        json={"chat_id": chat_id, "text": strip_html(text)},
+                        timeout=10.0,
+                    )
                 response.raise_for_status()
         except Exception as exc:
             log.warning("telegram_send_reply_error", chat_id=chat_id, error=str(exc))
@@ -304,6 +343,18 @@ class TelegramCommandHandler:
     # ------------------------------------------------------------------
 
     async def _help_handler(self, chat_id: int, args: list[str]) -> str:
-        commands = sorted(self._handlers.keys())
-        lines = ["Available commands:"] + [f"  /{cmd}" for cmd in commands]
-        return "\n".join(lines)
+        by_category: dict[str, list[str]] = {}
+        for cmd in sorted(self._handlers.keys()):
+            description, category = self._command_meta.get(cmd, ("", "Other"))
+            escaped = _html.escape(description, quote=False)
+            entry = f"/{cmd} — {escaped}" if description else f"/{cmd}"
+            by_category.setdefault(category, []).append(entry)
+
+        # Stable, reader-friendly category order; unknown categories last.
+        order = ["System", "Positions", "Performance", "Diagnostics", "Other"]
+        lines: list[str] = []
+        for category in sorted(by_category, key=lambda c: (order.index(c) if c in order else 99, c)):
+            lines.append(f"<b>{category}</b>")
+            lines.extend(by_category[category])
+            lines.append("")
+        return "\n".join(lines).rstrip()

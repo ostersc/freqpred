@@ -21,7 +21,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.alerts.command_handlers import _clip
+from freqpred.alerts.command_handlers import _clip, _esc, _fmt_usd
 from freqpred.alerts.run_state import get_drawdown_window
 from freqpred.metrics.calibration import compute_calibration, compute_source_brier_scores
 from freqpred.trading.ledger import get_portfolio_summary
@@ -32,11 +32,12 @@ if TYPE_CHECKING:
     from freqpred.alerts.telegram_commands import TelegramCommandHandler
     from freqpred.config import Settings
     from freqpred.llm.client import LLMClient
+    from freqpred.runtime.telemetry import RuntimeTelemetry
 
 log = structlog.get_logger(__name__)
 
 _TELEGRAM_MAX_LEN = 4096
-_TABLE_LIMIT = _TELEGRAM_MAX_LEN - 150  # headroom for backtick fences and headers
+_TABLE_LIMIT = _TELEGRAM_MAX_LEN - 150  # headroom for <pre> wrapper and headers
 
 
 # ---------------------------------------------------------------------------
@@ -45,22 +46,26 @@ _TABLE_LIMIT = _TELEGRAM_MAX_LEN - 150  # headroom for backtick fences and heade
 
 
 def _table_rows_clip(header: str, divider: str, rows: list[str]) -> str:
-    """Format a monospace table, appending '... and N more' if too long."""
-    lines: list[str] = ["```", header, divider]
-    char_count = len(header) + len(divider) + 4  # 4 for "```\n" twice
+    """Format a monospace <pre> table, appending '... and N more' if too long.
+
+    Rendered with parse_mode=HTML — <pre> keeps column alignment in Telegram.
+    Header and rows are HTML-escaped here; callers pass raw text.
+    """
+    lines: list[str] = ["<pre>", _esc(header), _esc(divider)]
+    char_count = len(header) + len(divider) + 13  # wrapper tags + newlines
     included = 0
 
     for row in rows:
         tentative = char_count + len(row) + 1
         remaining = len(rows) - included
-        if tentative + len(f"... and {remaining} more") + 4 > _TABLE_LIMIT:
+        if tentative + len(f"... and {remaining} more") + 6 > _TABLE_LIMIT:
             lines.append(f"... and {remaining} more")
             break
-        lines.append(row)
+        lines.append(_esc(row))
         char_count = tentative
         included += 1
 
-    lines.append("```")
+    lines.append("</pre>")
     return "\n".join(lines)
 
 
@@ -74,18 +79,6 @@ def _parse_int_arg(args: list[str], default: int, cmd: str) -> int | str:
         return f"Usage: /{cmd} [n] — n must be a number, got {args[0]!r}"
 
 
-def _hold_duration(entry: datetime, exit_: datetime) -> str:
-    """Format two datetimes as '4h 22m'."""
-    if entry.tzinfo is None:
-        entry = entry.replace(tzinfo=UTC)
-    if exit_.tzinfo is None:
-        exit_ = exit_.replace(tzinfo=UTC)
-    delta = exit_ - entry
-    total_secs = max(0, int(delta.total_seconds()))
-    hours, rem = divmod(total_secs, 3600)
-    return f"{hours}h {rem // 60}m"
-
-
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -97,6 +90,7 @@ def register_metrics_commands(
     config: Settings,
     mode: str,
     llm_client: LLMClient | None = None,
+    telemetry: RuntimeTelemetry | None = None,
 ) -> None:
     """Register all T29 metrics commands onto *cmd_handler*."""
 
@@ -185,13 +179,13 @@ def register_metrics_commands(
 
         period_label = f"last {n_days} day(s)" if n_days else "all time"
         lines = [
-            f"P&L summary ({period_label}):",
-            f"  Trades       : {trade_count}  (wins: {win_count}, win rate: {win_rate:.1%})",
-            f"  Total P&L    : {total_pnl:+.4f} ({pnl_pct:+.2%})",
-            f"  Best trade   : {best:+.4f}" if best is not None else "  Best trade   : N/A",
-            f"  Worst trade  : {worst:+.4f}" if worst is not None else "  Worst trade  : N/A",
-            f"  Avg hold time: {avg_hold}",
-            f"  Brier score  : {brier_str}",
+            f"<b>P&amp;L summary</b> ({period_label})",
+            f"Trades: {trade_count} ({win_count} wins, {win_rate:.0%} win rate)",
+            f"Total P&L: {_fmt_usd(total_pnl)} ({pnl_pct:+.1%} on ${total_invested:,.2f} invested)",
+            f"Best trade: {_fmt_usd(best)}" if best is not None else "Best trade: N/A",
+            f"Worst trade: {_fmt_usd(worst)}" if worst is not None else "Worst trade: N/A",
+            f"Avg hold time: {avg_hold}",
+            f"Brier score: {brier_str}",
         ]
         return _clip("\n".join(lines))
 
@@ -244,7 +238,7 @@ def register_metrics_commands(
             )
             pct = pnl / invested if invested > 0 else 0.0
             table_rows.append(
-                f"{day:<12} {len(day_rows):>6} {pnl:>+9.4f} {pct:>+7.2%}"
+                f"{day:<12} {len(day_rows):>6} {pnl:>+9.2f} {pct:>+7.1%}"
             )
         return _table_rows_clip(header, divider, table_rows)
 
@@ -297,7 +291,7 @@ def register_metrics_commands(
             )
             pct = pnl / invested if invested > 0 else 0.0
             table_rows.append(
-                f"{week:<12} {len(week_rows):>6} {pnl:>+9.4f} {pct:>+7.2%}"
+                f"{week:<12} {len(week_rows):>6} {pnl:>+9.2f} {pct:>+7.1%}"
             )
         return _table_rows_clip(header, divider, table_rows)
 
@@ -348,7 +342,7 @@ def register_metrics_commands(
             )
             pct = pnl / invested if invested > 0 else 0.0
             table_rows.append(
-                f"{month:<8} {len(month_rows):>6} {pnl:>+9.4f} {pct:>+7.2%}"
+                f"{month:<8} {len(month_rows):>6} {pnl:>+9.2f} {pct:>+7.1%}"
             )
         return _table_rows_clip(header, divider, table_rows)
 
@@ -410,21 +404,22 @@ def register_metrics_commands(
             )
 
         lines = [
-            "All-time stats:",
-            f"  Total trades : {len(rows)}  (wins: {win_count}, win rate: {win_rate:.1%})",
-            f"  Total P&L    : {total_pnl:+.4f} ({pnl_pct:+.2%})",
-            f"  Best trade   : {best:+.4f}" if best is not None else "  Best trade   : N/A",
-            f"  Worst trade  : {worst:+.4f}" if worst is not None else "  Worst trade  : N/A",
-            f"  Avg hold time: {avg_hold}",
+            "<b>All-time stats</b>",
+            f"Total trades: {len(rows)} ({win_count} wins, {win_rate:.0%} win rate)",
+            f"Total P&L: {_fmt_usd(total_pnl)} ({pnl_pct:+.1%} on ${total_invested:,.2f} invested)",
+            f"Best trade: {_fmt_usd(best)}" if best is not None else "Best trade: N/A",
+            f"Worst trade: {_fmt_usd(worst)}" if worst is not None else "Worst trade: N/A",
+            f"Avg hold time: {avg_hold}",
             "",
-            "By exit reason:",
+            "<b>By exit reason</b>",
         ]
-        for reason, (count, wins, reason_pnl) in sorted(reason_counts.items()):
-            lines.append(
-                f"  {reason:<20} {count:>3} trades  "
-                f"wins={wins}  P&L={reason_pnl:+.4f}"
-            )
-        return _clip("\n".join(lines))
+        reason_header = f"{'Reason':<22} {'N':>3} {'Wins':>4} {'P&L $':>9}"
+        reason_rows = [
+            f"{reason[:22]:<22} {count:>3} {wins:>4} {reason_pnl:>+9.2f}"
+            for reason, (count, wins, reason_pnl) in sorted(reason_counts.items())
+        ]
+        table_block = _table_rows_clip(reason_header, "-" * len(reason_header), reason_rows)
+        return _clip("\n".join(lines) + "\n" + table_block)
 
     # ------------------------------------------------------------------ #
     # /balance  — portfolio snapshot                                       #
@@ -452,10 +447,9 @@ def register_metrics_commands(
 
         def _excursion_line(label: str, usd: float | None, pct: float | None) -> str:
             if usd is None:
-                return f"  {label}: —"
-            return f"  {label}: ${usd:+.2f}  ({pct:+.4f} wtd avg)"
+                return f"{label}: —"
+            return f"{label}: {_fmt_usd(usd)} ({pct:+.4f} wtd avg)"
 
-        mode_label = f"({mode} mode)"
         if drawdown_reset_bankroll is not None and drawdown_reset_bankroll > 0:
             drawdown = max(0.0, (drawdown_reset_bankroll - net_value) / drawdown_reset_bankroll)
             reset_ts = (
@@ -464,23 +458,23 @@ def register_metrics_commands(
                 else "unknown"
             )
             drawdown_line = (
-                f"  Drawdown      : {drawdown:.1%} from ${drawdown_reset_bankroll:,.2f}"
-                f"  (reset {reset_ts})"
+                f"Drawdown: {drawdown:.1%} from ${drawdown_reset_bankroll:,.2f}"
+                f" (reset {reset_ts})"
             )
         else:
-            drawdown_line = "  Drawdown      : no baseline set (use /reset_drawdown)"
+            drawdown_line = "Drawdown: no baseline set (use /reset_drawdown)"
         lines = [
-            f"Balance snapshot {mode_label}:",
-            f"  Bankroll      : ${bankroll:,.2f}",
-            f"  All-time P&L  : ${all_time_pnl:+.2f}",
-            f"  Net value     : ${net_value:,.2f}",
-            f"  Gross exposure: ${exposure:.2f}  ({exposure_pct:.2%} of bankroll)",
-            f"  Net exposure  : ${net_exposure:+.2f}",
-            f"  Unrealized P&L: ${unrealized_pnl:+.2f}",
-            f"  Today's P&L   : ${daily_pnl:+.2f}",
-            f"  Open positions: {open_count}",
-            _excursion_line("Portfolio MAE ", portfolio_mae_usd, portfolio_mae_pct),
-            _excursion_line("Portfolio MFE ", portfolio_mfe_usd, portfolio_mfe_pct),
+            f"<b>Balance snapshot</b> ({mode} mode)",
+            f"Bankroll: ${bankroll:,.2f}",
+            f"All-time P&L: {_fmt_usd(all_time_pnl)}",
+            f"Net value: ${net_value:,.2f}",
+            f"Gross exposure: ${exposure:,.2f} ({exposure_pct:.1%} of bankroll)",
+            f"Net exposure: {_fmt_usd(net_exposure)}",
+            f"Unrealized P&L: {_fmt_usd(unrealized_pnl)}",
+            f"Today's P&L: {_fmt_usd(daily_pnl)}",
+            f"Open positions: {open_count}",
+            _excursion_line("Portfolio MAE", portfolio_mae_usd, portfolio_mae_pct),
+            _excursion_line("Portfolio MFE", portfolio_mfe_usd, portfolio_mfe_pct),
             drawdown_line,
         ]
         return "\n".join(lines)
@@ -540,20 +534,22 @@ def register_metrics_commands(
         resets_in_m = (int(resets_in.total_seconds()) % 3600) // 60
 
         lines = [
-            "LLM budget:",
-            f"  Today    : ${today_total:.4f} / ${cap:.2f} cap  ({cap_pct:.1%})  "
-            f"[resets in {resets_in_h}h {resets_in_m}m]",
+            "<b>LLM budget</b>",
+            f"Today: ${today_total:.2f} / ${cap:.2f} cap ({cap_pct:.0%})"
+            f" · resets in {resets_in_h}h {resets_in_m}m",
         ]
 
         if today_by_type:
-            lines.append("  Breakdown by type:")
-            for qt, cost in sorted(today_by_type.items()):
-                lines.append(f"    {qt:<25} ${cost:.4f}")
+            type_header = f"{'Query type':<25} {'Today $':>8}"
+            type_rows = [
+                f"{qt[:25]:<25} {cost:>8.4f}" for qt, cost in sorted(today_by_type.items())
+            ]
+            lines.append(_table_rows_clip(type_header, "-" * len(type_header), type_rows))
 
         lines += [
-            f"  This week: ${week_spend:.4f}",
-            f"  This month: ${month_spend:.4f}",
-            f"  All-time : ${alltime_spend:.4f}",
+            f"This week: ${week_spend:.2f}",
+            f"This month: ${month_spend:.2f}",
+            f"All-time: ${alltime_spend:.2f}",
         ]
         return _clip("\n".join(lines))
 
@@ -580,10 +576,9 @@ def register_metrics_commands(
 
         period = f"last {lookback_days}d" if lookback_days is not None else "all-time"
         header_lines = [
-            f"Brier score : {report.brier_score:.3f}  "
-            f"(market baseline: {report.market_brier_score:.3f})  [{period}]",
-            f"Improvement : {improvement:+.3f} ({direction})",
-            f"Samples     : {report.n_samples}",
+            f"<b>Calibration</b> ({period}, {report.n_samples} samples)",
+            f"Brier score: {report.brier_score:.3f} vs market baseline {report.market_brier_score:.3f}",
+            f"Improvement: {improvement:+.3f} ({direction} than market)",
         ]
 
         non_empty = [b for b in report.buckets if b.count > 0]
@@ -631,7 +626,7 @@ def register_metrics_commands(
             return f"No qualifying sources ({period}{min_docs_label}). Try /source_calibration {lookback_days or ''} 0"
 
         overall = calibration.brier_score
-        header_line = f"Source Brier ({period}{min_docs_label}) — overall: {overall:.4f}"
+        header_line = f"<b>Source Brier</b> ({period}{min_docs_label}) — overall: {overall:.4f}"
         tbl_header = f"{'Source':<22} {'Brier':>6} {'Delta':>7} {'Uses':>6}"
         divider = "-" * len(tbl_header)
         tbl_rows = [
@@ -654,25 +649,50 @@ def register_metrics_commands(
             return "Digest unavailable: LLM client not configured."
 
         async with session_factory() as session:
-            return await generate_daily_digest(
+            digest = await generate_daily_digest(
                 session,
                 llm_client,
                 trading_mode=mode,
                 bankroll=config.trading.bankroll_usd,
                 model=config.anthropic.cheap_model,
+                llm_daily_cap=config.risk.max_daily_llm_spend_usd,
+                max_open_positions=config.risk.max_open_positions,
+                telemetry=telemetry,
             )
+        # LLM output is free text — escape so it can't break HTML parsing.
+        return _clip(_esc(digest))
 
     # ------------------------------------------------------------------ #
     # Register all handlers
     # ------------------------------------------------------------------ #
 
-    cmd_handler.register("profit", handle_profit)
-    cmd_handler.register("daily", handle_daily)
-    cmd_handler.register("weekly", handle_weekly)
-    cmd_handler.register("monthly", handle_monthly)
-    cmd_handler.register("stats", handle_stats)
-    cmd_handler.register("balance", handle_balance)
-    cmd_handler.register("budget", handle_budget)
-    cmd_handler.register("calibration", handle_calibration)
-    cmd_handler.register("source_calibration", handle_source_calibration)
-    cmd_handler.register("digest", handle_digest)
+    cmd_handler.register(
+        "profit", handle_profit,
+        description="[days] — P&L summary (default all time)", category="Performance")
+    cmd_handler.register(
+        "daily", handle_daily,
+        description="[n] — per-day P&L table", category="Performance")
+    cmd_handler.register(
+        "weekly", handle_weekly,
+        description="[n] — per-week P&L table", category="Performance")
+    cmd_handler.register(
+        "monthly", handle_monthly,
+        description="[n] — per-month P&L table", category="Performance")
+    cmd_handler.register(
+        "stats", handle_stats,
+        description="All-time stats by exit reason", category="Performance")
+    cmd_handler.register(
+        "balance", handle_balance,
+        description="Bankroll, exposure, and P&L snapshot", category="Performance")
+    cmd_handler.register(
+        "budget", handle_budget,
+        description="LLM spend vs daily cap", category="Diagnostics")
+    cmd_handler.register(
+        "calibration", handle_calibration,
+        description="[days] — Brier score vs market", category="Performance")
+    cmd_handler.register(
+        "source_calibration", handle_source_calibration,
+        description="[days] [min_docs] — Brier score per source", category="Performance")
+    cmd_handler.register(
+        "digest", handle_digest,
+        description="LLM-written summary of the day", category="Performance")
