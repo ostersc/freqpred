@@ -334,6 +334,12 @@ Before declaring any task complete, verify every acceptance criterion listed in 
 - Wire `telemetry.mark_success()` and `telemetry.mark_error()` calls into the scheduler loop for that service — each scheduled task must report its own heartbeat independently, even if it runs inside another scheduler's loop.
 - The purpose of telemetry is to surface stale data sources. Two conceptually unrelated tasks must never share a heartbeat even if they share a scheduler loop.
 
+**For any change to `SYSTEM_PROMPT`, `build_prompt`, or `PROMPT_VERSION` (`freqpred/signal/llm.py`):**
+- Follow the full workflow in README → "Changing the signal prompt — the standard workflow". Non-negotiable steps: scope the edit to written-down findings, bump `PROMPT_VERSION`, regenerate the committed replay fixtures (`uv run freqpred fixtures replay --update`), and benchmark the new version against the recorded prompt bank (prompt mode, no `--candidate-model`) before treating the change as adopted.
+- Never regenerate `benchmarks/prompt_bank/` after a version bump — it is the frozen control baseline for the experiment; `record-bank` filters on the current version and would empty it.
+- Before any benchmark run, check today's LLM spend against the daily cap (it is shared with the live pipeline; exhausting it blocks live signal analysis until the UTC day rolls over) and confirm the run with the user — benchmark runs cost real API dollars.
+- One axis per experiment: a prompt change and a model change are separate benchmark decisions, never bundled.
+
 ---
 
 ## Diagrams

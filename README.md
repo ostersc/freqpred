@@ -288,6 +288,28 @@ uv run python scripts/benchmark_signals.py --candidate-model claude-haiku-4-5-20
 
 `--training-cutoff` is required: markets that closed inside the candidate's training window are excluded, since their outcomes may be memorized rather than forecast.
 
+### Changing the signal prompt — the standard workflow
+
+Every edit to `SYSTEM_PROMPT` or `build_prompt` follows this sequence. The goal: no prompt version reaches live trading without benchmark evidence against real resolved-market outcomes.
+
+1. **Scope the edit.** Change only what a specific, written-down finding justifies — no drive-by rewording. The benchmark measures the whole diff; unrelated edits make a negative result unattributable.
+2. **Bump `PROMPT_VERSION`** in `freqpred/signal/llm.py` (`signal-vN` → `signal-vN+1`). The replay harness guards (rendered-prompt snapshot, system-prompt hash, version pin test) fail on any unbumped edit — that's by design.
+3. **Regenerate the committed replay fixtures**: `uv run freqpred fixtures replay --update`, then run the full test suite.
+4. **Do NOT regenerate `benchmarks/prompt_bank/`.** `record-bank` only records signals whose stored prompt version is current, so a post-bump sweep produces an empty bank. The bank recorded under the *previous* version is the frozen baseline the benchmark compares against — treat it as the experiment's control artifact.
+5. **Check spend headroom first.** Benchmark calls share the daily LLM cap with the live pipeline; a run that exhausts the cap stops early **and blocks live signal analysis until the UTC day rolls over**. A full-bank run costs ~$3.50 typical (`--estimate-only` gives the exact projection). Today's spend:
+   ```bash
+   docker exec freqpred-db-1 psql -U freqpred -d freqpred -c \
+     "SELECT SUM(cost_usd) FROM llm_queries WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'utc');"
+   ```
+6. **Run the isolation cell** — incumbent model on the new prompt vs its stored old-prompt outputs (change one axis at a time):
+   ```bash
+   uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/prompt_bank \
+       --training-cutoff <incumbent cutoff> --limit 250 --json-out benchmarks/<vN>_isolation.json
+   ```
+7. **Apply the adopt/reject rule above** — the paired-Brier gate, then the degradation guard (would-trade, disagreements, stake-weighted P&L), then the regime split (a favorites-heavy bank can hide upset-side regressions; read both).
+8. **Adopt or revert.** Adopt: merge — the new version goes live on the next signal run, and its signals start accruing toward a future bank as their markets resolve. Reject: revert the bump (fixtures regenerate back); the old bank remains the control for the next attempt.
+9. **A model swap on top of a new prompt is a separate experiment** (model mode, new prompt as incumbent baseline) — never change both axes in one adoption decision.
+
 ### Utility scripts
 
 Other one-off analysis and maintenance scripts live in `scripts/` — see each script's module docstring for full usage.
