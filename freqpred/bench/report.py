@@ -8,7 +8,7 @@ from freqpred.bench.runner import BenchmarkRun
 from freqpred.bench.scoring import PairScore, aggregate, score_pair
 from freqpred.signal.llm import PROMPT_VERSION
 
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2  # v2: stake-weighted trade metrics (TradeDecision.stake/pnl)
 
 
 def score_run(
@@ -216,15 +216,31 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
     trades = summary["trade_decisions"]
     inc_ev = trades["incumbent_mean_ev_per_trade"]
     cand_ev = trades["candidate_mean_ev_per_trade"]
+
+    def _stake(value: float | None) -> str:
+        return f"{value:+.4f}" if value is not None else "n/a"
+
+    common = trades["common_trades"]
     lines += [
         "",
-        "  Degradation guard (trade decisions at frozen prices — not P&L):",
+        "  Degradation guard (trade decisions at frozen prices — not a portfolio sim):",
         f"    would-trade   : incumbent={trades['incumbent_would_trade']}  "
         f"candidate={trades['candidate_would_trade']}",
         "    mean EV/trade : incumbent="
         + (f"{inc_ev:+.4f}" if inc_ev is not None else "n/a")
         + "  candidate="
         + (f"{cand_ev:+.4f}" if cand_ev is not None else "n/a"),
+        "    Kelly-sized (production sizing from each side's own posterior+confidence;",
+        "    stakes are fractions of the per-market budget):",
+        f"      total stake        : incumbent={trades['incumbent_total_stake']:.4f}  "
+        f"candidate={trades['candidate_total_stake']:.4f}",
+        f"      settled P&L        : incumbent={_stake(trades['incumbent_stake_weighted_pnl'])}  "
+        f"candidate={_stake(trades['candidate_stake_weighted_pnl'])}",
+        f"      P&L per $1 staked  : incumbent={_stake(trades['incumbent_pnl_per_dollar_staked'])}  "
+        f"candidate={_stake(trades['candidate_pnl_per_dollar_staked'])}",
+        f"      common trades      : n={common['n']}  mean stake "
+        f"incumbent={_stake(common['incumbent_mean_stake'])}  "
+        f"candidate={_stake(common['candidate_mean_stake'])}",
     ]
     if trades["disagreements"]:
         lines.append("    disagreements (exactly one side trades):")

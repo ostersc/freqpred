@@ -148,6 +148,135 @@ def test_per_trade_ev_yes_and_no() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stake-weighted trade metrics — confidence scales position size in
+# production, so overconfidence-when-wrong must cost proportionally more here.
+# ---------------------------------------------------------------------------
+
+
+def test_kelly_stake_matches_production_sizing_formula() -> None:
+    """Wiring test: kelly_stake_fraction must equal the production
+    IPredictionStrategy._ideal_total_exposure (unit constants) for both sides,
+    fed the exact signal fields production stores (edge from
+    compute_signal_edge)."""
+    from types import SimpleNamespace
+
+    from freqpred.bench.scoring import kelly_stake_fraction
+    from freqpred.signal.pipeline import compute_signal_edge
+    from freqpred.strategy.base import IPredictionStrategy
+    from freqpred.strategy.config import StrategyConfig
+
+    class _UnitStrategy(IPredictionStrategy):
+        config = StrategyConfig(
+            name="unit",
+            min_confidence=0.0,
+            max_exposure_per_market=1.0,  # unit constants: exposure == f_star
+            kelly_fraction=1.0,
+            categories=[],
+            min_volume_24h=0.0,
+            max_days_to_close=365.0,
+            min_days_to_close=0.0,
+        )
+
+    strategy = _UnitStrategy()
+    yes_bid, yes_ask = 0.48, 0.50
+    for direction, posterior, confidence in [
+        ("YES", 0.70, 0.80),
+        ("YES", 0.65, 0.62),
+        ("NO", 0.30, 0.80),
+        ("NO", 0.35, 0.95),
+    ]:
+        edge, _ = compute_signal_edge(direction, posterior, yes_bid, yes_ask)
+        signal = SimpleNamespace(
+            direction=direction,
+            estimated_probability=posterior,
+            edge=edge,
+            confidence=confidence,
+        )
+        assert kelly_stake_fraction(
+            direction, posterior, confidence, yes_bid, yes_ask
+        ) == pytest.approx(strategy._ideal_total_exposure(signal, bankroll=1.0)), (
+            f"drift from production sizing for {direction} "
+            f"posterior={posterior} confidence={confidence}"
+        )
+
+
+def test_higher_confidence_stakes_more_both_directions() -> None:
+    scenario = _scenario()
+    for direction, posterior in [("YES", 0.70), ("NO", 0.30)]:
+        low = trade_decision(
+            _output(direction, posterior, confidence=0.65),
+            scenario, min_edge=0.10, min_confidence=0.60,
+        )
+        high = trade_decision(
+            _output(direction, posterior, confidence=0.95),
+            scenario, min_edge=0.10, min_confidence=0.60,
+        )
+        assert low.would_trade and high.would_trade
+        assert high.stake > low.stake > 0.0
+
+
+def test_stake_weighted_pnl_yes_and_no() -> None:
+    # pnl = (stake / side_ask) * ev — the stake buys stake/side_ask contracts.
+    won_yes = trade_decision(
+        _output("YES", 0.70), _scenario(outcome=1.0), min_edge=0.10, min_confidence=0.60
+    )
+    assert won_yes.pnl == pytest.approx(won_yes.stake / 0.50 * 0.50)
+    lost_yes = trade_decision(
+        _output("YES", 0.70), _scenario(outcome=0.0), min_edge=0.10, min_confidence=0.60
+    )
+    assert lost_yes.pnl == pytest.approx(-lost_yes.stake)  # YES loss = full stake
+    won_no = trade_decision(
+        _output("NO", 0.30), _scenario(outcome=0.0), min_edge=0.10, min_confidence=0.60
+    )
+    assert won_no.pnl == pytest.approx(won_no.stake / 0.52 * 0.48)
+    lost_no = trade_decision(
+        _output("NO", 0.30), _scenario(outcome=1.0), min_edge=0.10, min_confidence=0.60
+    )
+    assert lost_no.pnl == pytest.approx(-lost_no.stake)  # NO loss = full stake
+    # No trade → no stake, no pnl.
+    skip = trade_decision(
+        _output("SKIP", 0.50), _scenario(), min_edge=0.10, min_confidence=0.60
+    )
+    assert skip.stake is None and skip.pnl is None
+
+
+def test_aggregate_stake_totals_and_common_trades() -> None:
+    # Both trade YES on s1 (candidate more confident → larger stake); only the
+    # incumbent trades s2 (candidate skips).
+    both = score_pair(
+        _scenario(outcome=1.0, incumbent=_output("YES", 0.70, confidence=0.65), scenario_id="s1"),
+        _output("YES", 0.70, confidence=0.95, model="candidate"),
+        min_edge=0.10, min_confidence=0.60,
+    )
+    only_inc = score_pair(
+        _scenario(outcome=0.0, incumbent=_output("YES", 0.70), scenario_id="s2"),
+        _output("SKIP", 0.50, model="candidate"),
+        min_edge=0.10, min_confidence=0.60,
+    )
+    trades = aggregate([both, only_inc])["trade_decisions"]
+
+    assert trades["incumbent_total_stake"] == pytest.approx(
+        both.incumbent_trade.stake + only_inc.incumbent_trade.stake
+    )
+    assert trades["candidate_total_stake"] == pytest.approx(both.candidate_trade.stake)
+    # Incumbent won s1 and lost s2; candidate only won s1.
+    assert trades["incumbent_stake_weighted_pnl"] == pytest.approx(
+        both.incumbent_trade.pnl + only_inc.incumbent_trade.pnl
+    )
+    assert trades["candidate_stake_weighted_pnl"] == pytest.approx(both.candidate_trade.pnl)
+    assert trades["candidate_pnl_per_dollar_staked"] == pytest.approx(
+        both.candidate_trade.pnl / both.candidate_trade.stake
+    )
+    common = trades["common_trades"]
+    assert common["n"] == 1
+    assert common["candidate_mean_stake"] > common["incumbent_mean_stake"]
+    # Disagreement rows carry the trading side's stake.
+    assert trades["disagreements"][0]["trade_stake"] == pytest.approx(
+        only_inc.incumbent_trade.stake
+    )
+
+
+# ---------------------------------------------------------------------------
 # Paired statistics
 # ---------------------------------------------------------------------------
 

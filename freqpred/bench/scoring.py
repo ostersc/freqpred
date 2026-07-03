@@ -6,9 +6,15 @@ model's posterior against the actual market outcome. Paired statistics
 gate: a raw mean improvement on a small noisy sample is not evidence.
 
 Trade-decision metrics capture what Brier misses — a better-calibrated but
-systematically less confident model trades less. They are decision-quality
-signals at frozen side-specific prices, deliberately **not** a P&L
-simulation: no sizing, no bankroll, no exits, no portfolio path.
+systematically less confident model trades less, and confidence also scales
+position size (the Kelly blend in ``IPredictionStrategy.position_size``), so
+an overconfident model has more dollars on the line when it is wrong. Each
+would-trade therefore carries a ``stake`` computed with the production
+confidence-blended Kelly formula from that model's own posterior and
+confidence, and a stake-weighted settlement P&L. These are decision-quality
+signals at frozen side-specific prices, deliberately **not** a portfolio
+simulation: no risk caps, no exits, no bankroll path — stakes are per-trade
+fractions of the per-market budget, independent across scenarios.
 """
 from __future__ import annotations
 
@@ -68,12 +74,42 @@ def direction_correct(direction: str, outcome: float) -> bool | None:
     return None
 
 
+def kelly_stake_fraction(
+    direction: str,
+    posterior: float,
+    confidence: float,
+    yes_bid: float,
+    yes_ask: float,
+) -> float:
+    """Production confidence-blended Kelly fraction for one signal.
+
+    Mirrors ``IPredictionStrategy._ideal_total_exposure`` exactly (a wiring
+    test asserts equality against the strategy method): the p_market that
+    production recovers from the stored signal fields reduces to the
+    side-specific ask that ``compute_signal_edge`` prices the entry at.
+    Returned as a fraction of the per-market budget — ``kelly_fraction`` and
+    ``max_exposure_per_market`` are identical constants on both sides of a
+    comparison, so they cancel and are omitted.
+    """
+    _, side_ask = compute_signal_edge(direction, posterior, yes_bid, yes_ask)
+    if side_ask is None or not 0.0 < side_ask < 1.0:
+        return 0.0
+    p_market = side_ask
+    p_est = posterior if direction == "YES" else 1.0 - posterior
+    b = (1.0 - p_market) / p_market
+    p_adj = confidence * p_est + (1.0 - confidence) * p_market
+    f_star = (b * p_adj - (1.0 - p_adj)) / b
+    return max(f_star, 0.0)
+
+
 @dataclass
 class TradeDecision:
     would_trade: bool
     edge: float
     side_ask: float | None  # entry cost for the chosen side; None for SKIP
     ev: float | None        # settlement value minus entry cost, when trading
+    stake: float | None     # production Kelly fraction of the per-market budget
+    pnl: float | None       # stake-weighted settlement P&L: (stake / side_ask) * ev
 
 
 def trade_decision(
@@ -91,7 +127,10 @@ def trade_decision(
     side-specific ask arithmetic as production (`compute_signal_edge`).
 
     EV per contract at settlement: YES pays ``outcome - yes_ask``; NO pays
-    ``(1 - outcome) - no_ask``.
+    ``(1 - outcome) - no_ask``. ``stake`` sizes the trade with the production
+    Kelly blend from this output's own posterior and confidence, and ``pnl``
+    is the settlement P&L of that stake (stake dollars buy stake/side_ask
+    contracts) — overconfidence when wrong loses proportionally more.
     """
     edge, side_ask = compute_signal_edge(
         output.direction, output.posterior, scenario.yes_bid, scenario.yes_ask
@@ -102,13 +141,22 @@ def trade_decision(
         and output.confidence >= min_confidence
     )
     ev: float | None = None
+    stake: float | None = None
+    pnl: float | None = None
     if would:
         if output.direction == "YES":
             ev = scenario.outcome - scenario.yes_ask
         else:
             no_ask = round(1.0 - scenario.yes_bid, 4)
             ev = (1.0 - scenario.outcome) - no_ask
-    return TradeDecision(would_trade=would, edge=edge, side_ask=side_ask, ev=ev)
+        stake = kelly_stake_fraction(
+            output.direction, output.posterior, output.confidence,
+            scenario.yes_bid, scenario.yes_ask,
+        )
+        pnl = (stake / side_ask) * ev if side_ask else 0.0
+    return TradeDecision(
+        would_trade=would, edge=edge, side_ask=side_ask, ev=ev, stake=stake, pnl=pnl
+    )
 
 
 def bootstrap_mean_ci(
@@ -221,6 +269,10 @@ def aggregate(scores: list[PairScore]) -> dict:
 
     inc_trades = [s for s in scores if s.incumbent_trade.would_trade]
     cand_trades = [s for s in scores if s.candidate_trade.would_trade]
+    common_trades = [
+        s for s in scores
+        if s.incumbent_trade.would_trade and s.candidate_trade.would_trade
+    ]
     disagreements = [
         {
             "scenario_id": s.scenario_id,
@@ -235,10 +287,23 @@ def aggregate(scores: list[PairScore]) -> dict:
                 if s.incumbent_trade.would_trade
                 else s.candidate_trade.ev
             ),
+            "trade_stake": (
+                s.incumbent_trade.stake
+                if s.incumbent_trade.would_trade
+                else s.candidate_trade.stake
+            ),
         }
         for s in scores
         if s.incumbent_trade.would_trade != s.candidate_trade.would_trade
     ]
+
+    # Stake-weighted view: confidence scales position size in production, so
+    # even when both models trade the same market, the more confident one has
+    # more dollars on the line — its being wrong must cost more here too.
+    inc_total_stake = sum(s.incumbent_trade.stake or 0.0 for s in inc_trades)
+    cand_total_stake = sum(s.candidate_trade.stake or 0.0 for s in cand_trades)
+    inc_total_pnl = sum(s.incumbent_trade.pnl or 0.0 for s in inc_trades)
+    cand_total_pnl = sum(s.candidate_trade.pnl or 0.0 for s in cand_trades)
 
     # Regime breakdown: a hedging candidate loses on favorites and wins on
     # upsets — the split shows whether an aggregate result is a structural
@@ -286,6 +351,27 @@ def aggregate(scores: list[PairScore]) -> dict:
             "candidate_mean_ev_per_trade": (
                 mean(s.candidate_trade.ev for s in cand_trades) if cand_trades else None
             ),
+            "incumbent_total_stake": inc_total_stake,
+            "candidate_total_stake": cand_total_stake,
+            "incumbent_stake_weighted_pnl": inc_total_pnl,
+            "candidate_stake_weighted_pnl": cand_total_pnl,
+            "incumbent_pnl_per_dollar_staked": (
+                inc_total_pnl / inc_total_stake if inc_total_stake > 0 else None
+            ),
+            "candidate_pnl_per_dollar_staked": (
+                cand_total_pnl / cand_total_stake if cand_total_stake > 0 else None
+            ),
+            "common_trades": {
+                "n": len(common_trades),
+                "incumbent_mean_stake": (
+                    mean(s.incumbent_trade.stake for s in common_trades)
+                    if common_trades else None
+                ),
+                "candidate_mean_stake": (
+                    mean(s.candidate_trade.stake for s in common_trades)
+                    if common_trades else None
+                ),
+            },
             "disagreements": disagreements,
         },
     }
