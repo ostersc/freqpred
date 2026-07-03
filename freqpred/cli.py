@@ -1988,3 +1988,168 @@ def db_migrate() -> None:
     click.echo("Running: alembic upgrade head")
     result = subprocess.run(["uv", "run", "alembic", "upgrade", "head"])  # noqa: S603
     raise SystemExit(result.returncode)
+
+
+@main.group()
+def fixtures() -> None:
+    """Replay-harness fixtures: record from real signals, replay for regressions."""
+
+
+@fixtures.command(name="record")
+@click.option("--signal-id", required=True, help="UUID of the LLM-backed signal to record.")
+@click.option(
+    "--out", type=click.Path(path_type=Path), default=None,
+    help="Output path [default: tests/fixtures/replay/<name>.json].",
+)
+@click.option(
+    "--strategy", "strategy_name", default="ConservativeDefault", show_default=True,
+    help="Strategy used for the fixture's entry-decision expectations.",
+)
+@click.option(
+    "--bankroll", type=float, default=1000.0, show_default=True,
+    help="Frozen bankroll for the fixture's sizing/risk expectations.",
+)
+@click.option("--name", default=None, help="Fixture name [default: <market_id>_<direction>].")
+@click.option("--description", default="", help="Free-text note stored in the fixture.")
+@click.pass_context
+def fixtures_record(
+    ctx: click.Context,
+    signal_id: str,
+    out: Path | None,
+    strategy_name: str,
+    bankroll: float,
+    name: str | None,
+    description: str,
+) -> None:
+    """Record a replay fixture from a real signal in the DB."""
+    config = ctx.obj["config"]
+    asyncio.run(
+        _fixtures_record(
+            config, signal_id, out,
+            strategy_name=strategy_name, bankroll=bankroll,
+            name=name, description=description,
+        )
+    )
+
+
+async def _fixtures_record(
+    config: object,
+    signal_id: str,
+    out: Path | None,
+    *,
+    strategy_name: str,
+    bankroll: float,
+    name: str | None,
+    description: str,
+) -> None:
+    import uuid as _uuid
+
+    import freqpred.ingestion.models  # noqa: F401, PLC0415
+    import freqpred.llm.models  # noqa: F401, PLC0415
+    import freqpred.rag.models  # noqa: F401, PLC0415
+    import freqpred.signal.models  # noqa: F401, PLC0415
+    from freqpred.db import make_engine, make_session_factory  # noqa: PLC0415
+    from freqpred.replay import DEFAULT_FIXTURE_DIR, RecordingError, record_fixture, save_fixture  # noqa: PLC0415
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    try:
+        signal_uuid = _uuid.UUID(signal_id)
+    except ValueError:
+        click.echo(f"ERROR: --signal-id {signal_id!r} is not a valid UUID.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+    try:
+        async with session_factory() as session:
+            try:
+                fixture, warnings = await record_fixture(
+                    session,
+                    signal_uuid,
+                    strategy_name=strategy_name,
+                    bankroll=bankroll,
+                    name=name,
+                    description=description,
+                )
+            except RecordingError as exc:
+                click.echo(f"ERROR: {exc}", err=True)
+                return
+
+        out_path = out if out is not None else DEFAULT_FIXTURE_DIR / f"{fixture.name}.json"
+        save_fixture(fixture, out_path)
+
+        click.echo(f"Recorded fixture {fixture.name!r} -> {out_path}")
+        exp = fixture.expectations
+        click.echo(
+            f"  direction={exp.parsed.direction}  edge={exp.edge:+.4f}  "
+            f"would_trade={exp.entry.would_trade}"
+            + (f"  ({exp.entry.decline_reason})" if exp.entry.decline_reason else "")
+        )
+        for warning in warnings:
+            click.echo(f"  WARNING: {warning}")
+    finally:
+        await engine.dispose()
+
+
+@fixtures.command(name="replay")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--update", is_flag=True, default=False,
+    help="Regenerate each fixture's expectations from its inputs instead of comparing "
+         "(same as FREQPRED_UPDATE_FIXTURES=1 under pytest).",
+)
+def fixtures_replay(paths: tuple[Path, ...], update: bool) -> None:
+    """Replay fixture file(s) or directories and report regressions.
+
+    With no PATHS, replays everything under tests/fixtures/replay/.
+    Exits non-zero if any check fails.
+    """
+    from freqpred.replay import (  # noqa: PLC0415
+        DEFAULT_FIXTURE_DIR,
+        ReplayError,
+        compute_expectations,
+        load_fixture,
+        replay_fixture,
+        save_fixture,
+    )
+
+    files: list[Path] = []
+    for path in paths or (DEFAULT_FIXTURE_DIR,):
+        if path.is_dir():
+            files.extend(sorted(path.glob("*.json")))
+        else:
+            files.append(path)
+    if not files:
+        click.echo("No fixture files found.", err=True)
+        raise SystemExit(1)
+
+    any_failed = False
+    for file in files:
+        fixture = load_fixture(file)
+        if update:
+            try:
+                fixture.expectations = compute_expectations(
+                    fixture.inputs, fixture_name=fixture.name
+                )
+            except ReplayError as exc:
+                click.echo(f"UPDATE FAILED {fixture.name}: {exc}", err=True)
+                any_failed = True
+                continue
+            save_fixture(fixture, file)
+            click.echo(f"updated  {fixture.name}  ({file})")
+            continue
+
+        result = replay_fixture(fixture)
+        if result.passed:
+            click.echo(f"ok       {fixture.name}  ({len(result.checks)} checks)")
+        else:
+            any_failed = True
+            click.echo(f"FAILED   {fixture.name}")
+            for check in result.failures:
+                click.echo(f"  {check.name}: {check.detail}")
+
+    if any_failed:
+        raise SystemExit(1)

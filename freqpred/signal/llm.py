@@ -493,13 +493,18 @@ def build_prompt(
     docs: list[Document],
     series_history: dict | None = None,
     phrase_data: FactbasePhraseData | None = None,
+    _now: datetime | None = None,
 ) -> str:
     """Build the user prompt for signal analysis.
 
     Contains only per-market data: market context, optional historical base
     rate block, and retrieved evidence. All instructions live in SYSTEM_PROMPT.
+
+    ``_now`` pins the clock for deterministic rendering (the prompt embeds the
+    current date and window math) — used by the replay harness and time-
+    sensitive tests. Defaults to the real wall-clock.
     """
-    now = datetime.now(tz=UTC)
+    now = _now if _now is not None else datetime.now(tz=UTC)
     days_to_close = (market.close_time - now).total_seconds() / 86400
     days_elapsed = (
         (now - market.open_time).total_seconds() / 86400

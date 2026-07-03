@@ -109,6 +109,7 @@ async def _insert_doc(
     category: str = "politics",
     published_at: datetime = NOW,
     title: str = "Test Article",
+    embedding_768: list[float] | None = None,
 ) -> DocumentRow:
     row = DocumentRow(
         id=uuid.uuid4(),
@@ -123,6 +124,7 @@ async def _insert_doc(
         published_at=published_at,
         fetched_at=NOW,
         embedding=embedding,
+        embedding_768=embedding_768,
         embedding_model="all-MiniLM-L6-v2",
         summary=None,
     )
@@ -256,3 +258,44 @@ async def test_retrieval_unlinked_market_returns_empty(session):
                           top_k=10, now=NOW)
 
     assert docs == []
+
+
+@pytest.mark.asyncio
+async def test_retrieval_uses_configured_embedding_768_column(session):
+    """With a 768-dim embedder backend, retrieve() must score against
+    embedding_768 and exclude docs not yet reindexed for that backend.
+
+    Guards the dual-column setup (embedding = 384 sentence-transformers,
+    embedding_768 = Ollama): a regression that reads the wrong column would
+    silently return nothing (or mis-rank) in production while every 384-based
+    test stays green.
+    """
+    await _seed_market(session, "RETV-768-MKT")
+
+    # All docs share an identical 384 vector — if retrieve() wrongly scores
+    # against `embedding`, ranking collapses and the stale doc leaks in.
+    same_384 = _unit_vector(384, 5)
+    doc_match = await _insert_doc(
+        session, market_id="RETV-768-MKT", embedding=same_384,
+        embedding_768=_unit_vector(768, 0), title="match",
+    )
+    doc_other = await _insert_doc(
+        session, market_id="RETV-768-MKT", embedding=same_384,
+        embedding_768=_unit_vector(768, 3), title="other",
+    )
+    doc_stale = await _insert_doc(  # not yet reindexed for the 768 backend
+        session, market_id="RETV-768-MKT", embedding=same_384, title="stale",
+    )
+    await session.flush()
+
+    embedder = MagicMock(spec=LocalEmbedder)
+    embedder.embed_text = AsyncMock(return_value=_unit_vector(768, 0))
+    embedder.embedding_column = "embedding_768"
+
+    docs = await retrieve(session, embedder, "question", market_id="RETV-768-MKT",
+                          top_k=10, now=NOW)
+
+    returned_ids = [d.id for d, _ in docs]
+    assert str(doc_stale.id) not in returned_ids
+    assert set(returned_ids) == {str(doc_match.id), str(doc_other.id)}
+    assert returned_ids[0] == str(doc_match.id)  # ranked by 768 cosine similarity

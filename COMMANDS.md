@@ -200,6 +200,39 @@ In production, `freqpred run` also serves the built React SPA (from `freqpred/da
 
 ---
 
+### `fixtures record` — record a replay-harness fixture from a real signal
+
+```bash
+uv run freqpred fixtures record --signal-id <uuid>
+uv run freqpred fixtures record --signal-id <uuid> --strategy PoliticsEdgeStrategy \
+    --name my_fixture --description "why this scenario matters"
+```
+
+Snapshots one LLM-backed signal into a deterministic replay fixture under `tests/fixtures/replay/` — market state at signal time, retrieved documents with scores, catalyst queries, series-history/FactBase context, the frozen clock, and the verbatim LLM response — plus expectations for every pipeline stage (retrieval hash, rendered prompt, parsed output, edge, and the entry decision through the risk caps). Embedding vectors are deliberately not stored: fixtures freeze retrieval *outcomes*; retrieval-code correctness is covered by targeted tests in `tests/integration/test_retriever_integration.py`.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--signal-id` | (required) | UUID of an LLM-backed signal (`llm_query_id` set; not a price-moved clone) |
+| `--out` | `tests/fixtures/replay/<name>.json` | Output path |
+| `--strategy` | `ConservativeDefault` | Strategy used for the entry-decision expectations |
+| `--bankroll` | `1000.0` | Frozen bankroll for sizing/risk expectations |
+| `--name` | `<market_id>_<direction>` | Fixture name |
+| `--description` | (empty) | Free-text note stored in the fixture |
+
+---
+
+### `fixtures replay` — replay fixtures and report regressions
+
+```bash
+uv run freqpred fixtures replay                    # all of tests/fixtures/replay/
+uv run freqpred fixtures replay path/to/one.json   # specific file(s) or dirs
+uv run freqpred fixtures replay --update           # regenerate expectations after an intentional change
+```
+
+Replays each fixture offline — no network, no LLM calls, no DB — and exits non-zero on any regression (changed retrieval hash, changed rendered prompt without a `PROMPT_VERSION` bump, changed parse/edge/trade decision). The same checks run in CI via `tests/unit/test_replay_harness.py`; `--update` is equivalent to `FREQPRED_UPDATE_FIXTURES=1 uv run pytest tests/unit/test_replay_harness.py`, and the regenerated fixture diff should be reviewed like any snapshot change.
+
+---
+
 ## Telegram bot commands
 
 When the bot token is configured and `telegram_authorized_users` is set, `freqpred run` starts an inbound polling loop. The bot accepts `/commands` from authorized users only — unrecognized senders are silently ignored.

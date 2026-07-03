@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "name": "kxtrumpsay_karo_declined_scheduled_cooldown",
+  "description": "Scheduled-trigger decline (volume below min) with prior scheduled signal exercising skip/cooldown decisions",
+  "recorded_from_signal_id": "910fa395-0b4f-49ca-9ca1-0de47b9f9b7d",
+  "recorded_at": "2026-07-03T03:26:07.234641Z",
+  "inputs": {
+    "now": "2026-07-03T01:32:00Z",
+    "trigger": "scheduled",
+    "market": {
+      "id": "KXTRUMPSAY-26JUL06-KARO",
+      "platform": "kalshi",
+      "question": "Will Trump say \"Karoline / Leavitt\" before Jul 6, 2026? — Karoline / Leavitt\nIf Karoline / Leavitt, or a plural or possessive form of Karoline / Leavitt, is stated by Donald Trump after June 29th, 2026 at 8:00am ET and before Jul 6, 2026 at 12:00am ET, then the market resolves to Yes.\nbold textThe word or phrase must be stated by President Donald Trump in public statements, direct quotes published by Source Agencies, or written public statements on his personal social media accounts (Twitter/Truth Social). Official acts like Executive Orders or bills signed do not count. Grammatical inflections for plurals and possessives are included (e.g., \"immigrant\" includes \"immigrants\" and \"immigrant's\"), but other tense inflections, hyphenated compounds, and synonyms are not included. For phrases with slashes like \"Doge/Dogecoin,\" either word satisfies the criterion. If the word must be said a minimum number of times, all instances must occur after market issuance.",
+      "category": "Mentions",
+      "close_time": "2026-07-06T14:00:00Z",
+      "open_time": "2026-06-29T12:00:00Z",
+      "yes_bid": 0.14,
+      "yes_ask": 0.16,
+      "mid_price": 0.15000000000000002,
+      "volume_24h": 754.13,
+      "open_interest": 4180.84,
+      "status": "active",
+      "series_ticker": "KXTRUMPSAY"
+    },
+    "documents": [
+      {
+        "id": "53618005-04d5-46a5-97f7-f048d0e1e714",
+        "source_url": "https://archive.org/details/CNNW_20260624_170000_CNN_News_Central/start/396/end/456?q=trump+AND+%28%22Karoline+Leavitt%22+OR+%22Karoline%22+OR+%22Leavitt%22%29",
+        "content_hash": "ff6ab8bae1abb911293cd48e200a096bfd741accb80db7952dfcc5ba1def0b4b",
+        "title": "CNN News Central : CNNW : June 24, 2026 10:00am-11:00am PDT",
+        "body": "karoline leavitt saying president trump promised to lower housing costs, and he is delivering, making it easier for every family to achieve the american dream of home ownership. she says promises made, prmade, promises kept. bu now, that promise not yet kept. as the president withholds his signature from this bill.",
+        "summary": null,
+        "source_type": "tv_transcript",
+        "source_name": "TVArchive",
+        "category": "Mentions",
+        "tags": [
+          "trump",
+          "epstein",
+          "iran",
+          "gates",
+          "europe",
+          "israel",
+          "white house",
+          "new york",
+          "boris",
+          "new york city",
+          "rubio",
+          "jeffries",
+          "nato",
+          "lebanon",
+          "canada",
+          "brazil",
+          "anderson cooper",
+          "andy cohen",
+          "brianna",
+          "france",
+          "scotland",
+          "andersen",
+          "turkey",
+          "ukraine",
+          "mou"
+        ],
+        "published_at": "2026-06-24T00:00:00Z",
+        "fetched_at": "2026-07-01T00:15:17.544627Z",
+        "similarity_score": 0.9379025301697954
+      },
+      {
+        "id": "37e19f7c-f326-4dac-a35a-911c25e7666a",
+        "source_url": "https://www.reddit.com/r/politics/comments/1uk2olf/president_trumps_2026_personal_financial/",
+        "content_hash": "9649afaa2575bd7dcd505f1656cf80107d8890aa6bec9e6d7e155b907900f954",
+        "title": "President Trump’s 2026 personal financial disclosure",
+        "body": "President Trump’s 2026 personal financial disclosure",
+        "summary": null,
+        "source_type": "reddit",
+        "source_name": "r/politics",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-30T21:47:00Z",
+        "fetched_at": "2026-07-01T00:15:08.808819Z",
+        "similarity_score": 0.7002395425462948
+      },
+      {
+        "id": "a078bdea-cb19-4062-b181-8ccfcc42e855",
+        "source_url": "https://archive.org/details/MSNOW_20260702_180000_The_Moment_With_Katy_Tur/start/300",
+        "content_hash": "6aeddee15ded4b014c28e9fe0f0ecc260deebb643ff3af9f8f8708f12df2d4dc",
+        "title": "MSNOW: The Moment With Katy Tur",
+        "body": "TRUMP: GOING TO GIVE \\\"REALLY LONG SPEECR\\\" ON JULY 41H | L (o. . LIVE > 14:O4 A MAAORMENT | I atxr My\\nTRUMP: GOING TO GIVE \\\"REALLY LONG SPEECR\\\" ON JULY 41H | ﬁ > i. . LIVE > 9:-O& ™ MAAORMMENT | I atxr My",
+        "summary": null,
+        "source_type": "tv_chyron",
+        "source_name": "TVThirdEye",
+        "category": "Mentions",
+        "tags": [
+          "MSNOW"
+        ],
+        "published_at": "2026-07-02T18:05:00Z",
+        "fetched_at": "2026-07-02T18:07:56.862015Z",
+        "similarity_score": 0.7
+      },
+      {
+        "id": "06c6959f-8a77-4142-8efb-f87b80756a30",
+        "source_url": "https://www.theguardian.com/us-news/2026/jun/27/trump-america-250-passports-democrats",
+        "content_hash": "cec79dd31e5a5e49a7e7ec21ca0e4683874b6828d5be9718c80b18e7dacfc07b",
+        "title": "White House unveils new images of US ‘patriot passports’ for America’s 250th",
+        "body": "Donald Trump ’s efforts to brand the US government with his name and image advanced on Friday when the White House unveiled new images of a passport watermarked with his portrait to mark America’s 250th anniversary. The White House called it simply the “patriot passport”, while on Truth Social the president introduced it as “The U.S.A.’s New Passport, which says, ‘Welcome, but be good!’” The state department says the limited-edition commemorative US passport was created “to commemorate the histo",
+        "summary": "The White House unveiled a limited-edition \"patriot passport\" commemorative for America's 250th anniversary, featuring Trump's portrait and set to be issued starting July 6, 2026, at the Washington Passport Agency while supplies last. Trump introduced it on Truth Social as \"The U.S.A.'s New Passport, which says, 'Welcome, but be good!'\" The passport features a three-quarter portrait of Trump at the Resolute desk with text from the Declaration of Independence, his signature, and a \"Freedom 250\" g",
+        "source_type": "news",
+        "source_name": "The Guardian",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-27T18:05:05Z",
+        "fetched_at": "2026-07-01T07:03:40.294787Z",
+        "similarity_score": 0.6877049729061674
+      },
+      {
+        "id": "c0713eca-7a71-4128-a088-6b987faa76b5",
+        "source_url": "https://archive.org/details/CNNW_20260702_000000_Anderson_Cooper_360/start/1620",
+        "content_hash": "dd943b84d9a7c06311dd5c9ee03d2e49c4260224636b8c72f01a2563c91410b2",
+        "title": "CNNW: Anderson Cooper 360",
+        "body": "TRUMP SAYS HE'L GIVE \\\"REALLY LONG SPEECH\\\" ON JULY 4 DESPITE HEAT WAVE",
+        "summary": null,
+        "source_type": "tv_chyron",
+        "source_name": "TVThirdEye",
+        "category": "Mentions",
+        "tags": [
+          "CNNW"
+        ],
+        "published_at": "2026-07-02T00:27:00Z",
+        "fetched_at": "2026-07-02T00:30:09.693295Z",
+        "similarity_score": 0.6851758511480026
+      },
+      {
+        "id": "285f9216-ddc7-4121-aa90-d4ef6e30a8e8",
+        "source_url": "https://archive.org/details/CNNW_20260702_000000_Anderson_Cooper_360/start/1560",
+        "content_hash": "7cb87e5841f658e447f11ac035495a29e9993ef47b562362239dcf539108c4d9",
+        "title": "CNNW: Anderson Cooper 360",
+        "body": "TRUMP VISITS NORTH DAKOTA FOR AMERICA 25O EVENTS\\nTRUMP SPEAKS AT TEDDY ROOSEVELT LIBRARY OPENING. . Scott Jennings | Former Special Asst. to Pres. George W. Bush\\nTRUMP SPEAKS AT TEDDY ROOSEVELT LIBRARY OPENING. . Scott Jennings | @W Senior Political Commentator\\nTRUMP SAYS HE'L GIVE \\\"REALLY LONG SPEECH\\\" ON JULY 4 DESPITE HEAT WAVE",
+        "summary": null,
+        "source_type": "tv_chyron",
+        "source_name": "TVThirdEye",
+        "category": "Mentions",
+        "tags": [
+          "CNNW"
+        ],
+        "published_at": "2026-07-02T00:26:00Z",
+        "fetched_at": "2026-07-02T00:30:09.693295Z",
+        "similarity_score": 0.7458588480949402
+      },
+      {
+        "id": "b147dc12-5e78-42b9-b78d-4937d1267969",
+        "source_url": "https://archive.org/details/FOXNEWSW_20260702_130000_Americas_Newsroom/start/540",
+        "content_hash": "06951e2765bb660f18880c71727cbaaaf83478f195ca68443eaf1f1049fe36ae",
+        "title": "FOXNEWSW: Americas Newsroom",
+        "body": "TRUMP VOWS TO GIVE JULY 4TH SPEECH DESPITE HEAT",
+        "summary": null,
+        "source_type": "tv_chyron",
+        "source_name": "TVThirdEye",
+        "category": "Mentions",
+        "tags": [
+          "FOXNEWSW"
+        ],
+        "published_at": "2026-07-02T13:09:00Z",
+        "fetched_at": "2026-07-02T13:11:48.633005Z",
+        "similarity_score": 0.7411644458770752
+      },
+      {
+        "id": "d01e70f0-351b-4a70-8a4c-cba66ecfbd92",
+        "source_url": "https://archive.org/details/FOXNEWSW_20260703_000000_Jesse_Watters_Primetime/start/780",
+        "content_hash": "907628cf63c83ac2869786ef81e85f6b123b2657fe4a673baa44c5f5a2da75cf",
+        "title": "FOXNEWSW: Jesse Watters Primetime",
+        "body": "THE COUNTRY'S CRAWLING WITH COMMUNISTS\\nDEMS OPEN THE GATE FOR COMMIES\\nTHE COMMIE CAUCUS IS GROWING\\n> KAROLINE LEAVITT | WHITE HOUSE PRESS SECRETARY",
+        "summary": null,
+        "source_type": "tv_chyron",
+        "source_name": "TVThirdEye",
+        "category": "Mentions",
+        "tags": [
+          "FOXNEWSW"
+        ],
+        "published_at": "2026-07-03T00:13:00Z",
+        "fetched_at": "2026-07-03T00:16:15.663684Z",
+        "similarity_score": 0.6810929179191589
+      },
+      {
+        "id": "75d71994-47b4-4086-89a1-21931bd3c55d",
+        "source_url": "https://archive.org/details/CNNW_20260702_060000_Anderson_Cooper_360/start/1500",
+        "content_hash": "56233bd9cc71bb59e92d144ca562f2edc915eb35b1f1d8f27f890211ee3131fc",
+        "title": "CNNW: Anderson Cooper 360",
+        "body": "TRUMP SAYS HE'LL GIVE \\\"REALLY LONG SPEECK\\\" ON JULY 4 DESPITE HEAT WAVE\\nTRUMP SPEAKS AT TEDDY ROOSEVELT LIBRARY OPENING\\nSOURCES: WHITE HOUSE WORRIED ABOUT SMALL CROWDS ON JULY 4. . Xochitl Hinojosa | @W Political Commentator\\nSOURCES: WHITE HOUSE WORRIED ABOUT SMALL CROWDS ON JULY 4. . Xochitl Hinojosa | Former DNC Communications Director\\nSOURCES: WHITE HOUSE WORRIED ABOUT SMALL CROWDS ON JULY 4. . Xochitl Hinojosa | Former Director of DOJ Public Affairs",
+        "summary": null,
+        "source_type": "tv_chyron",
+        "source_name": "TVThirdEye",
+        "category": "Mentions",
+        "tags": [
+          "CNNW"
+        ],
+        "published_at": "2026-07-02T06:25:00Z",
+        "fetched_at": "2026-07-02T06:26:41.757095Z",
+        "similarity_score": 0.6768234372138977
+      },
+      {
+        "id": "b75db1c8-11d3-4b37-8ab7-0d34e7e0403f",
+        "source_url": "https://www.reddit.com/r/politics/comments/1uj05y9/trump_seethes_over_supreme_court_losses_in_series/",
+        "content_hash": "53917e686fbc2d49d693d68e57903b22df2f8bbc5d78c50f76dd88dbe3a2dc73",
+        "title": "Trump Seethes Over Supreme Court Losses In Series Of Truth Social Posts",
+        "body": "Trump Seethes Over Supreme Court Losses In Series Of Truth Social Posts",
+        "summary": null,
+        "source_type": "reddit",
+        "source_name": "r/politics",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-29T18:09:57Z",
+        "fetched_at": "2026-06-29T19:45:21.790039Z",
+        "similarity_score": 0.6630505323410034
+      }
+    ],
+    "catalyst_queries": [
+      "Karoline Leavitt Trump relationship 2026",
+      "Trump press secretary Karoline Leavitt June July 2026",
+      "Trump Truth Social posts mentions Karoline Leavitt",
+      "Trump campaign appearances statements late June 2026",
+      "Karoline Leavitt Trump administration role 2026",
+      "Karoline Leavitt Trump relationship 2026",
+      "Karoline Leavitt White House role 2026",
+      "Trump press secretary Karoline Leavitt June July 2026",
+      "how often Trump mentions Karoline Leavitt speeches statements",
+      "Karoline Leavitt Trump feuds controversies 2026",
+      "Karoline Leavitt Trump relationship 2026",
+      "Karoline Leavitt White House role June 2026",
+      "Trump staffing changes July 2026 Leavitt",
+      "Trump Fourth of July 2026 events announcements",
+      "Karoline Leavitt press secretary communications 2026",
+      "Karoline Leavitt Trump relationship 2026",
+      "Karoline Leavitt White House role June 2026",
+      "Trump July 4 2026 speech Teddy Roosevelt Library topics",
+      "Karoline Leavitt press secretary communications director 2026",
+      "Trump personal staff mentions June 29 July 6 2026"
+    ],
+    "series_history": {
+      "series_ticker": "KXTRUMPSAY",
+      "option_code": "KARO",
+      "series_row": {
+        "option_label": "KXTRUMPSAY",
+        "yes_count": 164,
+        "no_count": 148
+      },
+      "option_row": {
+        "option_label": "Karoline / Leavitt",
+        "yes_count": 0,
+        "no_count": 9
+      }
+    },
+    "phrase_data": {
+      "display_phrase": "Karoline / Leavitt",
+      "api_query": "\"Karoline\" OR \"Karolines\" OR \"Karoline's\" OR \"Karolines'\" OR \"Leavitt\" OR \"Leavitts\" OR \"Leavitt's\" OR \"Leavitts'\"",
+      "speaker_slug": "trump",
+      "in_market_count": 0,
+      "count_7d": 0,
+      "count_30d": 0,
+      "count_365d": 27,
+      "top_quotes": [
+        {
+          "date": "2026-04-26",
+          "text": "-- your -- your associate, yeah. She's a terrific person. They were asking the name of Karoline's child, that he didn't know, I guess. But he was able to get it.",
+          "event_type": "Other"
+        },
+        {
+          "date": "2026-04-26",
+          "text": "Your, your associate, yeah. She was a terrific person. And she was, you know, she had this big smile. I mean, they were, you know what they were doing? They were asking the name of Karoline's child, t",
+          "event_type": "Interview"
+        },
+        {
+          "date": "2026-03-31",
+          "text": "We have to straighten out our media. The reason their circulation is way down -- the New York Times' circulation has gone way down. Washington Post is almost extinct. The papers that are being dishone",
+          "event_type": "Remarks"
+        },
+        {
+          "date": "2026-03-12",
+          "text": "Appreciate it. And your husband's doing a good job. [Laughter] The youngest and perhaps the best White House press secretary in history, Karoline. Where is Karoline? Doing a fantastic job, Karoline. S",
+          "event_type": "Remarks"
+        },
+        {
+          "date": "2026-03-12",
+          "text": "Life would be so much more exciting, wouldn't it? [Laughter] Thank you, Karoline. Great. Attorney General Pam Bondi, my friend. Good. Good. Got some big things in store. She's doing a great job. Thank",
+          "event_type": "Remarks"
+        }
+      ],
+      "fetched_at": "2026-07-02T12:18:17.249531Z"
+    },
+    "llm_response": "{\"prior\": 0.08, \"prior_basis\": \"The option-specific historical rate is 0/9 (0%, n=9), a high-confidence anchor well below the series rate of 53%. The PHRASE FREQUENCY DATA shows in_market_count=0 and a RECENT DROUGHT (0 mentions in last 30 days vs. a monthly average of ~2.2). The Poisson baseline using the 30d rate is 0.0%, and using the 365d rate is 22.9%. Per the drought flag, the 30d baseline should be weighted more heavily. Blending these and accounting for the strong 0/9 option history, a prior of ~0.08 is appropriate.\", \"updates_applied\": [{\"doc_id\": \"d01e70f0-351b-4a70-8a4c-cba66ecfbd92\", \"direction\": \"+\", \"magnitude\": \"small\", \"reason\": \"Fox News chyron references 'Karoline Leavitt | White House Press Secretary' in a July 3 broadcast, indicating she is active in the news cycle, slightly raising per-day salience \\u2014 but this is not a Trump statement and does not satisfy the resolution criterion.\"}, {\"doc_id\": \"a078bdea-cb19-4062-b181-8ccfcc42e855\", \"direction\": \"neutral\", \"magnitude\": \"small\", \"reason\": \"Trump is planning a 'really long speech' on July 4th, which slightly increases the chance he mentions Leavitt by name in a lengthy address, but he typically refers to her as 'Karoline' or not at all in major speeches.\"}], \"posterior\": 0.09, \"probability\": 0.09, \"confidence\": 0.72, \"direction\": \"NO\", \"reasoning\": \"The option-specific history of 0/9 is a strong anchor, consistent with Trump rarely naming Leavitt explicitly in qualifying statements. The 30-day phrase frequency is zero (RECENT DROUGHT), making the relevant Poisson baseline effectively 0%, while the 365d-based baseline is 22.9%. Weighting the 30d drought heavily per instructions, the blended prior sits around 0.08. Evidence shows Leavitt is active in the news cycle (Fox News chyron, CNN references) and Trump has a major July 4th speech planned \\u2014 slight upward nudge \\u2014 but no qualifying Trump-statement instance has been confirmed in the market window. The posterior of 0.09 reflects a strong NO lean with moderate confidence at f=0.50.\"}",
+    "prior_scheduled_signal": {
+      "retrieval_hash": "ca5e992eaf4fa834c0f0caa16f7bda809a009798ff7974f52338d93d22946d81",
+      "created_at": "2026-07-03T00:30:03.079179Z",
+      "confidence": 0.72,
+      "factbase_refreshed_at": null
+    },
+    "max_scheduled_interval_hours": 24.0,
+    "decision_context": {
+      "strategy": "PoliticsEdgeStrategy",
+      "bankroll": 1000.0,
+      "existing_market_exposure": 0.0,
+      "portfolio": {
+        "loss_exit_count": 0,
+        "market_open_exposure": 0.0,
+        "market_pending_exposure": 0.0,
+        "open_count": 0,
+        "pending_count": 0,
+        "open_exposure": 0.0,
+        "pending_exposure": 0.0,
+        "daily_pnl": 0.0
+      },
+      "risk_config": {}
+    }
+  },
+  "expectations": {
+    "prompt_version": "signal-v9",
+    "retrieval_hash": "393510a6ac4fca2cb257c69ef70c2959f926a5b89d75562336d4e248e2da4e59",
+    "rendered_prompt": "=== MARKET CONTEXT ===\nQuestion: Will Trump say \"Karoline / Leavitt\" before Jul 6, 2026? — Karoline / Leavitt\nIf Karoline / Leavitt, or a plural or possessive form of Karoline / Leavitt, is stated by Donald Trump after June 29th, 2026 at 8:00am ET and before Jul 6, 2026 at 12:00am ET, then the market resolves to Yes.\nbold textThe word or phrase must be stated by President Donald Trump in public statements, direct quotes published by Source Agencies, or written public statements on his personal social media accounts (Twitter/Truth Social). Official acts like Executive Orders or bills signed do not count. Grammatical inflections for plurals and possessives are included (e.g., \"immigrant\" includes \"immigrants\" and \"immigrant's\"), but other tense inflections, hyphenated compounds, and synonyms are not included. For phrases with slashes like \"Doge/Dogecoin,\" either word satisfies the criterion. If the word must be said a minimum number of times, all instances must occur after market issuance.\n\nCategory: Mentions\nCurrent Date (UTC): 2026-07-03 01:32\nMarket Opened (Issuance Date): 2026-06-29T12:00:00+00:00\nMarket Closes: 2026-07-06T14:00:00+00:00 (3.5 days from now)\nWindow elapsed: 3.6 days  |  Window remaining: 3.5 days  |  f (fraction elapsed): 0.50\n\n=== HISTORICAL BASE RATE ===\nThis market is part of a recurring weekly series (KXTRUMPSAY / \"Karoline / Leavitt\").\nSeries overall: 164 YES / 148 NO across all options and weeks (53%, n=312)\nThis option specifically: 0 YES / 9 NO (0%, n=9)\n\n=== PHRASE FREQUENCY DATA (FactBase) ===\nPhrase: \"Karoline / Leavitt\"\nSpeaker: Donald Trump\n\nWindow fraction elapsed (f): 0.50  (3.6 of 7.1 days elapsed, 3.5 days remaining)\n\nOccurrence counts (Trump statements archive):\n  Since market opened : 0\n  Last 7 days         : 0\n  Last 30 days        : 0\n  Last 365 days       : 27\n\nDerived rates:\n  Annual rate (365d)   : 0.0740/day  (~0.52/week)\n  Recent rate (30d)    : 0.0000/day  (0 mentions in last 30 days)\n\nPoisson baseline P(≥1 occurrence in remaining 3.5 days):\n  Using 365d rate      : 22.9%\n  Using 30d rate       : 0.0%\n\nRECENT DROUGHT: count_30d (0) is well below the monthly average (2.2). Current usage rate appears suppressed. Weight the 30d Poisson baseline (lower).\n\nMost recent Trump quotes:\n  [2026-04-26] \"-- your -- your associate, yeah. She's a terrific person. They were asking the name of Karoline's child, that he didn't \"  (Other)\n  [2026-04-26] \"Your, your associate, yeah. She was a terrific person. And she was, you know, she had this big smile. I mean, they were,\"  (Interview)\n  [2026-03-31] \"We have to straighten out our media. The reason their circulation is way down -- the New York Times' circulation has gon\"  (Remarks)\n  [2026-03-12] \"Appreciate it. And your husband's doing a good job. [Laughter] The youngest and perhaps the best White House press secre\"  (Remarks)\n  [2026-03-12] \"Life would be so much more exciting, wouldn't it? [Laughter] Thank you, Karoline. Great. Attorney General Pam Bondi, my \"  (Remarks)\n\nINTERPRETATION:\n  in_market_count > 0: near-decisive YES (anchor ~0.95+).\n  in_market_count = 0: use the Poisson remaining-window baseline as your\n    probability estimate — NOT the historical option win rate (which reflects\n    full-window probability at f=0, not the conditional probability given\n    elapsed time without an occurrence).\n\n=== EVIDENCE ===\n[1] CNN News Central : CNNW : June 24, 2026 10:00am-11:00am PDT\n    Source: TVArchive (tv_transcript)\n    Published: 2026-06-24T00:00:00+00:00\n    ID: 53618005-04d5-46a5-97f7-f048d0e1e714\n    karoline leavitt saying president trump promised to lower housing costs, and he is delivering, making it easier for every family to achieve the american dream of home ownership. she says promises made, prmade, promises kept. bu now, that promise not yet kept. as the president withholds his signature from this bill.\n\n[2] President Trump’s 2026 personal financial disclosure\n    Source: r/politics (reddit)\n    Published: 2026-06-30T21:47:00+00:00\n    ID: 37e19f7c-f326-4dac-a35a-911c25e7666a\n    President Trump’s 2026 personal financial disclosure\n\n[3] MSNOW: The Moment With Katy Tur\n    Source: TVThirdEye (tv_chyron)\n    Published: 2026-07-02T18:05:00+00:00\n    ID: a078bdea-cb19-4062-b181-8ccfcc42e855\n    TRUMP: GOING TO GIVE \\\"REALLY LONG SPEECR\\\" ON JULY 41H | L (o. . LIVE > 14:O4 A MAAORMENT | I atxr My\\nTRUMP: GOING TO GIVE \\\"REALLY LONG SPEECR\\\" ON JULY 41H | ﬁ > i. . LIVE > 9:-O& ™ MAAORMMENT | I atxr My\n\n[4] White House unveils new images of US ‘patriot passports’ for America’s 250th\n    Source: The Guardian (news)\n    Published: 2026-06-27T18:05:05+00:00\n    ID: 06c6959f-8a77-4142-8efb-f87b80756a30\n    The White House unveiled a limited-edition \"patriot passport\" commemorative for America's 250th anniversary, featuring Trump's portrait and set to be issued starting July 6, 2026, at the Washington Passport Agency while supplies last. Trump introduced it on Truth Social as \"The U.S.A.'s New Passport, which says, 'Welcome, but be good!'\" The passport features a three-quarter portrait of Trump at the Resolute desk with text from the Declaration of Independence, his signature, and a \"Freedom 250\" g\n\n[5] CNNW: Anderson Cooper 360\n    Source: TVThirdEye (tv_chyron)\n    Published: 2026-07-02T00:27:00+00:00\n    ID: c0713eca-7a71-4128-a088-6b987faa76b5\n    TRUMP SAYS HE'L GIVE \\\"REALLY LONG SPEECH\\\" ON JULY 4 DESPITE HEAT WAVE\n\n[6] CNNW: Anderson Cooper 360\n    Source: TVThirdEye (tv_chyron)\n    Published: 2026-07-02T00:26:00+00:00\n    ID: 285f9216-ddc7-4121-aa90-d4ef6e30a8e8\n    TRUMP VISITS NORTH DAKOTA FOR AMERICA 25O EVENTS\\nTRUMP SPEAKS AT TEDDY ROOSEVELT LIBRARY OPENING. . Scott Jennings | Former Special Asst. to Pres. George W. Bush\\nTRUMP SPEAKS AT TEDDY ROOSEVELT LIBRARY OPENING. . Scott Jennings | @W Senior Political Commentator\\nTRUMP SAYS HE'L GIVE \\\"REALLY LONG SPEECH\\\" ON JULY 4 DESPITE HEAT WAVE\n\n[7] FOXNEWSW: Americas Newsroom\n    Source: TVThirdEye (tv_chyron)\n    Published: 2026-07-02T13:09:00+00:00\n    ID: b147dc12-5e78-42b9-b78d-4937d1267969\n    TRUMP VOWS TO GIVE JULY 4TH SPEECH DESPITE HEAT\n\n[8] FOXNEWSW: Jesse Watters Primetime\n    Source: TVThirdEye (tv_chyron)\n    Published: 2026-07-03T00:13:00+00:00\n    ID: d01e70f0-351b-4a70-8a4c-cba66ecfbd92\n    THE COUNTRY'S CRAWLING WITH COMMUNISTS\\nDEMS OPEN THE GATE FOR COMMIES\\nTHE COMMIE CAUCUS IS GROWING\\n> KAROLINE LEAVITT | WHITE HOUSE PRESS SECRETARY\n\n[9] CNNW: Anderson Cooper 360\n    Source: TVThirdEye (tv_chyron)\n    Published: 2026-07-02T06:25:00+00:00\n    ID: 75d71994-47b4-4086-89a1-21931bd3c55d\n    TRUMP SAYS HE'LL GIVE \\\"REALLY LONG SPEECK\\\" ON JULY 4 DESPITE HEAT WAVE\\nTRUMP SPEAKS AT TEDDY ROOSEVELT LIBRARY OPENING\\nSOURCES: WHITE HOUSE WORRIED ABOUT SMALL CROWDS ON JULY 4. . Xochitl Hinojosa | @W Political Commentator\\nSOURCES: WHITE HOUSE WORRIED ABOUT SMALL CROWDS ON JULY 4. . Xochitl Hinojosa | Former DNC Communications Director\\nSOURCES: WHITE HOUSE WORRIED ABOUT SMALL CROWDS ON JULY 4. . Xochitl Hinojosa | Former Director of DOJ Public Affairs\n\n[10] Trump Seethes Over Supreme Court Losses In Series Of Truth Social Posts\n    Source: r/politics (reddit)\n    Published: 2026-06-29T18:09:57+00:00\n    ID: b75db1c8-11d3-4b37-8ab7-0d34e7e0403f\n    Trump Seethes Over Supreme Court Losses In Series Of Truth Social Posts\n",
+    "parsed": {
+      "prior": 0.08,
+      "posterior": 0.09,
+      "probability": 0.09,
+      "confidence": 0.72,
+      "direction": "NO",
+      "updates_count": 2
+    },
+    "edge": 0.050000000000000044,
+    "market_ask_at_signal": 0.86,
+    "entry": {
+      "would_trade": false,
+      "decline_reason": "strategy_declined",
+      "position_size_raw": 0.0,
+      "risk_allowed": false,
+      "risk_capped_size": 0.0,
+      "risk_reason": "",
+      "entry_price": null,
+      "contracts": 0
+    },
+    "skip_decisions": {
+      "scheduled_skip": false,
+      "cooldown_hours_remaining": 0.0
+    }
+  }
+}

@@ -30,6 +30,35 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 _TOP_K = 10
 
 
+def compute_signal_edge(
+    direction: str,
+    estimated_probability: float,
+    yes_bid: float,
+    yes_ask: float,
+) -> tuple[float, float | None]:
+    """Return ``(edge, market_ask_at_signal)`` for a signal's side.
+
+    Edge uses the actual ask price for the signal's side — not mid_price —
+    because mid on illiquid markets is meaningless.
+    YES: edge = prob - yes_ask  (we think YES is underpriced vs what it costs)
+    NO:  edge = (1-prob) - no_ask = (1-prob) - (1-yes_bid) = yes_bid - prob
+    SKIP: edge = prob - yes_ask for audit; no_ask not applicable (ask is None).
+
+    Pure function — shared by signal creation, price-move repricing, and the
+    replay harness so all three always price edge identically.
+    """
+    if direction == "NO":
+        market_ask_at_signal: float | None = round(1.0 - yes_bid, 4)
+        edge = (1.0 - estimated_probability) - market_ask_at_signal
+    elif direction == "YES":
+        market_ask_at_signal = yes_ask
+        edge = estimated_probability - market_ask_at_signal
+    else:  # SKIP
+        market_ask_at_signal = None
+        edge = estimated_probability - yes_ask
+    return edge, market_ask_at_signal
+
+
 class SignalPipeline:
     """Orchestrates RAG retrieval, hash deduplication, and LLM probability analysis.
 
@@ -303,20 +332,9 @@ class SignalPipeline:
         signal_id = uuid.uuid4()
         estimated_probability = parsed["probability"]
         direction = parsed["direction"]
-        # Edge uses the actual ask price for the signal's side — not mid_price —
-        # because mid on illiquid markets is meaningless.
-        # YES: edge = prob - yes_ask  (we think YES is underpriced vs what it costs)
-        # NO:  edge = (1-prob) - no_ask = (1-prob) - (1-yes_bid) = yes_bid - prob
-        # SKIP: edge = prob - yes_ask for audit; no_ask not applicable.
-        if direction == "NO":
-            market_ask_at_signal: float | None = round(1.0 - market.yes_bid, 4)
-            edge = (1.0 - estimated_probability) - market_ask_at_signal
-        elif direction == "YES":
-            market_ask_at_signal = market.yes_ask
-            edge = estimated_probability - market_ask_at_signal
-        else:  # SKIP
-            market_ask_at_signal = None
-            edge = estimated_probability - market.yes_ask
+        edge, market_ask_at_signal = compute_signal_edge(
+            direction, estimated_probability, market.yes_bid, market.yes_ask
+        )
         docs = [doc for doc, _ in doc_pairs]
 
         signal_row = SignalRow(
@@ -413,15 +431,9 @@ class SignalPipeline:
         now = datetime.now(UTC)
         new_id = uuid.uuid4()
 
-        if current.direction == "NO":
-            new_ask = round(1.0 - market.yes_bid, 4)
-            new_edge = (1.0 - current.estimated_probability) - new_ask
-        elif current.direction == "YES":
-            new_ask = market.yes_ask
-            new_edge = current.estimated_probability - new_ask
-        else:  # SKIP
-            new_ask = None
-            new_edge = current.estimated_probability - market.yes_ask
+        new_edge, new_ask = compute_signal_edge(
+            current.direction, current.estimated_probability, market.yes_bid, market.yes_ask
+        )
 
         signal_row = SignalRow(
             id=new_id,

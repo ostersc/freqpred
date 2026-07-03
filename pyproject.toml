@@ -29,6 +29,7 @@ dependencies = [
     "pandas>=2.0.0",
     "numpy>=1.26.0",
     "pandas-ta>=0.3.14b",
+    "freezegun>=1.5.5",
 ]
 
 [project.scripts]
