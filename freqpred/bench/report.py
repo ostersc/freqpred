@@ -3,18 +3,31 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from freqpred.bench.runner import BenchmarkRun
 from freqpred.bench.scoring import PairScore, aggregate, score_pair
 from freqpred.signal.llm import PROMPT_VERSION
 
+if TYPE_CHECKING:
+    from freqpred.strategy.base import IPredictionStrategy
+
 ARTIFACT_SCHEMA_VERSION = 2  # v2: stake-weighted trade metrics (TradeDecision.stake/pnl)
 
 
 def score_run(
-    run: BenchmarkRun, *, min_edge: float, min_confidence: float
+    run: BenchmarkRun,
+    *,
+    min_edge: float,
+    min_confidence: float,
+    strategy: IPredictionStrategy,
+    bankroll: float,
 ) -> list[PairScore]:
-    """Score every scenario that produced at least one successful candidate rep."""
+    """Score every scenario that produced at least one successful candidate rep.
+
+    *strategy* sizes each would-trade via its own ``position_size()``, so the
+    stake-weighted metrics reflect the sizing logic that would run live.
+    """
     scores: list[PairScore] = []
     for scenario_run in run.scenario_runs:
         point = scenario_run.point_estimate
@@ -26,6 +39,8 @@ def score_run(
                 point,
                 min_edge=min_edge,
                 min_confidence=min_confidence,
+                strategy=strategy,
+                bankroll=bankroll,
             )
         )
     return scores
@@ -217,7 +232,10 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
     inc_ev = trades["incumbent_mean_ev_per_trade"]
     cand_ev = trades["candidate_mean_ev_per_trade"]
 
-    def _stake(value: float | None) -> str:
+    def _usd(value: float | None, sign: str = "") -> str:
+        return f"${value:{sign},.2f}" if value is not None else "n/a"
+
+    def _ratio(value: float | None) -> str:
         return f"{value:+.4f}" if value is not None else "n/a"
 
     common = trades["common_trades"]
@@ -230,17 +248,17 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
         + (f"{inc_ev:+.4f}" if inc_ev is not None else "n/a")
         + "  candidate="
         + (f"{cand_ev:+.4f}" if cand_ev is not None else "n/a"),
-        "    Kelly-sized (production sizing from each side's own posterior+confidence;",
-        "    stakes are fractions of the per-market budget):",
-        f"      total stake        : incumbent={trades['incumbent_total_stake']:.4f}  "
-        f"candidate={trades['candidate_total_stake']:.4f}",
-        f"      settled P&L        : incumbent={_stake(trades['incumbent_stake_weighted_pnl'])}  "
-        f"candidate={_stake(trades['candidate_stake_weighted_pnl'])}",
-        f"      P&L per $1 staked  : incumbent={_stake(trades['incumbent_pnl_per_dollar_staked'])}  "
-        f"candidate={_stake(trades['candidate_pnl_per_dollar_staked'])}",
+        "    Sized by the strategy's own position_size from each side's posterior +",
+        "    confidence (zero existing exposure, no assessment):",
+        f"      total stake        : incumbent={_usd(trades['incumbent_total_stake'])}  "
+        f"candidate={_usd(trades['candidate_total_stake'])}",
+        f"      settled P&L        : incumbent={_usd(trades['incumbent_stake_weighted_pnl'], '+')}  "
+        f"candidate={_usd(trades['candidate_stake_weighted_pnl'], '+')}",
+        f"      P&L per $1 staked  : incumbent={_ratio(trades['incumbent_pnl_per_dollar_staked'])}  "
+        f"candidate={_ratio(trades['candidate_pnl_per_dollar_staked'])}",
         f"      common trades      : n={common['n']}  mean stake "
-        f"incumbent={_stake(common['incumbent_mean_stake'])}  "
-        f"candidate={_stake(common['candidate_mean_stake'])}",
+        f"incumbent={_usd(common['incumbent_mean_stake'])}  "
+        f"candidate={_usd(common['candidate_mean_stake'])}",
     ]
     if trades["disagreements"]:
         lines.append("    disagreements (exactly one side trades):")

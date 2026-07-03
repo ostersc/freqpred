@@ -23,8 +23,11 @@ Interpreting results — the adopt/reject decision rule:
   1. Adopt only if the paired Brier delta is significant (bootstrap 95% CI
      excludes zero, or sign test p < 0.05). A better raw mean on a small
      noisy sample is not evidence.
-  2. Guard: would-trade rate, disagreement table, and per-trade EV must not
-     degrade — a candidate can be better calibrated but too timid to trade.
+  2. Guard: would-trade rate, disagreement table, per-trade EV, and the
+     stake-weighted P&L (sized by --strategy's own position_size; its config
+     also supplies the default gates) must not degrade — a candidate can be
+     better calibrated but too timid to trade, or right as often yet
+     overconfident exactly when wrong.
   3. Tiebreaker: cost and latency.
   4. Ambiguous → keep the incumbent; it has live calibration history.
 
@@ -70,11 +73,10 @@ from freqpred.db import make_engine, make_session_factory
 from freqpred.llm.client import LLMClient
 from freqpred.replay.fixtures import DEFAULT_FIXTURE_DIR
 from freqpred.signal.llm import PROMPT_VERSION
+from freqpred.strategy.loader import load_strategy
 
-# Defaults for the trade-decision gate; generic thresholds, overridable to
-# match a specific strategy's config.
-_DEFAULT_MIN_EDGE = 0.10
-_DEFAULT_MIN_CONFIDENCE = 0.60
+_DEFAULT_STRATEGY = "PoliticsEdgeStrategy"  # matches `fixtures record-bank`
+_DEFAULT_BANKROLL = 1000.0                  # matches `fixtures record`
 
 
 def _print_scenario_block(record_index: int, scenario_run, score) -> None:
@@ -117,6 +119,16 @@ async def main(args: argparse.Namespace) -> None:
     config = load_config()
     if not config.database.url:
         raise SystemExit("ERROR: DATABASE_URL not configured.")
+
+    # The strategy supplies the sizing logic for stake-weighted metrics and
+    # the default would-trade gates, so the guard mirrors what would run live.
+    strategy = load_strategy(args.strategy)
+    min_edge = args.min_edge if args.min_edge is not None else strategy.config.min_edge
+    min_confidence = (
+        args.min_confidence
+        if args.min_confidence is not None
+        else strategy.config.min_confidence
+    )
 
     engine = make_engine(config.database.url)
     session_factory = make_session_factory(engine)
@@ -173,7 +185,9 @@ async def main(args: argparse.Namespace) -> None:
         candidate_label = args.candidate_model or f"prompt {PROMPT_VERSION} (incumbent models)"
         print(
             f"Mode={mode}  candidate={candidate_label}  scenarios={len(kept)}  "
-            f"reps={args.reps}"
+            f"reps={args.reps}\n"
+            f"Trade gates: min_edge={min_edge}  min_confidence={min_confidence}  "
+            f"sizing: {args.strategy}.position_size @ bankroll=${args.bankroll:,.0f}"
         )
 
         if args.estimate_only:
@@ -223,7 +237,11 @@ async def main(args: argparse.Namespace) -> None:
             print(f"\nStopped early — {run.stopped_early}")
 
         scores = score_run(
-            run, min_edge=args.min_edge, min_confidence=args.min_confidence
+            run,
+            min_edge=min_edge,
+            min_confidence=min_confidence,
+            strategy=strategy,
+            bankroll=args.bankroll,
         )
         scores_by_id = {s.scenario_id: s for s in scores}
         for i, scenario_run in enumerate(run.scenario_runs, start=1):
@@ -246,8 +264,10 @@ async def main(args: argparse.Namespace) -> None:
                 config={
                     "reps": args.reps,
                     "limit": args.limit,
-                    "min_edge": args.min_edge,
-                    "min_confidence": args.min_confidence,
+                    "min_edge": min_edge,
+                    "min_confidence": min_confidence,
+                    "strategy": args.strategy,
+                    "bankroll": args.bankroll,
                     "include_contaminated": args.include_contaminated,
                     "fixtures": str(args.fixtures) if args.prompt_mode else None,
                 },
@@ -300,12 +320,24 @@ if __name__ == "__main__":
         "--market-id", default=None, help="Restrict model mode to a single market."
     )
     parser.add_argument(
-        "--min-edge", type=float, default=_DEFAULT_MIN_EDGE,
-        help=f"Edge threshold for the would-trade gate (default: {_DEFAULT_MIN_EDGE}).",
+        "--strategy", default=_DEFAULT_STRATEGY,
+        help="Strategy name or .py path whose position_size() sizes the "
+             "stake-weighted metrics and whose config supplies the default "
+             f"would-trade gates (default: {_DEFAULT_STRATEGY}).",
     )
     parser.add_argument(
-        "--min-confidence", type=float, default=_DEFAULT_MIN_CONFIDENCE,
-        help=f"Confidence threshold for the would-trade gate (default: {_DEFAULT_MIN_CONFIDENCE}).",
+        "--bankroll", type=float, default=_DEFAULT_BANKROLL,
+        help=f"Bankroll passed to position_size (default: {_DEFAULT_BANKROLL:.0f}).",
+    )
+    parser.add_argument(
+        "--min-edge", type=float, default=None,
+        help="Edge threshold for the would-trade gate "
+             "(default: the strategy's config.min_edge).",
+    )
+    parser.add_argument(
+        "--min-confidence", type=float, default=None,
+        help="Confidence threshold for the would-trade gate "
+             "(default: the strategy's config.min_confidence).",
     )
     parser.add_argument(
         "--thinking", choices=["adaptive", "none"], default="adaptive",

@@ -9,12 +9,13 @@ Trade-decision metrics capture what Brier misses — a better-calibrated but
 systematically less confident model trades less, and confidence also scales
 position size (the Kelly blend in ``IPredictionStrategy.position_size``), so
 an overconfident model has more dollars on the line when it is wrong. Each
-would-trade therefore carries a ``stake`` computed with the production
-confidence-blended Kelly formula from that model's own posterior and
-confidence, and a stake-weighted settlement P&L. These are decision-quality
+would-trade therefore carries a ``stake`` — the run strategy's own
+``position_size()`` called with a Signal built from that model's posterior
+and confidence — and a stake-weighted settlement P&L. Custom strategies with
+overridden sizing are honored automatically. These are decision-quality
 signals at frozen side-specific prices, deliberately **not** a portfolio
-simulation: no risk caps, no exits, no bankroll path — stakes are per-trade
-fractions of the per-market budget, independent across scenarios.
+simulation: no risk caps, no exits, no bankroll path — each stake assumes
+zero existing exposure and no assessment, independent across scenarios.
 """
 from __future__ import annotations
 
@@ -22,9 +23,14 @@ import math
 import random
 from dataclasses import dataclass
 from statistics import mean, median
+from typing import TYPE_CHECKING
 
 from freqpred.bench.scenarios import ModelOutput, Scenario
+from freqpred.signal.models import Signal
 from freqpred.signal.pipeline import compute_signal_edge
+
+if TYPE_CHECKING:
+    from freqpred.strategy.base import IPredictionStrategy
 
 _EPS = 1e-6  # log-loss clamp
 
@@ -74,32 +80,32 @@ def direction_correct(direction: str, outcome: float) -> bool | None:
     return None
 
 
-def kelly_stake_fraction(
-    direction: str,
-    posterior: float,
-    confidence: float,
-    yes_bid: float,
-    yes_ask: float,
-) -> float:
-    """Production confidence-blended Kelly fraction for one signal.
-
-    Mirrors ``IPredictionStrategy._ideal_total_exposure`` exactly (a wiring
-    test asserts equality against the strategy method): the p_market that
-    production recovers from the stored signal fields reduces to the
-    side-specific ask that ``compute_signal_edge`` prices the entry at.
-    Returned as a fraction of the per-market budget — ``kelly_fraction`` and
-    ``max_exposure_per_market`` are identical constants on both sides of a
-    comparison, so they cancel and are omitted.
-    """
-    _, side_ask = compute_signal_edge(direction, posterior, yes_bid, yes_ask)
-    if side_ask is None or not 0.0 < side_ask < 1.0:
-        return 0.0
-    p_market = side_ask
-    p_est = posterior if direction == "YES" else 1.0 - posterior
-    b = (1.0 - p_market) / p_market
-    p_adj = confidence * p_est + (1.0 - confidence) * p_market
-    f_star = (b * p_adj - (1.0 - p_adj)) / b
-    return max(f_star, 0.0)
+def _signal_for_output(output: ModelOutput, scenario: Scenario) -> Signal:
+    """Materialize the Signal DTO that production sizing consumes, priced with
+    the same side-specific edge arithmetic as the live pipeline. Provenance
+    fields are placeholders — ``position_size`` reads only direction,
+    estimated_probability, edge, and confidence."""
+    edge, side_ask = compute_signal_edge(
+        output.direction, output.posterior, scenario.yes_bid, scenario.yes_ask
+    )
+    return Signal(
+        id=scenario.id,
+        market_id=scenario.market_id,
+        estimated_probability=output.posterior,
+        confidence=output.confidence,
+        edge=edge,
+        market_mid_at_signal=scenario.mid_price,
+        direction=output.direction,
+        reasoning=output.reasoning,
+        sources=[],
+        retrieval_hash="",
+        model_used=output.model,
+        prompt_version="",
+        trigger="manual",
+        created_at=scenario.close_time,
+        raw_context="",
+        market_ask_at_signal=side_ask,
+    )
 
 
 @dataclass
@@ -108,7 +114,7 @@ class TradeDecision:
     edge: float
     side_ask: float | None  # entry cost for the chosen side; None for SKIP
     ev: float | None        # settlement value minus entry cost, when trading
-    stake: float | None     # production Kelly fraction of the per-market budget
+    stake: float | None     # strategy.position_size() dollars at the run bankroll
     pnl: float | None       # stake-weighted settlement P&L: (stake / side_ask) * ev
 
 
@@ -118,6 +124,8 @@ def trade_decision(
     *,
     min_edge: float,
     min_confidence: float,
+    strategy: IPredictionStrategy,
+    bankroll: float,
 ) -> TradeDecision:
     """Would this output pull the trigger at the frozen prices — and at what EV?
 
@@ -127,10 +135,11 @@ def trade_decision(
     side-specific ask arithmetic as production (`compute_signal_edge`).
 
     EV per contract at settlement: YES pays ``outcome - yes_ask``; NO pays
-    ``(1 - outcome) - no_ask``. ``stake`` sizes the trade with the production
-    Kelly blend from this output's own posterior and confidence, and ``pnl``
-    is the settlement P&L of that stake (stake dollars buy stake/side_ask
-    contracts) — overconfidence when wrong loses proportionally more.
+    ``(1 - outcome) - no_ask``. ``stake`` is the *strategy's* own
+    ``position_size()`` for a Signal built from this output's posterior and
+    confidence (zero existing exposure, no assessment), and ``pnl`` is the
+    settlement P&L of that stake (stake dollars buy stake/side_ask contracts)
+    — overconfidence when wrong loses proportionally more.
     """
     edge, side_ask = compute_signal_edge(
         output.direction, output.posterior, scenario.yes_bid, scenario.yes_ask
@@ -149,10 +158,7 @@ def trade_decision(
         else:
             no_ask = round(1.0 - scenario.yes_bid, 4)
             ev = (1.0 - scenario.outcome) - no_ask
-        stake = kelly_stake_fraction(
-            output.direction, output.posterior, output.confidence,
-            scenario.yes_bid, scenario.yes_ask,
-        )
+        stake = strategy.position_size(_signal_for_output(output, scenario), bankroll)
         pnl = (stake / side_ask) * ev if side_ask else 0.0
     return TradeDecision(
         would_trade=would, edge=edge, side_ask=side_ask, ev=ev, stake=stake, pnl=pnl
@@ -219,6 +225,8 @@ def score_pair(
     *,
     min_edge: float,
     min_confidence: float,
+    strategy: IPredictionStrategy,
+    bankroll: float,
 ) -> PairScore:
     inc = scenario.incumbent
     return PairScore(
@@ -238,10 +246,12 @@ def score_pair(
         posterior_delta=candidate.posterior - inc.posterior,
         confidence_delta=candidate.confidence - inc.confidence,
         incumbent_trade=trade_decision(
-            inc, scenario, min_edge=min_edge, min_confidence=min_confidence
+            inc, scenario, min_edge=min_edge, min_confidence=min_confidence,
+            strategy=strategy, bankroll=bankroll,
         ),
         candidate_trade=trade_decision(
-            candidate, scenario, min_edge=min_edge, min_confidence=min_confidence
+            candidate, scenario, min_edge=min_edge, min_confidence=min_confidence,
+            strategy=strategy, bankroll=bankroll,
         ),
     )
 

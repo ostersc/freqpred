@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from freqpred.bench import scoring
 from freqpred.bench.scenarios import ModelOutput, Scenario
 from freqpred.bench.scoring import (
     aggregate,
@@ -12,12 +13,47 @@ from freqpred.bench.scoring import (
     brier,
     direction_correct,
     log_loss,
-    score_pair,
     sign_test_p,
-    trade_decision,
 )
+from freqpred.strategy.base import IPredictionStrategy
+from freqpred.strategy.config import StrategyConfig
 
 FROZEN_CLOSE = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+class _UnitKellyStrategy(IPredictionStrategy):
+    """Base sizing with unit constants: at bankroll=1.0 the stake equals the
+    raw confidence-blended Kelly fraction — hand-checkable numbers."""
+
+    config = StrategyConfig(
+        name="unit-kelly",
+        min_confidence=0.0,
+        max_exposure_per_market=1.0,
+        kelly_fraction=1.0,
+        categories=[],
+        min_volume_24h=0.0,
+        max_days_to_close=365.0,
+        min_days_to_close=0.0,
+    )
+
+
+_STRATEGY = _UnitKellyStrategy()
+
+
+def trade_decision(output, scenario, **kwargs):
+    kwargs.setdefault("min_edge", 0.10)
+    kwargs.setdefault("min_confidence", 0.60)
+    kwargs.setdefault("strategy", _STRATEGY)
+    kwargs.setdefault("bankroll", 1.0)
+    return scoring.trade_decision(output, scenario, **kwargs)
+
+
+def score_pair(scenario, candidate, **kwargs):
+    kwargs.setdefault("min_edge", 0.10)
+    kwargs.setdefault("min_confidence", 0.60)
+    kwargs.setdefault("strategy", _STRATEGY)
+    kwargs.setdefault("bankroll", 1.0)
+    return scoring.score_pair(scenario, candidate, **kwargs)
 
 
 def _output(
@@ -153,51 +189,39 @@ def test_per_trade_ev_yes_and_no() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_kelly_stake_matches_production_sizing_formula() -> None:
-    """Wiring test: kelly_stake_fraction must equal the production
-    IPredictionStrategy._ideal_total_exposure (unit constants) for both sides,
-    fed the exact signal fields production stores (edge from
-    compute_signal_edge)."""
-    from types import SimpleNamespace
+def test_stake_is_production_kelly_hand_computed_yes_and_no() -> None:
+    """The stake is the strategy's real position_size — at unit constants the
+    numbers are hand-checkable Kelly: b=(1-ask)/ask, p_adj=c*p+(1-c)*ask,
+    f*=(b*p_adj-(1-p_adj))/b."""
+    # YES: ask=0.50, p=0.70, c=0.80 → b=1, p_adj=0.66, f*=0.32
+    yes = trade_decision(_output("YES", 0.70, confidence=0.80), _scenario())
+    assert yes.stake == pytest.approx(0.32)
+    # NO: no_ask=0.52, p_est=0.70, c=0.80 → b=0.48/0.52, p_adj=0.664, f*=0.30
+    no = trade_decision(_output("NO", 0.30, confidence=0.80), _scenario())
+    assert no.stake == pytest.approx(0.30, abs=1e-4)
 
-    from freqpred.bench.scoring import kelly_stake_fraction
-    from freqpred.signal.pipeline import compute_signal_edge
-    from freqpred.strategy.base import IPredictionStrategy
-    from freqpred.strategy.config import StrategyConfig
 
-    class _UnitStrategy(IPredictionStrategy):
-        config = StrategyConfig(
-            name="unit",
-            min_confidence=0.0,
-            max_exposure_per_market=1.0,  # unit constants: exposure == f_star
-            kelly_fraction=1.0,
-            categories=[],
-            min_volume_24h=0.0,
-            max_days_to_close=365.0,
-            min_days_to_close=0.0,
-        )
+def test_stake_honors_strategy_position_size_override() -> None:
+    """A custom strategy's overridden sizing must flow through — the whole
+    point of sizing via the strategy instead of a copied formula."""
 
-    strategy = _UnitStrategy()
-    yes_bid, yes_ask = 0.48, 0.50
-    for direction, posterior, confidence in [
-        ("YES", 0.70, 0.80),
-        ("YES", 0.65, 0.62),
-        ("NO", 0.30, 0.80),
-        ("NO", 0.35, 0.95),
-    ]:
-        edge, _ = compute_signal_edge(direction, posterior, yes_bid, yes_ask)
-        signal = SimpleNamespace(
-            direction=direction,
-            estimated_probability=posterior,
-            edge=edge,
-            confidence=confidence,
+    class _FlatFraction(IPredictionStrategy):
+        config = _UnitKellyStrategy.config
+
+        def position_size(
+            self, signal, bankroll, existing_market_exposure=0.0, assessment=None
+        ):
+            return 0.042 * bankroll
+
+    for direction, posterior in [("YES", 0.70), ("NO", 0.30)]:
+        decision = trade_decision(
+            _output(direction, posterior),
+            _scenario(outcome=1.0),
+            strategy=_FlatFraction(),
+            bankroll=100.0,
         )
-        assert kelly_stake_fraction(
-            direction, posterior, confidence, yes_bid, yes_ask
-        ) == pytest.approx(strategy._ideal_total_exposure(signal, bankroll=1.0)), (
-            f"drift from production sizing for {direction} "
-            f"posterior={posterior} confidence={confidence}"
-        )
+        assert decision.would_trade is True
+        assert decision.stake == pytest.approx(4.2)
 
 
 def test_higher_confidence_stakes_more_both_directions() -> None:

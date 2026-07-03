@@ -282,7 +282,7 @@ uv run python scripts/benchmark_signals.py --candidate-model claude-haiku-4-5-20
 **The adopt/reject decision rule:**
 
 1. **Adopt only on a significant paired Brier delta** — bootstrap 95% CI excluding zero, or sign test p < 0.05. A better raw mean on a small noisy sample is not evidence.
-2. **Guard: trade decisions must not degrade** — check the would-trade rate, disagreement table, per-trade EV, and the stake-weighted P&L. Confidence scales position size in production (the Kelly blend), so each would-trade is also sized with the production formula from that model's own posterior + confidence — an overconfident model loses proportionally more when wrong, and a better-calibrated but timid candidate shows up as too small a total stake. (Decision-quality signals at frozen prices, deliberately not a portfolio simulation.)
+2. **Guard: trade decisions must not degrade** — check the would-trade rate, disagreement table, per-trade EV, and the stake-weighted P&L. Confidence scales position size in production (the Kelly blend), so each would-trade is also sized by the benchmark strategy's own `position_size()` from that model's posterior + confidence (`--strategy`, default `PoliticsEdgeStrategy`; the strategy config also supplies the default `min_edge`/`min_confidence` gates) — an overconfident model loses proportionally more when wrong, and a better-calibrated but timid candidate shows up as too small a total stake. (Decision-quality signals at frozen prices, deliberately not a portfolio simulation.)
 3. **Tiebreaker: cost and latency.**
 4. **Ambiguous → keep the incumbent**; it has live calibration history, the candidate has none.
 
