@@ -253,15 +253,44 @@ cd freqpred/dashboard/ui && npm install && npm run dev
 
 Adminer (database UI): `docker-compose up -d adminer` → `http://localhost:8080` (server: `db`, user/pass/db: `freqpred`)
 
-### Utility scripts
+### Benchmarking a model or prompt change
 
-One-off analysis and maintenance scripts live in `scripts/` — see each script's module docstring for full usage. Notable ones:
+Before switching the signal model or merging a `PROMPT_VERSION` bump, benchmark the candidate against resolved-market outcomes (supersedes the old `compare_model_signals.py`):
 
 ```bash
-# Compare a candidate Claude model against the model that produced each
-# open market's latest real signal, replaying the exact stored prompt
-uv run python scripts/compare_model_signals.py --model claude-sonnet-5 --limit 20
+# Model swap: replay each resolved market's stored prompt verbatim to the candidate
+uv run python scripts/benchmark_signals.py --candidate-model claude-sonnet-5 \
+    --training-cutoff 2026-03-01 --limit 50 --reps 3 --json-out benchmarks/sonnet5.json
+
+# Prompt change: re-render frozen fixtures through the CURRENT prompt template.
+# Build the resolved-market scenario bank first (leakage-free by construction):
+uv run freqpred fixtures record-bank
+uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/prompt_bank \
+    --training-cutoff 2026-03-01 --limit 250
+
+# Preview call volume and token cost first
+uv run python scripts/benchmark_signals.py --candidate-model claude-sonnet-5 \
+    --training-cutoff 2026-03-01 --estimate-only
+
+# Pre-4.6 candidates (e.g. Haiku 4.5) reject adaptive thinking — omit it
+uv run python scripts/benchmark_signals.py --candidate-model claude-haiku-4-5-20251001 \
+    --training-cutoff 2026-03-01 --thinking none
 ```
+
+**When to use it:** before any signal-model swap, any prompt-template change, or judgment-relevant config changes (thinking settings, max_tokens). Not for regression testing (that's the free, deterministic replay harness — `freqpred fixtures replay`), not for P&L estimation, and not for scheduled monitoring — every run costs real API dollars (audited to `llm_queries`, counted against the daily spend cap).
+
+**The adopt/reject decision rule:**
+
+1. **Adopt only on a significant paired Brier delta** — bootstrap 95% CI excluding zero, or sign test p < 0.05. A better raw mean on a small noisy sample is not evidence.
+2. **Guard: trade decisions must not degrade** — check the would-trade rate, disagreement table, and per-trade EV. A candidate can be better calibrated but too timid to clear the edge/confidence gates (these are decision-quality signals at frozen prices, deliberately not a P&L simulation).
+3. **Tiebreaker: cost and latency.**
+4. **Ambiguous → keep the incumbent**; it has live calibration history, the candidate has none.
+
+`--training-cutoff` is required: markets that closed inside the candidate's training window are excluded, since their outcomes may be memorized rather than forecast.
+
+### Utility scripts
+
+Other one-off analysis and maintenance scripts live in `scripts/` — see each script's module docstring for full usage.
 
 ---
 

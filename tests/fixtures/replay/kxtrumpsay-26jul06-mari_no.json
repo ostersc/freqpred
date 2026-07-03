@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "name": "kxtrumpsay-26jul06-mari_no",
+  "description": "v10 prompt test bed: batch-recorded 2026-07-03 from the market's latest LLM-backed signal; becomes a prompt-mode benchmark scenario once the market resolves",
+  "recorded_from_signal_id": "59bf0d80-fdd0-4212-8962-2af17c3eb0cb",
+  "recorded_at": "2026-07-03T14:10:31.293933Z",
+  "inputs": {
+    "now": "2026-06-29T22:52:00Z",
+    "trigger": "scheduled",
+    "market": {
+      "id": "KXTRUMPSAY-26JUL06-MARI",
+      "platform": "kalshi",
+      "question": "Will Trump say \"Marijuana / Weed / Cannabis\" before Jul 6, 2026? — Marijuana / Weed / Cannabis\nIf Marijuana / Weed / Cannabis, or a plural or possessive form of Marijuana / Weed / Cannabis, is stated by Donald Trump after June 29th, 2026 at 8:00am ET and before Jul 6, 2026 at 12:00am ET, then the market resolves to Yes.\nbold textThe word or phrase must be stated by President Donald Trump in public statements, direct quotes published by Source Agencies, or written public statements on his personal social media accounts (Twitter/Truth Social). Official acts like Executive Orders or bills signed do not count. Grammatical inflections for plurals and possessives are included (e.g., \"immigrant\" includes \"immigrants\" and \"immigrant's\"), but other tense inflections, hyphenated compounds, and synonyms are not included. For phrases with slashes like \"Doge/Dogecoin,\" either word satisfies the criterion. If the word must be said a minimum number of times, all instances must occur after market issuance.",
+      "category": "Mentions",
+      "close_time": "2026-07-06T14:00:00Z",
+      "open_time": "2026-06-29T12:00:00Z",
+      "yes_bid": 0.11,
+      "yes_ask": 0.12,
+      "mid_price": 0.11499999999999999,
+      "volume_24h": 2494.01,
+      "open_interest": 5574.18,
+      "status": "active",
+      "series_ticker": "KXTRUMPSAY"
+    },
+    "documents": [
+      {
+        "id": "114cef7a-7c1f-423d-94c1-01c794266dc0",
+        "source_url": "https://www.reddit.com/r/politics/comments/1uhbe4l/trump_posts_boastful_atlasinspired_truth_social/",
+        "content_hash": "7fdab1f5eda6496daaee96b91bb80da5ee17bfd3e5c479a6cf9b59de44a6f19b",
+        "title": "Trump posts boastful Atlas-inspired Truth Social image of himself carrying the world on his shoulders - President Donald Trump also posted an image comparing himself at age 20 to former President Barack Obama at age 18 in which Obama has a marijuana joint in his mouth",
+        "body": "Trump posts boastful Atlas-inspired Truth Social image of himself carrying the world on his shoulders - President Donald Trump also posted an image comparing himself at age 20 to former President Barack Obama at age 18 in which Obama has a marijuana joint in his mouth",
+        "summary": null,
+        "source_type": "reddit",
+        "source_name": "r/politics",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-27T19:20:15Z",
+        "fetched_at": "2026-06-27T19:49:46.446175Z",
+        "similarity_score": 1.0
+      },
+      {
+        "id": "17c9f93a-725c-4d5e-815b-7b0af1406636",
+        "source_url": "https://archive.org/details/BLOOMBERG_20260601_050000_Bloomberg_Daybreak_Europe/start/354/end/414?q=trump+AND+%28%22public+statement%22+OR+rally+OR+speech%29",
+        "content_hash": "5c4004d4b109e0fb0cbb25f3f7a8ae5e22593e3ded4c5147c47ff673169444ab",
+        "title": "Bloomberg Daybreak: Europe : BLOOMBERG : June 1, 2026 1:00am-2:00am EDT",
+        "body": "trump and the u.s. have made that very clear over recent weeks and i think the iranians do want something but they both seem to be holding out, you know, probably trying to negotiate the final terms, whether it is the exact details over how the strait of hormuz will be reopened or how much and how quickly iran's frozen funds abroad will be unfrozen and this type of thing but i think the trend is definitely in the direction of the deal even with these skirmishes we are seeing at the ones only a few hours ago that saw it, you know, the u.s. to fire upon missile launch sites and iran react by firing at the u.s. base since he carried out these attacks so it is quite hard to square these things but does seem like we are still heading towards a deal, whether it will be in the next few days, whether it will take a bit longer, we don't know, but clearly, both sides do seem to want to get to that point. lizzy: how did you square israel's ground assault in lebanon growing as it is paul: very much. israel is furth",
+        "summary": null,
+        "source_type": "tv_transcript",
+        "source_name": "TVArchive",
+        "category": "Mentions",
+        "tags": [
+          "lizzy",
+          "europe",
+          "iran",
+          "bloomberg",
+          "nvidia",
+          "spacex",
+          "israel",
+          "china",
+          "lebanon",
+          "nato",
+          "intel",
+          "trump",
+          "taiwan",
+          "london",
+          "warsh",
+          "england",
+          "pete hegseth",
+          "germany",
+          "vera rubin",
+          "u.k.",
+          "dell",
+          "jensen",
+          "paul wallace",
+          "washington",
+          "mandelson"
+        ],
+        "published_at": "2026-06-01T00:00:00Z",
+        "fetched_at": "2026-06-01T16:23:53.106163Z",
+        "similarity_score": 0.6023457994061969
+      },
+      {
+        "id": "1ef21e92-bee1-438d-9c62-c212819d12fa",
+        "source_url": "https://www.reddit.com/r/politics/comments/1uivg9f/trump_in_truth_social_rant_drops_vile_nickname_on/",
+        "content_hash": "c91c34be2c86f9787e7a4b7ca7bdddfeccaaddd86b0e688bf59ce3eaddf06de8",
+        "title": "Trump in Truth Social rant drops vile nickname on NYT’s Haberman. And misspells it. Twice",
+        "body": "Trump in Truth Social rant drops vile nickname on NYT’s Haberman. And misspells it. Twice",
+        "summary": null,
+        "source_type": "reddit",
+        "source_name": "r/politics",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-29T15:19:51Z",
+        "fetched_at": "2026-06-29T19:47:03.956521Z",
+        "similarity_score": 0.4930051982121537
+      },
+      {
+        "id": "11e51488-03b7-4903-a122-fdecd456de07",
+        "source_url": "https://www.reddit.com/r/Conservative/comments/1uhi4jg/us_president_donald_trump_said_on_saturday_on/",
+        "content_hash": "efe8ab960fb79ac562c91c0380b3fd477e18f42cff616eb4237d5754cbf875a3",
+        "title": "US President Donald Trump said on Saturday on Truth Social that US aircraft struck Iranian missile and drone storage locations as well as coastal radar sites, citing violations of a ceasefire agreement.",
+        "body": "US President Donald Trump said on Saturday on Truth Social that US aircraft struck Iranian missile and drone storage locations as well as coastal radar sites, citing violations of a ceasefire agreement.",
+        "summary": null,
+        "source_type": "reddit",
+        "source_name": "r/Conservative",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-28T00:06:25Z",
+        "fetched_at": "2026-06-28T03:50:37.178539Z",
+        "similarity_score": 0.3419016327406124
+      },
+      {
+        "id": "47cfbd4d-0d85-4609-b22f-4dca385c7833",
+        "source_url": "https://www.reddit.com/r/moderatepolitics/comments/1ue6kdl/zohran_mamdanis_picks_take_key_house_primaries/",
+        "content_hash": "3dd2f04ae9ea0f7c29d17571b608073c071fb978263ac2b7810b91daa35a7cfa",
+        "title": "Zohran Mamdani’s picks take key House primaries amid a broad battle over Democrat’s direction",
+        "body": "There were primaries held across 4 U.S states on Tuesday night but the results in NYC will undoubtedly dominate national attention. Zohran Mamdani and his democratic socialist allies were the big winners with 3 of their endorsed Congressional House candidates winning their primaries. NYC comptroller Brad Lander dethroned Democratic Rep. Dan Goldman in NY’s 10th District. State legislator Claire Valdez won in the open 7th district. Both of these victories were by significant margins. The most significant result was the victory of activist Darializa Avila Chevalier over 5-term House member Rep. Adriano Espaillat who chairs the Congressional Hispanic Caucus. Chevalier in particular is controversial given a number of highly controversial past social media posts. All 3 of these seats are rapidly gentrifying and safely Democratic. These 3 races centered especially heavily on Israel and Palestine in addition to left-wing debates on housing, healthcare and opposition to Trump. The primary results add to a growing list of progressive and socialist victories in Democratic primaries elsewhere and have re-ignited debate about the future of the Democraric Party. Republicans on the other hand seem eager to highlight the most controversial stances and members among this faction. However, other primaries in Utah, Maryland and upstate New York saw less progressive Democrats win. Some questions: what were your reaction to these results? What do they indicate about the direction and future of the Democratic Party? What do these trends mean for the 2026 midterms and 2028 cycle?",
+        "summary": null,
+        "source_type": "reddit",
+        "source_name": "r/moderatepolitics",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-24T07:20:43Z",
+        "fetched_at": "2026-06-24T08:13:56.210367Z",
+        "similarity_score": 0.20346666632975857
+      },
+      {
+        "id": "b75db1c8-11d3-4b37-8ab7-0d34e7e0403f",
+        "source_url": "https://www.reddit.com/r/politics/comments/1uj05y9/trump_seethes_over_supreme_court_losses_in_series/",
+        "content_hash": "53917e686fbc2d49d693d68e57903b22df2f8bbc5d78c50f76dd88dbe3a2dc73",
+        "title": "Trump Seethes Over Supreme Court Losses In Series Of Truth Social Posts",
+        "body": "Trump Seethes Over Supreme Court Losses In Series Of Truth Social Posts",
+        "summary": null,
+        "source_type": "reddit",
+        "source_name": "r/politics",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-29T18:09:57Z",
+        "fetched_at": "2026-06-29T19:45:21.790039Z",
+        "similarity_score": 0.676039457321167
+      },
+      {
+        "id": "4ef2c8e4-b600-42a8-a07d-da283d7d7113",
+        "source_url": "https://www.reddit.com/r/moderatepolitics/comments/1uedl8p/a_comprehensive_plan_to_close_the_19_trillion_us/",
+        "content_hash": "4ada93edbc3a75685cef06d708792dd4157b35d97533278ad900199a39e13dd1",
+        "title": "A comprehensive plan to close the $1.9 trillion U.S. budget deficit",
+        "body": "I see endless talk about the United States’ federal budget deficit, which, according to CBO projections for fiscal year 2026, will reach $1.9 trillion on a $7.4 trillion budget. Unfortunately, the country hasn’t taken a serious run at addressing it in more than 25 years, feckless DOGE efforts aside. It sure feels like it's time, for at least two reasons: The U.S. national debt has reached 120% of GDP, which is dangerous when the bond investors who buy American debt grow skittish about the United States’ fiscal risk, as they did last spring following the Liberation Day tariffs and One Big Beautiful Bill Act announcements. The U.S. economy will likely soon experience an AI-fueled productivity boom like the computer-driven productivity boom of the 1990s that helped push the U.S. budget into its last surplus. Let’s take advantage of it. I don't see anyone proposing concrete plans to close the deficit, and I wanted to see what the actual math of a comprehensive legislative fix would look like, so I researched and drafted the framework of a hypothetical bill I call the Pay Our Bills Act (POBA). Not everyone will like my particular blend of tax increases and spending cuts, but it does reveal how difficult deficit reduction is, and it offers a starting point for discussion. POBA pulls on 18 budget-related levers to achieve a progressive-leaning budget reset, starting with: Personal Income Taxes Change the personal income tax bracket rates to 10%, 12%, 22%, 25%, 34%, 39% and 44%, which maintains tax rates at the bottom, mostly maintains them in the middle, and raises them on the ultra-wealthy. (Deficit reduction: ~$153 billion) Delete the preferential rate for long-term capital gains. (Deficit reduction: ~$109B) Close the carried-interest loophole. (Deficit reduction: ~$1.55B) Wealth Taxes Implement a 2% tax on households worth $50-plus million. (Deficit reduction: ~$418B) Implement a 3% surtax on net worth above $1 billion. (Deficit reduction: ~$64.5B) Implement a 12% surtax on investment income for high-income households. (Deficit reduction: ~$64.6B) Return the estate tax exemption to its 2012 level of $5 million. (Deficit reduction: ~$18B) Implement an excise tax of 7% on new planes and yachts that cost more than $500,000. (Deficit reduction: ~$1.2B.) Corporate Taxes Change rates from the current 21% flat rate to back to 1990s-style, progressive, graduated tax brackets with 18%, 24%, 32% and 41% rates, which would cut rates for small businesses, mostly maintain mid-size rates, and raise taxes on large and mega corporations. (Deficit reduction: ~$216B) Close international tax loopholes by fully implementing the Global Minimum Tax of 15%. (Deficit reduction: ~$56B.) Social Security Replace the program’s payroll tax cap for employees (currently 6.2% up to $176,000) with tiered tax rates of 6.2% to $170K, 5% to $400K, 4% to $800K, 3% to $1.5 million and 2% above $1.5M. (Deficit reduction: ~$77.6B) Implement progressive indexing on Social Security benefits that maintains the benefit formula’s link to the wage index for the bottom 50% of workers, but links it to inflation for the top 50% of new retirees. (Deficit reduction: ~$1.1B first year, but it compounds) Implement modest means testing for the top 20% of senior households (i.e., a 15% benefit reduction on incomes starting at $116,252). (Deficit reduction: ~$50.8B) Medicare Expand Medicare’s ability to negotiate drug prices to include all outpatient and physician-administered drugs. (Deficit reduction: ~$44B) Cut Medicare Advantage overspending by cracking down on upcoding. (Deficit reduction: ~$68.5B) Equalize Medicare Advantage’s payment rates with Medicare’s. (Deficit reduction: ~$65B.) More Spending Cuts Cap defense spending at 12% of the total federal budget from its current 13.3%. (Deficit reduction: ~$98B.) Cut all energy tax-break subsidies in half (including renewable, fossil fuel, etc). (Deficit reduction: ~$13.2B.) Final Numbers: All told, how effective would POBA be at def",
+        "summary": null,
+        "source_type": "reddit",
+        "source_name": "r/moderatepolitics",
+        "category": "Mentions",
+        "tags": [],
+        "published_at": "2026-06-24T13:30:33Z",
+        "fetched_at": "2026-06-26T14:39:16.913663Z",
+        "similarity_score": 0.0
+      }
+    ],
+    "catalyst_queries": [],
+    "series_history": {
+      "series_ticker": "KXTRUMPSAY",
+      "option_code": "MARI",
+      "series_row": {
+        "option_label": "KXTRUMPSAY",
+        "yes_count": 164,
+        "no_count": 148
+      },
+      "option_row": {
+        "option_label": "Marijuana / Weed / Cannabis",
+        "yes_count": 1,
+        "no_count": 9
+      }
+    },
+    "phrase_data": {
+      "display_phrase": "Marijuana / Weed / Cannabis",
+      "api_query": "\"Marijuana\" OR \"Marijuanas\" OR \"Marijuana's\" OR \"Marijuanas'\" OR \"Weed\" OR \"Weeds\" OR \"Weed's\" OR \"Weeds'\" OR \"Cannabis\" OR \"Cannabises\" OR \"Cannabis's\" OR \"Cannabises'\"",
+      "speaker_slug": "trump",
+      "in_market_count": 0,
+      "count_7d": 0,
+      "count_30d": 0,
+      "count_365d": 8,
+      "top_quotes": [
+        {
+          "date": "2026-04-23",
+          "text": "So, hopefully you don't need it, but if you do need it, I hear it's the best of all the alternatives. But I want to thank Howard Kessler and Michelle Kessler, they really pushed us very hard. These ar",
+          "event_type": "Remarks"
+        },
+        {
+          "date": "2025-12-18",
+          "text": "Today, I'm pleased to announce that I will be signing an executive order to reschedule marijuana from a Schedule 1 to a Schedule 3 controlled substance with legitimate medical uses. We have people beg",
+          "event_type": "Remarks"
+        },
+        {
+          "date": "2025-12-18",
+          "text": "You look -- I'm telling you, he looks better than he did 20 years ago, but I don't want to go through what you went through to get there, right? It looks like you're doing great. I'm proud of you. I w",
+          "event_type": "Remarks"
+        },
+        {
+          "date": "2025-12-18",
+          "text": "Young Americans are especially at risk. So, unless a drug is recommended by a doctor for medical reasons, just don't do it. At the same time, the facts compel the federal government to recognize that ",
+          "event_type": "Remarks"
+        },
+        {
+          "date": "2025-12-18",
+          "text": "This can do it in a much lesser way, can make people feel much better that are living through tremendous pain and problems. 40 states and multiple US territories have already recognized the use of med",
+          "event_type": "Remarks"
+        }
+      ],
+      "fetched_at": "2026-07-03T12:19:01.188996Z"
+    },
+    "llm_response": "{\"prior\": 0.1, \"prior_basis\": \"The historical option rate is 1/10 (10%, n=10), which is a moderate-confidence anchor well below the series average of 53%. This aligns with the Poisson 365d baseline of 13.5%, and the 30d baseline of 0% due to a RECENT DROUGHT (0 mentions in last 30 days). The option has low base rate usage for Trump.\", \"updates_applied\": [{\"doc_id\": \"114cef7a-7c1f-423d-94c1-01c794266dc0\", \"direction\": \"+\", \"magnitude\": \"small\", \"reason\": \"Trump posted an image referencing Obama with a marijuana joint \\u2014 adjacent to the topic but not Trump personally saying 'marijuana/weed/cannabis'. Slight topical salience boost.\"}], \"posterior\": 0.1, \"probability\": 0.1, \"confidence\": 0.72, \"direction\": \"NO\", \"reasoning\": \"The RECENT DROUGHT flag (0 mentions in the last 30 days vs. a long-run average of ~0.7/month) strongly suppresses the Poisson baseline toward 0%, with the 365d rate yielding only 13.5%. The historical option rate of 10% (n=10) is a reliable moderate-confidence anchor that aligns with both Poisson baselines. One evidence document shows Trump posting an image referencing a marijuana joint associated with Obama, which is adjacent topical salience but does not constitute Trump himself saying the term \\u2014 warranting only a small positive adjustment that is insufficient to meaningfully move the posterior. With in_market_count=0 and a clear drought in recent usage, the posterior remains near 10%.\"}",
+    "prior_scheduled_signal": null,
+    "max_scheduled_interval_hours": 24.0,
+    "decision_context": {
+      "strategy": "PoliticsEdgeStrategy",
+      "bankroll": 1000.0,
+      "existing_market_exposure": 0.0,
+      "portfolio": {
+        "loss_exit_count": 0,
+        "market_open_exposure": 0.0,
+        "market_pending_exposure": 0.0,
+        "open_count": 0,
+        "pending_count": 0,
+        "open_exposure": 0.0,
+        "pending_exposure": 0.0,
+        "daily_pnl": 0.0
+      },
+      "risk_config": {}
+    }
+  },
+  "expectations": {
+    "prompt_version": "signal-v9",
+    "retrieval_hash": "819b96504d23f008a887fe41e70910932368f17adc4e8f02834d60533075020a",
+    "rendered_prompt": "=== MARKET CONTEXT ===\nQuestion: Will Trump say \"Marijuana / Weed / Cannabis\" before Jul 6, 2026? — Marijuana / Weed / Cannabis\nIf Marijuana / Weed / Cannabis, or a plural or possessive form of Marijuana / Weed / Cannabis, is stated by Donald Trump after June 29th, 2026 at 8:00am ET and before Jul 6, 2026 at 12:00am ET, then the market resolves to Yes.\nbold textThe word or phrase must be stated by President Donald Trump in public statements, direct quotes published by Source Agencies, or written public statements on his personal social media accounts (Twitter/Truth Social). Official acts like Executive Orders or bills signed do not count. Grammatical inflections for plurals and possessives are included (e.g., \"immigrant\" includes \"immigrants\" and \"immigrant's\"), but other tense inflections, hyphenated compounds, and synonyms are not included. For phrases with slashes like \"Doge/Dogecoin,\" either word satisfies the criterion. If the word must be said a minimum number of times, all instances must occur after market issuance.\n\nCategory: Mentions\nCurrent Date (UTC): 2026-06-29 22:52\nMarket Opened (Issuance Date): 2026-06-29T12:00:00+00:00\nMarket Closes: 2026-07-06T14:00:00+00:00 (6.6 days from now)\nWindow elapsed: 0.5 days  |  Window remaining: 6.6 days  |  f (fraction elapsed): 0.06\n\n=== HISTORICAL BASE RATE ===\nThis market is part of a recurring weekly series (KXTRUMPSAY / \"Marijuana / Weed / Cannabis\").\nSeries overall: 164 YES / 148 NO across all options and weeks (53%, n=312)\nThis option specifically: 1 YES / 9 NO (10%, n=10)\n\n=== PHRASE FREQUENCY DATA (FactBase) ===\nPhrase: \"Marijuana / Weed / Cannabis\"\nSpeaker: Donald Trump\n\nWindow fraction elapsed (f): 0.06  (0.5 of 7.1 days elapsed, 6.6 days remaining)\n\nOccurrence counts (Trump statements archive):\n  Since market opened : 0\n  Last 7 days         : 0\n  Last 30 days        : 0\n  Last 365 days       : 8\n\nDerived rates:\n  Annual rate (365d)   : 0.0219/day  (~0.15/week)\n  Recent rate (30d)    : 0.0000/day  (0 mentions in last 30 days)\n\nPoisson baseline P(≥1 occurrence in remaining 6.6 days):\n  Using 365d rate      : 13.5%\n  Using 30d rate       : 0.0%\n\nRECENT DROUGHT: count_30d (0) is well below the monthly average (0.7). Current usage rate appears suppressed. Weight the 30d Poisson baseline (lower).\n\nMost recent Trump quotes:\n  [2026-04-23] \"So, hopefully you don't need it, but if you do need it, I hear it's the best of all the alternatives. But I want to than\"  (Remarks)\n  [2025-12-18] \"Today, I'm pleased to announce that I will be signing an executive order to reschedule marijuana from a Schedule 1 to a \"  (Remarks)\n  [2025-12-18] \"You look -- I'm telling you, he looks better than he did 20 years ago, but I don't want to go through what you went thro\"  (Remarks)\n  [2025-12-18] \"Young Americans are especially at risk. So, unless a drug is recommended by a doctor for medical reasons, just don't do \"  (Remarks)\n  [2025-12-18] \"This can do it in a much lesser way, can make people feel much better that are living through tremendous pain and proble\"  (Remarks)\n\nINTERPRETATION:\n  in_market_count > 0: near-decisive YES (anchor ~0.95+).\n  in_market_count = 0: use the Poisson remaining-window baseline as your\n    probability estimate — NOT the historical option win rate (which reflects\n    full-window probability at f=0, not the conditional probability given\n    elapsed time without an occurrence).\n\n=== EVIDENCE ===\n[1] Trump posts boastful Atlas-inspired Truth Social image of himself carrying the world on his shoulders - President Donald Trump also posted an image comparing himself at age 20 to former President Barack Obama at age 18 in which Obama has a marijuana joint in his mouth\n    Source: r/politics (reddit)\n    Published: 2026-06-27T19:20:15+00:00\n    ID: 114cef7a-7c1f-423d-94c1-01c794266dc0\n    Trump posts boastful Atlas-inspired Truth Social image of himself carrying the world on his shoulders - President Donald Trump also posted an image comparing himself at age 20 to former President Barack Obama at age 18 in which Obama has a marijuana joint in his mouth\n\n[2] Bloomberg Daybreak: Europe : BLOOMBERG : June 1, 2026 1:00am-2:00am EDT\n    Source: TVArchive (tv_transcript)\n    Published: 2026-06-01T00:00:00+00:00\n    ID: 17c9f93a-725c-4d5e-815b-7b0af1406636\n    trump and the u.s. have made that very clear over recent weeks and i think the iranians do want something but they both seem to be holding out, you know, probably trying to negotiate the final terms, whether it is the exact details over how the strait of hormuz will be reopened or how much and how quickly iran's frozen funds abroad will be unfrozen and this type of thing but i think the trend is definitely in the direction of the deal even with these skirmishes we are seeing at the ones only a f\n\n[3] Trump in Truth Social rant drops vile nickname on NYT’s Haberman. And misspells it. Twice\n    Source: r/politics (reddit)\n    Published: 2026-06-29T15:19:51+00:00\n    ID: 1ef21e92-bee1-438d-9c62-c212819d12fa\n    Trump in Truth Social rant drops vile nickname on NYT’s Haberman. And misspells it. Twice\n\n[4] US President Donald Trump said on Saturday on Truth Social that US aircraft struck Iranian missile and drone storage locations as well as coastal radar sites, citing violations of a ceasefire agreement.\n    Source: r/Conservative (reddit)\n    Published: 2026-06-28T00:06:25+00:00\n    ID: 11e51488-03b7-4903-a122-fdecd456de07\n    US President Donald Trump said on Saturday on Truth Social that US aircraft struck Iranian missile and drone storage locations as well as coastal radar sites, citing violations of a ceasefire agreement.\n\n[5] Zohran Mamdani’s picks take key House primaries amid a broad battle over Democrat’s direction\n    Source: r/moderatepolitics (reddit)\n    Published: 2026-06-24T07:20:43+00:00\n    ID: 47cfbd4d-0d85-4609-b22f-4dca385c7833\n    There were primaries held across 4 U.S states on Tuesday night but the results in NYC will undoubtedly dominate national attention. Zohran Mamdani and his democratic socialist allies were the big winners with 3 of their endorsed Congressional House candidates winning their primaries. NYC comptroller Brad Lander dethroned Democratic Rep. Dan Goldman in NY’s 10th District. State legislator Claire Valdez won in the open 7th district. Both of these victories were by significant margins. The most sig\n\n[6] Trump Seethes Over Supreme Court Losses In Series Of Truth Social Posts\n    Source: r/politics (reddit)\n    Published: 2026-06-29T18:09:57+00:00\n    ID: b75db1c8-11d3-4b37-8ab7-0d34e7e0403f\n    Trump Seethes Over Supreme Court Losses In Series Of Truth Social Posts\n\n[7] A comprehensive plan to close the $1.9 trillion U.S. budget deficit\n    Source: r/moderatepolitics (reddit)\n    Published: 2026-06-24T13:30:33+00:00\n    ID: 4ef2c8e4-b600-42a8-a07d-da283d7d7113\n    I see endless talk about the United States’ federal budget deficit, which, according to CBO projections for fiscal year 2026, will reach $1.9 trillion on a $7.4 trillion budget. Unfortunately, the country hasn’t taken a serious run at addressing it in more than 25 years, feckless DOGE efforts aside. It sure feels like it's time, for at least two reasons: The U.S. national debt has reached 120% of GDP, which is dangerous when the bond investors who buy American debt grow skittish about the United\n",
+    "system_prompt_sha256": "8b92852b081cc81da903e707aa0df0d3df8813c6544a3253ba6e9cf262af0fe9",
+    "parsed": {
+      "prior": 0.1,
+      "posterior": 0.1,
+      "probability": 0.1,
+      "confidence": 0.72,
+      "direction": "NO",
+      "updates_count": 1
+    },
+    "edge": 0.010000000000000009,
+    "market_ask_at_signal": 0.89,
+    "entry": {
+      "would_trade": false,
+      "decline_reason": "strategy_declined",
+      "position_size_raw": 0.0,
+      "risk_allowed": false,
+      "risk_capped_size": 0.0,
+      "risk_reason": "",
+      "entry_price": null,
+      "contracts": 0
+    },
+    "skip_decisions": null
+  }
+}

@@ -29,6 +29,19 @@ log = structlog.get_logger(__name__)
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 _TOP_K = 10
 
+# Output budget for signal-analysis calls. Deliberately model-agnostic: the
+# `thinking` parameter is omitted so every model runs its own default (Sonnet
+# 4.6 / Haiku 4.5: no thinking; Sonnet 5: adaptive thinking ON by default;
+# Fable-class: always on). On default-thinking models, thinking output shares
+# this budget with the forced tool call — 1024 (the pre-2026-07 value) risks
+# the response truncating mid-thought before the tool call is emitted.
+# max_tokens is a ceiling, not a cost: non-thinking models bill identically
+# under 4096, and this matches the benchmark harness's candidate budget so
+# scripts/benchmark_signals.py results transfer to production behavior.
+# Do NOT pin `thinking: {"type": "disabled"}` instead — it is rejected with a
+# 400 on models where thinking is always on.
+_LLM_MAX_TOKENS = 4096
+
 
 def compute_signal_edge(
     direction: str,
@@ -247,7 +260,7 @@ class SignalPipeline:
                     system=SYSTEM_PROMPT,
                     cache_system=True,
                     market_id=market.id,
-                    max_tokens=1024,
+                    max_tokens=_LLM_MAX_TOKENS,
                     json_tool=SIGNAL_ANALYSIS_TOOL,
                 )
             except LLMError as exc:

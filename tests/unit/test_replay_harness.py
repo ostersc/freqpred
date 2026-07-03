@@ -429,3 +429,20 @@ def test_recorded_fixtures_cover_both_directions() -> None:
         load_fixture(p).expectations.parsed.direction for p in _recorded_fixture_paths()
     }
     assert {"YES", "NO"} <= directions
+
+
+def test_replay_system_prompt_change_requires_prompt_version_bump() -> None:
+    """SYSTEM_PROMPT edits are covered by the guard, not just build_prompt output."""
+    fixture = _make_fixture()
+    fixture.expectations.system_prompt_sha256 = "0" * 64  # as if recorded under another system prompt
+
+    result = replay_fixture(fixture, strategy=_PermissiveStrategy())
+    assert not result.passed
+    failure = next(c for c in result.failures if c.name == "system_prompt")
+    assert "bump PROMPT_VERSION" in failure.detail
+
+    # And a correct hash passes.
+    from freqpred.replay.engine import system_prompt_hash
+
+    fixture.expectations.system_prompt_sha256 = system_prompt_hash()
+    assert replay_fixture(fixture, strategy=_PermissiveStrategy()).passed

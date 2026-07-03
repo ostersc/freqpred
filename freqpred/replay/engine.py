@@ -23,6 +23,7 @@ produces a fresh FixtureExpectations from inputs alone.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 
@@ -40,7 +41,12 @@ from freqpred.replay.fixtures import (
     ReplayFixture,
 )
 from freqpred.signal.cache import cooldown_decision, scheduled_skip_decision
-from freqpred.signal.llm import PROMPT_VERSION, build_prompt, parse_signal_response
+from freqpred.signal.llm import (
+    PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    build_prompt,
+    parse_signal_response,
+)
 from freqpred.signal.models import Signal
 from freqpred.signal.pipeline import compute_signal_edge
 from freqpred.strategy.base import IPredictionStrategy
@@ -48,6 +54,16 @@ from freqpred.strategy.loader import load_strategy
 from freqpred.trading.risk import RiskEngine
 
 _FLOAT_TOL = 1e-9
+
+
+def system_prompt_hash() -> str:
+    """SHA-256 of the current SYSTEM_PROMPT.
+
+    Snapshotted into fixture expectations so a SYSTEM_PROMPT edit without a
+    PROMPT_VERSION bump fails replay — the rendered-prompt check only covers
+    build_prompt's user-prompt output.
+    """
+    return hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
 
 
 class ReplayError(Exception):
@@ -180,6 +196,24 @@ def replay_entry_decision(
     return decision
 
 
+def render_prompt_from_inputs(inputs: FixtureInputs) -> str:
+    """Render the signal-analysis prompt from a fixture's structured inputs.
+
+    This is what makes fixtures reusable as benchmark scenarios (T93): a
+    modified prompt template re-renders against the same frozen inputs,
+    which verbatim ``raw_context`` replay cannot do.
+    """
+    return build_prompt(
+        inputs.market.to_market(inputs.now),
+        [fd.to_document() for fd in inputs.documents],
+        series_history=(
+            inputs.series_history.to_series_history() if inputs.series_history else None
+        ),
+        phrase_data=inputs.phrase_data.to_phrase_data() if inputs.phrase_data else None,
+        _now=inputs.now,
+    )
+
+
 def compute_expectations(
     inputs: FixtureInputs,
     strategy: IPredictionStrategy | None = None,
@@ -196,15 +230,7 @@ def compute_expectations(
 
     retrieval_hash = compute_retrieval_hash([d.id for d in docs])
 
-    rendered_prompt = build_prompt(
-        market,
-        docs,
-        series_history=(
-            inputs.series_history.to_series_history() if inputs.series_history else None
-        ),
-        phrase_data=inputs.phrase_data.to_phrase_data() if inputs.phrase_data else None,
-        _now=inputs.now,
-    )
+    rendered_prompt = render_prompt_from_inputs(inputs)
 
     parsed = parse_signal_response(inputs.llm_response)
     if parsed is None:
@@ -270,6 +296,7 @@ def compute_expectations(
         prompt_version=PROMPT_VERSION,
         retrieval_hash=retrieval_hash,
         rendered_prompt=rendered_prompt,
+        system_prompt_sha256=system_prompt_hash(),
         parsed=FixtureParsed(
             prior=parsed["prior"],
             posterior=parsed["posterior"],
@@ -323,9 +350,21 @@ def replay_fixture(
         "selected document set changed",
     )
 
-    # Prompt snapshot + PROMPT_VERSION guard.
+    # Prompt snapshot + PROMPT_VERSION guard. Covers both halves of the prompt:
+    # the rendered user prompt (byte-exact) and the SYSTEM_PROMPT (by hash).
     prompt_matches = actual.rendered_prompt == expected.rendered_prompt
     version_matches = PROMPT_VERSION == expected.prompt_version
+    system_matches = actual.system_prompt_sha256 == expected.system_prompt_sha256
+    if version_matches:
+        check(
+            "system_prompt",
+            system_matches,
+            "SYSTEM_PROMPT changed but PROMPT_VERSION is still "
+            f"{PROMPT_VERSION!r} — bump PROMPT_VERSION for an intentional prompt "
+            "change, or regenerate fixtures (FREQPRED_UPDATE_FIXTURES=1 pytest / "
+            "freqpred fixtures replay --update) if this fixture predates the "
+            "system-prompt guard",
+        )
     if prompt_matches and version_matches:
         check("rendered_prompt", True)
     elif not prompt_matches and version_matches:

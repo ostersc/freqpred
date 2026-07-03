@@ -2153,3 +2153,109 @@ def fixtures_replay(paths: tuple[Path, ...], update: bool) -> None:
 
     if any_failed:
         raise SystemExit(1)
+
+
+@fixtures.command(name="record-bank")
+@click.option(
+    "--out-dir", type=click.Path(path_type=Path), default=Path("benchmarks/prompt_bank"),
+    show_default=True,
+    help="Directory for the bank (gitignored — regenerable from the DB anytime).",
+)
+@click.option(
+    "--strategy", "strategy_name", default="PoliticsEdgeStrategy", show_default=True,
+    help="Strategy used for the fixtures' entry-decision expectations.",
+)
+@click.option("--limit", type=int, default=None, help="Max markets (default: all).")
+@click.pass_context
+def fixtures_record_bank(
+    ctx: click.Context, out_dir: Path, strategy_name: str, limit: int | None
+) -> None:
+    """Build the prompt-mode scenario bank from resolved markets.
+
+    Records a frozen-context fixture from each finalized binary market's last
+    LLM-backed signal under the current prompt version. Inputs are parsed from
+    the stored raw_context (never the live tables, which now contain the
+    outcome) and verified by byte-exact re-render — signals that fail the
+    round-trip are skipped, not written.
+    """
+    config = ctx.obj["config"]
+    asyncio.run(_fixtures_record_bank(config, out_dir, strategy_name, limit))
+
+
+async def _fixtures_record_bank(
+    config: object, out_dir: Path, strategy_name: str, limit: int | None
+) -> None:
+    from sqlalchemy import select  # noqa: PLC0415
+    from sqlalchemy.orm import aliased  # noqa: PLC0415
+
+    import freqpred.ingestion.models  # noqa: F401, PLC0415
+    import freqpred.llm.models  # noqa: F401, PLC0415
+    import freqpred.rag.models  # noqa: F401, PLC0415
+    from freqpred.db import make_engine, make_session_factory  # noqa: PLC0415
+    from freqpred.markets.models import MarketRow  # noqa: PLC0415
+    from freqpred.replay import RecordingError, record_fixture, save_fixture  # noqa: PLC0415
+    from freqpred.signal.llm import PROMPT_VERSION  # noqa: PLC0415
+    from freqpred.signal.models import SignalRow  # noqa: PLC0415
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+    try:
+        async with session_factory() as session:
+            dedup = (
+                select(SignalRow)
+                .join(MarketRow, MarketRow.id == SignalRow.market_id)
+                .where(
+                    SignalRow.llm_query_id.isnot(None),
+                    MarketRow.status == "finalized",
+                    MarketRow.result.in_(("yes", "no")),
+                )
+                .distinct(SignalRow.market_id)
+                .order_by(SignalRow.market_id, SignalRow.created_at.desc())
+            ).subquery()
+            alias = aliased(SignalRow, dedup)
+            stmt = select(alias).order_by(alias.created_at.desc())
+            if limit:
+                stmt = stmt.limit(limit)
+            signals = (await session.execute(stmt)).scalars().all()
+            click.echo(
+                f"{len(signals)} resolved binary market(s) with an LLM-backed signal"
+            )
+
+            recorded = 0
+            skip_reasons: dict[str, int] = {}
+            for signal in signals:
+                if signal.prompt_version != PROMPT_VERSION:
+                    skip_reasons[f"prompt_version {signal.prompt_version}"] = (
+                        skip_reasons.get(f"prompt_version {signal.prompt_version}", 0) + 1
+                    )
+                    continue
+                try:
+                    fixture, _warnings = await record_fixture(
+                        session,
+                        signal.id,
+                        strategy_name=strategy_name,
+                        frozen_context=True,
+                        description=(
+                            "prompt-mode scenario bank: frozen-context recording "
+                            "from a resolved market (as-of inputs parsed from "
+                            "raw_context; round-trip verified byte-exact)"
+                        ),
+                    )
+                except RecordingError as exc:
+                    reason = str(exc).split(":")[0]
+                    skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                    continue
+                save_fixture(fixture, out_dir / f"{fixture.name}.json")
+                recorded += 1
+
+        click.echo(f"Recorded {recorded} fixture(s) -> {out_dir}")
+        if skip_reasons:
+            click.echo("Skipped:")
+            for reason, count in sorted(skip_reasons.items(), key=lambda kv: -kv[1]):
+                click.echo(f"  {count:4d}  {reason}")
+    finally:
+        await engine.dispose()

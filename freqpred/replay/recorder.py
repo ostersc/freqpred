@@ -34,6 +34,13 @@ from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow
 from freqpred.metrics.series_history import get_series_history_for_market
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
+from freqpred.replay.context_parser import (
+    FrozenContextParseError,
+    parse_evidence_docs,
+    parse_market_context,
+    parse_phrase_block,
+    parse_series_block,
+)
 from freqpred.replay.engine import compute_expectations
 from freqpred.replay.fixtures import (
     FixtureDecisionContext,
@@ -107,11 +114,20 @@ async def record_fixture(
     bankroll: float = 1000.0,
     name: str | None = None,
     description: str = "",
+    frozen_context: bool = False,
 ) -> tuple[ReplayFixture, list[str]]:
     """Build a ReplayFixture from a real signal. Returns (fixture, warnings).
 
     The signal must have called the LLM (``llm_query_id`` set) — price-moved
     repricing clones carry no response to mock.
+
+    ``frozen_context=True`` reconstructs the series-history/FactBase inputs by
+    parsing the stored ``raw_context`` instead of reading the live tables, and
+    requires the re-rendered prompt to match ``raw_context`` **byte-exactly**
+    (RecordingError otherwise). This is mandatory for already-resolved markets:
+    the live tables now contain the outcome (the settled market's result is in
+    the series counts; ``in_market_count`` includes the occurrence that
+    resolved it), so live-table inputs would leak the answer into the prompt.
     """
     warnings: list[str] = []
 
@@ -142,6 +158,11 @@ async def record_fixture(
 
     now = _parse_prompt_now(signal.raw_context)
     if now is None:
+        if frozen_context:
+            raise RecordingError(
+                "frozen-context recording requires the 'Current Date' line in "
+                "raw_context (round-trip verification needs the exact clock)"
+            )
         now = signal.created_at
         warnings.append(
             "could not parse 'Current Date' from raw_context — using "
@@ -184,26 +205,61 @@ async def record_fixture(
     }
 
     fixture_docs = []
-    for doc_id in source_ids:
-        row = doc_rows[doc_id]
-        body_cap = _BODY_CAP_WITH_SUMMARY if row.summary else _BODY_CAP_NO_SUMMARY
-        fixture_docs.append(
-            FixtureDocument(
-                id=str(row.id),
-                source_url=row.source_url,
-                content_hash=row.content_hash,
-                title=row.title,
-                body=row.body[:body_cap],
-                summary=row.summary,
-                source_type=row.source_type,
-                source_name=row.source_name,
-                category=row.category,
-                tags=list(row.tags),
-                published_at=row.published_at,
-                fetched_at=row.fetched_at,
-                similarity_score=scores.get(doc_id, 0.0),
+    if frozen_context:
+        # Live doc rows are upserted on re-fetch, so their content drifts —
+        # take title/source/published_at/excerpt from the frozen prompt and
+        # keep only the immutable identity fields (source_url) from the rows.
+        try:
+            parsed_docs = parse_evidence_docs(signal.raw_context)
+        except FrozenContextParseError as exc:
+            raise RecordingError(f"frozen-context parse failed: {exc}") from exc
+        if [d["id"] for d in parsed_docs] != [str(s) for s in source_ids]:
+            raise RecordingError(
+                "evidence doc IDs in raw_context don't match signal.sources"
             )
-        )
+        for parsed in parsed_docs:
+            doc_id = uuid.UUID(parsed["id"])
+            row = doc_rows[doc_id]
+            fixture_docs.append(
+                FixtureDocument(
+                    id=parsed["id"],
+                    source_url=row.source_url,
+                    content_hash=row.content_hash,
+                    title=parsed["title"],
+                    # The rendered excerpt round-trips: build_prompt's
+                    # truncate/normalize is idempotent on it.
+                    body=parsed["excerpt"],
+                    summary=None,
+                    source_type=parsed["source_type"],
+                    source_name=parsed["source_name"],
+                    category=row.category,
+                    tags=[],
+                    published_at=parsed["published_at"],
+                    fetched_at=now,
+                    similarity_score=scores.get(doc_id, 0.0),
+                )
+            )
+    else:
+        for doc_id in source_ids:
+            row = doc_rows[doc_id]
+            body_cap = _BODY_CAP_WITH_SUMMARY if row.summary else _BODY_CAP_NO_SUMMARY
+            fixture_docs.append(
+                FixtureDocument(
+                    id=str(row.id),
+                    source_url=row.source_url,
+                    content_hash=row.content_hash,
+                    title=row.title,
+                    body=row.body[:body_cap],
+                    summary=row.summary,
+                    source_type=row.source_type,
+                    source_name=row.source_name,
+                    category=row.category,
+                    tags=list(row.tags),
+                    published_at=row.published_at,
+                    fetched_at=row.fetched_at,
+                    similarity_score=scores.get(doc_id, 0.0),
+                )
+            )
 
     cat_result = await session.execute(
         select(CatalystQueryRow)
@@ -216,59 +272,78 @@ async def record_fixture(
     catalyst_queries = [row.query_text for row in cat_result.scalars().all()]
 
     series_history = None
-    if "=== HISTORICAL BASE RATE ===" in signal.raw_context and market_row.series_ticker:
-        option_code = (
-            signal.market_id.rsplit("-", 1)[-1] if "-" in signal.market_id else signal.market_id
-        )
-        history = await get_series_history_for_market(
-            session, market_row.series_ticker, option_code
-        )
-        if history is not None:
-            def _counts(row) -> FixtureSeriesCounts | None:  # noqa: ANN001 — ORM row
-                if row is None:
-                    return None
-                return FixtureSeriesCounts(
-                    option_label=row.option_label,
-                    yes_count=row.yes_count,
-                    no_count=row.no_count,
+    phrase_data = None
+    if frozen_context:
+        # Resolved-market safe path: parse the as-of state from the frozen
+        # prompt — never from the live tables, which now contain the outcome.
+        try:
+            series_history = parse_series_block(signal.raw_context, signal.market_id)
+            phrase_data = parse_phrase_block(signal.raw_context, fetched_at=now)
+            # Market rows drift after resolution (category re-bucketed, early
+            # determinations rewrite close_time, rules amendments rewrite the
+            # question) — take the as-of values from the frozen prompt.
+            market_context = parse_market_context(signal.raw_context)
+        except FrozenContextParseError as exc:
+            raise RecordingError(f"frozen-context parse failed: {exc}") from exc
+    else:
+        market_context = {
+            "question": market_row.question,
+            "category": market_row.category,
+            "open_time": market_row.open_time,
+            "close_time": market_row.close_time,
+        }
+        if "=== HISTORICAL BASE RATE ===" in signal.raw_context and market_row.series_ticker:
+            option_code = (
+                signal.market_id.rsplit("-", 1)[-1] if "-" in signal.market_id else signal.market_id
+            )
+            history = await get_series_history_for_market(
+                session, market_row.series_ticker, option_code
+            )
+            if history is not None:
+                def _counts(row) -> FixtureSeriesCounts | None:  # noqa: ANN001 — ORM row
+                    if row is None:
+                        return None
+                    return FixtureSeriesCounts(
+                        option_label=row.option_label,
+                        yes_count=row.yes_count,
+                        no_count=row.no_count,
+                    )
+
+                series_history = FixtureSeriesHistory(
+                    series_ticker=history["series_ticker"],
+                    option_code=history["option_code"],
+                    series_row=_counts(history["series_row"]),
+                    option_row=_counts(history["option_row"]),
+                )
+            else:
+                warnings.append(
+                    "original prompt had a HISTORICAL BASE RATE block but no series "
+                    "history rows exist now — fixture omits the block"
                 )
 
-            series_history = FixtureSeriesHistory(
-                series_ticker=history["series_ticker"],
-                option_code=history["option_code"],
-                series_row=_counts(history["series_row"]),
-                option_row=_counts(history["option_row"]),
-            )
-        else:
-            warnings.append(
-                "original prompt had a HISTORICAL BASE RATE block but no series "
-                "history rows exist now — fixture omits the block"
-            )
-
-    phrase_data = None
-    if "=== PHRASE FREQUENCY DATA" in signal.raw_context:
-        fb_row = (
-            await session.execute(
-                select(FactbasePhraseRow).where(FactbasePhraseRow.market_id == signal.market_id)
-            )
-        ).scalar_one_or_none()
-        if fb_row is not None:
-            phrase_data = FixturePhraseData(
-                display_phrase=fb_row.display_phrase,
-                api_query=fb_row.api_query,
-                speaker_slug=fb_row.speaker_slug,
-                in_market_count=fb_row.in_market_count,
-                count_7d=fb_row.count_7d,
-                count_30d=fb_row.count_30d,
-                count_365d=fb_row.count_365d,
-                top_quotes=list(fb_row.top_quotes or []),
-                fetched_at=fb_row.last_fetched_at,
-            )
-        else:
-            warnings.append(
-                "original prompt had a PHRASE FREQUENCY DATA block but no "
-                "factbase row exists now — fixture omits the block"
-            )
+        if "=== PHRASE FREQUENCY DATA" in signal.raw_context:
+            fb_row = (
+                await session.execute(
+                    select(FactbasePhraseRow).where(FactbasePhraseRow.market_id == signal.market_id)
+                )
+            ).scalar_one_or_none()
+            if fb_row is not None:
+                phrase_data = FixturePhraseData(
+                    display_phrase=fb_row.display_phrase,
+                    api_query=fb_row.api_query,
+                    speaker_slug=fb_row.speaker_slug,
+                    in_market_count=fb_row.in_market_count,
+                    count_7d=fb_row.count_7d,
+                    count_30d=fb_row.count_30d,
+                    count_365d=fb_row.count_365d,
+                    top_quotes=list(fb_row.top_quotes or []),
+                    fetched_at=fb_row.last_fetched_at,
+                )
+            else:
+                warnings.append(
+                    "original prompt had a PHRASE FREQUENCY DATA block but no "
+                    "factbase row exists now — fixture omits the block"
+                )
 
     prior_row = (
         await session.execute(
@@ -301,10 +376,10 @@ async def record_fixture(
         market=FixtureMarket(
             id=market_row.id,
             platform=market_row.platform,
-            question=market_row.question,
-            category=market_row.category,
-            close_time=market_row.close_time,
-            open_time=market_row.open_time,
+            question=market_context["question"],
+            category=market_context["category"],
+            close_time=market_context["close_time"],
+            open_time=market_context["open_time"],
             yes_bid=yes_bid,
             yes_ask=yes_ask,
             mid_price=signal.market_mid_at_signal,
@@ -333,12 +408,18 @@ async def record_fixture(
 
     # Sanity checks against the historical record — drift here doesn't make the
     # fixture invalid (expectations are self-consistent with its inputs) but
-    # the operator should know what changed.
+    # the operator should know what changed. In frozen-context mode this is a
+    # hard gate: byte-equality proves the reconstruction is exact (no leakage,
+    # no drift); anything less is a corrupt fixture and must not be written.
     if fixture.expectations.rendered_prompt != signal.raw_context:
+        diff = _first_diff_preview(signal.raw_context, fixture.expectations.rendered_prompt)
+        if frozen_context:
+            raise RecordingError(
+                f"frozen-context round-trip failed (re-render != raw_context): {diff}"
+            )
         warnings.append(
             "re-rendered prompt differs from the signal's stored raw_context "
-            "(clock precision or content drift since the signal): "
-            + _first_diff_preview(signal.raw_context, fixture.expectations.rendered_prompt)
+            "(clock precision or content drift since the signal): " + diff
         )
     if fixture.expectations.retrieval_hash != signal.retrieval_hash:
         warnings.append(

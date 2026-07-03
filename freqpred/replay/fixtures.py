@@ -277,6 +277,10 @@ class FixtureExpectations(BaseModel):
     prompt_version: str
     retrieval_hash: str
     rendered_prompt: str
+    # SHA-256 of SYSTEM_PROMPT at record time. The rendered_prompt snapshot only
+    # covers build_prompt's user-prompt output — without this, SYSTEM_PROMPT
+    # could change without a PROMPT_VERSION bump and every fixture stays green.
+    system_prompt_sha256: str = ""
     parsed: FixtureParsed
     edge: float
     market_ask_at_signal: float | None = None

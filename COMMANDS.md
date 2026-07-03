@@ -221,6 +221,30 @@ Snapshots one LLM-backed signal into a deterministic replay fixture under `tests
 
 ---
 
+### `fixtures record-bank` — build the prompt-mode scenario bank from resolved markets
+
+```bash
+uv run freqpred fixtures record-bank                       # all resolved markets, current prompt version
+uv run freqpred fixtures record-bank --out-dir benchmarks/prompt_bank --limit 100
+```
+
+Records a **frozen-context** fixture from each finalized binary market's last LLM-backed signal. Unlike plain `fixtures record`, inputs are parsed from the signal's stored `raw_context` — never from the live tables, which contain the outcome after resolution (`in_market_count` includes the occurrence that resolved the market; the series counts include the market's own settlement; the market row's category/close_time/question drift). Every fixture is verified by re-rendering and requiring **byte-equality** with the stored prompt; signals that fail the round-trip (or predate the current prompt version) are skipped, never written.
+
+The output directory is gitignored — the bank is regenerable from the DB anytime. Use it as the scenario source for prompt benchmarking:
+
+```bash
+uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/prompt_bank \
+    --training-cutoff 2026-03-01 --limit 250
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--out-dir` | `benchmarks/prompt_bank` | Bank directory (gitignored) |
+| `--strategy` | `PoliticsEdgeStrategy` | Strategy for the fixtures' entry-decision expectations |
+| `--limit` | all | Max markets |
+
+---
+
 ### `fixtures replay` — replay fixtures and report regressions
 
 ```bash
