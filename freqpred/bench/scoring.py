@@ -134,20 +134,38 @@ def trade_decision(
     "better Brier but too timid to trade" candidate). Edge uses the same
     side-specific ask arithmetic as production (`compute_signal_edge`).
 
+    Beyond min_edge/min_confidence, the gate applies the signal-level entry
+    filters from the strategy's config, mirroring ``should_trade``:
+    ``max_edge`` (a huge edge usually means the market is right and the model
+    is wrong) and ``min_mid_price``/``max_mid_price`` on the entry side's own
+    cost (longshot/decided-market filter). Market-selection filters (volume,
+    category, days-to-close) and the spread gate are not replayable from a
+    frozen scenario and are identical for both sides of a comparison.
+
     EV per contract at settlement: YES pays ``outcome - yes_ask``; NO pays
     ``(1 - outcome) - no_ask``. ``stake`` is the *strategy's* own
     ``position_size()`` for a Signal built from this output's posterior and
     confidence (zero existing exposure, no assessment), and ``pnl`` is the
     settlement P&L of that stake (stake dollars buy stake/side_ask contracts)
-    — overconfidence when wrong loses proportionally more.
+    — overconfidence when wrong loses proportionally more. Two deliberate
+    simplifications vs live: entry fills at the frozen ask (production posts
+    resting limits at estimated_probability - min_edge), and positions ride
+    to settlement (production exits via stoploss/signal/force_exit).
     """
     edge, side_ask = compute_signal_edge(
         output.direction, output.posterior, scenario.yes_bid, scenario.yes_ask
+    )
+    cfg = strategy.config
+    side_price = (
+        1.0 - scenario.mid_price if output.direction == "NO" else scenario.mid_price
     )
     would = (
         output.direction in ("YES", "NO")
         and edge >= min_edge
         and output.confidence >= min_confidence
+        and (cfg.max_edge is None or edge <= cfg.max_edge)
+        and (cfg.min_mid_price is None or side_price >= cfg.min_mid_price)
+        and (cfg.max_mid_price is None or side_price <= cfg.max_mid_price)
     )
     ev: float | None = None
     stake: float | None = None

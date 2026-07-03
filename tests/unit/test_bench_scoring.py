@@ -189,6 +189,65 @@ def test_per_trade_ev_yes_and_no() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_gate_applies_strategy_entry_filters_yes_and_no() -> None:
+    """max_edge and the side-price band from the strategy config must block
+    exactly the trades production should_trade blocks — a huge edge or a
+    longshot entry price is a no-trade even when min_edge/min_confidence pass."""
+
+    class _Filtered(IPredictionStrategy):
+        config = StrategyConfig(
+            name="filtered",
+            min_confidence=0.60,
+            max_exposure_per_market=1.0,
+            kelly_fraction=1.0,
+            categories=[],
+            min_volume_24h=0.0,
+            max_days_to_close=365.0,
+            min_days_to_close=0.0,
+            max_edge=0.40,
+            min_mid_price=0.10,
+            max_mid_price=0.95,
+        )
+
+    strategy = _Filtered()
+
+    # YES longshot: market at 7c — edge 0.89 > max_edge AND side price < 0.10.
+    longshot_yes = trade_decision(
+        _output("YES", 0.97, confidence=0.95),
+        _scenario(yes_bid=0.06, yes_ask=0.08),
+        strategy=strategy,
+    )
+    assert longshot_yes.would_trade is False
+
+    # NO longshot: market at 0.97 — NO side costs 0.03 < 0.10, edge in band.
+    longshot_no = trade_decision(
+        _output("NO", 0.80, confidence=0.80),
+        _scenario(yes_bid=0.96, yes_ask=0.98),
+        strategy=strategy,
+    )
+    assert 0.15 <= longshot_no.edge <= 0.40  # blocked by price, not by edge
+    assert longshot_no.would_trade is False
+
+    # max_edge alone: side price fine (0.30), edge 0.58 too large.
+    overconfident = trade_decision(
+        _output("YES", 0.90, confidence=0.90),
+        _scenario(yes_bid=0.28, yes_ask=0.32),
+        strategy=strategy,
+    )
+    assert overconfident.edge > 0.40
+    assert overconfident.would_trade is False
+
+    # Within all bands → trades (both directions).
+    ok_yes = trade_decision(
+        _output("YES", 0.70), _scenario(yes_bid=0.48, yes_ask=0.50), strategy=strategy
+    )
+    ok_no = trade_decision(
+        _output("NO", 0.30), _scenario(yes_bid=0.48, yes_ask=0.50), strategy=strategy
+    )
+    assert ok_yes.would_trade is True
+    assert ok_no.would_trade is True
+
+
 def test_stake_is_production_kelly_hand_computed_yes_and_no() -> None:
     """The stake is the strategy's real position_size — at unit constants the
     numbers are hand-checkable Kelly: b=(1-ask)/ask, p_adj=c*p+(1-c)*ask,
