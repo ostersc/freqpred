@@ -25,12 +25,12 @@ import websockets
 from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from freqpred.markets.kalshi import KalshiClient
 from freqpred.markets.models import MarketRow, PositionRow
 from freqpred.trading import ledger
 
 if TYPE_CHECKING:
     from freqpred.alerts.dispatcher import AlertDispatcher
-    from freqpred.markets.kalshi import KalshiClient
     from freqpred.runtime.telemetry import RuntimeTelemetry
     from freqpred.trading.order_manager import OrderManager
     from freqpred.trading.position_monitor import PositionMonitor
@@ -607,16 +607,57 @@ class PositionWatcher:
             }
 
             # Sync DB → Kalshi.
-            rows_to_auto_close: list[tuple[str, float]] = []  # (position_id, exit_price)
+            # (position_id, exit_price, exit_reason, resolution)
+            rows_to_auto_close: list[tuple[str, float, str, int | None]] = []
             for market_id, rows in db_rows_by_market.items():
                 net = kalshi_net.get(market_id, 0)
                 db_total = sum(row.contracts for row in rows)
                 if net == 0:
-                    # Kalshi has no position — auto-close every row at effective price.
+                    # Kalshi net=0 is ambiguous: it means either (a) the position was
+                    # manually closed externally while the market is still active, or
+                    # (b) the market resolved and Kalshi already paid out/removed the
+                    # position. Case (b) is common right here — this runs on every WS
+                    # reconnect, and a "determined" event (which normally closes
+                    # positions at the true settlement price) can be missed during the
+                    # very disconnect window that triggers this reconcile. The local
+                    # MarketRow may not reflect the resolution yet either, since that
+                    # same missed event is what would have updated it. So ask Kalshi
+                    # directly rather than assuming (a) and closing at a stale mid_price
+                    # — that previously caused a resolved winning YES position to be
+                    # booked as a loss at exit_price=0.5 instead of the true 1.0 payout.
+                    settlement_result, settlement_value = await self._fetch_settlement_result(
+                        market_id
+                    )
+                    if settlement_result is not None:
+                        resolution = 1 if settlement_result.lower() == "yes" else 0
+                        for row in rows:
+                            wins = row.direction.upper() == settlement_result.upper()
+                            if settlement_value is not None:
+                                exit_price = (
+                                    settlement_value
+                                    if row.direction.upper() == "YES"
+                                    else round(1.0 - settlement_value, 4)
+                                )
+                            else:
+                                exit_price = 1.0 if wins else 0.0
+                            rows_to_auto_close.append(
+                                (str(row.id), exit_price, "market_resolved", resolution)
+                            )
+                            log.warning(
+                                "position_watcher.reconcile_resolved_close",
+                                market_id=market_id,
+                                position_id=str(row.id),
+                                exit_price=exit_price,
+                                result=settlement_result,
+                            )
+                        continue
+                    # Not resolved (or couldn't be confirmed) — genuine external close.
                     mid = market_mids.get(market_id, 0.0)
                     for row in rows:
                         exit_price = 1.0 - mid if row.direction == "NO" else mid
-                        rows_to_auto_close.append((str(row.id), exit_price))
+                        rows_to_auto_close.append(
+                            (str(row.id), exit_price, "reconcile_auto_close", None)
+                        )
                         log.warning(
                             "position_watcher.reconcile_auto_close",
                             market_id=market_id,
@@ -652,13 +693,14 @@ class PositionWatcher:
 
             # Auto-close zero-net positions in fresh sessions (ledger.close_position
             # needs its own session since it loads and commits the row internally).
-            for position_id, exit_price in rows_to_auto_close:
+            for position_id, exit_price, exit_reason, resolution in rows_to_auto_close:
                 async with self._session_factory() as close_session:
                     await ledger.close_position(
                         close_session,
                         position_id,
                         exit_price=exit_price,
-                        exit_reason="reconcile_auto_close",
+                        exit_reason=exit_reason,
+                        resolution=resolution,
                     )
 
         # Log Kalshi-only positions (manual trades outside freqpred).
@@ -669,6 +711,36 @@ class PositionWatcher:
                     market_id=market_id,
                     hint="manual trade placed outside freqpred, skipping",
                 )
+
+    async def _fetch_settlement_result(
+        self, market_id: str
+    ) -> tuple[str | None, float | None]:
+        """Ask Kalshi directly whether a market has resolved, bypassing the local DB.
+
+        Used only from the reconcile net=0 path, where the local MarketRow can't be
+        trusted: net=0 there can itself be a symptom of a missed WS ``determined``
+        event, which is the same event that would have updated MarketRow.result.
+        Falls back to the settled-list endpoint since Kalshi purges finalized
+        markets from ``GET /markets/{ticker}`` (mirrors
+        ``MarketWatcher._resolve_settled_open_positions``). Returns ``(None, None)``
+        if the result can't be confirmed either way.
+        """
+        try:
+            market = await self._kalshi_client.get_market(market_id)
+            if market.result is not None:
+                return market.result, market.settlement_value
+        except Exception:
+            log.warning("position_watcher.reconcile_settlement_lookup_failed", market_id=market_id)
+        if isinstance(self._kalshi_client, KalshiClient):
+            try:
+                settled = await self._kalshi_client.get_market_from_settled(market_id)
+                if settled is not None and settled.result is not None:
+                    return settled.result, settled.settlement_value
+            except Exception:
+                log.warning(
+                    "position_watcher.reconcile_settled_lookup_failed", market_id=market_id
+                )
+        return None, None
 
     # ------------------------------------------------------------------
     # Subscription helpers

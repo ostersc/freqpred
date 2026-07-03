@@ -42,6 +42,10 @@ def _make_watcher(
     kalshi_client = MagicMock()
     kalshi_client._make_auth_headers.return_value = {}
     kalshi_client.get_positions = AsyncMock(return_value=[])
+    # Default: market not resolved, so net=0 reconcile falls through to the
+    # legacy external-close-at-mid path unless a test overrides this.
+    kalshi_client.get_market = AsyncMock(return_value=MagicMock(result=None, settlement_value=None))
+    kalshi_client.get_market_from_settled = AsyncMock(return_value=None)
 
     session_factory = MagicMock()
     mock_session = AsyncMock()
@@ -87,6 +91,7 @@ def _make_position_row(
     contracts: int = 10,
     status: str = "open",
     mode: str = "live",
+    direction: str = "YES",
 ) -> MagicMock:
     row = MagicMock()
     row.id = uuid.uuid4()
@@ -94,6 +99,7 @@ def _make_position_row(
     row.contracts = contracts
     row.status = status
     row.mode = mode
+    row.direction = direction
     return row
 
 
@@ -546,6 +552,153 @@ async def test_reconcile_closes_position_when_kalshi_has_zero() -> None:
     mock_ledger.close_position.assert_awaited_once()
     call_kwargs = mock_ledger.close_position.call_args_list[0].kwargs
     assert call_kwargs.get("exit_reason") == "reconcile_auto_close"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closes_at_settlement_price_when_market_resolved_yes() -> None:
+    """Kalshi net=0 for a market that has actually resolved YES → close at the true
+    settlement price (1.0 for a winning YES position), not the stale mid_price.
+
+    Regression test for a live incident: a WS disconnect during market settlement
+    caused the "determined" event (which normally closes at the settlement price)
+    to be missed. On reconnect, net=0 was misread as a manual external close and
+    positions were closed at mid_price (0.5), booking a loss on what was actually
+    a winning position that Kalshi had already paid out at $1.00/contract.
+    """
+    watcher, kalshi_client, session_factory, _, _ = _make_watcher()
+
+    db_row = _make_position_row(market_id="MKT-X", contracts=3, direction="YES")
+    market_row = MagicMock()
+    market_row.id = "MKT-X"
+    market_row.mid_price = 0.5  # stale — must NOT be used once resolution is confirmed
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _make_db_result([db_row])
+        return _make_db_result([market_row])
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    kalshi_client.get_positions = AsyncMock(return_value=[])
+    # get_positions() returns [] overall would trip the empty-response guard, so
+    # give it an unrelated market too, matching how Kalshi actually behaves —
+    # this market is genuinely absent (net=0) because it settled, not because
+    # the whole response was empty.
+    other_pos = MagicMock()
+    other_pos.market_id = "OTHER-MKT"
+    other_pos.contracts = 5
+    kalshi_client.get_positions = AsyncMock(return_value=[other_pos])
+    kalshi_client.get_market = AsyncMock(
+        return_value=MagicMock(result="yes", settlement_value=None)
+    )
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        mock_ledger.close_position = AsyncMock()
+        async with session_factory() as session:
+            await watcher._detect_external_drift(session)
+
+    mock_ledger.close_position.assert_awaited_once()
+    call_kwargs = mock_ledger.close_position.call_args_list[0].kwargs
+    assert call_kwargs.get("exit_price") == 1.0
+    assert call_kwargs.get("exit_reason") == "market_resolved"
+    assert call_kwargs.get("resolution") == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closes_at_settlement_price_for_losing_no_position() -> None:
+    """Same scenario but a NO position on a market that resolved YES (scalar
+    settlement_value present) → exit_price = 1.0 - settlement_value = 0.0."""
+    watcher, kalshi_client, session_factory, _, _ = _make_watcher()
+
+    db_row = _make_position_row(market_id="MKT-X", contracts=3, direction="NO")
+    market_row = MagicMock()
+    market_row.id = "MKT-X"
+    market_row.mid_price = 0.5
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _make_db_result([db_row])
+        return _make_db_result([market_row])
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    other_pos = MagicMock()
+    other_pos.market_id = "OTHER-MKT"
+    other_pos.contracts = 5
+    kalshi_client.get_positions = AsyncMock(return_value=[other_pos])
+    kalshi_client.get_market = AsyncMock(
+        return_value=MagicMock(result="yes", settlement_value=1.0)
+    )
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        mock_ledger.close_position = AsyncMock()
+        async with session_factory() as session:
+            await watcher._detect_external_drift(session)
+
+    mock_ledger.close_position.assert_awaited_once()
+    call_kwargs = mock_ledger.close_position.call_args_list[0].kwargs
+    assert call_kwargs.get("exit_price") == 0.0
+    assert call_kwargs.get("exit_reason") == "market_resolved"
+    assert call_kwargs.get("resolution") == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_falls_back_to_settled_endpoint_when_market_purged() -> None:
+    """get_market() finds nothing conclusive (market purged post-finalization) but
+    get_market_from_settled() confirms the result → still closes at settlement price,
+    not mid_price."""
+    from freqpred.markets.kalshi import KalshiClient
+
+    watcher, _, session_factory, _, _ = _make_watcher()
+    kalshi_client = MagicMock(spec=KalshiClient)
+    kalshi_client._make_auth_headers.return_value = {}
+    watcher._kalshi_client = kalshi_client
+
+    db_row = _make_position_row(market_id="MKT-X", contracts=3, direction="YES")
+    market_row = MagicMock()
+    market_row.id = "MKT-X"
+    market_row.mid_price = 0.5
+
+    call_count = 0
+
+    async def fake_execute(stmt):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _make_db_result([db_row])
+        return _make_db_result([market_row])
+
+    mock_session = session_factory.return_value.__aenter__.return_value
+    mock_session.execute = AsyncMock(side_effect=fake_execute)
+
+    other_pos = MagicMock()
+    other_pos.market_id = "OTHER-MKT"
+    other_pos.contracts = 5
+    kalshi_client.get_positions = AsyncMock(return_value=[other_pos])
+    kalshi_client.get_market = AsyncMock(return_value=MagicMock(result=None, settlement_value=None))
+    kalshi_client.get_market_from_settled = AsyncMock(
+        return_value=MagicMock(result="yes", settlement_value=None)
+    )
+
+    with patch("freqpred.markets.position_watcher.ledger") as mock_ledger:
+        mock_ledger.close_position = AsyncMock()
+        async with session_factory() as session:
+            await watcher._detect_external_drift(session)
+
+    mock_ledger.close_position.assert_awaited_once()
+    call_kwargs = mock_ledger.close_position.call_args_list[0].kwargs
+    assert call_kwargs.get("exit_price") == 1.0
+    assert call_kwargs.get("exit_reason") == "market_resolved"
 
 
 @pytest.mark.asyncio
