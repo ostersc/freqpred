@@ -606,9 +606,9 @@ class TestBuildPrompt:
         prompt = build_prompt(market, [], phrase_data=None)
         assert "PHRASE FREQUENCY DATA" not in prompt
 
-    def test_prompt_version_is_v9(self) -> None:
+    def test_prompt_version_is_v10(self) -> None:
         from freqpred.signal.llm import PROMPT_VERSION
-        assert PROMPT_VERSION == "signal-v9"
+        assert PROMPT_VERSION == "signal-v10"
 
 
 # ---------------------------------------------------------------------------
