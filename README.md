@@ -263,10 +263,19 @@ uv run python scripts/benchmark_signals.py --candidate-model claude-sonnet-5 \
     --training-cutoff 2026-03-01 --limit 50 --reps 3 --json-out benchmarks/sonnet5.json
 
 # Prompt change: re-render frozen fixtures through the CURRENT prompt template.
-# Build the resolved-market scenario bank first (leakage-free by construction):
+# Build the resolved-market scenario bank first (leakage-free by construction;
+# records EVERY LLM-backed signal per market — the benchmark samples from it):
 uv run freqpred fixtures record-bank
 uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/prompt_bank \
     --training-cutoff 2026-03-01 --limit 250
+
+# Sampling: --limit N picks N MARKETS at random (seeded via --seed, so runs are
+# reproducible), and --per-market picks which of each market's signals to score:
+# spread:3 (default — early/mid/late decision points), all, or last (the final
+# pre-resolution signal only; the market has usually converged by then).
+# Identical evals (model+thinking+prompt) are served free from
+# benchmarks/.eval_cache — re-runs and extensions only pay for new calls;
+# --no-cache forces fresh calls.
 
 # Preview call volume and token cost first
 uv run python scripts/benchmark_signals.py --candidate-model claude-sonnet-5 \
@@ -281,7 +290,7 @@ uv run python scripts/benchmark_signals.py --candidate-model claude-haiku-4-5-20
 
 **The adopt/reject decision rule:**
 
-1. **Adopt only on a significant paired Brier delta** — bootstrap 95% CI excluding zero, or sign test p < 0.05. A better raw mean on a small noisy sample is not evidence.
+1. **Adopt only on a significant paired Brier delta** — bootstrap 95% CI excluding zero, or sign test p < 0.05. A better raw mean on a small noisy sample is not evidence. Statistics are **clustered by market**: signals on one market share its outcome, so the bootstrap resamples markets and the sign test votes once per market — 16 correlated snapshots of one market cannot manufacture significance.
 2. **Guard: trade decisions must not degrade** — check the would-trade rate, disagreement table, per-trade EV, and the stake-weighted P&L. Confidence scales position size in production (the Kelly blend), so each would-trade is also sized by the benchmark strategy's own `position_size()` from that model's posterior + confidence (`--strategy`, default `PoliticsEdgeStrategy`; the strategy config also supplies the default `min_edge`/`min_confidence` gates) — an overconfident model loses proportionally more when wrong, and a better-calibrated but timid candidate shows up as too small a total stake. The gate applies the signal-level entry filters from the strategy config exactly as `should_trade` does (`max_edge`, `min_mid_price`/`max_mid_price` on the entry side's cost) — without them the numbers include longshot trades production would never take. Known simplifications vs live P&L: entry fills at the frozen ask (production posts resting limits), and positions ride to settlement (production exits via stoploss/signal/force_exit).
 3. **Tiebreaker: cost and latency.**
 4. **Ambiguous → keep the incumbent**; it has live calibration history, the candidate has none.
@@ -295,7 +304,7 @@ Every edit to `SYSTEM_PROMPT` or `build_prompt` follows this sequence. The goal:
 1. **Scope the edit.** Change only what a specific, written-down finding justifies — no drive-by rewording. The benchmark measures the whole diff; unrelated edits make a negative result unattributable.
 2. **Bump `PROMPT_VERSION`** in `freqpred/signal/llm.py` (`signal-vN` → `signal-vN+1`). The replay harness guards (rendered-prompt snapshot, system-prompt hash, version pin test) fail on any unbumped edit — that's by design.
 3. **Regenerate the committed replay fixtures**: `uv run freqpred fixtures replay --update`, then run the full test suite.
-4. **Do NOT regenerate `benchmarks/prompt_bank/`.** `record-bank` only records signals whose stored prompt version is current, so a post-bump sweep produces an empty bank. The bank recorded under the *previous* version is the frozen baseline the benchmark compares against — treat it as the experiment's control artifact.
+4. **Treat `benchmarks/prompt_bank/` as the experiment's control artifact.** `record-bank` gates every fixture on a byte-exact re-render of the stored prompt under the *current* `build_prompt`. A SYSTEM_PROMPT-only change (like v9 → v10) keeps all old signals recordable, but if your edit touches `build_prompt`'s user-prompt template, older signals stop round-tripping — record the bank *before* such a change and don't regenerate it mid-experiment. The eval cache (`benchmarks/.eval_cache`) keys on the full prompt, so re-runs after an accidental regeneration still reuse any evals whose prompts are unchanged.
 5. **Check spend headroom first.** Benchmark calls share the daily LLM cap with the live pipeline; a run that exhausts the cap stops early **and blocks live signal analysis until the UTC day rolls over**. A full-bank run costs ~$3.50 typical (`--estimate-only` gives the exact projection). Today's spend:
    ```bash
    docker exec freqpred-db-1 psql -U freqpred -d freqpred -c \

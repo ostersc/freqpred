@@ -402,31 +402,107 @@ def test_bootstrap_ci_is_deterministic_and_ordered() -> None:
     assert bootstrap_mean_ci([]) == (0.0, 0.0)
 
 
-def test_disagreement_table_one_model_trades() -> None:
-    # Incumbent trades (edge 0.20, conf 0.8); candidate abstains (SKIP).
+def test_disagreement_table_one_model_enters() -> None:
+    # Incumbent enters d1 (edge 0.20, conf 0.8); candidate abstains (SKIP).
     disagree = score_pair(
         _scenario(outcome=1.0, incumbent=_output("YES", 0.70), scenario_id="d1"),
         _output("SKIP", 0.50, model="candidate"),
         min_edge=0.10,
         min_confidence=0.60,
     )
-    # Both trade — must NOT appear in the table.
-    both = score_pair(
-        _scenario(outcome=1.0, incumbent=_output("YES", 0.70), scenario_id="d2"),
-        _output("YES", 0.75, model="candidate"),
-        min_edge=0.10,
-        min_confidence=0.60,
+    # Both enter — must NOT appear in the table. (Different market.)
+    both = _scenario(outcome=1.0, incumbent=_output("YES", 0.70), scenario_id="d2")
+    both.market_id = "MKT-d2"
+    both_score = score_pair(
+        both, _output("YES", 0.75, model="candidate"), min_edge=0.10, min_confidence=0.60
     )
-    summary = aggregate([disagree, both])
+    summary = aggregate([disagree, both_score])
     trades = summary["trade_decisions"]
-    assert trades["incumbent_would_trade"] == 2
+    assert trades["incumbent_would_trade"] == 2  # markets entered
     assert trades["candidate_would_trade"] == 1
     assert len(trades["disagreements"]) == 1
     row = trades["disagreements"][0]
     assert row["scenario_id"] == "d1"
-    assert row["incumbent_trades"] is True
-    assert row["candidate_trades"] is False
-    assert row["trade_ev"] == pytest.approx(1.0 - 0.50)  # the trading side's EV
+    assert row["entered_by"] == "incumbent"
+    assert row["trade_ev"] == pytest.approx(1.0 - 0.50)  # the entering side's EV
+
+
+def test_entry_faithful_first_clearing_signal_per_market() -> None:
+    """One market, three signals over time: incumbent clears the gate at t1,
+    candidate not until t2 — each side's entry is its own first clearing
+    signal (different times, different prices), and later clearing signals do
+    not add trades. Mirrors production: enter once, then exposure blocks."""
+    from datetime import timedelta
+
+    def scen(i, yes_bid, yes_ask, inc):
+        s = _scenario(outcome=1.0, yes_bid=yes_bid, yes_ask=yes_ask,
+                      incumbent=inc, scenario_id=f"t{i}")
+        s.market_id = "MKT-SERIES"
+        s.signal_time = FROZEN_CLOSE + timedelta(hours=i)
+        return s
+
+    # t1: incumbent trades (edge 0.20), candidate below min_edge.
+    s1 = score_pair(scen(1, 0.48, 0.50, _output("YES", 0.70)),
+                    _output("YES", 0.58, model="cand"), min_edge=0.10, min_confidence=0.60)
+    # t2: both would clear; must be candidate's entry, NOT a second incumbent entry.
+    s2 = score_pair(scen(2, 0.38, 0.40, _output("YES", 0.70)),
+                    _output("YES", 0.60, model="cand"), min_edge=0.10, min_confidence=0.60)
+    # t3: both clear again — must add nothing.
+    s3 = score_pair(scen(3, 0.28, 0.30, _output("YES", 0.70)),
+                    _output("YES", 0.55, model="cand"), min_edge=0.10, min_confidence=0.60)
+
+    trades = aggregate([s3, s1, s2])["trade_decisions"]  # order-independent
+    assert trades["incumbent_would_trade"] == 1
+    assert trades["candidate_would_trade"] == 1
+    # Incumbent entered at t1 prices (stake computed at ask 0.50); candidate
+    # at t2 prices (ask 0.40) — one market in common, different entry scores.
+    assert trades["common_trades"]["n"] == 1
+    assert trades["incumbent_total_stake"] == pytest.approx(
+        s1.incumbent_trade.stake
+    )
+    assert trades["candidate_total_stake"] == pytest.approx(
+        s2.candidate_trade.stake
+    )
+    assert trades["disagreements"] == []
+
+
+def test_cluster_bootstrap_and_market_sign_test() -> None:
+    """10 correlated scenarios on ONE market must not manufacture
+    significance: one cluster → degenerate CI, one sign-test vote."""
+    from freqpred.bench.scoring import cluster_bootstrap_mean_ci
+
+    one_market = []
+    for i in range(10):
+        scenario = _scenario(outcome=1.0, incumbent=_output("YES", 0.60), scenario_id=f"c{i}")
+        scenario.market_id = "MKT-ONE"
+        one_market.append(
+            score_pair(
+                scenario, _output("YES", 0.80, model="cand"),
+                min_edge=0.10, min_confidence=0.60,
+            )
+        )
+    summary = aggregate(one_market)
+    assert summary["n_scenarios"] == 10
+    assert summary["n_markets"] == 1
+    assert summary["candidate_wins"] == 1          # one market, one vote
+    assert summary["sign_test_p"] == 1.0           # n=1 proves nothing
+    lo, hi = summary["brier_delta_ci95"]
+    assert lo == pytest.approx(hi)                 # single cluster: no width
+
+    # Same deltas spread over 10 markets → real evidence again.
+    ten_markets = []
+    for i, s in enumerate(one_market):
+        s.market_id = f"MKT-{i}"
+        ten_markets.append(s)
+    summary10 = aggregate(ten_markets)
+    assert summary10["n_markets"] == 10
+    assert summary10["candidate_wins"] == 10
+    assert summary10["sign_test_p"] < 0.01
+    lo10, hi10 = summary10["brier_delta_ci95"]
+    assert hi10 < 0
+
+    # Direct: cluster CI degenerates to plain bootstrap at 1 scenario/cluster.
+    assert cluster_bootstrap_mean_ci({"a": [0.5]}) == (0.5, 0.5)
 
 
 def test_aggregate_empty() -> None:

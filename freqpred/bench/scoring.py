@@ -3,7 +3,9 @@
 Calibration metrics (Brier, log loss, direction correctness) score each
 model's posterior against the actual market outcome. Paired statistics
 (bootstrap CI on the mean Brier delta, exact sign test) are the adopt/reject
-gate: a raw mean improvement on a small noisy sample is not evidence.
+gate: a raw mean improvement on a small noisy sample is not evidence. Both
+are clustered by market — signals within one market share its outcome, so
+the bootstrap resamples markets and the sign test votes once per market.
 
 Trade-decision metrics capture what Brier misses — a better-calibrated but
 systematically less confident model trades less, and confidence also scales
@@ -22,6 +24,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from datetime import datetime
 from statistics import mean, median
 from typing import TYPE_CHECKING
 
@@ -205,6 +208,40 @@ def bootstrap_mean_ci(
     return (lo, hi)
 
 
+def cluster_bootstrap_mean_ci(
+    values_by_cluster: dict[str, list[float]],
+    *,
+    n_boot: int = 10_000,
+    alpha: float = 0.05,
+    seed: int = 42,
+) -> tuple[float, float]:
+    """Percentile bootstrap CI for the mean, resampling whole clusters.
+
+    Multiple signals on one market share the market's outcome, so their
+    deltas are correlated — resampling scenarios independently would fake
+    n-fold more evidence than exists. Resampling markets (clusters) with
+    replacement keeps the CI honest; with one scenario per cluster this
+    degenerates to the plain bootstrap.
+    """
+    clusters = sorted(values_by_cluster)
+    if not clusters:
+        return (0.0, 0.0)
+    if len(clusters) == 1:
+        m = mean(values_by_cluster[clusters[0]])
+        return (m, m)
+    rng = random.Random(seed)
+    means = []
+    for _ in range(n_boot):
+        resampled: list[float] = []
+        for _ in range(len(clusters)):
+            resampled.extend(values_by_cluster[rng.choice(clusters)])
+        means.append(mean(resampled))
+    means.sort()
+    lo = means[int((alpha / 2) * n_boot)]
+    hi = means[min(n_boot - 1, int((1 - alpha / 2) * n_boot))]
+    return (lo, hi)
+
+
 def sign_test_p(wins: int, losses: int) -> float:
     """Exact two-sided binomial sign test p-value; ties are excluded upstream."""
     n = wins + losses
@@ -221,6 +258,7 @@ class PairScore:
 
     scenario_id: str
     market_id: str
+    signal_time: datetime | None
     contaminated: bool
     outcome: float
     regime: str  # "favorite" | "upset" | "coin_flip" — see classify_regime()
@@ -250,6 +288,7 @@ def score_pair(
     return PairScore(
         scenario_id=scenario.id,
         market_id=scenario.market_id,
+        signal_time=scenario.signal_time,
         contaminated=scenario.contaminated,
         outcome=scenario.outcome,
         regime=classify_regime(scenario.mid_price, scenario.outcome),
@@ -274,9 +313,29 @@ def score_pair(
     )
 
 
-def aggregate(scores: list[PairScore]) -> dict:
-    """Aggregate paired statistics across scenarios.
+def _entry_scores(
+    by_market: dict[str, list[PairScore]], side: str
+) -> dict[str, PairScore]:
+    """Each model's entry per market: the FIRST gate-clearing signal, matching
+    production, where entry happens on the first signal that passes
+    should_trade and existing exposure then blocks re-entry. Later signals on
+    the same market are exit/monitoring inputs, not additional trades."""
+    entries: dict[str, PairScore] = {}
+    for market_id, series in by_market.items():
+        for score in series:  # series is signal_time-sorted
+            trade = score.incumbent_trade if side == "incumbent" else score.candidate_trade
+            if trade.would_trade:
+                entries[market_id] = score
+                break
+    return entries
 
+
+def aggregate(scores: list[PairScore]) -> dict:
+    """Aggregate paired statistics, clustered by market.
+
+    Signals within one market share its outcome, so scenarios are not
+    independent: the bootstrap CI resamples markets, and the sign test gets
+    one vote per market (the sign of its mean Brier delta).
     ``brier_delta_ci95`` excluding zero, or ``sign_test_p`` < 0.05, is the
     primary adopt/reject evidence; the trade-decision block is the
     degradation guard.
@@ -284,9 +343,20 @@ def aggregate(scores: list[PairScore]) -> dict:
     if not scores:
         return {"n_scenarios": 0}
 
+    by_market: dict[str, list[PairScore]] = {}
+    for score in scores:
+        by_market.setdefault(score.market_id, []).append(score)
+    for series in by_market.values():
+        series.sort(key=lambda s: (s.signal_time is None, s.signal_time))
+
     deltas = [s.brier_delta for s in scores]
-    candidate_wins = sum(1 for d in deltas if d < 0)
-    incumbent_wins = sum(1 for d in deltas if d > 0)
+    deltas_by_market = {
+        market_id: [s.brier_delta for s in series]
+        for market_id, series in by_market.items()
+    }
+    market_mean_deltas = {m: mean(v) for m, v in deltas_by_market.items()}
+    candidate_wins = sum(1 for d in market_mean_deltas.values() if d < 0)
+    incumbent_wins = sum(1 for d in market_mean_deltas.values() if d > 0)
 
     def _accuracy(graded: list[bool | None]) -> tuple[int, int]:
         graded_only = [g for g in graded if g is not None]
@@ -295,43 +365,39 @@ def aggregate(scores: list[PairScore]) -> dict:
     inc_correct, inc_graded = _accuracy([s.incumbent_direction_correct for s in scores])
     cand_correct, cand_graded = _accuracy([s.candidate_direction_correct for s in scores])
 
-    inc_trades = [s for s in scores if s.incumbent_trade.would_trade]
-    cand_trades = [s for s in scores if s.candidate_trade.would_trade]
-    common_trades = [
-        s for s in scores
-        if s.incumbent_trade.would_trade and s.candidate_trade.would_trade
-    ]
-    disagreements = [
-        {
-            "scenario_id": s.scenario_id,
-            "market_id": s.market_id,
-            "outcome": s.outcome,
-            "incumbent_trades": s.incumbent_trade.would_trade,
-            "candidate_trades": s.candidate_trade.would_trade,
-            "incumbent_edge": round(s.incumbent_trade.edge, 4),
-            "candidate_edge": round(s.candidate_trade.edge, 4),
-            "trade_ev": (
-                s.incumbent_trade.ev
-                if s.incumbent_trade.would_trade
-                else s.candidate_trade.ev
-            ),
-            "trade_stake": (
-                s.incumbent_trade.stake
-                if s.incumbent_trade.would_trade
-                else s.candidate_trade.stake
-            ),
-        }
-        for s in scores
-        if s.incumbent_trade.would_trade != s.candidate_trade.would_trade
-    ]
+    # Entry-faithful trades: one entry per market per model, at that model's
+    # own first gate-clearing signal — models may enter the same market at
+    # different times and prices, exactly like live.
+    inc_entries = _entry_scores(by_market, "incumbent")
+    cand_entries = _entry_scores(by_market, "candidate")
+    common_markets = sorted(set(inc_entries) & set(cand_entries))
+    disagreements = []
+    for market_id in sorted(set(inc_entries) ^ set(cand_entries)):
+        entry = inc_entries.get(market_id) or cand_entries[market_id]
+        side = "incumbent" if market_id in inc_entries else "candidate"
+        trade = entry.incumbent_trade if side == "incumbent" else entry.candidate_trade
+        disagreements.append(
+            {
+                "scenario_id": entry.scenario_id,
+                "market_id": market_id,
+                "outcome": entry.outcome,
+                "entered_by": side,
+                "entry_signal_time": (
+                    entry.signal_time.isoformat() if entry.signal_time else None
+                ),
+                "entry_edge": round(trade.edge, 4),
+                "trade_ev": trade.ev,
+                "trade_stake": trade.stake,
+            }
+        )
 
     # Stake-weighted view: confidence scales position size in production, so
     # even when both models trade the same market, the more confident one has
     # more dollars on the line — its being wrong must cost more here too.
-    inc_total_stake = sum(s.incumbent_trade.stake or 0.0 for s in inc_trades)
-    cand_total_stake = sum(s.candidate_trade.stake or 0.0 for s in cand_trades)
-    inc_total_pnl = sum(s.incumbent_trade.pnl or 0.0 for s in inc_trades)
-    cand_total_pnl = sum(s.candidate_trade.pnl or 0.0 for s in cand_trades)
+    inc_total_stake = sum(s.incumbent_trade.stake or 0.0 for s in inc_entries.values())
+    cand_total_stake = sum(s.candidate_trade.stake or 0.0 for s in cand_entries.values())
+    inc_total_pnl = sum(s.incumbent_trade.pnl or 0.0 for s in inc_entries.values())
+    cand_total_pnl = sum(s.candidate_trade.pnl or 0.0 for s in cand_entries.values())
 
     # Regime breakdown: a hedging candidate loses on favorites and wins on
     # upsets — the split shows whether an aggregate result is a structural
@@ -351,9 +417,10 @@ def aggregate(scores: list[PairScore]) -> dict:
             "incumbent_wins": sum(1 for d in segment_deltas if d > 0),
         }
 
-    lo, hi = bootstrap_mean_ci(deltas)
+    lo, hi = cluster_bootstrap_mean_ci(deltas_by_market)
     return {
         "n_scenarios": len(scores),
+        "n_markets": len(by_market),
         "n_contaminated": sum(1 for s in scores if s.contaminated),
         "incumbent_mean_brier": mean(s.incumbent_brier for s in scores),
         "candidate_mean_brier": mean(s.candidate_brier for s in scores),
@@ -361,9 +428,9 @@ def aggregate(scores: list[PairScore]) -> dict:
         "brier_delta_median": median(deltas),
         "brier_delta_ci95": [lo, hi],
         "brier_delta_significant": hi < 0 or lo > 0,
-        "candidate_wins": candidate_wins,
+        "candidate_wins": candidate_wins,   # markets, by sign of mean delta
         "incumbent_wins": incumbent_wins,
-        "ties": len(deltas) - candidate_wins - incumbent_wins,
+        "ties": len(by_market) - candidate_wins - incumbent_wins,
         "sign_test_p": sign_test_p(candidate_wins, incumbent_wins),
         "incumbent_mean_log_loss": mean(s.incumbent_log_loss for s in scores),
         "candidate_mean_log_loss": mean(s.candidate_log_loss for s in scores),
@@ -371,13 +438,15 @@ def aggregate(scores: list[PairScore]) -> dict:
         "candidate_direction_accuracy": [cand_correct, cand_graded],
         "regimes": regimes,
         "trade_decisions": {
-            "incumbent_would_trade": len(inc_trades),
-            "candidate_would_trade": len(cand_trades),
+            "incumbent_would_trade": len(inc_entries),   # markets entered
+            "candidate_would_trade": len(cand_entries),
             "incumbent_mean_ev_per_trade": (
-                mean(s.incumbent_trade.ev for s in inc_trades) if inc_trades else None
+                mean(s.incumbent_trade.ev for s in inc_entries.values())
+                if inc_entries else None
             ),
             "candidate_mean_ev_per_trade": (
-                mean(s.candidate_trade.ev for s in cand_trades) if cand_trades else None
+                mean(s.candidate_trade.ev for s in cand_entries.values())
+                if cand_entries else None
             ),
             "incumbent_total_stake": inc_total_stake,
             "candidate_total_stake": cand_total_stake,
@@ -390,14 +459,14 @@ def aggregate(scores: list[PairScore]) -> dict:
                 cand_total_pnl / cand_total_stake if cand_total_stake > 0 else None
             ),
             "common_trades": {
-                "n": len(common_trades),
+                "n": len(common_markets),
                 "incumbent_mean_stake": (
-                    mean(s.incumbent_trade.stake for s in common_trades)
-                    if common_trades else None
+                    mean(inc_entries[m].incumbent_trade.stake for m in common_markets)
+                    if common_markets else None
                 ),
                 "candidate_mean_stake": (
-                    mean(s.candidate_trade.stake for s in common_trades)
-                    if common_trades else None
+                    mean(cand_entries[m].candidate_trade.stake for m in common_markets)
+                    if common_markets else None
                 ),
             },
             "disagreements": disagreements,

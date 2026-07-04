@@ -8,15 +8,21 @@ against the outcome — never against training-data-era history.
 
 Two sources:
 
-- **Model mode** (``build_db_scenarios``): resolved markets from the DB, one
-  scenario per market using its last pre-resolution LLM-backed signal. The
-  stored ``raw_context`` is replayed to the candidate **verbatim**, so this
-  mode is exact but cannot vary the prompt template.
-- **Prompt mode** (``build_fixture_scenarios``): T66 replay fixtures, whose
+- **Model mode** (``build_db_scenarios``): every LLM-backed signal on
+  finalized binary markets. The stored ``raw_context`` is replayed to the
+  candidate **verbatim**, so this mode is exact but cannot vary the prompt
+  template.
+- **Prompt mode** (``build_fixture_scenarios``): replay fixtures, whose
   structured inputs are **re-rendered** through the current ``build_prompt`` +
   ``SYSTEM_PROMPT``. Only snapshotted fixture inputs are trustworthy for
   re-rendering — reconstructing series-history/FactBase state as-of signal
   time from live tables would introduce lookahead.
+
+Both modes return *all* decision points per market; which markets and which
+of each market's signals to actually benchmark is decided at run time by
+``sample_markets`` (seeded random market selection) and ``sample_per_market``
+(last / all / spread:K across the signal timeline). Signals within a market
+share one outcome — score them with market-clustered statistics.
 
 Contamination guard: scenarios whose market closed on or before the
 candidate's training-data cutoff are excluded by ``filter_contaminated``
@@ -25,12 +31,12 @@ keeps them but flags each one.
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.orm import aliased
 
 from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow
@@ -73,6 +79,7 @@ class Scenario:
     yes_bid: float              # prices at signal time (frozen)
     yes_ask: float
     mid_price: float
+    signal_time: datetime | None = None  # when the signal fired (frozen clock)
     contaminated: bool = False  # close_time <= candidate training cutoff
     notes: list[str] = field(default_factory=list)
 
@@ -140,7 +147,72 @@ def scenario_from_signal(
         yes_bid=yes_bid,
         yes_ask=yes_ask,
         mid_price=signal.market_mid_at_signal,
+        signal_time=signal.created_at,
     )
+
+
+def sample_markets(
+    scenarios: list[Scenario],
+    limit: int | None,
+    *,
+    seed: int = 42,
+) -> tuple[list[Scenario], int]:
+    """Randomly sample *limit* markets (seeded, reproducible) and keep all of
+    their scenarios. Returns (kept, n_markets_kept).
+
+    Sampling whole markets — not scenarios — keeps per-market signal series
+    intact for spread sampling and market-clustered statistics, and avoids the
+    recency bias of taking the first/last N.
+    """
+    market_ids = sorted({s.market_id for s in scenarios})
+    if limit is None or len(market_ids) <= limit:
+        return scenarios, len(market_ids)
+    chosen = set(random.Random(seed).sample(market_ids, limit))
+    return [s for s in scenarios if s.market_id in chosen], len(chosen)
+
+
+def sample_per_market(
+    scenarios: list[Scenario],
+    per_market: str,
+) -> list[Scenario]:
+    """Select which of each market's signals to benchmark.
+
+    - ``"last"``: the final pre-resolution signal only (the market has usually
+      converged by then — favorites-heavy, least tradeable).
+    - ``"all"``: every recorded signal (use market-clustered stats downstream).
+    - ``"spread:K"``: K signals per market evenly spaced across its signal
+      timeline (first and last always included; markets with <= K signals keep
+      all) — covers early/mid/late decision points at bounded cost.
+
+    Scenarios lacking ``signal_time`` sort by close_time as a fallback.
+    """
+    if per_market == "all":
+        return scenarios
+
+    by_market: dict[str, list[Scenario]] = {}
+    for scenario in scenarios:
+        by_market.setdefault(scenario.market_id, []).append(scenario)
+
+    kept: list[Scenario] = []
+    for series in by_market.values():
+        series.sort(key=lambda s: s.signal_time or s.close_time)
+        if per_market == "last":
+            kept.append(series[-1])
+            continue
+        if not per_market.startswith("spread:"):
+            raise ValueError(f"unknown --per-market mode: {per_market!r}")
+        k = int(per_market.split(":", 1)[1])
+        if k < 1:
+            raise ValueError("--per-market spread:K requires K >= 1")
+        if len(series) <= k:
+            kept.extend(series)
+        elif k == 1:
+            kept.append(series[-1])
+        else:
+            indices = sorted({round(i * (len(series) - 1) / (k - 1)) for i in range(k)})
+            kept.extend(series[i] for i in indices)
+    kept.sort(key=lambda s: (s.market_id, s.signal_time or s.close_time))
+    return kept
 
 
 def filter_contaminated(
@@ -173,18 +245,18 @@ def filter_contaminated(
 async def build_db_scenarios(
     session,
     *,
-    limit: int = 50,
     market_id: str | None = None,
 ) -> list[Scenario]:
-    """Model-mode bank: the last pre-resolution LLM-backed signal per finalized
-    binary market, most recently resolved first.
+    """Model-mode bank: every LLM-backed signal on finalized binary markets.
 
-    Scans from signals (DISTINCT ON market_id, newest first) exactly like
-    ``compare_model_signals.py`` did: only a small fraction of markets ever
-    get LLM analysis, so scanning markets first mostly produces skips.
+    Returns all decision points — market selection (``sample_markets``) and
+    per-market signal sampling (``sample_per_market``) happen at benchmark
+    time, so the caller controls cost and coverage. Scans from signals: only
+    a small fraction of markets ever get LLM analysis, so scanning markets
+    first mostly produces skips.
     """
-    dedup_stmt = (
-        select(SignalRow, MarketRow.close_time.label("market_close_time"))
+    stmt = (
+        select(SignalRow)
         .join(MarketRow, MarketRow.id == SignalRow.market_id)
         .where(
             SignalRow.llm_query_id.isnot(None),
@@ -193,26 +265,12 @@ async def build_db_scenarios(
             # silently miscategorized as a NO resolution.
             MarketRow.result.in_(("yes", "no")),
         )
+        .order_by(SignalRow.market_id, SignalRow.created_at)
     )
     if market_id:
-        dedup_stmt = dedup_stmt.where(SignalRow.market_id == market_id)
-    dedup_stmt = dedup_stmt.distinct(SignalRow.market_id).order_by(
-        SignalRow.market_id, SignalRow.created_at.desc()
-    )
+        stmt = stmt.where(SignalRow.market_id == market_id)
 
-    deduped = dedup_stmt.subquery()
-    signal_alias = aliased(SignalRow, deduped)
-    signals = (
-        (
-            await session.execute(
-                select(signal_alias)
-                .order_by(deduped.c.market_close_time.desc())
-                .limit(limit)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    signals = (await session.execute(stmt)).scalars().all()
     if not signals:
         return []
 
@@ -284,6 +342,7 @@ def scenario_from_fixture(
         yes_bid=inputs.market.yes_bid,
         yes_ask=inputs.market.yes_ask,
         mid_price=inputs.market.mid_price,
+        signal_time=inputs.now,
     )
     if scenario.prompt != fixture.expectations.rendered_prompt:
         scenario.notes.append(
@@ -308,30 +367,24 @@ async def build_fixture_scenarios(
     if not fixtures:
         return [], [f"no fixtures found under {fixture_dir}"]
 
-    # One scenario per market: multiple fixtures on the same market are
-    # correlated snapshots, not independent evidence — keeping them all would
-    # pseudo-replicate that market in the paired statistics. Keep the most
-    # recently recorded fixture.
+    # Every fixture becomes a scenario — multiple signals on one market are
+    # correlated snapshots of the same outcome, which downstream handles via
+    # per-market sampling (sample_per_market) and market-clustered statistics,
+    # not by discarding decision points here. Same-signal duplicates (identical
+    # frozen clock) are collapsed.
     skipped: list[str] = []
-    by_market: dict[str, ReplayFixture] = {}
+    by_key: dict[tuple[str, datetime | None], ReplayFixture] = {}
     for fixture in fixtures:
-        market_id = fixture.inputs.market.id
-        existing = by_market.get(market_id)
+        key = (fixture.inputs.market.id, fixture.inputs.now)
+        existing = by_key.get(key)
         if existing is None:
-            by_market[market_id] = fixture
-            continue
-        newer, older = (
-            (fixture, existing)
-            if (fixture.recorded_at or datetime.min.replace(tzinfo=UTC))
-            > (existing.recorded_at or datetime.min.replace(tzinfo=UTC))
-            else (existing, fixture)
-        )
-        by_market[market_id] = newer
-        skipped.append(
-            f"{older.name}: duplicate market {market_id} — using newer fixture "
-            f"{newer.name}"
-        )
-    fixtures = list(by_market.values())
+            by_key[key] = fixture
+        else:
+            skipped.append(
+                f"{fixture.name}: duplicate of {existing.name} "
+                f"(same market and frozen clock)"
+            )
+    fixtures = list(by_key.values())
 
     market_rows = {
         m.id: m

@@ -66,8 +66,11 @@ from freqpred.bench import (
     filter_contaminated,
     format_summary,
     run_benchmark,
+    sample_markets,
+    sample_per_market,
     score_run,
 )
+from freqpred.bench.eval_cache import DEFAULT_CACHE_DIR, EvalCache
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.llm.client import LLMClient
@@ -149,7 +152,7 @@ async def main(args: argparse.Namespace) -> None:
                         "(without --prompt-mode there is no other candidate axis)."
                     )
                 scenarios = await build_db_scenarios(
-                    session, limit=args.limit, market_id=args.market_id
+                    session, market_id=args.market_id
                 )
 
         if not scenarios:
@@ -180,12 +183,27 @@ async def main(args: argparse.Namespace) -> None:
                 "All scenarios fall inside the training cutoff — nothing "
                 "contamination-free to benchmark."
             )
-        kept = kept[: args.limit]
+
+        # Market selection is a seeded random sample (no recency bias), then
+        # per-market signal sampling picks the decision points to score.
+        kept, n_markets = sample_markets(kept, args.limit, seed=args.seed)
+        try:
+            kept = sample_per_market(kept, args.per_market)
+        except ValueError as exc:
+            raise SystemExit(f"ERROR: {exc}") from exc
+
+        thinking = (
+            None
+            if args.thinking == "none"
+            else {"type": "adaptive", "display": "summarized"}
+        )
+        cache = None if args.no_cache else EvalCache(DEFAULT_CACHE_DIR)
 
         candidate_label = args.candidate_model or f"prompt {PROMPT_VERSION} (incumbent models)"
         print(
-            f"Mode={mode}  candidate={candidate_label}  scenarios={len(kept)}  "
-            f"reps={args.reps}\n"
+            f"Mode={mode}  candidate={candidate_label}  "
+            f"scenarios={len(kept)} across {n_markets} markets "
+            f"(--per-market {args.per_market}, seed={args.seed})  reps={args.reps}\n"
             f"Trade gates: min_edge={min_edge}  min_confidence={min_confidence}  "
             f"sizing: {args.strategy}.position_size @ bankroll=${args.bankroll:,.0f}"
         )
@@ -195,7 +213,8 @@ async def main(args: argparse.Namespace) -> None:
                 kept,
                 args.reps,
                 candidate_model=args.candidate_model,
-                thinking_enabled=args.thinking != "none",
+                thinking=thinking,
+                cache=cache,
             )
             print("\nEstimate only — no LLM calls made:")
             for key, value in estimate.items():
@@ -221,17 +240,13 @@ async def main(args: argparse.Namespace) -> None:
             max_consecutive_errors=config.risk.max_consecutive_llm_errors,
         )
 
-        thinking = (
-            None
-            if args.thinking == "none"
-            else {"type": "adaptive", "display": "summarized"}
-        )
         run = await run_benchmark(
             llm_client,
             kept,
             candidate_model=args.candidate_model,
             reps=args.reps,
             thinking=thinking,
+            cache=cache,
         )
         if run.stopped_early:
             print(f"\nStopped early — {run.stopped_early}")
@@ -264,10 +279,14 @@ async def main(args: argparse.Namespace) -> None:
                 config={
                     "reps": args.reps,
                     "limit": args.limit,
+                    "per_market": args.per_market,
+                    "seed": args.seed,
                     "min_edge": min_edge,
                     "min_confidence": min_confidence,
                     "strategy": args.strategy,
                     "bankroll": args.bankroll,
+                    "cache": not args.no_cache,
+                    "thinking": args.thinking,
                     "include_contaminated": args.include_contaminated,
                     "fixtures": str(args.fixtures) if args.prompt_mode else None,
                 },
@@ -311,10 +330,32 @@ if __name__ == "__main__":
         "--include-contaminated", action="store_true",
         help="Keep scenarios inside the training cutoff, loudly flagged.",
     )
-    parser.add_argument("--limit", type=int, default=50, help="Max scenarios (default: 50).")
+    parser.add_argument(
+        "--limit", type=int, default=50,
+        help="Max MARKETS, sampled randomly with --seed — not first/last N "
+             "(default: 50; scenarios per market set by --per-market).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Seed for the random market sample — same seed, same markets (default: 42).",
+    )
+    parser.add_argument(
+        "--per-market", default="spread:3",
+        help="Which of each market's signals to score: 'last' (final pre-resolution "
+             "signal — favorites-heavy, least tradeable), 'all' (every signal), or "
+             "'spread:K' (K signals evenly spaced across the market's timeline, "
+             "first and last included). Default: spread:3. Statistics are "
+             "market-clustered either way.",
+    )
     parser.add_argument(
         "--reps", type=int, default=1,
         help="Candidate calls per scenario; >1 reports per-scenario posterior spread.",
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Skip the eval cache (benchmarks/.eval_cache) — every call hits the "
+             "API even if the identical experiment (model+thinking+prompts) was "
+             "already evaluated.",
     )
     parser.add_argument(
         "--market-id", default=None, help="Restrict model mode to a single market."

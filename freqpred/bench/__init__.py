@@ -13,6 +13,8 @@ from freqpred.bench.scenarios import (
     build_db_scenarios,
     build_fixture_scenarios,
     filter_contaminated,
+    sample_markets,
+    sample_per_market,
     scenario_from_fixture,
     scenario_from_signal,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "filter_contaminated",
     "format_summary",
     "run_benchmark",
+    "sample_markets",
+    "sample_per_market",
     "scenario_from_fixture",
     "scenario_from_signal",
     "score_pair",

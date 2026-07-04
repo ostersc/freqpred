@@ -2166,24 +2166,33 @@ def fixtures_replay(paths: tuple[Path, ...], update: bool) -> None:
     help="Strategy used for the fixtures' entry-decision expectations.",
 )
 @click.option("--limit", type=int, default=None, help="Max markets (default: all).")
+@click.option(
+    "--per-market", type=click.Choice(["all", "last"]), default="all", show_default=True,
+    help="Record every LLM-backed signal per market, or only the last one. "
+         "Recording everything lets the benchmark sample decision points at "
+         "run time (--per-market spread:K there).",
+)
 @click.pass_context
 def fixtures_record_bank(
-    ctx: click.Context, out_dir: Path, strategy_name: str, limit: int | None
+    ctx: click.Context, out_dir: Path, strategy_name: str, limit: int | None,
+    per_market: str,
 ) -> None:
     """Build the prompt-mode scenario bank from resolved markets.
 
-    Records a frozen-context fixture from each finalized binary market's last
-    LLM-backed signal under the current prompt version. Inputs are parsed from
-    the stored raw_context (never the live tables, which now contain the
-    outcome) and verified by byte-exact re-render — signals that fail the
-    round-trip are skipped, not written.
+    Records frozen-context fixtures from finalized binary markets' LLM-backed
+    signals. Inputs are parsed from the stored raw_context (never the live
+    tables, which now contain the outcome) and verified by byte-exact
+    re-render — signals that fail the round-trip are skipped, not written.
+    The round-trip is the compatibility gate: signals from any prompt version
+    whose stored prompt still re-renders byte-exactly are recordable.
     """
     config = ctx.obj["config"]
-    asyncio.run(_fixtures_record_bank(config, out_dir, strategy_name, limit))
+    asyncio.run(_fixtures_record_bank(config, out_dir, strategy_name, limit, per_market))
 
 
 async def _fixtures_record_bank(
-    config: object, out_dir: Path, strategy_name: str, limit: int | None
+    config: object, out_dir: Path, strategy_name: str, limit: int | None,
+    per_market: str,
 ) -> None:
     from sqlalchemy import select  # noqa: PLC0415
     from sqlalchemy.orm import aliased  # noqa: PLC0415
@@ -2194,7 +2203,6 @@ async def _fixtures_record_bank(
     from freqpred.db import make_engine, make_session_factory  # noqa: PLC0415
     from freqpred.markets.models import MarketRow  # noqa: PLC0415
     from freqpred.replay import RecordingError, record_fixture, save_fixture  # noqa: PLC0415
-    from freqpred.signal.llm import PROMPT_VERSION  # noqa: PLC0415
     from freqpred.signal.models import SignalRow  # noqa: PLC0415
 
     if not config.database.url:
@@ -2205,39 +2213,69 @@ async def _fixtures_record_bank(
     session_factory = make_session_factory(engine)
     try:
         async with session_factory() as session:
-            dedup = (
-                select(SignalRow)
-                .join(MarketRow, MarketRow.id == SignalRow.market_id)
-                .where(
-                    SignalRow.llm_query_id.isnot(None),
-                    MarketRow.status == "finalized",
-                    MarketRow.result.in_(("yes", "no")),
-                )
-                .distinct(SignalRow.market_id)
-                .order_by(SignalRow.market_id, SignalRow.created_at.desc())
-            ).subquery()
-            alias = aliased(SignalRow, dedup)
-            stmt = select(alias).order_by(alias.created_at.desc())
+            base_filter = (
+                SignalRow.llm_query_id.isnot(None),
+                MarketRow.status == "finalized",
+                MarketRow.result.in_(("yes", "no")),
+            )
             if limit:
-                stmt = stmt.limit(limit)
+                market_ids = (
+                    (
+                        await session.execute(
+                            select(MarketRow.id)
+                            .join(SignalRow, SignalRow.market_id == MarketRow.id)
+                            .where(*base_filter)
+                            .distinct()
+                            .order_by(MarketRow.id)
+                            .limit(limit)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            else:
+                market_ids = None
+
+            if per_market == "last":
+                dedup = (
+                    select(SignalRow)
+                    .join(MarketRow, MarketRow.id == SignalRow.market_id)
+                    .where(*base_filter)
+                    .distinct(SignalRow.market_id)
+                    .order_by(SignalRow.market_id, SignalRow.created_at.desc())
+                ).subquery()
+                alias = aliased(SignalRow, dedup)
+                stmt = select(alias).order_by(alias.market_id, alias.created_at)
+                if market_ids is not None:
+                    stmt = stmt.where(alias.market_id.in_(market_ids))
+            else:
+                stmt = (
+                    select(SignalRow)
+                    .join(MarketRow, MarketRow.id == SignalRow.market_id)
+                    .where(*base_filter)
+                    .order_by(SignalRow.market_id, SignalRow.created_at)
+                )
+                if market_ids is not None:
+                    stmt = stmt.where(SignalRow.market_id.in_(market_ids))
             signals = (await session.execute(stmt)).scalars().all()
+            n_markets = len({s.market_id for s in signals})
             click.echo(
-                f"{len(signals)} resolved binary market(s) with an LLM-backed signal"
+                f"{len(signals)} LLM-backed signal(s) across {n_markets} resolved "
+                f"binary market(s) (--per-market {per_market})"
             )
 
             recorded = 0
             skip_reasons: dict[str, int] = {}
             for signal in signals:
-                if signal.prompt_version != PROMPT_VERSION:
-                    skip_reasons[f"prompt_version {signal.prompt_version}"] = (
-                        skip_reasons.get(f"prompt_version {signal.prompt_version}", 0) + 1
-                    )
-                    continue
+                name = (
+                    f"{signal.market_id}_{signal.created_at:%Y%m%dt%H%M%S}"
+                ).lower().replace("/", "_")
                 try:
                     fixture, _warnings = await record_fixture(
                         session,
                         signal.id,
                         strategy_name=strategy_name,
+                        name=name,
                         frozen_context=True,
                         description=(
                             "prompt-mode scenario bank: frozen-context recording "

@@ -22,6 +22,7 @@ from statistics import mean
 
 import structlog
 
+from freqpred.bench.eval_cache import EvalCache, cache_key
 from freqpred.bench.scenarios import ModelOutput, Scenario
 from freqpred.llm.client import LLMClient, LLMConsecutiveErrorsError, LLMError
 from freqpred.signal.llm import SIGNAL_ANALYSIS_TOOL, SYSTEM_PROMPT, parse_signal_response
@@ -44,6 +45,7 @@ class CandidateRep:
     output: ModelOutput | None
     error: str | None = None
     thinking_tokens: int | None = None
+    cached: bool = False  # served from the eval cache — no API spend this run
 
 
 @dataclass
@@ -154,6 +156,7 @@ async def run_benchmark(
     candidate_model: str | None,
     reps: int = 1,
     thinking: dict | None = DEFAULT_THINKING,
+    cache: EvalCache | None = None,
 ) -> BenchmarkRun:
     """Run the candidate over every scenario, *reps* times each.
 
@@ -161,6 +164,9 @@ async def run_benchmark(
     model against the re-rendered prompt — isolating the prompt change.
     ``thinking=None`` omits the thinking parameter (required for pre-4.6
     models like Haiku 4.5, which 400 on adaptive thinking).
+    ``cache`` reuses prior evaluations of the identical experiment (same
+    model + thinking + system prompt + prompt) at zero API cost, and stores
+    every fresh successful call for future runs.
     ``LLMConsecutiveErrorsError`` stops the whole run early with partial
     results preserved.
     """
@@ -169,7 +175,20 @@ async def run_benchmark(
         model = candidate_model or scenario.incumbent.model
         scenario_run = ScenarioRun(scenario=scenario)
         run.scenario_runs.append(scenario_run)
-        for _ in range(reps):
+
+        key = cache_key(model, thinking, SYSTEM_PROMPT, scenario.prompt) if cache else ""
+        cached_reps = cache.load(key) if cache else []
+        for rep_index in range(reps):
+            if rep_index < len(cached_reps):
+                record = cached_reps[rep_index]
+                scenario_run.reps.append(
+                    CandidateRep(
+                        output=ModelOutput(**record["output"]),
+                        thinking_tokens=record.get("thinking_tokens"),
+                        cached=True,
+                    )
+                )
+                continue
             try:
                 rep = await _call_candidate(llm_client, scenario, model, thinking)
             except LLMConsecutiveErrorsError as exc:
@@ -177,6 +196,8 @@ async def run_benchmark(
                 log.error("bench.stopped_early", error=str(exc))
                 return run
             scenario_run.reps.append(rep)
+            if cache is not None and rep.output is not None:
+                cache.append(key, rep.output, rep.thinking_tokens)
     return run
 
 
@@ -192,13 +213,15 @@ def estimate_run(
     reps: int,
     *,
     candidate_model: str | None = None,
-    thinking_enabled: bool = True,
+    thinking: dict | None = DEFAULT_THINKING,
+    cache: EvalCache | None = None,
 ) -> dict:
     """Cost preview without any LLM calls.
 
     Input tokens are projected from each scenario's incumbent audit row (the
     candidate sees the same prompt). Output tokens are projected from the
     incumbent's observed output, scaled up when adaptive thinking is on.
+    Scenarios already present in the eval cache are counted as free hits.
     Dollar figures use the same pricing table as the production audit trail
     (freqpred.llm.audit.calculate_cost) — rough by construction: they ignore
     prompt-cache discounts, and the ``max`` bound assumes every call exhausts
@@ -209,28 +232,41 @@ def estimate_run(
     known_inputs = [
         s.incumbent.tokens_input for s in scenarios if s.incumbent.tokens_input
     ]
-    output_multiplier = _THINKING_OUTPUT_MULTIPLIER if thinking_enabled else 1
+    output_multiplier = _THINKING_OUTPUT_MULTIPLIER if thinking else 1
 
     typical_cost = 0.0
     max_cost = 0.0
     total_inputs = 0
+    fresh_calls = 0
+    cached_calls = 0
     for scenario in scenarios:
         model = candidate_model or scenario.incumbent.model
+        cached = 0
+        if cache is not None:
+            key = cache_key(model, thinking, SYSTEM_PROMPT, scenario.prompt)
+            cached = min(cache.count(key), reps)
+        cached_calls += cached
+        fresh = reps - cached
+        fresh_calls += fresh
+        if fresh == 0:
+            continue
         input_tokens = scenario.incumbent.tokens_input or len(scenario.prompt) // 4
         typical_output = (
             scenario.incumbent.tokens_output or _FALLBACK_OUTPUT_TOKENS
         ) * output_multiplier
-        total_inputs += input_tokens
-        typical_cost += calculate_cost(model, input_tokens, typical_output)
-        max_cost += calculate_cost(model, input_tokens, _CANDIDATE_MAX_TOKENS)
+        total_inputs += input_tokens * fresh
+        typical_cost += calculate_cost(model, input_tokens, typical_output) * fresh
+        max_cost += calculate_cost(model, input_tokens, _CANDIDATE_MAX_TOKENS) * fresh
 
     return {
         "scenarios": len(scenarios),
         "reps": reps,
         "total_calls": len(scenarios) * reps,
-        "projected_input_tokens": total_inputs * reps,
+        "cached_calls": cached_calls,
+        "fresh_calls": fresh_calls,
+        "projected_input_tokens": total_inputs,
         "input_tokens_from_audit_rows": len(known_inputs),
         "max_output_tokens_per_call": _CANDIDATE_MAX_TOKENS,
-        "projected_cost_typical_usd": round(typical_cost * reps, 4),
-        "projected_cost_max_usd": round(max_cost * reps, 4),
+        "projected_cost_typical_usd": round(typical_cost, 4),
+        "projected_cost_max_usd": round(max_cost, 4),
     }

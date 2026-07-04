@@ -64,6 +64,7 @@ def _fake_signal(
         market_mid_at_signal=mid,
         market_ask_at_signal=ask,
         raw_context=raw_context,
+        created_at=FROZEN_NOW,
     )
 
 
@@ -243,8 +244,10 @@ def test_include_contaminated_flags_rows() -> None:
     assert after.contaminated is False
 
 
-async def test_fixture_bank_dedupes_same_market(tmp_path) -> None:
-    """Two fixtures on one market → one scenario (the newer), with a skip note."""
+async def test_fixture_bank_collapses_same_clock_duplicates(tmp_path) -> None:
+    """Two fixtures with the same market AND frozen clock are the same decision
+    point — one scenario survives, with a skip note. Distinct signal times on
+    one market are kept (sampling/clustering handles them downstream)."""
     from datetime import timedelta
     from unittest.mock import AsyncMock, MagicMock
 
@@ -272,4 +275,83 @@ async def test_fixture_bank_dedupes_same_market(tmp_path) -> None:
 
     scenarios, skipped = await build_fixture_scenarios(session, tmp_path)
     assert [s.id for s in scenarios] == ["newer"]
-    assert any("duplicate market FIX-MKT" in reason for reason in skipped)
+    assert any("duplicate of newer" in reason for reason in skipped)
+
+
+# ---------------------------------------------------------------------------
+# Benchmark-time sampling — markets and per-market signals
+# ---------------------------------------------------------------------------
+
+
+def _scen_at(market_id: str, hour: int):
+    from datetime import timedelta
+
+    from freqpred.bench.scenarios import ModelOutput, Scenario
+
+    return Scenario(
+        id=f"{market_id}-h{hour}",
+        source="fixture",
+        market_id=market_id,
+        market_question="q",
+        close_time=FROZEN_NOW,
+        outcome=1.0,
+        prompt="p",
+        incumbent=ModelOutput(
+            model="m", prior=0.5, posterior=0.6, confidence=0.7,
+            direction="YES", updates_count=0,
+        ),
+        yes_bid=0.48,
+        yes_ask=0.50,
+        mid_price=0.49,
+        signal_time=FROZEN_NOW + timedelta(hours=hour),
+    )
+
+
+def test_sample_per_market_last_all_and_spread() -> None:
+    from freqpred.bench.scenarios import sample_per_market
+
+    series = [_scen_at("M1", h) for h in range(10)] + [_scen_at("M2", h) for h in range(2)]
+
+    last = sample_per_market(series, "last")
+    assert sorted(s.id for s in last) == ["M1-h9", "M2-h1"]
+
+    assert len(sample_per_market(series, "all")) == 12
+
+    spread = sample_per_market(series, "spread:3")
+    # M1: first, middle (index 4.5 → banker's round → 4), last; M2 (<=3) all kept.
+    assert [s.id for s in spread if s.market_id == "M1"] == ["M1-h0", "M1-h4", "M1-h9"]
+    assert [s.id for s in spread if s.market_id == "M2"] == ["M2-h0", "M2-h1"]
+
+    assert [s.id for s in sample_per_market(series, "spread:1") if s.market_id == "M1"] == [
+        "M1-h9"
+    ]
+
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        sample_per_market(series, "bogus")
+    with _pytest.raises(ValueError):
+        sample_per_market(series, "spread:0")
+
+
+def test_sample_markets_random_seeded() -> None:
+    from freqpred.bench.scenarios import sample_markets
+
+    scenarios = [_scen_at(f"M{i}", h) for i in range(20) for h in range(3)]
+
+    kept, n_markets = sample_markets(scenarios, 5, seed=7)
+    assert n_markets == 5
+    kept_markets = {s.market_id for s in kept}
+    assert len(kept_markets) == 5
+    # Whole markets kept: all 3 signals of each sampled market survive.
+    assert len(kept) == 15
+    # Deterministic under the same seed; different under another.
+    again, _ = sample_markets(scenarios, 5, seed=7)
+    assert {s.id for s in again} == {s.id for s in kept}
+    other, _ = sample_markets(scenarios, 5, seed=8)
+    assert {s.market_id for s in other} != kept_markets
+
+    # No limit (or limit >= markets) keeps everything.
+    all_kept, n_all = sample_markets(scenarios, None)
+    assert len(all_kept) == 60
+    assert n_all == 20

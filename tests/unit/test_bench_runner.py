@@ -230,7 +230,7 @@ def test_estimate_projects_dollar_cost_from_pricing_table() -> None:
 
     # claude-sonnet-4-6 pricing: $3/M input, $15/M output.
     est = estimate_run(
-        [scenario], reps=1, candidate_model="claude-sonnet-4-6", thinking_enabled=True
+        [scenario], reps=1, candidate_model="claude-sonnet-4-6", thinking={"type": "adaptive", "display": "summarized"}
     )
     # typical: 1200 in + 200*3 thinking-scaled out = 1200*3e-6 + 600*15e-6
     assert est["projected_cost_typical_usd"] == pytest.approx(0.0036 + 0.009, abs=1e-4)
@@ -239,12 +239,106 @@ def test_estimate_projects_dollar_cost_from_pricing_table() -> None:
 
     # thinking off → no output multiplier
     est_off = estimate_run(
-        [scenario], reps=1, candidate_model="claude-sonnet-4-6", thinking_enabled=False
+        [scenario], reps=1, candidate_model="claude-sonnet-4-6", thinking=None
     )
     assert est_off["projected_cost_typical_usd"] == pytest.approx(0.0036 + 0.003, abs=1e-4)
 
     # reps scale everything linearly
     est_reps = estimate_run(
-        [scenario], reps=3, candidate_model="claude-sonnet-4-6", thinking_enabled=True
+        [scenario], reps=3, candidate_model="claude-sonnet-4-6", thinking={"type": "adaptive", "display": "summarized"}
     )
     assert est_reps["projected_cost_typical_usd"] == pytest.approx(3 * (0.0036 + 0.009), abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Eval cache — identical experiments are never re-billed
+# ---------------------------------------------------------------------------
+
+
+async def test_eval_cache_hit_skips_api_and_miss_populates(tmp_path) -> None:
+    from freqpred.bench.eval_cache import EvalCache
+
+    cache = EvalCache(tmp_path)
+    client = _mock_client(return_value=_response())
+    scenario = _scenario("s1", prompt="cached prompt")
+
+    first = await run_benchmark(
+        client, [scenario], candidate_model="candidate-model", reps=1, cache=cache
+    )
+    assert client.complete.await_count == 1
+    assert first.scenario_runs[0].reps[0].cached is False
+
+    # Second run: same model + thinking + system + prompt → zero API calls.
+    client2 = _mock_client(return_value=_response())
+    second = await run_benchmark(
+        client2, [scenario], candidate_model="candidate-model", reps=1, cache=cache
+    )
+    assert client2.complete.await_count == 0
+    rep = second.scenario_runs[0].reps[0]
+    assert rep.cached is True
+    assert rep.output.posterior == pytest.approx(0.70)
+
+    # Different model → miss; different thinking → miss.
+    client3 = _mock_client(return_value=_response())
+    await run_benchmark(
+        client3, [scenario], candidate_model="other-model", reps=1, cache=cache
+    )
+    assert client3.complete.await_count == 1
+    client4 = _mock_client(return_value=_response())
+    await run_benchmark(
+        client4, [scenario], candidate_model="candidate-model", reps=1,
+        thinking=None, cache=cache,
+    )
+    assert client4.complete.await_count == 1
+
+
+async def test_eval_cache_reps_extend_not_duplicate(tmp_path) -> None:
+    """reps=3 after a cached reps=1 run makes exactly 2 fresh calls and keeps
+    per-scenario spread meaningful (cached rep + fresh reps, not 3 copies)."""
+    from freqpred.bench.eval_cache import EvalCache
+
+    cache = EvalCache(tmp_path)
+    scenario = _scenario("s1")
+    await run_benchmark(
+        _mock_client(return_value=_response(0.70)), [scenario],
+        candidate_model="candidate-model", reps=1, cache=cache,
+    )
+
+    client = _mock_client(return_value=_response(0.80))
+    run = await run_benchmark(
+        client, [scenario], candidate_model="candidate-model", reps=3, cache=cache
+    )
+    assert client.complete.await_count == 2
+    flags = [r.cached for r in run.scenario_runs[0].reps]
+    assert flags == [True, False, False]
+    # All three now cached for the next run.
+    client2 = _mock_client(return_value=_response())
+    await run_benchmark(
+        client2, [scenario], candidate_model="candidate-model", reps=3, cache=cache
+    )
+    assert client2.complete.await_count == 0
+
+
+def test_estimate_counts_cache_hits_as_free(tmp_path) -> None:
+    from freqpred.bench.eval_cache import EvalCache, cache_key
+
+    cache = EvalCache(tmp_path)
+    cached_scenario = _scenario("s1", prompt="already evaluated")
+    fresh_scenario = _scenario("s2", prompt="never evaluated")
+    thinking = None
+    key = cache_key(
+        "candidate-model", thinking, SYSTEM_PROMPT, cached_scenario.prompt
+    )
+    cache.append(key, cached_scenario.incumbent, None)
+
+    estimate = estimate_run(
+        [cached_scenario, fresh_scenario], 1,
+        candidate_model="candidate-model", thinking=thinking, cache=cache,
+    )
+    assert estimate["cached_calls"] == 1
+    assert estimate["fresh_calls"] == 1
+    no_cache = estimate_run(
+        [cached_scenario, fresh_scenario], 1,
+        candidate_model="candidate-model", thinking=thinking,
+    )
+    assert estimate["projected_cost_typical_usd"] < no_cache["projected_cost_typical_usd"]

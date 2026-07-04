@@ -64,14 +64,19 @@ def cost_summary(run: BenchmarkRun) -> dict:
         for r in run.scenario_runs
         if r.scenario.incumbent.latency_ms is not None
     ]
-    cand_costs = [
-        o.cost_usd for r in run.scenario_runs for o in r.successful_outputs
-        if o.cost_usd is not None
+    # Cached reps carry their original cost/latency for reference but were
+    # free this run — only fresh calls count as spend.
+    fresh_outputs = [
+        rep.output
+        for r in run.scenario_runs
+        for rep in r.reps
+        if rep.output is not None and not rep.cached
     ]
-    cand_latencies = [
-        o.latency_ms for r in run.scenario_runs for o in r.successful_outputs
-        if o.latency_ms is not None
-    ]
+    cached_calls = sum(
+        1 for r in run.scenario_runs for rep in r.reps if rep.cached
+    )
+    cand_costs = [o.cost_usd for o in fresh_outputs if o.cost_usd is not None]
+    cand_latencies = [o.latency_ms for o in fresh_outputs if o.latency_ms is not None]
 
     def _mean(values: list) -> float | None:
         return sum(values) / len(values) if values else None
@@ -97,6 +102,7 @@ def cost_summary(run: BenchmarkRun) -> dict:
         ),
         "incumbent_calls_priced": len(inc_costs),
         "candidate_calls_priced": len(cand_costs),
+        "candidate_cached_calls": cached_calls,
         "candidate_total_cost_usd": sum(cand_costs) if cand_costs else 0.0,
     }
 
@@ -140,6 +146,7 @@ def build_artifact(
                     "output": asdict(rep.output) if rep.output else None,
                     "error": rep.error,
                     "thinking_tokens": rep.thinking_tokens,
+                    "cached": rep.cached,
                 }
                 for rep in scenario_run.reps
             ],
@@ -177,22 +184,24 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
         "=" * 78,
         f"  Benchmark summary — candidate: {candidate_label}",
         "=" * 78,
-        f"  Scenarios scored     : {summary['n_scenarios']}"
+        f"  Scenarios scored     : {summary['n_scenarios']} across "
+        f"{summary.get('n_markets', summary['n_scenarios'])} markets"
         + (
             f"  (CONTAMINATED: {summary['n_contaminated']})"
             if summary["n_contaminated"]
             else ""
         ),
         "",
-        "  Adopt/reject gate (paired Brier, negative delta = candidate better):",
+        "  Adopt/reject gate (paired Brier, negative delta = candidate better;",
+        "  clustered by market — signals on one market share its outcome):",
         f"    mean Brier — incumbent : {summary['incumbent_mean_brier']:.4f}",
         f"    mean Brier — candidate : {summary['candidate_mean_brier']:.4f}",
         f"    paired delta           : mean={summary['brier_delta_mean']:+.4f}  "
         f"median={summary['brier_delta_median']:+.4f}",
-        f"    bootstrap 95% CI       : [{summary['brier_delta_ci95'][0]:+.4f}, "
+        f"    cluster bootstrap 95% CI: [{summary['brier_delta_ci95'][0]:+.4f}, "
         f"{summary['brier_delta_ci95'][1]:+.4f}]"
         + ("  ← excludes zero" if summary["brier_delta_significant"] else "  (includes zero — not significant)"),
-        f"    per-scenario winners   : candidate={summary['candidate_wins']}  "
+        f"    per-market winners     : candidate={summary['candidate_wins']}  "
         f"incumbent={summary['incumbent_wins']}  ties={summary['ties']}  "
         f"(sign test p={summary['sign_test_p']:.3f})",
         "",
@@ -241,10 +250,11 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
     common = trades["common_trades"]
     lines += [
         "",
-        "  Degradation guard (trade decisions at frozen prices — not a portfolio sim):",
-        f"    would-trade   : incumbent={trades['incumbent_would_trade']}  "
+        "  Degradation guard (entry-faithful: one entry per market per model, at",
+        "  that model's first gate-clearing signal — frozen prices, not a portfolio sim):",
+        f"    markets entered : incumbent={trades['incumbent_would_trade']}  "
         f"candidate={trades['candidate_would_trade']}",
-        "    mean EV/trade : incumbent="
+        "    mean EV/entry  : incumbent="
         + (f"{inc_ev:+.4f}" if inc_ev is not None else "n/a")
         + "  candidate="
         + (f"{cand_ev:+.4f}" if cand_ev is not None else "n/a"),
@@ -261,18 +271,18 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
         f"candidate={_usd(common['candidate_mean_stake'])}",
     ]
     if trades["disagreements"]:
-        lines.append("    disagreements (exactly one side trades):")
+        lines.append("    disagreements (exactly one side enters the market):")
         for d in trades["disagreements"]:
-            who = "candidate" if d["candidate_trades"] else "incumbent"
             ev = d["trade_ev"]
             ev_str = f"{ev:+.4f}" if ev is not None else "n/a"
+            when = (d["entry_signal_time"] or "")[:16]
             lines.append(
-                f"      {d['market_id']}: only {who} trades "
-                f"(edges inc={d['incumbent_edge']:+.3f}/cand={d['candidate_edge']:+.3f}, "
+                f"      {d['market_id']}: only {d['entered_by']} enters "
+                f"(at {when}, edge={d['entry_edge']:+.3f}, "
                 f"outcome={'YES' if d['outcome'] == 1.0 else 'NO'}, EV={ev_str})"
             )
     else:
-        lines.append("    disagreements : none — both sides trade the same scenarios")
+        lines.append("    disagreements : none — both sides enter the same markets")
 
     cost = summary.get("cost")
     if cost:
@@ -288,7 +298,12 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
             f"    mean latency : incumbent={_fmt(cost['incumbent_mean_latency_ms'], '.0f', 'ms')}"
             f"  candidate={_fmt(cost['candidate_mean_latency_ms'], '.0f', 'ms')}"
             f"  Δ={_fmt(cost['latency_delta_ms_per_call'], '+.0f', 'ms')}",
-            f"    candidate total spend this run: ${cost['candidate_total_cost_usd']:.4f}",
+            f"    candidate total spend this run: ${cost['candidate_total_cost_usd']:.4f}"
+            + (
+                f"  ({cost['candidate_cached_calls']} call(s) served from eval cache)"
+                if cost.get("candidate_cached_calls")
+                else ""
+            ),
         ]
 
     lines.append("")

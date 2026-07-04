@@ -228,9 +228,9 @@ uv run freqpred fixtures record-bank                       # all resolved market
 uv run freqpred fixtures record-bank --out-dir benchmarks/prompt_bank --limit 100
 ```
 
-Records a **frozen-context** fixture from each finalized binary market's last LLM-backed signal. Unlike plain `fixtures record`, inputs are parsed from the signal's stored `raw_context` — never from the live tables, which contain the outcome after resolution (`in_market_count` includes the occurrence that resolved the market; the series counts include the market's own settlement; the market row's category/close_time/question drift). Every fixture is verified by re-rendering and requiring **byte-equality** with the stored prompt; signals that fail the round-trip (or predate the current prompt version) are skipped, never written.
+Records a **frozen-context** fixture from every LLM-backed signal on finalized binary markets (default `--per-market all`; `--per-market last` records only each market's final pre-resolution signal). Unlike plain `fixtures record`, inputs are parsed from the signal's stored `raw_context` — never from the live tables, which contain the outcome after resolution (`in_market_count` includes the occurrence that resolved the market; the series counts include the market's own settlement; the market row's category/close_time/question drift). Every fixture is verified by re-rendering and requiring **byte-equality** with the stored prompt; signals that fail the round-trip are skipped, never written. The round-trip is also the prompt-version compatibility gate — signals from older prompt versions whose stored prompt still re-renders byte-exactly under the current template are recordable.
 
-The output directory is gitignored. The bank is regenerable from the DB **while the prompt version is unchanged** — after a `PROMPT_VERSION` bump, `record-bank` skips all previous-version signals, so a re-sweep produces an empty bank until new-version markets resolve. When benchmarking a prompt change, the bank recorded under the previous version is the frozen baseline: do not delete or regenerate it mid-experiment (see README → "Changing the signal prompt"). Use it as the scenario source for prompt benchmarking:
+The output directory is gitignored. The bank is regenerable from the DB **while `build_prompt`'s user-prompt template is unchanged** — a `PROMPT_VERSION` bump that only edits `SYSTEM_PROMPT` (e.g. v9 → v10) keeps every old signal recordable, but a template change makes older signals fail the round-trip, and a re-sweep then loses them until new-template markets resolve. When benchmarking a prompt-template change, treat the recorded bank as the experiment's frozen baseline: do not delete or regenerate it mid-experiment (see README → "Changing the signal prompt"). Use it as the scenario source for prompt benchmarking:
 
 ```bash
 uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/prompt_bank \
@@ -242,6 +242,7 @@ uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/p
 | `--out-dir` | `benchmarks/prompt_bank` | Bank directory (gitignored) |
 | `--strategy` | `PoliticsEdgeStrategy` | Strategy for the fixtures' entry-decision expectations |
 | `--limit` | all | Max markets |
+| `--per-market` | `all` | `all` = every LLM-backed signal per market (benchmark samples at run time); `last` = final pre-resolution signal only |
 
 ---
 
