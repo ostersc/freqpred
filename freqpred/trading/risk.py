@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.config import RiskConfig
@@ -65,21 +65,21 @@ class RiskEngine:
         block_reentry_after_stoploss: bool,
         stoploss_cooldown_hours: float,
     ) -> tuple[bool, str]:
-        """Return (blocked, reason) if stoploss re-entry policy prevents a new entry.
+        """Return (blocked, reason) if the loss re-entry policy prevents a new entry.
 
+        Despite the name (kept for config-flag compatibility), this blocks on
+        *any* closed loss for this market, not just stoploss exits — see the
+        loss_where condition below.
         Returns (False, "") when neither guard is configured or no blocking exit found.
         """
         if not block_reentry_after_stoploss and stoploss_cooldown_hours <= 0:
             return False, ""
-        # Block on hard stoploss, trailing stop, or any exit that closed at a loss.
-        loss_exit_condition = or_(
-            PositionRow.exit_reason.in_(("stoploss", "trailing_stop")),
-            (PositionRow.exit_reason == "signal") & (PositionRow.pnl < 0),
-            (PositionRow.exit_reason == "force_exit:manual") & (PositionRow.pnl < 0),
-        )
+        # Block on any closed exit that lost money, regardless of exit_reason —
+        # a loss is a loss whether it came from a hard stoploss, a signal flip,
+        # a manual/algo force-exit, a resolved market, or a reconcile close.
         loss_where = [
             PositionRow.status == "closed",
-            loss_exit_condition,
+            PositionRow.pnl < 0,
             PositionRow.market_id == market_id,
             PositionRow.mode == mode,
         ]
@@ -369,14 +369,13 @@ class RiskEngine:
         # neither guard is configured (mirrors _check_stoploss_reentry).
         loss_exit_count = 0
         if block_reentry_after_stoploss or stoploss_cooldown_hours > 0:
-            loss_exit_condition = or_(
-                PositionRow.exit_reason.in_(("stoploss", "trailing_stop")),
-                (PositionRow.exit_reason == "signal") & (PositionRow.pnl < 0),
-                (PositionRow.exit_reason == "force_exit:manual") & (PositionRow.pnl < 0),
-            )
+            # Block on any closed exit that lost money, regardless of exit_reason
+            # (mirrors _check_stoploss_reentry) — a loss is a loss whether it came
+            # from a hard stoploss, a signal flip, a manual/algo force-exit, a
+            # resolved market, or a reconcile close.
             loss_where = [
                 PositionRow.status == "closed",
-                loss_exit_condition,
+                PositionRow.pnl < 0,
                 PositionRow.market_id == market_id,
                 PositionRow.mode == mode,
             ]

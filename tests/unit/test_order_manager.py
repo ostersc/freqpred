@@ -683,6 +683,57 @@ async def test_live_mode_entry_price_uses_get_fills_when_order_executed(
 
 
 @pytest.mark.asyncio
+async def test_live_mode_contracts_reconciled_up_from_get_fills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The create-order response's filled_yes_count can under-report the true
+    fill count when the remaining matches land a beat after the HTTP response
+    returns. get_fills() is authoritative on count, not just price/fee —
+    persisted contracts must reflect it, or the extra contracts end up held
+    on the exchange with zero DB tracking, no stoploss, no risk visibility."""
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+
+    filled_order = Order(
+        market_id=MARKET_ID,
+        direction="YES",
+        contracts=3,
+        price=0.60,
+        mode="live",
+        exchange_order_id="ORD-UNDER",
+        status="executed",
+        fee_usd=0.05,
+        filled_yes_count=1,  # under-reported by the synchronous response
+        remaining_count=0,
+        requested_count=3,
+    )
+    mock_kalshi = AsyncMock()
+    mock_kalshi.place_order = AsyncMock(return_value=filled_order)
+    mock_kalshi.get_fills = AsyncMock(
+        return_value=[
+            Fill(
+                fill_id="F-1", order_id="ORD-UNDER", market_id=MARKET_ID,
+                direction="YES", contracts=3, price=0.60, fee_usd=0.05,
+            ),
+        ]
+    )
+
+    om, _ = _make_order_manager(mode="live", kalshi_client=mock_kalshi)
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    expected_position = _make_position(contracts=3, entry_price=0.60)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_position,
+    ) as mock_ledger:
+        await om.submit(_make_signal(direction="YES"), _make_market(yes_bid=0.58, yes_ask=0.60), strategy)
+
+    kwargs = mock_ledger.call_args.kwargs
+    assert kwargs["contracts"] == 3
+    assert kwargs["status"] == "open"
+
+
+@pytest.mark.asyncio
 async def test_live_mode_entry_price_falls_back_when_get_fills_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

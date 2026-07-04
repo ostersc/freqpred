@@ -630,6 +630,26 @@ class OrderManager:
             if fill_contracts > 0:
                 fill_price = sum(f.price * f.contracts for f in fills) / fill_contracts
                 fill_fee = sum(f.fee_usd for f in fills)
+                # GET /portfolio/fills is authoritative on count too, not just price/fee.
+                # The synchronous place_order response can under-report filled_yes_count
+                # when a taker order's remaining matches land a beat after the HTTP
+                # response returns — mapped.contracts would then persist a smaller
+                # position than what's actually held on the exchange, leaving the
+                # extra contracts with no DB tracking, no stoploss, no risk visibility.
+                # Only correct upward: fills lagging the index (the retry loop above
+                # exists for exactly that) could make fill_contracts the smaller,
+                # stale number, and a confirmed "executed" order response should not
+                # be overridden downward by a still-catching-up fills index.
+                if fill_contracts > mapped.contracts:
+                    logger.warning(
+                        "order_manager.fill_count_reconciled",
+                        exchange_order_id=filled_order.exchange_order_id,
+                        market_id=order.market_id,
+                        order_response_contracts=mapped.contracts,
+                        fills_endpoint_contracts=fill_contracts,
+                    )
+                    mapped.contracts = fill_contracts
+                    mapped.is_partial = mapped.contracts < order.contracts
 
         effective_entry = fill_price + (fill_fee / order.contracts if order.contracts else 0)
         logger.info(
