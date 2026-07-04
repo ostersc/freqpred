@@ -242,7 +242,7 @@ uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/p
 | `--out-dir` | `benchmarks/prompt_bank` | Bank directory (gitignored) |
 | `--strategy` | `PoliticsEdgeStrategy` | Strategy for the fixtures' entry-decision expectations |
 | `--limit` | all | Max markets |
-| `--per-market` | `all` | `all` = every LLM-backed signal per market (benchmark samples at run time); `last` = final pre-resolution signal only |
+| `--per-market` | `all` | `all` = every LLM-backed signal per market (benchmark samples at run time); `first` = earliest signal only (pure entry decisions); `last` = final pre-resolution signal only |
 
 ---
 

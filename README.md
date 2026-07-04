@@ -271,8 +271,9 @@ uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/p
 
 # Sampling: --limit N picks N MARKETS at random (seeded via --seed, so runs are
 # reproducible), and --per-market picks which of each market's signals to score:
-# spread:3 (default — early/mid/late decision points), all, or last (the final
-# pre-resolution signal only; the market has usually converged by then).
+# spread:3 (default — early/mid/late decision points), all, first (earliest
+# signal — the purest entry decision), or last (the final pre-resolution
+# signal only; the market has usually converged by then).
 # Identical evals (model+thinking+prompt) are served free from
 # benchmarks/.eval_cache — re-runs and extensions only pay for new calls;
 # --no-cache forces fresh calls.

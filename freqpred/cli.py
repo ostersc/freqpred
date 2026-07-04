@@ -2167,10 +2167,11 @@ def fixtures_replay(paths: tuple[Path, ...], update: bool) -> None:
 )
 @click.option("--limit", type=int, default=None, help="Max markets (default: all).")
 @click.option(
-    "--per-market", type=click.Choice(["all", "last"]), default="all", show_default=True,
-    help="Record every LLM-backed signal per market, or only the last one. "
-         "Recording everything lets the benchmark sample decision points at "
-         "run time (--per-market spread:K there).",
+    "--per-market", type=click.Choice(["all", "first", "last"]), default="all",
+    show_default=True,
+    help="Record every LLM-backed signal per market, only the first (earliest "
+         "entry decision), or only the last. Recording everything lets the "
+         "benchmark sample decision points at run time (--per-market there).",
 )
 @click.pass_context
 def fixtures_record_bank(
@@ -2236,13 +2237,18 @@ async def _fixtures_record_bank(
             else:
                 market_ids = None
 
-            if per_market == "last":
+            if per_market in ("first", "last"):
+                order = (
+                    SignalRow.created_at.asc()
+                    if per_market == "first"
+                    else SignalRow.created_at.desc()
+                )
                 dedup = (
                     select(SignalRow)
                     .join(MarketRow, MarketRow.id == SignalRow.market_id)
                     .where(*base_filter)
                     .distinct(SignalRow.market_id)
-                    .order_by(SignalRow.market_id, SignalRow.created_at.desc())
+                    .order_by(SignalRow.market_id, order)
                 ).subquery()
                 alias = aliased(SignalRow, dedup)
                 stmt = select(alias).order_by(alias.market_id, alias.created_at)

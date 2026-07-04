@@ -315,6 +315,9 @@ def test_sample_per_market_last_all_and_spread() -> None:
     last = sample_per_market(series, "last")
     assert sorted(s.id for s in last) == ["M1-h9", "M2-h1"]
 
+    first = sample_per_market(series, "first")
+    assert sorted(s.id for s in first) == ["M1-h0", "M2-h0"]
+
     assert len(sample_per_market(series, "all")) == 12
 
     spread = sample_per_market(series, "spread:3")

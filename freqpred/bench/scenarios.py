@@ -177,6 +177,8 @@ def sample_per_market(
 ) -> list[Scenario]:
     """Select which of each market's signals to benchmark.
 
+    - ``"first"``: the earliest LLM signal only — the purest early-entry
+      decision point, before the market converges.
     - ``"last"``: the final pre-resolution signal only (the market has usually
       converged by then — favorites-heavy, least tradeable).
     - ``"all"``: every recorded signal (use market-clustered stats downstream).
@@ -196,6 +198,9 @@ def sample_per_market(
     kept: list[Scenario] = []
     for series in by_market.values():
         series.sort(key=lambda s: s.signal_time or s.close_time)
+        if per_market == "first":
+            kept.append(series[0])
+            continue
         if per_market == "last":
             kept.append(series[-1])
             continue

@@ -341,8 +341,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--per-market", default="spread:3",
-        help="Which of each market's signals to score: 'last' (final pre-resolution "
-             "signal — favorites-heavy, least tradeable), 'all' (every signal), or "
+        help="Which of each market's signals to score: 'first' (earliest signal — "
+             "the purest entry decision), 'last' (final pre-resolution signal — "
+             "favorites-heavy, least tradeable), 'all' (every signal), or "
              "'spread:K' (K signals evenly spaced across the market's timeline, "
              "first and last included). Default: spread:3. Statistics are "
              "market-clustered either way.",
