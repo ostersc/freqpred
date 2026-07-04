@@ -1104,7 +1104,6 @@ class TestGetPositions:
                     "ticker": "KXPRES-25-DEM",
                     "position_fp": "5.00",
                     "market_exposure_dollars": "2.50",
-                    "resting_orders_count": 0,
                     "fees_paid_dollars": "0.05",
                     "realized_pnl_dollars": "0.00",
                     "total_traded_dollars": "2.50",
@@ -1144,7 +1143,7 @@ class TestGetPositions:
         client = _make_client()
         resp_data = {
             "market_positions": [
-                {"ticker": "KXTECH-25-AI", "position_fp": "-3.00", "resting_orders_count": 0},
+                {"ticker": "KXTECH-25-AI", "position_fp": "-3.00"},
             ],
             "event_positions": [],
             "cursor": "",
@@ -1163,7 +1162,7 @@ class TestGetPositions:
         client = _make_client()
         resp_data = {
             "market_positions": [
-                {"ticker": "KXPRES-25-DEM", "position_fp": "0.00", "resting_orders_count": 0},
+                {"ticker": "KXPRES-25-DEM", "position_fp": "0.00"},
             ],
             "event_positions": [],
             "cursor": "",
