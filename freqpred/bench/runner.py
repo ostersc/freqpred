@@ -24,6 +24,7 @@ import structlog
 
 from freqpred.bench.eval_cache import EvalCache, cache_key
 from freqpred.bench.scenarios import ModelOutput, Scenario
+from freqpred.llm.audit import LLMBudgetExceededError
 from freqpred.llm.client import LLMClient, LLMConsecutiveErrorsError, LLMError
 from freqpred.signal.llm import SIGNAL_ANALYSIS_TOOL, SYSTEM_PROMPT, parse_signal_response
 
@@ -191,7 +192,10 @@ async def run_benchmark(
                 continue
             try:
                 rep = await _call_candidate(llm_client, scenario, model, thinking)
-            except LLMConsecutiveErrorsError as exc:
+            except (LLMConsecutiveErrorsError, LLMBudgetExceededError) as exc:
+                # Stop with partial results (scored + reported), never a crash.
+                # Every completed call is already in the eval cache, so the
+                # re-run after the cap resets only pays for what's missing.
                 run.stopped_early = str(exc)
                 log.error("bench.stopped_early", error=str(exc))
                 return run

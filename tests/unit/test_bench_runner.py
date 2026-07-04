@@ -342,3 +342,19 @@ def test_estimate_counts_cache_hits_as_free(tmp_path) -> None:
         candidate_model="candidate-model", thinking=thinking,
     )
     assert estimate["projected_cost_typical_usd"] < no_cache["projected_cost_typical_usd"]
+
+
+async def test_budget_exceeded_stops_gracefully_with_partial_results() -> None:
+    """Hitting the daily spend cap mid-run must stop with partial results and
+    stopped_early set — never propagate as a crash (the artifact and summary
+    still get written from what completed)."""
+    from freqpred.llm.audit import LLMBudgetExceededError
+
+    client = _mock_client(
+        side_effect=[_response(), LLMBudgetExceededError("cap reached")]
+    )
+    scenarios = [_scenario("s1"), _scenario("s2"), _scenario("s3")]
+    run = await run_benchmark(client, scenarios, candidate_model="candidate-model", reps=1)
+    assert run.stopped_early == "cap reached"
+    assert len(run.scenario_runs[0].reps) == 1  # s1 completed
+    assert run.scenario_runs[0].reps[0].output is not None
