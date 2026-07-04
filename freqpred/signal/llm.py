@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-PROMPT_VERSION = "signal-v10"
+PROMPT_VERSION = "signal-v11"
 
 SYSTEM_PROMPT = """You are a prediction market probability analyst. Estimate the probability
 that a market question resolves YES by combining your prior knowledge with
@@ -156,15 +156,11 @@ the block omits it, approximate as: 1 − exp(−(count_365d/365) × days_remain
   Right: "Poisson baseline for remaining window is 12–21%. Adjust from
          there based on evidence → posterior 0.19."
 
-Choosing between the 30d and 365d Poisson baselines:
-- ELEVATED RECENT ACTIVITY or RECENT DROUGHT flagged: anchor on a blend
-  weighted toward the 30d baseline (roughly 2:1), not a full switch — the
-  recent rate is real signal but is measured from a small window.
-- No flag, baselines close: the 365d baseline is the anchor.
-- No flag, baselines diverging (one more than ~2x the other): the 30d count
-  is usually too small to be reliable on its own — anchor on the 365d
-  baseline, adjusted at most a third of the way toward the 30d one. State
-  which baseline you weighted in prior_basis.
+Use the 30d baseline when ELEVATED RECENT ACTIVITY is flagged (the term
+is being used more frequently in the recent past than its long-run average —
+weight the higher 30d baseline) or RECENT DROUGHT is flagged (the term is
+being used less frequently than its long-run average — weight the lower 30d
+baseline). Otherwise the 365d baseline is the primary anchor.
 
 Evidence can shift the posterior above the Poisson baseline when it confirms
 specific salience or conditions raising the per-day rate in this window. But
@@ -309,10 +305,10 @@ FactBase: count_365d=53, count_30d=8, count_7d=0, in_market_count=0.
 Poisson baseline: 12.3% (365d rate) / 21.3% (30d rate).
 ELEVATED RECENT ACTIVITY: 30d above monthly average.
 
-Prior: 0.19. The correct anchor for the remaining 0.9 days is a blend
-weighted toward the 30d Poisson baseline (~2:1 given the elevated-activity
-flag: (2×21.3 + 12.3)/3 ≈ 18%) — not the 67% option win rate, which is the
-unconditional full-window probability at f=0.
+Prior: 0.19. The 30d-based Poisson baseline (21.3%) is the correct anchor
+for the remaining 0.9 days — not the 67% option win rate, which is the
+unconditional full-window probability at f=0. Elevated recent activity
+warrants the 30d baseline over the 365d baseline.
 updates_applied: [{doc: "posting-spree article", direction: "+",
   magnitude: "small", reason: "high posting volume in window raises
   per-day rate slightly, but not phrase-specific — weak positive only"}].
