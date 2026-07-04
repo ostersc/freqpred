@@ -229,12 +229,14 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
             seg = regimes.get(regime)
             if seg is None:
                 continue
+            delta = seg["brier_delta_mean"]
+            verdict = "cand better" if delta < 0 else ("inc better" if delta > 0 else "even")
             lines.append(
                 f"    {label:32s}: n={seg['n']:<4d} "
                 f"brier inc={seg['incumbent_mean_brier']:.4f} "
                 f"cand={seg['candidate_mean_brier']:.4f} "
-                f"Δ={seg['brier_delta_mean']:+.4f}  "
-                f"(cand wins {seg['candidate_wins']}/{seg['n']})"
+                f"Δ={delta:+.4f} ({verdict} on mean; "
+                f"cand closer on {seg['candidate_wins']}/{seg['n']})"
             )
 
     trades = summary["trade_decisions"]
