@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.kalshi import KalshiAPIError
@@ -727,13 +727,25 @@ class OrderManager:
         *,
         _now: datetime | None = None,
     ) -> None:
-        """Per-order reconciliation for live pending positions.
+        """Per-order reconciliation for live pending *and* still-resting-open positions.
 
-        For each live PositionRow in 'pending' with a non-null exchange_order_id:
+        For each live PositionRow with a non-null exchange_order_id that is either
+        (a) 'pending', or (b) 'open' but only partially filled so far (a resting
+        order can keep filling after the initial partial-fill snapshot already
+        promoted the row to 'open' — see class docstring note below):
           1. Call kalshi.get_order(exchange_order_id) for exchange-confirmed state.
           2. Map status via ``map_order_to_status``.
-          3. If still pending and age > pending_order_timeout_seconds → cancel_order.
+          3. If still not fully filled and age > pending_order_timeout_seconds →
+             cancel_order (kills only the unfilled remainder; already-filled
+             contracts are untouched).
           4. Persist db_status, contracts, exchange_order_status, last_exchange_sync_at.
+
+        Case (b) exists because a resting order can be promoted straight to
+        'open' off its first partial fill (map_order_to_status: "resting/partial,
+        0 < filled < requested -> open"), which otherwise permanently excludes it
+        from this sweep — any further fills the resting order receives afterward
+        would then never be reflected in row.contracts, leaving a live exchange
+        position with fewer contracts tracked in the DB than actually held.
 
         Rows with NULL exchange_order_id (legacy pre-migration rows) are skipped.
         Uses SELECT FOR UPDATE SKIP LOCKED so concurrent reconcile passes from
@@ -748,9 +760,15 @@ class OrderManager:
         result = await session.execute(
             select(PositionRow)
             .where(
-                PositionRow.status == "pending",
                 PositionRow.mode == "live",
                 PositionRow.exchange_order_id.is_not(None),
+                or_(
+                    PositionRow.status == "pending",
+                    and_(
+                        PositionRow.status == "open",
+                        PositionRow.exchange_order_status.in_(["resting", "partial"]),
+                    ),
+                ),
             )
             .with_for_update(skip_locked=True)
         )
@@ -795,9 +813,14 @@ class OrderManager:
 
         await self._apply_exchange_state(session, row, exchange_order, now=now)
 
-        # Timeout: if still pending after the status check and we've exceeded
-        # the configured timeout, cancel the order and re-poll its final state.
-        if row.status == "pending":
+        # Timeout: if still not fully filled after the status check (either
+        # 'pending' with zero fill, or 'open' off an earlier partial fill whose
+        # resting remainder never completed) and we've exceeded the configured
+        # timeout, cancel the order's unfilled remainder and re-poll its final
+        # state. Already-filled contracts are untouched by cancel_order.
+        if row.status == "pending" or (
+            row.status == "open" and row.exchange_order_status in ("resting", "partial")
+        ):
             timeout = self._pending_timeout_for(row.strategy_name)
             row_created = row.created_at
             if row_created is not None and row_created.tzinfo is None:

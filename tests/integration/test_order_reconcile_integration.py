@@ -154,6 +154,59 @@ async def _seed_pending_position(
     return pos_id
 
 
+async def _seed_open_partial_position(
+    session_factory,
+    *,
+    signal_id: uuid.UUID,
+    market_id: str,
+    exchange_order_id: str,
+    requested_contracts: int,
+    contracts: int,
+    created_at: datetime | None = None,
+) -> uuid.UUID:
+    """Seed a row already promoted to 'open' off an initial partial fill.
+
+    Mirrors what map_order_to_status does the moment a resting order's first
+    fill arrives (0 < filled < requested -> 'open'), which is the state that
+    previously fell out of reconcile_pending_orders' scope entirely.
+    """
+    pos_id = uuid.uuid4()
+    async with session_factory() as session:
+        row = PositionRow(
+            id=pos_id,
+            market_id=market_id,
+            signal_id=signal_id,
+            strategy_name="IntegrationStrategy",
+            strategy_version="1.0",
+            signal_confidence=0.8,
+            signal_edge=0.10,
+            signal_estimated_prob=0.6,
+            direction="YES",
+            contracts=contracts,
+            entry_price=0.50,
+            entry_time=created_at or NOW,
+            mode="live",
+            status="open",
+            exchange_order_id=exchange_order_id,
+            requested_contracts=requested_contracts,
+            exchange_order_status="partial",
+            last_exchange_sync_at=None,
+        )
+        if created_at is not None:
+            row.created_at = created_at
+        session.add(row)
+        await session.commit()
+
+    if created_at is not None:
+        async with session_factory() as session:
+            await session.execute(
+                text("UPDATE positions SET created_at = :ca WHERE id = :pid"),
+                {"ca": created_at, "pid": pos_id},
+            )
+            await session.commit()
+    return pos_id
+
+
 def _make_om(session_factory, kalshi_client, *, timeout: float = 900.0) -> OrderManager:
     return OrderManager(
         risk=MagicMock(spec=RiskEngine),
@@ -328,3 +381,78 @@ async def test_reconcile_skips_null_exchange_order_id_legacy_rows(session_factor
     async with session_factory() as session:
         row = (await session.execute(select(PositionRow).where(PositionRow.id == pos_id))).scalar_one()
         assert row.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_trues_up_open_row_still_resting_on_trailing_fill(session_factory) -> None:
+    """A resting order's *second* fill, arriving after the first fill already
+    promoted the row to 'open', must still be picked up and reflected in
+    row.contracts — reproduces the KXTRUMPSAY-26JUL13-MELA incident where a
+    4-contract entry order filled 3 then 1 ~2m45s later, and the row (already
+    'open' with contracts=3 from the first fill) was never revisited, leaving
+    1 contract live on the exchange with no DB tracking at all.
+    """
+    signal_id = await _seed_market_and_signal(session_factory)
+    pos_id = await _seed_open_partial_position(
+        session_factory, signal_id=signal_id, market_id="MKT-INT",
+        exchange_order_id="ORD-TRAIL", requested_contracts=4, contracts=3,
+    )
+
+    now_filled = Order(
+        market_id="MKT-INT", direction="YES", contracts=4, price=0.5, mode="live",
+        exchange_order_id="ORD-TRAIL", status="executed",
+        requested_count=4, filled_yes_count=4, filled_no_count=0, remaining_count=0,
+    )
+    kalshi = AsyncMock()
+    kalshi.get_order = AsyncMock(return_value=now_filled)
+
+    om = _make_om(session_factory, kalshi)
+    async with session_factory() as session:
+        await om.reconcile_pending_orders(session, _now=NOW)
+
+    kalshi.get_order.assert_awaited_once_with("ORD-TRAIL")
+    async with session_factory() as session:
+        row = (await session.execute(select(PositionRow).where(PositionRow.id == pos_id))).scalar_one()
+        assert row.status == "open"
+        assert row.contracts == 4
+        assert row.exchange_order_status == "executed"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_cancels_stuck_resting_remainder_after_timeout(session_factory) -> None:
+    """An 'open' partial-fill row whose remainder never completes gets its
+    unfilled portion cancelled once past the timeout, finalizing at whatever
+    was actually filled rather than hanging open indefinitely.
+    """
+    signal_id = await _seed_market_and_signal(session_factory)
+    aged = NOW - timedelta(seconds=120)
+    pos_id = await _seed_open_partial_position(
+        session_factory, signal_id=signal_id, market_id="MKT-INT",
+        exchange_order_id="ORD-STUCK", requested_contracts=4, contracts=3,
+        created_at=aged,
+    )
+
+    still_partial = Order(
+        market_id="MKT-INT", direction="YES", contracts=3, price=0.5, mode="live",
+        exchange_order_id="ORD-STUCK", status="partial",
+        requested_count=4, filled_yes_count=3, filled_no_count=0, remaining_count=1,
+    )
+    cancelled = Order(
+        market_id="MKT-INT", direction="YES", contracts=3, price=0.5, mode="live",
+        exchange_order_id="ORD-STUCK", status="canceled",
+        requested_count=4, filled_yes_count=3, filled_no_count=0, remaining_count=1,
+    )
+    kalshi = AsyncMock()
+    kalshi.get_order = AsyncMock(return_value=still_partial)
+    kalshi.cancel_order = AsyncMock(return_value=cancelled)
+
+    om = _make_om(session_factory, kalshi, timeout=60.0)
+    async with session_factory() as session:
+        await om.reconcile_pending_orders(session, _now=NOW)
+
+    kalshi.cancel_order.assert_awaited_once_with("ORD-STUCK")
+    async with session_factory() as session:
+        row = (await session.execute(select(PositionRow).where(PositionRow.id == pos_id))).scalar_one()
+        assert row.status == "open"
+        assert row.contracts == 3
+        assert row.exchange_order_status == "canceled"

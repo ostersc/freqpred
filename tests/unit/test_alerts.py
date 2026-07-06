@@ -256,6 +256,42 @@ async def test_resolution_alert_win_vs_loss_prefix() -> None:
 
 
 # ---------------------------------------------------------------------------
+# test_exit_alert_shows_filled_contracts_not_remaining
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exit_alert_shows_filled_contracts_not_remaining() -> None:
+    """exit_alert must report exit_filled_contracts, not position.contracts.
+
+    A fully-closed live position finalized via partial_close_position always
+    has contracts == 0 (the *remaining* open size) — the alert previously
+    displayed that 0 instead of how many contracts were actually closed.
+    """
+    captured: list[str] = []
+
+    class CaptureSender:
+        async def send(self, message: str) -> None:
+            captured.append(message)
+
+    dispatcher = AlertDispatcher([CaptureSender()])
+
+    closed_pos = _make_position(
+        contracts=0,
+        exit_filled_contracts=3,
+        entry_price=0.82,
+        exit_price=0.59,
+        exit_time=datetime(2026, 7, 6, tzinfo=UTC),
+        pnl=-0.7407,
+        status="closed",
+    )
+    await dispatcher.exit_alert(closed_pos, "force_exit:algo_exit")
+
+    assert "3 contracts" in captured[0]
+    assert "0 contracts" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
 # Circuit breaker alert format
 # ---------------------------------------------------------------------------
 

@@ -66,11 +66,15 @@ class AlertDispatcher:
     async def exit_alert(self, position: Position, exit_reason: str) -> None:
         pnl = position.pnl or 0.0
         prefix = "WIN" if pnl >= 0 else "LOSS"
+        # position.contracts is the *remaining* open size, which a full close
+        # (via partial_close_position) zeroes out — exit_filled_contracts is
+        # the count actually closed and must be used for display instead.
+        closed_contracts = position.exit_filled_contracts or position.contracts
         msg = (
             f"{prefix} EXIT ({exit_reason}): {position.direction} position closed\n"
             f"Market: {position.market_id}\n"
             f"P&L: {pnl:+.4f}  |  Entry: {position.entry_price:.4f}  "
-            f"Exit: {position.exit_price:.4f}  |  {position.contracts} contracts"
+            f"Exit: {position.exit_price:.4f}  |  {closed_contracts} contracts"
         )
         await self.send(msg)
 
