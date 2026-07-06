@@ -220,24 +220,45 @@ def _make_source_quality_row(**kw) -> MagicMock:
 
 
 def _signals_list_result(rows: list) -> MagicMock:
-    """Mock result for the signals list query.
+    """Mock result for the signals list data query.
 
-    Each element must be a 6-tuple:
-    (SignalRow, question, series_ticker, rag_hit_count, has_factbase, has_assessment)
+    Each element must be a 7-tuple:
+    (SignalRow, question, series_ticker, rag_hit_count, has_factbase, has_assessment, has_open_position)
     """
     r = MagicMock()
     r.all.return_value = rows
     return r
 
 
+def _signals_mock_session(
+    rows: list[tuple],
+    *,
+    total: int | None = None,
+    distinct_triggers: list[str] | None = None,
+    distinct_series_tickers: list[str] | None = None,
+    mode: str = "paper",
+) -> AsyncMock:
+    """Build an AsyncMock session with the 5 execute calls made by /api/signals."""
+    session = AsyncMock()
+    session.execute = _execute_side_effects(
+        _mode_result(mode),                                             # _get_mode
+        _scalar_result(total if total is not None else len(rows)),      # count
+        _signals_list_result(rows),                                      # data query
+        _distinct_scalars_result(distinct_triggers or []),               # distinct triggers
+        _distinct_scalars_result(distinct_series_tickers or []),         # distinct series tickers
+    )
+    return session
+
+
 def test_signals_endpoint_returns_paginated_list() -> None:
     row1 = _make_signal_row()
     row2 = _make_signal_row()
 
-    session = AsyncMock()
-    session.execute = _execute_side_effects(
-        _scalar_result(2),                                              # count query
-        _signals_list_result([(row1, "Q1", None, 2, 0, 0), (row2, "Q2", "KXTEST", 0, 1, 1)]),  # data query
+    session = _signals_mock_session(
+        [(row1, "Q1", None, 2, 0, 0, 0), (row2, "Q2", "KXTEST", 0, 1, 1, 1)],
+        total=2,
+        distinct_triggers=["scheduled"],
+        distinct_series_tickers=["KXTEST"],
     )
 
     client = TestClient(_make_app(session))
@@ -255,16 +276,15 @@ def test_signals_endpoint_returns_paginated_list() -> None:
     assert "direction" in item
     assert "created_at" in item
     assert item["market_question"] == "Q1"
+    assert item["has_open_position"] is False
+    assert data["items"][1]["has_open_position"] is True
+    assert data["distinct_triggers"] == ["scheduled"]
+    assert data["distinct_series_tickers"] == ["KXTEST"]
 
 
 def test_signals_endpoint_filters_by_market_id() -> None:
     row = _make_signal_row(market_id="MKTX-42")
-
-    session = AsyncMock()
-    session.execute = _execute_side_effects(
-        _scalar_result(1),
-        _signals_list_result([(row, "Will X happen?", None, 0, 0, 0)]),
-    )
+    session = _signals_mock_session([(row, "Will X happen?", None, 0, 0, 0, 0)])
 
     client = TestClient(_make_app(session))
     resp = client.get("/api/signals?market_id=MKTX-42")
@@ -277,18 +297,29 @@ def test_signals_endpoint_filters_by_market_id() -> None:
 
 def test_signals_endpoint_market_question_none_when_market_missing() -> None:
     row = _make_signal_row()
-
-    session = AsyncMock()
-    session.execute = _execute_side_effects(
-        _scalar_result(1),
-        _signals_list_result([(row, None, None, 0, 0, 0)]),
-    )
+    session = _signals_mock_session([(row, None, None, 0, 0, 0, 0)])
 
     client = TestClient(_make_app(session))
     resp = client.get("/api/signals")
 
     assert resp.status_code == 200
     assert resp.json()["items"][0]["market_question"] is None
+
+
+def test_signals_endpoint_accepts_new_filter_params() -> None:
+    """New edge/confidence/factbase/docs/trigger/series query params are parsed without error."""
+    row = _make_signal_row()
+    session = _signals_mock_session([(row, "Q1", None, 0, 0, 0, 0)])
+
+    client = TestClient(_make_app(session))
+    resp = client.get(
+        "/api/signals"
+        "?min_edge=0.1&max_edge=0.5&min_confidence=0.5&max_confidence=0.9"
+        "&has_factbase=true&has_docs=false&trigger=scheduled&series_ticker=KXTEST"
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 1
 
 
 def test_signals_endpoint_unknown_id_returns_404() -> None:

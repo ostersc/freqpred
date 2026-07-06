@@ -175,6 +175,7 @@ def _signal_row_to_out(
     has_factbase: bool = False,
     series_ticker: str | None = None,
     has_assessment: bool = False,
+    has_open_position: bool = False,
 ) -> SignalOut:
     return SignalOut(
         id=str(row.id),
@@ -198,6 +199,7 @@ def _signal_row_to_out(
         has_factbase=has_factbase,
         series_ticker=series_ticker,
         has_assessment=has_assessment,
+        has_open_position=has_open_position,
     )
 
 
@@ -460,7 +462,17 @@ async def list_signals(
     offset: int = Query(default=0, ge=0),
     market_id: str | None = Query(default=None),
     direction: str | None = Query(default=None),
+    min_edge: float | None = Query(default=None),
+    max_edge: float | None = Query(default=None),
+    min_confidence: float | None = Query(default=None),
+    max_confidence: float | None = Query(default=None),
+    has_factbase: bool | None = Query(default=None),
+    has_docs: bool | None = Query(default=None),
+    trigger: str | None = Query(default=None),
+    series_ticker: str | None = Query(default=None),
 ) -> SignalListResponse:
+    app_mode = await _get_mode(session)
+
     rag_count_subq = (
         select(func.count())
         .select_from(DocumentMarketLinkRow)
@@ -482,6 +494,15 @@ async def list_signals(
         .correlate(SignalRow)
         .scalar_subquery()
     )
+    has_open_position_subq = (
+        select(func.count())
+        .select_from(PositionRow)
+        .where(PositionRow.market_id == SignalRow.market_id)
+        .where(PositionRow.status == "open")
+        .where(PositionRow.mode == app_mode)
+        .correlate(SignalRow)
+        .scalar_subquery()
+    )
     stmt = (
         select(
             SignalRow,
@@ -490,11 +511,16 @@ async def list_signals(
             rag_count_subq.label("rag_hit_count"),
             has_factbase_subq.label("has_factbase"),
             has_assessment_subq.label("has_assessment"),
+            has_open_position_subq.label("has_open_position"),
         )
         .outerjoin(MarketRow, MarketRow.id == SignalRow.market_id)
         .order_by(SignalRow.created_at.desc())
     )
-    count_stmt = select(func.count()).select_from(SignalRow)
+    count_stmt = (
+        select(func.count())
+        .select_from(SignalRow)
+        .outerjoin(MarketRow, MarketRow.id == SignalRow.market_id)
+    )
 
     if market_id:
         stmt = stmt.where(SignalRow.market_id == market_id)
@@ -502,18 +528,59 @@ async def list_signals(
     if direction:
         stmt = stmt.where(SignalRow.direction == direction.upper())
         count_stmt = count_stmt.where(SignalRow.direction == direction.upper())
+    if min_edge is not None:
+        stmt = stmt.where(SignalRow.edge >= min_edge)
+        count_stmt = count_stmt.where(SignalRow.edge >= min_edge)
+    if max_edge is not None:
+        stmt = stmt.where(SignalRow.edge <= max_edge)
+        count_stmt = count_stmt.where(SignalRow.edge <= max_edge)
+    if min_confidence is not None:
+        stmt = stmt.where(SignalRow.confidence >= min_confidence)
+        count_stmt = count_stmt.where(SignalRow.confidence >= min_confidence)
+    if max_confidence is not None:
+        stmt = stmt.where(SignalRow.confidence <= max_confidence)
+        count_stmt = count_stmt.where(SignalRow.confidence <= max_confidence)
+    if has_factbase is not None:
+        cond = has_factbase_subq > 0 if has_factbase else has_factbase_subq == 0
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
+    if has_docs is not None:
+        cond = rag_count_subq > 0 if has_docs else rag_count_subq == 0
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
+    if trigger:
+        stmt = stmt.where(SignalRow.trigger == trigger)
+        count_stmt = count_stmt.where(SignalRow.trigger == trigger)
+    if series_ticker:
+        stmt = stmt.where(MarketRow.series_ticker == series_ticker)
+        count_stmt = count_stmt.where(MarketRow.series_ticker == series_ticker)
 
     total = int((await session.execute(count_stmt)).scalar_one())
     result_rows = (await session.execute(stmt.offset(offset).limit(limit))).all()
 
+    distinct_triggers = (
+        await session.execute(select(SignalRow.trigger).distinct().order_by(SignalRow.trigger))
+    ).scalars().all()
+    distinct_series_tickers = (
+        await session.execute(
+            select(MarketRow.series_ticker)
+            .join(SignalRow, SignalRow.market_id == MarketRow.id)
+            .where(MarketRow.series_ticker.isnot(None))
+            .distinct()
+            .order_by(MarketRow.series_ticker)
+        )
+    ).scalars().all()
+
     return SignalListResponse(
         items=[
-            _signal_row_to_out(r, q, int(rag), bool(fb), st, bool(asmnt))
-            for r, q, st, rag, fb, asmnt in result_rows
+            _signal_row_to_out(r, q, int(rag), bool(fb), st, bool(asmnt), bool(hop))
+            for r, q, st, rag, fb, asmnt, hop in result_rows
         ],
         total=total,
         limit=limit,
         offset=offset,
+        distinct_triggers=list(distinct_triggers),
+        distinct_series_tickers=list(distinct_series_tickers),
     )
 
 

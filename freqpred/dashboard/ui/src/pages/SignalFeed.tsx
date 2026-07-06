@@ -1,8 +1,8 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
+import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { getSignals, getSignal } from '../api/signals'
 import { getStrategyConfig } from '../api/strategy'
-import { Badge, Panel, LoadingSpinner, ErrorBanner, ProbBar, fmtAge } from '../components/ui'
+import { Badge, Panel, LoadingSpinner, ErrorBanner, ProbBar, LabeledSelect, RangeSlider, fmtAge } from '../components/ui'
 import AnalyzeButton from '../components/AnalyzeButton'
 import { SignalDetail as SharedSignalDetail } from '../components/SignalDetail'
 import type { SignalOut } from '../api/types'
@@ -29,14 +29,12 @@ function firstSentence(text: string): string {
   return m ? m[0] : text
 }
 
-type TriggerKind = 'scheduled' | 'price_moved' | 'entry_manual' | 'market_update' | string
-
-function triggerBadge(trigger: TriggerKind) {
+function triggerBadge(trigger: string) {
   const map: Record<string, 'accent' | 'info' | 'pos' | 'muted'> = {
     price_moved: 'accent',
     scheduled: 'info',
-    entry_manual: 'pos',
-    market_update: 'muted',
+    manual: 'pos',
+    demo_harness: 'muted',
   }
   return map[trigger] ?? 'muted'
 }
@@ -92,9 +90,10 @@ function SignalRow({ signal, minConf }: { signal: SignalOut; minConf: number }) 
       >
         <td>
           <div style={{ fontWeight: 500, marginBottom: 3 }}>{firstSentence(signal.market_question ?? signal.market_id)}</div>
-          <div className="row" style={{ gap: 8 }}>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             <span className="ticker-id">{signal.market_id}</span>
             <Badge kind={triggerBadge(signal.trigger)} dot>{signal.trigger.replace('_', ' ')}</Badge>
+            {signal.has_open_position && <Badge kind="pos" dot>open position</Badge>}
           </div>
           <SignalDataBadges signal={signal} />
         </td>
@@ -131,8 +130,19 @@ function SignalRow({ signal, minConf }: { signal: SignalOut; minConf: number }) 
   )
 }
 
+type TriState = '' | 'yes' | 'no'
+
+const DEFAULT_TRIGGER = 'scheduled'
+
 export default function SignalFeed() {
   const [offset, setOffset] = useState(0)
+  const [direction, setDirection] = useState('')
+  const [trigger, setTrigger] = useState(DEFAULT_TRIGGER)
+  const [seriesTicker, setSeriesTicker] = useState('')
+  const [hasFactbase, setHasFactbase] = useState<TriState>('')
+  const [hasDocs, setHasDocs] = useState<TriState>('')
+  const [edgeRange, setEdgeRange] = useState<[number, number] | null>(null)
+  const [confRange, setConfRange] = useState<[number, number] | null>(null)
 
   const { data: config } = useQuery({
     queryKey: ['strategyConfig'],
@@ -141,11 +151,46 @@ export default function SignalFeed() {
   })
   const minConf = config?.min_confidence ?? 0.5
 
+  // Initialize the range filters from the live strategy config exactly once —
+  // re-running this on every config refetch would clobber in-progress user edits.
+  useEffect(() => {
+    if (config && edgeRange === null) setEdgeRange([config.min_edge, config.max_edge ?? 1])
+    if (config && confRange === null) setConfRange([config.min_confidence, 1])
+  }, [config, edgeRange, confRange])
+
   const { data, isLoading, error } = useQuery({
-    queryKey: ['signals', offset],
-    queryFn: () => getSignals({ limit: PAGE_SIZE, offset }),
+    queryKey: ['signals', offset, direction, trigger, seriesTicker, hasFactbase, hasDocs, edgeRange, confRange],
+    queryFn: () => getSignals({
+      limit: PAGE_SIZE,
+      offset,
+      direction: direction || undefined,
+      trigger: trigger || undefined,
+      series_ticker: seriesTicker || undefined,
+      has_factbase: hasFactbase === '' ? undefined : hasFactbase === 'yes',
+      has_docs: hasDocs === '' ? undefined : hasDocs === 'yes',
+      min_edge: edgeRange?.[0],
+      max_edge: edgeRange?.[1],
+      min_confidence: confRange?.[0],
+      max_confidence: confRange?.[1],
+    }),
+    enabled: edgeRange !== null && confRange !== null,
+    placeholderData: keepPreviousData,
     refetchInterval: 30_000,
   })
+
+  function resetFilters() {
+    setDirection('')
+    setTrigger(DEFAULT_TRIGGER)
+    setSeriesTicker('')
+    setHasFactbase('')
+    setHasDocs('')
+    setEdgeRange(null)
+    setConfRange(null)
+    setOffset(0)
+  }
+
+  const triggerOptions = Array.from(new Set([DEFAULT_TRIGGER, ...(data?.distinct_triggers ?? [])]))
+  const seriesOptions = data?.distinct_series_tickers ?? []
 
   return (
     <div className="page">
@@ -162,6 +207,85 @@ export default function SignalFeed() {
           {data && <div className="chip mono">{data.total} signals total</div>}
         </div>
       </div>
+
+      <Panel style={{ marginBottom: 12 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'end' }}>
+          <LabeledSelect
+            label="Direction"
+            value={direction}
+            onChange={(v) => { setDirection(v); setOffset(0) }}
+            options={[
+              { value: '', label: 'All' },
+              { value: 'YES', label: 'YES' },
+              { value: 'NO', label: 'NO' },
+              { value: 'SKIP', label: 'SKIP' },
+            ]}
+          />
+          <LabeledSelect
+            label="Type"
+            value={trigger}
+            onChange={(v) => { setTrigger(v); setOffset(0) }}
+            options={[
+              { value: '', label: 'All' },
+              ...triggerOptions.map((t) => ({ value: t, label: t.replace('_', ' ') })),
+            ]}
+          />
+          <LabeledSelect
+            label="Series"
+            value={seriesTicker}
+            onChange={(v) => { setSeriesTicker(v); setOffset(0) }}
+            options={[
+              { value: '', label: 'All' },
+              ...seriesOptions.map((s) => ({ value: s, label: s })),
+            ]}
+          />
+          <LabeledSelect
+            label="Factbase"
+            value={hasFactbase}
+            onChange={(v) => { setHasFactbase(v as TriState); setOffset(0) }}
+            options={[
+              { value: '', label: 'Any' },
+              { value: 'yes', label: 'Has factbase' },
+              { value: 'no', label: 'No factbase' },
+            ]}
+          />
+          <LabeledSelect
+            label="Docs"
+            value={hasDocs}
+            onChange={(v) => { setHasDocs(v as TriState); setOffset(0) }}
+            options={[
+              { value: '', label: 'Any' },
+              { value: 'yes', label: 'Has docs' },
+              { value: 'no', label: 'No docs' },
+            ]}
+          />
+          <div className="labeled-field" style={{ minWidth: 200 }}>
+            <label className="field-label">
+              Edge {edgeRange ? `${(edgeRange[0] * 100).toFixed(0)}%–${(edgeRange[1] * 100).toFixed(0)}%` : ''}
+            </label>
+            {edgeRange && (
+              <RangeSlider
+                min={-1} max={1} step={0.01}
+                valueMin={edgeRange[0]} valueMax={edgeRange[1]}
+                onChange={(lo, hi) => { setEdgeRange([lo, hi]); setOffset(0) }}
+              />
+            )}
+          </div>
+          <div className="labeled-field" style={{ minWidth: 200 }}>
+            <label className="field-label">
+              Confidence {confRange ? `${(confRange[0] * 100).toFixed(0)}%–${(confRange[1] * 100).toFixed(0)}%` : ''}
+            </label>
+            {confRange && (
+              <RangeSlider
+                min={0} max={1} step={0.01}
+                valueMin={confRange[0]} valueMax={confRange[1]}
+                onChange={(lo, hi) => { setConfRange([lo, hi]); setOffset(0) }}
+              />
+            )}
+          </div>
+          <button className="btn ghost" onClick={resetFilters}>Reset</button>
+        </div>
+      </Panel>
 
       {isLoading && <LoadingSpinner />}
       {error && <ErrorBanner message={String(error)} />}
@@ -183,6 +307,13 @@ export default function SignalFeed() {
               </thead>
               <tbody>
                 {data.items.map((s) => <SignalRow key={s.id} signal={s} minConf={minConf} />)}
+                {data.items.length === 0 && (
+                  <tr>
+                    <td colSpan={7} style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-3)' }}>
+                      No signals match the current filters
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </Panel>

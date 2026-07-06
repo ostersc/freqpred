@@ -204,6 +204,46 @@ export function LabeledSelect({ label, value, onChange, options }: {
   )
 }
 
+// ---- RangeSlider (dual-thumb, two overlaid native range inputs) ----
+export function RangeSlider({ min, max, step = 0.01, valueMin, valueMax, onChange }: {
+  min: number
+  max: number
+  step?: number
+  valueMin: number
+  valueMax: number
+  onChange: (lo: number, hi: number) => void
+}) {
+  const span = max - min || 1
+  const loPct = ((valueMin - min) / span) * 100
+  const hiPct = ((valueMax - min) / span) * 100
+
+  return (
+    <div className="range-slider">
+      <div className="range-slider-track">
+        <div className="range-slider-fill" style={{ left: `${loPct}%`, width: `${hiPct - loPct}%` }} />
+      </div>
+      <input
+        type="range"
+        className="range-slider-input"
+        min={min}
+        max={max}
+        step={step}
+        value={valueMin}
+        onChange={(e) => onChange(Math.min(Number(e.target.value), valueMax), valueMax)}
+      />
+      <input
+        type="range"
+        className="range-slider-input"
+        min={min}
+        max={max}
+        step={step}
+        value={valueMax}
+        onChange={(e) => onChange(valueMin, Math.max(Number(e.target.value), valueMin))}
+      />
+    </div>
+  )
+}
+
 export function LabeledInput({ label, placeholder, type = 'text', value, onChange }: {
   label: string
   placeholder?: string

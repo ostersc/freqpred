@@ -33,6 +33,7 @@ class SignalOut(BaseModel):
     has_factbase: bool
     series_ticker: str | None
     has_assessment: bool
+    has_open_position: bool
 
 
 class DocumentLinkOut(BaseModel):
@@ -71,6 +72,8 @@ class SignalListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+    distinct_triggers: list[str]
+    distinct_series_tickers: list[str]
 
 
 # ---------------------------------------------------------------------------

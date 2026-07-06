@@ -20,6 +20,7 @@ export interface SignalOut {
   has_factbase: boolean
   series_ticker: string | null
   has_assessment: boolean
+  has_open_position: boolean
 }
 
 export interface DocumentLinkOut {
@@ -58,6 +59,8 @@ export interface SignalListResponse {
   total: number
   limit: number
   offset: number
+  distinct_triggers: string[]
+  distinct_series_tickers: string[]
 }
 
 export interface PositionOut {
@@ -274,6 +277,7 @@ export interface LLMQueryDetailOut extends LLMQueryOut {
 export interface StrategyConfigOut {
   name: string
   min_edge: number
+  max_edge: number | null
   min_confidence: number
   kelly_fraction: number
   max_exposure_per_market: number

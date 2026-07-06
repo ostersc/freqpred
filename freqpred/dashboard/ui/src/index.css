@@ -346,6 +346,38 @@ body {
 .select option { background: oklch(0.20 0.008 255); color: var(--fg-0); }
 body.light .select option { background: oklch(0.98 0.002 255); }
 
+/* =========== Range slider (dual-thumb) =========== */
+.range-slider { position: relative; height: 20px; display: flex; align-items: center; min-width: 160px; }
+.range-slider-track {
+  position: absolute; left: 0; right: 0; height: 4px;
+  background: var(--bg-3); border-radius: 2px;
+}
+.range-slider-fill {
+  position: absolute; height: 4px;
+  background: var(--accent); border-radius: 2px;
+}
+.range-slider-input {
+  position: absolute; left: 0; right: 0;
+  width: 100%; margin: 0; background: transparent;
+  appearance: none; -webkit-appearance: none;
+  pointer-events: none;
+}
+.range-slider-input::-webkit-slider-runnable-track { background: transparent; height: 4px; }
+.range-slider-input::-moz-range-track { background: transparent; height: 4px; }
+.range-slider-input::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none;
+  pointer-events: auto;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--fg-0); border: 2px solid var(--accent);
+  cursor: pointer; margin-top: 0;
+}
+.range-slider-input::-moz-range-thumb {
+  pointer-events: auto;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--fg-0); border: 2px solid var(--accent);
+  cursor: pointer;
+}
+
 /* =========== Segmented =========== */
 .seg {
   display: inline-flex; align-items: center;
