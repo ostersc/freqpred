@@ -45,7 +45,10 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
     Exit priority (per framework rules):
       1–2. Hard stoploss / trailing stop  (config below)
       3.   force_exit — PM-native: thesis-aware displacement/choppiness (this class)
-      4–5. custom_exit / should_exit  (inherited no-ops)
+      4.   custom_exit  (inherited no-op)
+      5.   should_exit  (inherited from IPredictionStrategy — NOT a no-op: fires on a
+           confident direction flip once the position's estimated-probability edge has
+           dropped by more than min_edge since entry; see base.py)
     """
 
     timeframe: str = _TIMEFRAME

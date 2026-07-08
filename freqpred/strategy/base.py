@@ -165,13 +165,25 @@ class IPredictionStrategy(ABC):
         """Signal-driven exit.
 
         Called after LLM re-analysis of a market with an open position.
-        Default: exit if new signal direction != position direction AND
-        confidence >= min_confidence.
+
+        Default: new signal direction != position direction AND confidence
+        >= min_confidence (as before), AND the estimated probability of our
+        held side has dropped by more than min_edge since entry.
+
+        The direction-flip check alone isn't sufficient on a near-coin-flip
+        entry: estimated_probability only has to cross 0.5 by a hair (e.g.
+        0.50 -> 0.49) to flip the label, even though the position's actual
+        edge barely moved. Requiring the drop to exceed min_edge means the
+        position has to lose at least as much conviction as it took to enter
+        it before a reversal is acted on.
         """
-        return (
-            signal.direction not in ("SKIP", position.direction)
-            and signal.confidence >= self.config.min_confidence
-        )
+        if signal.direction in ("SKIP", position.direction):
+            return False
+        if signal.confidence < self.config.min_confidence:
+            return False
+        sign = 1.0 if position.direction == "YES" else -1.0
+        prob_drop = sign * (position.signal_estimated_prob - signal.estimated_probability)
+        return prob_drop > self.config.min_edge
 
     def force_exit(self, position: Position, market: Market) -> str | None:
         """Signal-independent exit hook. Called on every PositionMonitor tick.

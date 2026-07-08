@@ -566,17 +566,19 @@ class TestLoadStrategyFromFile:
 # ---------------------------------------------------------------------------
 
 class TestShouldExitDefault:
-    strategy = ConservativeDefault()
+    strategy = ConservativeDefault()  # min_edge=0.12, min_confidence=0.80
 
-    def _position(self, direction: str = "YES") -> MagicMock:
+    def _position(self, direction: str = "YES", signal_estimated_prob: float = 0.70) -> MagicMock:
         pos = MagicMock()
         pos.direction = direction
+        pos.signal_estimated_prob = signal_estimated_prob
         return pos
 
-    def _signal(self, direction: str, confidence: float) -> MagicMock:
+    def _signal(self, direction: str, confidence: float, estimated_probability: float = 0.40) -> MagicMock:
         sig = MagicMock()
         sig.direction = direction
         sig.confidence = confidence
+        sig.estimated_probability = estimated_probability
         return sig
 
     def test_returns_true_when_direction_flips(self) -> None:
@@ -603,6 +605,47 @@ class TestShouldExitDefault:
     def test_returns_true_at_exact_confidence_threshold(self) -> None:
         pos = self._position("YES")
         sig = self._signal("NO", confidence=0.80)
+        assert self.strategy.should_exit(pos, sig, MagicMock())
+
+    # -- probability-drop floor (regression coverage for a coin-flip entry
+    # whose direction label flips on noise without the position's edge
+    # actually eroding) --
+
+    def test_yes_position_holds_when_prob_drop_below_min_edge(self) -> None:
+        # Coin-flip entry (p=0.50): a marginal re-estimate flips the label
+        # to NO but only erodes 5 points of probability, well under min_edge
+        # (0.12) -- should not exit.
+        pos = self._position("YES", signal_estimated_prob=0.50)
+        sig = self._signal("NO", confidence=0.82, estimated_probability=0.45)
+        assert not self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_yes_position_exits_when_prob_drop_exceeds_min_edge(self) -> None:
+        pos = self._position("YES", signal_estimated_prob=0.50)
+        sig = self._signal("NO", confidence=0.82, estimated_probability=0.30)
+        assert self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_yes_position_holds_when_prob_drop_small_margin(self) -> None:
+        pos = self._position("YES", signal_estimated_prob=0.62)
+        sig = self._signal("NO", confidence=0.82, estimated_probability=0.52)  # drop=0.10 < 0.12
+        assert not self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_yes_position_exits_when_prob_drop_clears_margin(self) -> None:
+        pos = self._position("YES", signal_estimated_prob=0.62)
+        sig = self._signal("NO", confidence=0.82, estimated_probability=0.47)  # drop=0.15 > 0.12
+        assert self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_no_position_holds_when_prob_move_below_min_edge(self) -> None:
+        # NO position entered on a cheap ask (p_yes=0.45 -> p_no=0.55). A
+        # re-estimate that only pushes p_yes up to 0.50 (direction flips to
+        # YES, still consistency-guard-valid) moves only 5 points against
+        # the NO holder -- should not exit.
+        pos = self._position("NO", signal_estimated_prob=0.45)
+        sig = self._signal("YES", confidence=0.82, estimated_probability=0.50)
+        assert not self.strategy.should_exit(pos, sig, MagicMock())
+
+    def test_no_position_exits_when_prob_move_exceeds_min_edge(self) -> None:
+        pos = self._position("NO", signal_estimated_prob=0.30)
+        sig = self._signal("YES", confidence=0.82, estimated_probability=0.55)  # moved 0.25 against NO
         assert self.strategy.should_exit(pos, sig, MagicMock())
 
 

@@ -91,11 +91,13 @@ def _make_market(
     )
 
 
-def _make_signal(direction: str = "YES", confidence: float = 0.82) -> Signal:
+def _make_signal(
+    direction: str = "YES", confidence: float = 0.82, estimated_probability: float = 0.65
+) -> Signal:
     return Signal(
         id=str(uuid.uuid4()),
         market_id="MKT-1",
-        estimated_probability=0.65,
+        estimated_probability=estimated_probability,
         confidence=confidence,
         edge=0.15,
         market_mid_at_signal=0.50,
@@ -317,7 +319,9 @@ class TestEvaluateExit:
         strategy = _make_strategy(min_confidence=0.80)
         monitor = self._monitor(strategy)
         pos = _make_position(entry_price=0.50, direction="YES", entry_time=NOW)
-        sig = _make_signal(direction="NO", confidence=0.85)
+        # signal_estimated_prob defaults to 0.65 on the position; drop to 0.30
+        # clears min_edge (0.10) so should_exit's probability-drop check fires.
+        sig = _make_signal(direction="NO", confidence=0.85, estimated_probability=0.30)
 
         result = monitor.evaluate_exit(
             position=pos,
@@ -866,7 +870,9 @@ class TestCheckAllPositions:
         )
 
         market = _make_market(mid_price=0.60)
-        flip_signal = _make_signal(direction="NO", confidence=0.85)
+        # position's signal_estimated_prob defaults to 0.65 (_make_position); drop
+        # to 0.30 clears min_edge (0.10) so the real should_exit fires the exit.
+        flip_signal = _make_signal(direction="NO", confidence=0.85, estimated_probability=0.30)
 
         scalars_mock = MagicMock()
         scalars_mock.scalars.return_value.all.return_value = [
