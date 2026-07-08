@@ -1,0 +1,20 @@
+/* Self-hosted copies of the two brand fonts freqpred loads at runtime via a
+   Google Fonts <link> in index.html (see freqpred/dashboard/ui/index.html).
+   Both are variable fonts — Google serves the same woff2 file for every
+   requested static weight, so one @font-face per family covers the range. */
+
+@font-face {
+  font-family: 'Inter Tight';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./InterTight-latin.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('./JetBrainsMono-latin.woff2') format('woff2');
+}

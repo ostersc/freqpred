@@ -329,6 +329,10 @@ Before declaring any task complete, verify every acceptance criterion listed in 
 - Update [COMMANDS.md](COMMANDS.md) to reflect the change before declaring the task done.
 - This includes: new commands, removed commands, changed option names/defaults, new Telegram bot commands registered via `TelegramCommandHandler.register()`.
 
+**For any task that adds, removes, renames, or changes the props of a component in `freqpred/dashboard/ui/src/components/ui.tsx`, `AssessmentCard.tsx`, `PriceTimeline.tsx`, or `DocLinkItem.tsx`:**
+- These 19 components are synced to a Claude Design project ("freqpred Dashboard") for prototyping — see `.design-sync/` (config, notes, conventions, authored previews). Re-run `/design-sync` before declaring the task done so the synced project doesn't silently drift from the real component API.
+- Data-fetching components (`NavBar`, `Footer`, `PositionDetail`, `SignalDetail`, `AnalyzeButton`) are intentionally excluded from the sync — no action needed if only those change.
+
 **For any task that adds, removes, or changes a scheduled background task:**
 - Add or update a `SERVICE_*` constant and a `FreshnessSpec` entry in `freqpred/runtime/telemetry.py:build_freshness_specs()` before declaring the task done.
 - Wire `telemetry.mark_success()` and `telemetry.mark_error()` calls into the scheduler loop for that service — each scheduled task must report its own heartbeat independently, even if it runs inside another scheduler's loop.

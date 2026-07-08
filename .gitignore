@@ -62,3 +62,10 @@ freqpred/dashboard/ui/node_modules/
 freqpred/dashboard/ui/dist/
 AGENTS.md
 benchmarks/
+
+# design-sync
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules

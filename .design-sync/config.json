@@ -1,0 +1,51 @@
+{
+  "projectId": "569385bb-9908-456b-bad6-dbd2989663cd",
+  "shape": "package",
+  "pkg": "freqpred-dashboard",
+  "srcDir": "src/components",
+  "cssEntry": "src/index.css",
+  "readmeHeader": ".design-sync/conventions.md",
+  "extraFonts": ["../../../.design-sync/assets/fonts/fonts.css"],
+  "extraEntries": ["react-router-dom"],
+  "provider": {
+    "component": "MemoryRouter",
+    "props": { "initialEntries": ["/"] }
+  },
+  "overrides": {
+    "AssessmentCard": { "cardMode": "column" },
+    "PriceTimeline": { "cardMode": "column" },
+    "SignalHistoryChart": { "cardMode": "column" }
+  },
+  "componentSrcMap": {
+    "NavBar": null,
+    "Footer": null,
+    "PositionDetail": null,
+    "SignalDetail": null,
+    "SelectedSignalPanel": null,
+    "AnalyzeButton": null
+  },
+  "libOverrides": {
+    "source-kit.mjs": "synth-entry mode: export * drops default exports (AssessmentCard, PriceTimeline) and doesn't respect componentSrcMap null-exclusions when building the synthesized entry, bundling the excluded data-fetching components' deps unnecessarily"
+  },
+  "dtsPropsFor": {
+    "Badge": "  kind?: 'pos' | 'neg' | 'warn' | 'info' | 'accent' | 'muted';\n  children: React.ReactNode;\n  dot?: boolean;",
+    "Panel": "  title?: string;\n  children: React.ReactNode;\n  action?: React.ReactNode;\n  style?: React.CSSProperties;\n  className?: string;\n  flush?: boolean;",
+    "Stat": "  label: string;\n  value: React.ReactNode;\n  sub?: string;\n  delta?: string;\n  deltaKind?: string;\n  spark?: React.ReactNode;\n  accent?: string;\n  children?: React.ReactNode;",
+    "Segmented": "  items: { v: string; label: string }[] | string[];\n  value: string;\n  onChange: (value: string) => void;",
+    "ProbBar": "  ours: number;\n  market: number;",
+    "Icon": "  name: 'search' | 'chev' | 'chevR' | 'filter' | 'refresh' | 'check' | 'x' | 'info' | 'bolt' | 'gear';\n  size?: number;",
+    "Sparkline": "  data: number[];\n  timestamps?: number[];\n  w?: number;\n  h?: number;\n  color?: string;\n  fill?: boolean;",
+    "MiniStat": "  label: string;\n  value: React.ReactNode;",
+    "LoadingSpinner": "",
+    "ErrorBanner": "  message: string;",
+    "WarnBanner": "  message: string;",
+    "LabeledSelect": "  label: string;\n  value: string;\n  onChange: (value: string) => void;\n  options: { value: string; label: string }[];",
+    "RangeSlider": "  min: number;\n  max: number;\n  step?: number;\n  valueMin: number;\n  valueMax: number;\n  onChange: (lo: number, hi: number) => void;",
+    "LabeledInput": "  label: string;\n  placeholder?: string;\n  type?: string;\n  value?: string;\n  onChange?: (value: string) => void;",
+    "Donut": "  data: { label: string; pct: number; color: string }[];\n  size?: number;",
+    "SignalHistoryChart": "  signals: {\n    estimated_probability: number;\n    market_mid_at_signal: number;\n    created_at: string;\n    trigger: string;\n    reasoning?: string;\n  }[];",
+    "AssessmentCard": "  assessment: {\n    trust_score: number;\n    size_multiplier: number;\n    verdict: string;\n    reasoning: string;\n    key_factors: string[];\n    warnings: string[];\n    source_breakdown: Array<Record<string, unknown>>;\n    similar_market_summary: Record<string, unknown>;\n    llm_query_id: number | null;\n    created_at: string;\n  } | null;",
+    "PriceTimeline": "  signals: {\n    id: string;\n    created_at: string;\n    estimated_probability: number;\n    market_mid_at_signal: number;\n    trigger: string;\n  }[];\n  entrySignalId: string;\n  entryPrice: number;\n  currentMid: number | null;\n  direction: string;\n  selectedSignalId: string | null;\n  onSignalClick: (id: string) => void;\n  exitPrice?: number | null;\n  exitTime?: string | null;\n  exitReason?: string | null;",
+    "DocLinkItem": "  doc: {\n    document_id: string;\n    source_url: string;\n    title: string;\n    relevance_score: number;\n    source_type: string;\n    source_name: string;\n    published_at: string | null;\n    fetched_at: string;\n    summary: string | null;\n    body_excerpt: string;\n  };"
+  }
+}
