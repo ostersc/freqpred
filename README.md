@@ -320,6 +320,19 @@ Every edit to `SYSTEM_PROMPT` or `build_prompt` follows this sequence. The goal:
 8. **Adopt or revert.** Adopt: merge — the new version goes live on the next signal run, and its signals start accruing toward a future bank as their markets resolve. Reject: revert the bump (fixtures regenerate back); the old bank remains the control for the next attempt.
 9. **A model swap on top of a new prompt is a separate experiment** (model mode, new prompt as incumbent baseline) — never change both axes in one adoption decision.
 
+### Auditing the sizing assessor
+
+`scripts/audit_assessor_enhancement.py` is the paired A/B harness for the trade-sizing assessor (`assess_signal_context()`), the counterpart of `benchmark_signals.py` for the assessment prompt rather than the signal prompt. Use it whenever you change what the assessor sees or how it is asked to judge — an edit to `_SYSTEM_PROMPT` or `_build_prompt_payload` in `freqpred/metrics/assessment.py`, a new context section (the T94 calibration data went through it), a `judgment_model` swap, or a proposed `assessment_scale_min/max` change. Like signal-prompt changes, an assessment-prompt change should not be adopted on inspection alone: the script replays real historical signals with known outcomes through the *current* assessor (control) and the *proposed* variant (enhanced), two live judgment-model calls per signal, and reports whether corr(trust_score, outcome) actually improved.
+
+How it works and what it protects against:
+
+- **Point-in-time context, not current DB state.** The script rebuilds each signal's assessment context with PIT copies of the production loaders — the assessed market is excluded, and only markets closed / positions exited / source-quality snapshots computed *before the signal's `created_at`* are admitted. This is not optional rigor: on since-resolved markets the production loaders self-leak (the exact-question Brier history contains the assessed market's own outcome — measured at r=0.85 vs the honest 0.43, i.e. the model reads the answer key). Production is immune (an unresolved market has no outcome to leak); every retrospective audit must use the PIT loaders.
+- **No production pollution.** Calls go through the real `LLMClient` under `query_type="model_eval"` with the daily spend cap enforced; nothing is written to `signal_assessments`.
+- **Spend**: ~$0.04/signal (two Opus calls) — the default 30-signal sample is ~$1.20. Same rule as benchmark runs: check today's spend against the daily cap first (the cap is shared with the live pipeline) and confirm the run with the user.
+- **Read the result like a benchmark**: the paired bootstrap CI on the correlation difference is the adopt/reject gate (`scripts/.audit_output/analyze_audit.py`); the stake-weighted P&L comparison is the degradation guard. Sampling is seeded (`SEED`/`SAMPLE_N`/`MAX_PER_MARKET` constants) so runs are reproducible and extendable.
+
+Reference run: 2026-07-11, T94 ([#94](https://github.com/ostersc/freqpred/issues/94)) — enhanced payload lifted corr(trust, outcome) 0.432 → 0.623 (95% CI on diff +0.019..+0.42) on 30 signals.
+
 ### Utility scripts
 
 Other one-off analysis and maintenance scripts live in `scripts/` — see each script's module docstring for full usage.
