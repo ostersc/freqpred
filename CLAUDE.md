@@ -338,11 +338,17 @@ Before declaring any task complete, verify every acceptance criterion listed in 
 - Wire `telemetry.mark_success()` and `telemetry.mark_error()` calls into the scheduler loop for that service — each scheduled task must report its own heartbeat independently, even if it runs inside another scheduler's loop.
 - The purpose of telemetry is to surface stale data sources. Two conceptually unrelated tasks must never share a heartbeat even if they share a scheduler loop.
 
-**For any change to `SYSTEM_PROMPT`, `build_prompt`, or `PROMPT_VERSION` (`freqpred/signal/llm.py`):**
-- Follow the full workflow in README → "Changing the signal prompt — the standard workflow". Non-negotiable steps: scope the edit to written-down findings, bump `PROMPT_VERSION`, regenerate the committed replay fixtures (`uv run freqpred fixtures replay --update`), and benchmark the new version against the recorded prompt bank (prompt mode, no `--candidate-model`) before treating the change as adopted.
+**For any change to the signal LLM or its inputs — `SYSTEM_PROMPT`, `build_prompt`, `PROMPT_VERSION` (`freqpred/signal/llm.py`), the signal model (`signal.model` config / `_DEFAULT_MODEL`), or any new/changed data block fed into the signal prompt:**
+- Follow the full workflow in README → "Changing the signal prompt — the standard workflow". Non-negotiable steps: scope the edit to written-down findings, bump `PROMPT_VERSION`, regenerate the committed replay fixtures (`uv run freqpred fixtures replay --update`), and benchmark the new version with `scripts/benchmark_signals.py` (prompt mode for prompt/data changes; model mode with `--candidate-model` for model swaps) before treating the change as adopted. Do not adopt on inspection alone — propose the benchmark run to the user as the required validation step.
 - Never regenerate `benchmarks/prompt_bank/` after a version bump — it is the frozen control baseline for the experiment; `record-bank` filters on the current version and would empty it.
 - Before any benchmark run, check today's LLM spend against the daily cap (it is shared with the live pipeline; exhausting it blocks live signal analysis until the UTC day rolls over) and confirm the run with the user — benchmark runs cost real API dollars.
 - One axis per experiment: a prompt change and a model change are separate benchmark decisions, never bundled.
+
+**For any change to the sizing assessor's LLM or its inputs — `_SYSTEM_PROMPT`, `_build_prompt_payload`, `_PROMPT_VERSION` (`freqpred/metrics/assessment.py`), the judgment model (`anthropic.judgment_model`), `assessment_scale_min/max`, or any new/changed data section in the assessment payload:**
+- Follow README → "Auditing the sizing assessor". Validate with the paired A/B audit in `scripts/audit_assessor_enhancement.py` (control = current assessor, enhanced = proposed change, same signals, live judgment-model calls) and adopt only if the bootstrap CI on the corr(trust_score, outcome) difference clears zero (`scripts/.audit_output/analyze_audit.py`). Do not adopt on inspection alone — propose the audit run to the user as the required validation step.
+- Retrospective audits must use the script's point-in-time loader copies, never the raw production context loaders — on since-resolved markets those self-leak the assessed market's own outcome into the prompt (production is immune; an unresolved market has no outcome to leak).
+- Audit calls cost real API dollars (~$0.04/signal, two Opus calls) and share the daily LLM cap with the live pipeline — check today's spend and confirm the run with the user first. Calls are logged as `query_type="model_eval"`; nothing may ever be written to `signal_assessments` from an audit.
+- Bump `_PROMPT_VERSION` (`assessment-vN`) on any adopted prompt/payload change so old and new assessments stay distinguishable in `llm_queries` and `signal_assessments`.
 
 ---
 
