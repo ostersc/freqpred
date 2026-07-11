@@ -120,10 +120,18 @@ class PositionWatcher:
                     from freqpred.runtime.telemetry import (
                         SERVICE_POSITION_WATCHER_LAST_MESSAGE,  # noqa: PLC0415
                     )
-                    await self._runtime_telemetry.record_kalshi_error(
-                        SERVICE_POSITION_WATCHER_LAST_MESSAGE,
-                        f"websocket disconnected: {exc}",
-                    )
+                    try:
+                        await self._runtime_telemetry.record_kalshi_error(
+                            SERVICE_POSITION_WATCHER_LAST_MESSAGE,
+                            f"websocket disconnected: {exc}",
+                        )
+                    except Exception:
+                        # Telemetry recording must never take down the reconnect
+                        # loop itself — e.g. if Postgres is down/in recovery at
+                        # the same moment as a WS disconnect, this would otherwise
+                        # escape run() and crash the whole asyncio.gather() in
+                        # cli.py, killing every other subsystem along with it.
+                        log.exception("position_watcher.telemetry_record_failed")
                 log.exception("position_watcher.disconnected", backoff=backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)

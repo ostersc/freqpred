@@ -149,10 +149,13 @@ class PositionMonitor:
                 from freqpred.runtime.telemetry import (  # noqa: PLC0415
                     SERVICE_PENDING_ORDER_RECONCILE,
                 )
-                await self._runtime_telemetry.mark_error(
-                    SERVICE_PENDING_ORDER_RECONCILE,
-                    f"periodic reconcile failed: {exc}",
-                )
+                try:
+                    await self._runtime_telemetry.mark_error(
+                        SERVICE_PENDING_ORDER_RECONCILE,
+                        f"periodic reconcile failed: {exc}",
+                    )
+                except Exception:
+                    logger.exception("position_monitor.telemetry_record_failed")
 
     async def check_all_positions(
         self,
@@ -623,11 +626,14 @@ class PositionMonitor:
                 body=exc.body,
             )
             if self._runtime_telemetry is not None:
-                await self._runtime_telemetry.record_kalshi_error(
-                    "position_monitor",
-                    f"exit order failed for {position.market_id}: {exc}",
-                    details={"market_id": position.market_id, "status_code": exc.status_code},
-                )
+                try:
+                    await self._runtime_telemetry.record_kalshi_error(
+                        "position_monitor",
+                        f"exit order failed for {position.market_id}: {exc}",
+                        details={"market_id": position.market_id, "status_code": exc.status_code},
+                    )
+                except Exception:
+                    logger.exception("position_monitor.telemetry_record_failed")
             await self._send_exit_alert(
                 market=market,
                 position=position,

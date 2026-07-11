@@ -710,10 +710,13 @@ async def run_scheduler(
             if telemetry is not None:
                 from freqpred.runtime.telemetry import SERVICE_INGESTION_SCHEDULER  # noqa: PLC0415
 
-                await telemetry.mark_error(
-                    SERVICE_INGESTION_SCHEDULER,
-                    str(exc),
-                )
+                try:
+                    await telemetry.mark_error(
+                        SERVICE_INGESTION_SCHEDULER,
+                        str(exc),
+                    )
+                except Exception:
+                    log.exception("scheduler.telemetry_record_failed")
 
         await asyncio.sleep(interval_seconds)
 

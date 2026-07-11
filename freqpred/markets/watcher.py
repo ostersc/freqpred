@@ -94,21 +94,27 @@ class MarketWatcher:
                 await self._poll_cycle()
             except KalshiAPIError as exc:
                 if self._runtime_telemetry is not None:
-                    await self._runtime_telemetry.record_kalshi_error(
-                        "market_watcher",
-                        f"market watcher poll failed: {exc}",
-                        details={"status_code": exc.status_code},
-                    )
+                    try:
+                        await self._runtime_telemetry.record_kalshi_error(
+                            "market_watcher",
+                            f"market watcher poll failed: {exc}",
+                            details={"status_code": exc.status_code},
+                        )
+                    except Exception:
+                        log.exception("market_watcher.telemetry_record_failed")
                 log.exception("market_watcher_poll_error")
             except asyncio.CancelledError:
                 log.info("market_watcher_stopped")
                 raise
             except Exception as exc:
                 if self._runtime_telemetry is not None:
-                    await self._runtime_telemetry.record_kalshi_error(
-                        "market_watcher",
-                        f"market watcher poll failed: {exc}",
-                    )
+                    try:
+                        await self._runtime_telemetry.record_kalshi_error(
+                            "market_watcher",
+                            f"market watcher poll failed: {exc}",
+                        )
+                    except Exception:
+                        log.exception("market_watcher.telemetry_record_failed")
                 log.exception("market_watcher_poll_error")
             await asyncio.sleep(self._polling_interval)
 
@@ -188,11 +194,14 @@ class MarketWatcher:
                 fetched_markets = await self._client.get_markets_by_tickers(market_ids)
             except Exception as exc:
                 if self._runtime_telemetry is not None:
-                    await self._runtime_telemetry.record_kalshi_error(
-                        "market_watcher",
-                        f"resolved sweep batch fetch failed: {exc}",
-                        details={"market_ids": market_ids},
-                    )
+                    try:
+                        await self._runtime_telemetry.record_kalshi_error(
+                            "market_watcher",
+                            f"resolved sweep batch fetch failed: {exc}",
+                            details={"market_ids": market_ids},
+                        )
+                    except Exception:
+                        log.exception("market_watcher.telemetry_record_failed")
                 log.exception("market_watcher.resolved_sweep_error", market_ids=market_ids)
         else:
             for market_id in market_ids:
@@ -200,11 +209,14 @@ class MarketWatcher:
                     fetched_markets.append(await self._client.get_market(market_id))
                 except Exception as exc:
                     if self._runtime_telemetry is not None:
-                        await self._runtime_telemetry.record_kalshi_error(
-                            "market_watcher",
-                            f"resolved sweep failed for {market_id}: {exc}",
-                            details={"market_id": market_id},
-                        )
+                        try:
+                            await self._runtime_telemetry.record_kalshi_error(
+                                "market_watcher",
+                                f"resolved sweep failed for {market_id}: {exc}",
+                                details={"market_id": market_id},
+                            )
+                        except Exception:
+                            log.exception("market_watcher.telemetry_record_failed")
                     log.exception("market_watcher.resolved_sweep_error", market_id=market_id)
 
         fetched_by_id = {m.id: m for m in fetched_markets}

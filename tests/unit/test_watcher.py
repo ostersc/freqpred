@@ -1,6 +1,7 @@
 """Unit tests for freqpred.markets.watcher."""
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -177,6 +178,51 @@ class TestCheckPriceMoveTriggers:
 # ---------------------------------------------------------------------------
 # MarketWatcher._sweep_closed_markets
 # ---------------------------------------------------------------------------
+
+
+class TestRunLoopTelemetryResilience:
+    @pytest.mark.asyncio
+    async def test_run_loop_survives_telemetry_failure_during_poll_error(self) -> None:
+        """If _poll_cycle() raises and the telemetry.record_kalshi_error() write
+        used to report that failure *also* raises (e.g. Postgres down/in
+        recovery), run() must swallow it and keep polling — not let it escape
+        and kill the whole MarketWatcher task via asyncio.gather() in cli.py.
+
+        Regression test for the same incident class as position_watcher's
+        telemetry-crash bug: a DB outage during error handling turned a
+        recoverable "log and retry" event into a full process crash.
+        """
+        client = AsyncMock(spec=KalshiClient)
+        session_factory = MagicMock()
+        watcher = MarketWatcher(client=client, session_factory=session_factory)
+
+        telemetry = AsyncMock()
+        telemetry.record_kalshi_error = AsyncMock(side_effect=RuntimeError("db down"))
+        watcher._runtime_telemetry = telemetry
+
+        poll_calls = 0
+
+        async def fake_poll_cycle() -> None:
+            nonlocal poll_calls
+            poll_calls += 1
+            if poll_calls == 1:
+                raise RuntimeError("poll failed")
+            raise asyncio.CancelledError()
+
+        async def fake_sleep(seconds: float) -> None:
+            return None
+
+        with (
+            patch.object(watcher, "_poll_cycle", side_effect=fake_poll_cycle),
+            patch("freqpred.markets.watcher.asyncio.sleep", side_effect=fake_sleep),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await watcher.run()
+
+        # Telemetry recording was attempted and failed, but the loop must have
+        # continued to a second poll attempt rather than crashing on the first.
+        telemetry.record_kalshi_error.assert_awaited_once()
+        assert poll_calls == 2
 
 
 class TestSweepClosedMarkets:

@@ -318,6 +318,47 @@ async def test_reconnect_backoff_sequence() -> None:
     assert slept == expected_backoffs
 
 
+@pytest.mark.asyncio
+async def test_telemetry_failure_during_disconnect_does_not_crash_run_loop() -> None:
+    """If record_kalshi_error() itself raises (e.g. Postgres is down/in recovery
+    at the same moment as a WS disconnect), run() must swallow that and keep
+    reconnecting — not let it propagate out of run() and take down the whole
+    asyncio.gather() in cli.py, which would crash every other subsystem too.
+
+    Regression test for a live incident: Postgres briefly entered recovery
+    mode; the WS disconnected around the same time; record_kalshi_error's own
+    DB write raised, which was uncaught and killed the entire freqpred process.
+    """
+    watcher, _, _, _, _ = _make_watcher()
+    telemetry = AsyncMock()
+    telemetry.record_kalshi_error = AsyncMock(side_effect=RuntimeError("db down"))
+    watcher._runtime_telemetry = telemetry
+
+    connect_calls = 0
+
+    async def fake_connect(*_a, **_kw):
+        nonlocal connect_calls
+        connect_calls += 1
+        if connect_calls == 1:
+            raise ConnectionError("simulated disconnect")
+        raise asyncio.CancelledError()
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    with (
+        patch.object(watcher, "_connect_and_subscribe", side_effect=fake_connect),
+        patch("freqpred.markets.position_watcher.asyncio.sleep", side_effect=fake_sleep),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await watcher.run()
+
+    # Telemetry recording was attempted and failed, but the loop must have
+    # continued to a second reconnect attempt rather than crashing on the first.
+    telemetry.record_kalshi_error.assert_awaited_once()
+    assert connect_calls == 2
+
+
 # ---------------------------------------------------------------------------
 # Reconnect subscription re-build test
 # ---------------------------------------------------------------------------

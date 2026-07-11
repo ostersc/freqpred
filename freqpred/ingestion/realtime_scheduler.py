@@ -315,9 +315,12 @@ async def run_realtime_scheduler(
             if telemetry is not None:
                 from freqpred.runtime.telemetry import SERVICE_REALTIME_SCHEDULER  # noqa: PLC0415
 
-                await telemetry.mark_error(
-                    SERVICE_REALTIME_SCHEDULER,
-                    str(exc),
-                )
+                try:
+                    await telemetry.mark_error(
+                        SERVICE_REALTIME_SCHEDULER,
+                        str(exc),
+                    )
+                except Exception:
+                    log.exception("realtime_scheduler.telemetry_record_failed")
 
         await asyncio.sleep(interval_seconds)

@@ -1213,6 +1213,46 @@ async def test_periodic_reconcile_noop_in_paper_mode() -> None:
     order_manager.reconcile_pending_orders.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_periodic_reconcile_telemetry_failure_does_not_propagate() -> None:
+    """If reconcile_pending_orders fails and the telemetry.mark_error() write
+    used to report that failure *also* raises (e.g. DB down/in recovery),
+    _maybe_run_periodic_reconcile() must swallow it.
+
+    run()'s tick loop calls _maybe_run_periodic_reconcile() with no try/except
+    around it — an uncaught exception here would kill the whole PositionMonitor
+    task, i.e. stop all position-exit monitoring, not just the reconcile step.
+    Regression test for the same incident class as position_watcher's
+    telemetry-crash bug.
+    """
+    from freqpred.trading.position_monitor import PositionMonitor as _PM
+
+    session_factory = MagicMock()
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    session_factory.return_value = mock_session
+
+    order_manager = MagicMock()
+    order_manager.reconcile_pending_orders = AsyncMock(side_effect=RuntimeError("db down"))
+
+    telemetry = AsyncMock()
+    telemetry.mark_error = AsyncMock(side_effect=RuntimeError("db still down"))
+
+    monitor = _PM(
+        session_factory=session_factory,
+        strategies={},
+        mode="live",
+        order_manager=order_manager,
+        reconcile_interval_seconds=0.0,
+        runtime_telemetry=telemetry,
+    )
+
+    await monitor._maybe_run_periodic_reconcile()  # must not raise
+
+    telemetry.mark_error.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # T76: exit-side polling + partial-fill tests
 # ---------------------------------------------------------------------------

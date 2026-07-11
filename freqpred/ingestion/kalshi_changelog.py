@@ -173,9 +173,12 @@ async def run_changelog_monitor(
         except Exception as exc:
             log.exception("kalshi_changelog_monitor.error")
             if telemetry is not None:
-                await telemetry.mark_error(
-                    SERVICE_KALSHI_CHANGELOG, str(exc), now=datetime.now(UTC)
-                )
+                try:
+                    await telemetry.mark_error(
+                        SERVICE_KALSHI_CHANGELOG, str(exc), now=datetime.now(UTC)
+                    )
+                except Exception:
+                    log.exception("kalshi_changelog_monitor.telemetry_record_failed")
 
     # On startup: run immediately if never checked or overdue.
     async with session_factory() as session:

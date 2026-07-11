@@ -573,11 +573,14 @@ class OrderManager:
                 body=body,
             )
             if self._runtime_telemetry is not None:
-                await self._runtime_telemetry.record_kalshi_error(
-                    "order_manager",
-                    f"submit live order failed for {order.market_id}: {exc}",
-                    details={"market_id": order.market_id, "status_code": status_code},
-                )
+                try:
+                    await self._runtime_telemetry.record_kalshi_error(
+                        "order_manager",
+                        f"submit live order failed for {order.market_id}: {exc}",
+                        details={"market_id": order.market_id, "status_code": status_code},
+                    )
+                except Exception:
+                    logger.exception("order_manager.telemetry_record_failed")
             return None
 
         mapped = map_order_to_status(filled_order, order.contracts)
@@ -710,15 +713,18 @@ class OrderManager:
                         exchange_order_id=filled_order.exchange_order_id,
                     )
                 if self._runtime_telemetry is not None:
-                    await self._runtime_telemetry.record_kalshi_error(
-                        "order_manager",
-                        f"orphan order auto-cancelled after ledger failure: "
-                        f"{filled_order.exchange_order_id} on {order.market_id}",
-                        details={
-                            "market_id": order.market_id,
-                            "exchange_order_id": filled_order.exchange_order_id,
-                        },
-                    )
+                    try:
+                        await self._runtime_telemetry.record_kalshi_error(
+                            "order_manager",
+                            f"orphan order auto-cancelled after ledger failure: "
+                            f"{filled_order.exchange_order_id} on {order.market_id}",
+                            details={
+                                "market_id": order.market_id,
+                                "exchange_order_id": filled_order.exchange_order_id,
+                            },
+                        )
+                    except Exception:
+                        logger.exception("order_manager.telemetry_record_failed")
             raise
 
     async def reconcile_pending_orders(
@@ -804,11 +810,14 @@ class OrderManager:
                 status_code=exc.status_code,
             )
             if self._runtime_telemetry is not None:
-                await self._runtime_telemetry.record_kalshi_error(
-                    "order_manager",
-                    f"get_order failed for {order_id}: {exc}",
-                    details={"exchange_order_id": order_id, "status_code": exc.status_code},
-                )
+                try:
+                    await self._runtime_telemetry.record_kalshi_error(
+                        "order_manager",
+                        f"get_order failed for {order_id}: {exc}",
+                        details={"exchange_order_id": order_id, "status_code": exc.status_code},
+                    )
+                except Exception:
+                    logger.exception("order_manager.telemetry_record_failed")
             return
 
         await self._apply_exchange_state(session, row, exchange_order, now=now)

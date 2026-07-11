@@ -420,10 +420,13 @@ async def run_factbase_scheduler(
         except Exception:
             log.error("factbase.scheduler.cycle_error", exc_info=True)
             if telemetry:
-                await telemetry.mark_error(
-                    SERVICE_FACTBASE_SCHEDULER,
-                    "Unhandled error in factbase scheduler cycle",
-                )
+                try:
+                    await telemetry.mark_error(
+                        SERVICE_FACTBASE_SCHEDULER,
+                        "Unhandled error in factbase scheduler cycle",
+                    )
+                except Exception:
+                    log.exception("factbase.scheduler.telemetry_record_failed")
         await asyncio.sleep(interval_seconds)
 
 

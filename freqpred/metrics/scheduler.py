@@ -95,7 +95,10 @@ async def run_source_quality_scheduler(
                         SERVICE_SOURCE_QUALITY_SCHEDULER,  # noqa: PLC0415
                     )
 
-                    await telemetry.mark_error(SERVICE_SOURCE_QUALITY_SCHEDULER, str(exc))
+                    try:
+                        await telemetry.mark_error(SERVICE_SOURCE_QUALITY_SCHEDULER, str(exc))
+                    except Exception:
+                        log.exception("source_quality_scheduler.telemetry_record_failed")
 
             # Series history — independent heartbeat
             if kalshi_client is not None:
@@ -129,7 +132,10 @@ async def run_source_quality_scheduler(
                             SERVICE_SERIES_HISTORY_SCHEDULER,  # noqa: PLC0415
                         )
 
-                        await telemetry.mark_error(SERVICE_SERIES_HISTORY_SCHEDULER, str(exc))
+                        try:
+                            await telemetry.mark_error(SERVICE_SERIES_HISTORY_SCHEDULER, str(exc))
+                        except Exception:
+                            log.exception("series_history.scheduler.telemetry_record_failed")
 
             try:
                 await session.commit()
