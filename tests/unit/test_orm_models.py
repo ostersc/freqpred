@@ -61,6 +61,7 @@ def test_all_tables_registered():
         "run_state",
         "runtime_config_overrides",
         "source_quality_scores",
+        "edge_calibration_scores",
         "signal_assessments",
         "service_heartbeats",
         "runtime_events",

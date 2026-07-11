@@ -800,7 +800,7 @@ def test_get_strategy_config_returns_all_fields() -> None:
     assert "trailing_stop" in data
     assert "max_exposure_per_market" in data
     assert "block_reentry_after_stoploss" in data
-    assert data["assessment_scale_min"] == pytest.approx(0.80)
+    assert data["assessment_scale_min"] == pytest.approx(0.50)
     assert data["assessment_scale_max"] == pytest.approx(1.20)
     assert data["similar_market_min_signals"] == 10
     assert data["similar_market_min_trades"] == 5

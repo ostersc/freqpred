@@ -23,6 +23,8 @@ from freqpred.metrics.calibration import (
     compute_calibration_heatmap,
     compute_calibration_time_series,
     compute_source_brier_scores,
+    edge_band,
+    refresh_edge_calibration_scores,
     refresh_source_quality_scores,
 )
 
@@ -576,3 +578,103 @@ async def test_heatmap_empty() -> None:
     assert report.rows[0].option_code == "All"
     assert report.rows[0].cells["All"].brier_score is None
     assert report.rows[0].cells["All"].n_samples == 0
+
+
+# ---------------------------------------------------------------------------
+# edge_band() / refresh_edge_calibration_scores() — T94
+# ---------------------------------------------------------------------------
+
+
+def test_edge_band_boundaries() -> None:
+    assert edge_band(-5.0) == "<0"
+    assert edge_band(0.0) == "0-15"
+    assert edge_band(14.99) == "0-15"
+    assert edge_band(15.0) == "15-40"
+    assert edge_band(39.99) == "15-40"
+    assert edge_band(40.0) == ">40"
+    assert edge_band(100.0) == ">40"
+
+
+def _edge_calibration_row(
+    direction: str,
+    edge: float,
+    estimated_probability: float,
+    market_ask_at_signal: float,
+    market_id: str,
+    series_ticker: str | None,
+    result: str,
+) -> MagicMock:
+    row = MagicMock()
+    row.direction = direction
+    row.edge = edge
+    row.estimated_probability = estimated_probability
+    row.market_ask_at_signal = market_ask_at_signal
+    row.market_id = market_id
+    row.series_ticker = series_ticker
+    row.result = result
+    return row
+
+
+@pytest.mark.asyncio
+async def test_refresh_edge_calibration_scores_writes_global_and_series_rows() -> None:
+    rows = [
+        # YES, edge 13% -> band 0-15, hit (direction YES, result yes)
+        _edge_calibration_row("YES", 0.13, 0.63, 0.55, "MKT-1", "KXTRUMPSAY", "yes"),
+        # NO, edge 5% -> band 0-15, hit (direction NO, result no)
+        _edge_calibration_row("NO", 0.05, 0.40, 0.42, "MKT-2", "KXTRUMPSAY", "no"),
+        # YES, edge 50% -> band >40, miss (direction YES, result no); no series_ticker
+        _edge_calibration_row("YES", 0.50, 0.90, 0.60, "MKT-3", None, "no"),
+    ]
+    result_mock = MagicMock()
+    result_mock.all.return_value = rows
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    rows_written = await refresh_edge_calibration_scores(session)
+
+    # 3 global rows (one per band+direction) + 2 series rows (MKT-3 has no series_ticker)
+    assert rows_written == 5
+    written = {
+        (r.edge_band, r.direction, r.series_ticker): r
+        for r in (call.args[0] for call in session.add.call_args_list)
+    }
+
+    global_yes_low = written[("0-15", "YES", None)]
+    assert global_yes_low.n_signals == 1
+    assert global_yes_low.n_markets == 1
+    assert global_yes_low.hit_rate == pytest.approx(1.0)
+    assert global_yes_low.avg_market_implied_p == pytest.approx(0.55)
+    assert global_yes_low.avg_model_implied_p == pytest.approx(0.63)
+
+    global_no_low = written[("0-15", "NO", None)]
+    assert global_no_low.hit_rate == pytest.approx(1.0)
+    assert global_no_low.avg_model_implied_p == pytest.approx(0.60)  # 1 - 0.40
+
+    global_high = written[(">40", "YES", None)]
+    assert global_high.hit_rate == pytest.approx(0.0)
+
+    series_yes_low = written[("0-15", "YES", "KXTRUMPSAY")]
+    assert series_yes_low.n_signals == 1
+    series_no_low = written[("0-15", "NO", "KXTRUMPSAY")]
+    assert series_no_low.n_signals == 1
+    assert (">40", "YES", "KXTRUMPSAY") not in written
+
+
+@pytest.mark.asyncio
+async def test_refresh_edge_calibration_scores_skips_missing_ask_price() -> None:
+    """Signals with no market_ask_at_signal (e.g. SKIP direction) are excluded."""
+    rows = [
+        _edge_calibration_row("YES", 0.13, 0.63, None, "MKT-1", None, "yes"),
+    ]
+    result_mock = MagicMock()
+    result_mock.all.return_value = rows
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    rows_written = await refresh_edge_calibration_scores(session)
+    assert rows_written == 0
+    session.add.assert_not_called()

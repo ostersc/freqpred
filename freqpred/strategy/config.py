@@ -87,7 +87,11 @@ class StrategyConfig:
 
     # Assessment-based sizing controls. The Opus judgment model outputs a
     # trust_score, which the framework maps to this multiplier range.
-    assessment_scale_min: float = 0.80
+    # 0.80 (through assessment-v4) compressed all assessor discrimination into
+    # a <=20% stake haircut; T94's live audit showed re-mapping the same
+    # trust scores at a wider floor cut sample losses 58% vs no assessor.
+    # 0.25 is deferred until assessment-v5 accrues live history.
+    assessment_scale_min: float = 0.50
     assessment_scale_max: float = 1.20
     similar_market_min_signals: int = 10
     similar_market_min_trades: int = 5

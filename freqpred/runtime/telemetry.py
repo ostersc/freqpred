@@ -19,6 +19,7 @@ SERVICE_INGESTION_SCHEDULER = "ingestion_scheduler"
 SERVICE_REALTIME_SCHEDULER = "realtime_scheduler"
 SERVICE_SIGNAL_LOOP = "signal_loop"
 SERVICE_SOURCE_QUALITY_SCHEDULER = "source_quality_scheduler"
+SERVICE_EDGE_CALIBRATION = "edge_calibration_scheduler"
 SERVICE_SERIES_HISTORY_SCHEDULER = "series_history_scheduler"
 SERVICE_FACTBASE_SCHEDULER = "factbase_scheduler"
 SERVICE_POSITION_WATCHER_LAST_MESSAGE = "position_watcher_last_message"
@@ -91,6 +92,11 @@ def build_freshness_specs(
         SERVICE_SOURCE_QUALITY_SCHEDULER: FreshnessSpec(
             service_name=SERVICE_SOURCE_QUALITY_SCHEDULER,
             label="Source quality refresh",
+            stale_after_seconds=36 * 3600,
+        ),
+        SERVICE_EDGE_CALIBRATION: FreshnessSpec(
+            service_name=SERVICE_EDGE_CALIBRATION,
+            label="Edge-band calibration refresh",
             stale_after_seconds=36 * 3600,
         ),
         SERVICE_SERIES_HISTORY_SCHEDULER: FreshnessSpec(

@@ -16,6 +16,8 @@ import freqpred.signal.models  # noqa: F401
 from freqpred.markets.models import Market
 from freqpred.metrics.assessment import (
     _build_prompt_payload,
+    _load_edge_band_calibration,
+    _load_market_reevaluation_history,
     _parse_assessment_response,
     _trust_score_to_multiplier,
     assess_signal_context,
@@ -383,3 +385,238 @@ def test_no_phrase_data_no_key() -> None:
         phrase_data=None,
     )
     assert "phrase_frequency" not in payload
+
+
+# ---------------------------------------------------------------------------
+# T94 — edge_band_calibration / market_reevaluation_history
+# ---------------------------------------------------------------------------
+
+
+def _edge_calibration_row(
+    n_signals: int,
+    n_markets: int,
+    hit_rate: float,
+    avg_market_p: float,
+    avg_model_p: float,
+) -> MagicMock:
+    row = MagicMock()
+    row.n_signals = n_signals
+    row.n_markets = n_markets
+    row.hit_rate = hit_rate
+    row.avg_market_implied_p = avg_market_p
+    row.avg_model_implied_p = avg_model_p
+    return row
+
+
+def _compile_sql(stmt: object) -> str:
+    from sqlalchemy.dialects import postgresql
+
+    return str(
+        stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+
+
+def _make_edge_calibration_session(rows_by_key: dict[tuple[str, str], object]) -> AsyncMock:
+    """rows_by_key: {(direction, scope): row_or_None}; scope is 'global' or 'series'."""
+
+    async def _execute(stmt: object, *args: object, **kwargs: object) -> MagicMock:
+        sql = _compile_sql(stmt)
+        direction = "YES" if "direction = 'YES'" in sql else "NO"
+        scope = "global" if "series_ticker IS NULL" in sql else "series"
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = rows_by_key.get((direction, scope))
+        return result
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_execute)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_load_edge_band_calibration_yes_and_no() -> None:
+    """NO-side band assignment uses the signal's own edge (both directions covered)."""
+    yes_global = _edge_calibration_row(20, 15, 0.55, 0.50, 0.65)
+    no_global = _edge_calibration_row(12, 10, 0.40, 0.45, 0.60)
+    session = _make_edge_calibration_session(
+        {("YES", "global"): yes_global, ("NO", "global"): no_global}
+    )
+    market_no_series = Market(**{**_make_market().__dict__, "series_ticker": None})
+
+    yes_signal = _make_signal()  # direction="YES", edge=0.13 -> band "0-15"
+    result = await _load_edge_band_calibration(session, yes_signal, market_no_series)
+    assert result is not None
+    assert result["this_signal_edge_band"] == "0-15"
+    assert result["same_direction_only"]["n_signals"] == 20
+    assert result["same_direction_only"]["hit_rate"] == pytest.approx(0.55)
+    assert result["all_directions"]["n_signals"] == 32
+    assert result["all_directions"]["hit_rate"] == pytest.approx(
+        round((0.55 * 20 + 0.40 * 12) / 32, 3)
+    )
+
+    no_signal = Signal(**{**_make_signal().__dict__, "direction": "NO", "edge": 0.13})
+    result_no = await _load_edge_band_calibration(session, no_signal, market_no_series)
+    assert result_no is not None
+    assert result_no["this_signal_edge_band"] == "0-15"
+    assert result_no["same_direction_only"]["n_signals"] == 12
+
+
+@pytest.mark.asyncio
+async def test_load_edge_band_calibration_below_min_n_omitted() -> None:
+    """Global row with n_signals < 10 -> section omitted entirely."""
+    thin_global = _edge_calibration_row(4, 3, 0.5, 0.5, 0.5)
+    session = _make_edge_calibration_session({("YES", "global"): thin_global})
+
+    result = await _load_edge_band_calibration(session, _make_signal(), _make_market())
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_load_edge_band_calibration_prefers_series_scope_when_adequate() -> None:
+    """A series-scoped row with n_signals >= 10 overrides the global row."""
+    global_row = _edge_calibration_row(20, 15, 0.55, 0.50, 0.65)
+    series_row = _edge_calibration_row(11, 9, 0.90, 0.60, 0.55)
+    session = _make_edge_calibration_session(
+        {("YES", "global"): global_row, ("YES", "series"): series_row}
+    )
+
+    result = await _load_edge_band_calibration(session, _make_signal(), _make_market())
+    assert result is not None
+    assert result["same_direction_only"]["n_signals"] == 11
+    assert result["same_direction_only"]["hit_rate"] == pytest.approx(0.90)
+
+
+@pytest.mark.asyncio
+async def test_load_market_reevaluation_history_first_signal() -> None:
+    result_mock = MagicMock()
+    result_mock.all.return_value = []
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await _load_market_reevaluation_history(session, _make_signal())
+    assert result == {"prior_signal_count": 0, "note": "First signal on this market."}
+
+
+@pytest.mark.asyncio
+async def test_load_market_reevaluation_history_direction_and_trend() -> None:
+    prior_rows = [
+        MagicMock(direction="NO", edge=0.05),
+        MagicMock(direction="YES", edge=0.20),
+    ]
+    result_mock = MagicMock()
+    result_mock.all.return_value = prior_rows
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+
+    signal = _make_signal()  # direction="YES"
+    result = await _load_market_reevaluation_history(session, signal)
+    assert result["prior_signal_count"] == 2
+    assert result["prior_directions"] == ["NO", "YES"]
+    assert result["direction_consistent_with_this_signal"] is False
+    assert result["edge_trend_across_prior_signals"] == "increasing"
+
+
+def test_build_prompt_payload_includes_new_sections() -> None:
+    edge_band_calibration = {
+        "description": "desc",
+        "this_signal_edge_band": "0-15",
+        "all_directions": {"n_signals": 32},
+        "same_direction_only": {"n_signals": 20},
+    }
+    market_reevaluation_history = {
+        "prior_signal_count": 0,
+        "note": "First signal on this market.",
+    }
+    payload = _build_prompt_payload(
+        _make_signal(),
+        _make_market(),
+        "TestStrategy",
+        source_breakdown=[],
+        similar_market_summary={"available": False},
+        edge_band_calibration=edge_band_calibration,
+        market_reevaluation_history=market_reevaluation_history,
+    )
+    assert payload["edge_band_calibration"] == edge_band_calibration
+    assert payload["market_reevaluation_history"] == market_reevaluation_history
+
+
+def test_build_prompt_payload_omits_edge_band_calibration_when_none() -> None:
+    payload = _build_prompt_payload(
+        _make_signal(),
+        _make_market(),
+        "TestStrategy",
+        source_breakdown=[],
+        similar_market_summary={"available": False},
+        edge_band_calibration=None,
+        market_reevaluation_history={"prior_signal_count": 0, "note": "x"},
+    )
+    assert "edge_band_calibration" not in payload
+    assert "market_reevaluation_history" in payload
+
+
+@pytest.mark.asyncio
+async def test_assess_signal_context_passes_sections_to_llm() -> None:
+    """Wiring test: the prompt actually sent to LLMClient.complete carries both
+    T94 sections, not just that the loaders return the right shape in isolation."""
+    import json
+
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+
+    captured: dict[str, str] = {}
+
+    async def _complete(**kwargs: object) -> MagicMock:
+        captured["prompt"] = kwargs["prompt"]
+        response = MagicMock()
+        response.llm_query_id = 42
+        response.content = json.dumps(
+            {"trust_score": 0.5, "reasoning": "ok", "key_factors": [], "warnings": []}
+        )
+        return response
+
+    llm_client = MagicMock()
+    llm_client.complete = AsyncMock(side_effect=_complete)
+
+    edge_band_calibration = {
+        "description": "desc",
+        "this_signal_edge_band": "0-15",
+        "all_directions": {"n_signals": 32},
+        "same_direction_only": {"n_signals": 20},
+    }
+    market_reevaluation_history = {
+        "prior_signal_count": 0,
+        "note": "First signal on this market.",
+    }
+
+    with patch(
+        "freqpred.metrics.assessment._load_source_breakdown",
+        new_callable=AsyncMock,
+        return_value=[
+            {"source_name": "Tavily", "document_share": 1.0, "delta_vs_overall": 0.0}
+        ],
+    ), patch(
+        "freqpred.metrics.assessment._load_similar_market_summary",
+        new_callable=AsyncMock,
+        return_value={"available": True, "exact_question_subset": {}},
+    ), patch(
+        "freqpred.metrics.assessment._load_edge_band_calibration",
+        new_callable=AsyncMock,
+        return_value=edge_band_calibration,
+    ), patch(
+        "freqpred.metrics.assessment._load_market_reevaluation_history",
+        new_callable=AsyncMock,
+        return_value=market_reevaluation_history,
+    ):
+        await assess_signal_context(
+            session,
+            _make_signal(),
+            _make_market(),
+            _StubStrategy(),
+            llm_client,
+            "claude-opus-4-6",
+        )
+
+    assert "prompt" in captured
+    assert "edge_band_calibration" in captured["prompt"]
+    assert "market_reevaluation_history" in captured["prompt"]

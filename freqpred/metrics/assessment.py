@@ -10,7 +10,13 @@ import structlog
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.metrics.models import SignalAssessment, SignalAssessmentRow, SourceQualityScoreRow
+from freqpred.metrics.calibration import edge_band
+from freqpred.metrics.models import (
+    EdgeCalibrationScoreRow,
+    SignalAssessment,
+    SignalAssessmentRow,
+    SourceQualityScoreRow,
+)
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
 
@@ -23,11 +29,12 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_PROMPT_VERSION = "assessment-v4"
+_PROMPT_VERSION = "assessment-v5"
 _QUERY_TYPE = "signal_assessment"
 _LOOKBACK_DAYS = 90
 _MAX_FACTORS = 5
 _MAX_WARNINGS = 3
+_MIN_EDGE_CALIBRATION_SAMPLES = 10
 _SYSTEM_PROMPT = """\
 You are a risk and sizing judge for a prediction-market trading system.
 
@@ -48,9 +55,11 @@ and stay closer to neutral unless one side clearly has stronger data.
 - Treat this as a sizing-confidence judgment, not a market-prediction task.
 - If you populate the warnings field with any concern, your trust_score MUST \
 be ≤ 0.5. Warnings and a trust_score above 0.5 are contradictory — do not do both.
-- Unusually large edge (> 0.4) is a warning sign of stale/illiquid pricing, not \
-genuine alpha. Treat it as a reason to stay neutral or go below 0.5 unless you \
-have strong calibration data that supports the edge.
+- When `edge_band_calibration` is present, weigh its measured hit_rate against \
+avg_model_implied_p for this signal's own edge band — a wide gap there (the \
+model claims much more confidence than the band has actually earned) is the \
+warning sign, not the edge's raw size. A large edge with a well-calibrated \
+history for its band is not automatically suspect.
 
 Call the submit_assessment tool with your judgment:
 - trust_score: 0.0–1.0; 0.5 = neutral, < 0.5 = lower confidence, > 0.5 = higher confidence
@@ -371,6 +380,146 @@ async def _load_similar_market_summary(
     return summary
 
 
+def _edge_calibration_row_summary(row: EdgeCalibrationScoreRow | None) -> dict[str, Any]:
+    if row is None:
+        return {"n_signals": 0, "n_markets": 0}
+    return {
+        "n_signals": row.n_signals,
+        "n_markets": row.n_markets,
+        "hit_rate": round(row.hit_rate, 3),
+        "avg_market_implied_p": round(row.avg_market_implied_p, 3),
+        "avg_model_implied_p": round(row.avg_model_implied_p, 3),
+    }
+
+
+def _merge_edge_calibration_rows(
+    same_direction: EdgeCalibrationScoreRow | None,
+    other_direction: EdgeCalibrationScoreRow | None,
+) -> dict[str, Any]:
+    rows = [r for r in (same_direction, other_direction) if r is not None]
+    if not rows:
+        return {"n_signals": 0, "n_markets": 0}
+    n_signals = sum(r.n_signals for r in rows)
+    return {
+        "n_signals": n_signals,
+        "n_markets": sum(r.n_markets for r in rows),
+        "hit_rate": round(sum(r.hit_rate * r.n_signals for r in rows) / n_signals, 3),
+        "avg_market_implied_p": round(
+            sum(r.avg_market_implied_p * r.n_signals for r in rows) / n_signals, 3
+        ),
+        "avg_model_implied_p": round(
+            sum(r.avg_model_implied_p * r.n_signals for r in rows) / n_signals, 3
+        ),
+    }
+
+
+async def _load_edge_band_calibration(
+    session: AsyncSession,
+    signal: Signal,
+    market: Market,
+) -> dict[str, Any] | None:
+    """Latest edge_calibration_scores snapshot for this signal's own edge band.
+
+    Prefers a series-scoped row (if it has >= _MIN_EDGE_CALIBRATION_SAMPLES
+    signals) over the global row, per band+direction. The whole section is
+    omitted when even the global row for this band+direction is too thin —
+    the assessor should not be handed a near-zero-sample statistic.
+    """
+    band = edge_band(signal.edge * 100.0)
+    other_direction = "NO" if signal.direction == "YES" else "YES"
+
+    async def _latest(direction: str, series_ticker: str | None) -> EdgeCalibrationScoreRow | None:
+        stmt = select(EdgeCalibrationScoreRow).where(
+            EdgeCalibrationScoreRow.edge_band == band,
+            EdgeCalibrationScoreRow.direction == direction,
+            EdgeCalibrationScoreRow.series_ticker == series_ticker
+            if series_ticker is not None
+            else EdgeCalibrationScoreRow.series_ticker.is_(None),
+        )
+        stmt = stmt.order_by(EdgeCalibrationScoreRow.computed_at.desc()).limit(1)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    global_same_direction = await _latest(signal.direction, None)
+    if (
+        global_same_direction is None
+        or global_same_direction.n_signals < _MIN_EDGE_CALIBRATION_SAMPLES
+    ):
+        return None
+
+    same_direction_row = global_same_direction
+    other_direction_row = await _latest(other_direction, None)
+
+    if market.series_ticker:
+        series_same_direction = await _latest(signal.direction, market.series_ticker)
+        if (
+            series_same_direction is not None
+            and series_same_direction.n_signals >= _MIN_EDGE_CALIBRATION_SAMPLES
+        ):
+            same_direction_row = series_same_direction
+            other_direction_row = await _latest(other_direction, market.series_ticker)
+
+    return {
+        "description": (
+            "Empirical calibration for signals whose edge fell in the same "
+            "band as this one. hit_rate is what actually happened; "
+            "avg_model_implied_p is what the model claimed at signal time — "
+            "a large gap between them for this band is a documented failure "
+            "mode, not a hypothetical one."
+        ),
+        "this_signal_edge_band": band,
+        "all_directions": _merge_edge_calibration_rows(same_direction_row, other_direction_row),
+        "same_direction_only": _edge_calibration_row_summary(same_direction_row),
+    }
+
+
+async def _load_market_reevaluation_history(
+    session: AsyncSession,
+    signal: Signal,
+) -> dict[str, Any]:
+    """Prior signal count / direction consistency / edge trend for this market.
+
+    PIT-safe by construction: only signals created before this one exist to
+    query in production (the current signal has already been written, but
+    later ones cannot exist yet).
+    """
+    result = await session.execute(
+        select(SignalRow.direction, SignalRow.edge)
+        .where(
+            SignalRow.market_id == signal.market_id,
+            SignalRow.created_at < signal.created_at,
+        )
+        .order_by(SignalRow.created_at.asc())
+    )
+    prior = result.all()
+    if not prior:
+        return {"prior_signal_count": 0, "note": "First signal on this market."}
+
+    directions: list[str] = []
+    for row in prior:
+        if row.direction not in directions:
+            directions.append(row.direction)
+    edges = [row.edge * 100.0 for row in prior]
+    trend = None
+    if len(edges) >= 2:
+        trend = "increasing" if edges[-1] > edges[0] else "decreasing_or_flat"
+
+    return {
+        "prior_signal_count": len(prior),
+        "prior_directions": directions,
+        "direction_consistent_with_this_signal": all(d == signal.direction for d in directions),
+        "edge_trend_across_prior_signals": trend,
+        "note": (
+            "A market re-signaled many times with a consistent direction and "
+            "growing edge, as the market keeps moving further from the "
+            "model's estimate, is the specific pattern behind this "
+            "strategy's worst historical misses — the model held its ground "
+            "while the market kept disagreeing more, and the market was "
+            "usually right."
+        ),
+    }
+
+
 def _build_prompt_payload(
     signal: Signal,
     market: Market,
@@ -380,6 +529,8 @@ def _build_prompt_payload(
     scale_min: float = 0.80,
     scale_max: float = 1.20,
     phrase_data: FactbasePhraseData | None = None,
+    edge_band_calibration: dict[str, Any] | None = None,
+    market_reevaluation_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     weighted_delta = None
     if source_breakdown:
@@ -488,6 +639,16 @@ def _build_prompt_payload(
                 }
             }
             if phrase_data is not None
+            else {}
+        ),
+        **(
+            {"edge_band_calibration": edge_band_calibration}
+            if edge_band_calibration is not None
+            else {}
+        ),
+        **(
+            {"market_reevaluation_history": market_reevaluation_history}
+            if market_reevaluation_history is not None
             else {}
         ),
     }
@@ -606,6 +767,9 @@ async def assess_signal_context(
         await session.commit()
         return _row_to_assessment(row)
 
+    edge_band_calibration = await _load_edge_band_calibration(session, signal, market)
+    market_reevaluation_history = await _load_market_reevaluation_history(session, signal)
+
     prompt_payload = _build_prompt_payload(
         signal,
         market,
@@ -615,6 +779,8 @@ async def assess_signal_context(
         scale_min=strategy.config.assessment_scale_min,
         scale_max=strategy.config.assessment_scale_max,
         phrase_data=phrase_data,
+        edge_band_calibration=edge_band_calibration,
+        market_reevaluation_history=market_reevaluation_history,
     )
     prompt = json.dumps(prompt_payload, indent=2, sort_keys=True)
     llm_query_id: int | None = None

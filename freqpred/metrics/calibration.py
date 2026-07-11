@@ -8,9 +8,29 @@ from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.markets.models import MarketRow
-from freqpred.metrics.models import SeriesOptionHistoryRow, SourceQualityScoreRow
+from freqpred.metrics.models import (
+    EdgeCalibrationScoreRow,
+    SeriesOptionHistoryRow,
+    SourceQualityScoreRow,
+)
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
+
+# Edge-band boundaries (edge expressed as a percentage), shared by the daily
+# edge_calibration_scores snapshot job and the assessor's read-side lookup —
+# both must bucket a given edge into the same band.
+EDGE_CALIBRATION_BANDS = ["<0", "0-15", "15-40", ">40"]
+_EDGE_BAND_BINS = [-100.0, 0.0, 15.0, 40.0, 200.0]
+
+
+def edge_band(edge_pct: float) -> str:
+    """Bucket a signal's edge (as a percentage, e.g. 13.0 for 13%) into a band."""
+    for lo, hi, label in zip(
+        _EDGE_BAND_BINS[:-1], _EDGE_BAND_BINS[1:], EDGE_CALIBRATION_BANDS, strict=True
+    ):
+        if lo <= edge_pct < hi:
+            return label
+    return EDGE_CALIBRATION_BANDS[-1]
 
 
 @dataclass
@@ -374,6 +394,88 @@ async def refresh_source_quality_scores(
                 )
             )
             rows_written += 1
+
+    await session.flush()
+    return rows_written
+
+
+async def refresh_edge_calibration_scores(session: AsyncSession) -> int:
+    """Write one rolling snapshot row per (edge_band, direction, series_ticker|global).
+
+    Aggregates every resolved (finalized, result yes/no) scheduled signal into
+    per-band/direction rows: one global (series_ticker=NULL) row plus one
+    series-scoped row per series_ticker seen in the data. Caller owns commit/rollback.
+    """
+    result = await session.execute(
+        select(
+            SignalRow.direction,
+            SignalRow.edge,
+            SignalRow.estimated_probability,
+            SignalRow.market_ask_at_signal,
+            SignalRow.market_id,
+            MarketRow.series_ticker,
+            MarketRow.result,
+        )
+        .join(MarketRow, MarketRow.id == SignalRow.market_id)
+        .where(
+            SignalRow.trigger == "scheduled",
+            MarketRow.status == "finalized",
+            MarketRow.result.is_not(None),
+            SignalRow.model_used != "demo_harness",
+            SignalRow.prompt_version != "demo",
+        )
+    )
+    rows = result.all()
+
+    records: list[dict] = []
+    for row in rows:
+        if row.market_ask_at_signal is None:
+            continue
+        hit = (row.direction == "YES" and row.result == "yes") or (
+            row.direction == "NO" and row.result == "no"
+        )
+        model_p_side = (
+            row.estimated_probability
+            if row.direction == "YES"
+            else 1.0 - row.estimated_probability
+        )
+        records.append(
+            {
+                "edge_band": edge_band(row.edge * 100.0),
+                "direction": row.direction,
+                "series_ticker": row.series_ticker,
+                "market_id": row.market_id,
+                "hit": 1 if hit else 0,
+                "market_p_side": row.market_ask_at_signal,
+                "model_p_side": model_p_side,
+            }
+        )
+
+    grouped: dict[tuple[str, str, str | None], list[dict]] = {}
+    for rec in records:
+        global_key = (rec["edge_band"], rec["direction"], None)
+        grouped.setdefault(global_key, []).append(rec)
+        if rec["series_ticker"] is not None:
+            series_key = (rec["edge_band"], rec["direction"], rec["series_ticker"])
+            grouped.setdefault(series_key, []).append(rec)
+
+    rows_written = 0
+    for (band, direction, series_ticker), recs in grouped.items():
+        n_signals = len(recs)
+        n_markets = len({r["market_id"] for r in recs})
+        session.add(
+            EdgeCalibrationScoreRow(
+                edge_band=band,
+                direction=direction,
+                series_ticker=series_ticker,
+                n_signals=n_signals,
+                n_markets=n_markets,
+                hit_rate=sum(r["hit"] for r in recs) / n_signals,
+                avg_market_implied_p=sum(r["market_p_side"] for r in recs) / n_signals,
+                avg_model_implied_p=sum(r["model_p_side"] for r in recs) / n_signals,
+            )
+        )
+        rows_written += 1
 
     await session.flush()
     return rows_written

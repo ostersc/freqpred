@@ -36,6 +36,33 @@ class SourceQualityScoreRow(Base):
     )
 
 
+class EdgeCalibrationScoreRow(Base):
+    """Daily rolling edge-band calibration snapshot for one band/direction/series.
+
+    series_ticker=NULL is the global (all-series) rollup row for that band+direction.
+    """
+
+    __tablename__ = "edge_calibration_scores"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    edge_band: Mapped[str] = mapped_column(VARCHAR(10), nullable=False)
+    direction: Mapped[str] = mapped_column(VARCHAR(10), nullable=False)
+    series_ticker: Mapped[str | None] = mapped_column(Text, nullable=True)
+    n_signals: Mapped[int] = mapped_column(Integer, nullable=False)
+    n_markets: Mapped[int] = mapped_column(Integer, nullable=False)
+    hit_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_market_implied_p: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_model_implied_p: Mapped[float] = mapped_column(Float, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
+
+
 class SignalAssessmentRow(Base):
     """Append-only persisted trade-sizing assessment for one signal."""
 

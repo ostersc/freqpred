@@ -1,4 +1,4 @@
-"""Background scheduler for source-quality snapshots and series history."""
+"""Background scheduler for source-quality, edge-calibration, and series-history snapshots."""
 from __future__ import annotations
 
 import asyncio
@@ -10,8 +10,11 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from freqpred.metrics.calibration import refresh_source_quality_scores
-from freqpred.metrics.models import SourceQualityScoreRow
+from freqpred.metrics.calibration import (
+    refresh_edge_calibration_scores,
+    refresh_source_quality_scores,
+)
+from freqpred.metrics.models import EdgeCalibrationScoreRow, SourceQualityScoreRow
 
 if TYPE_CHECKING:
     from freqpred.markets.kalshi import KalshiClient
@@ -43,6 +46,22 @@ async def refresh_source_quality_scores_if_due(
     if latest is not None and latest.date() >= current.date():
         return 0
     return await refresh_source_quality_scores(session, lookback_days=lookback_days)
+
+
+async def refresh_edge_calibration_scores_if_due(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Refresh daily edge-calibration rows only when today's snapshot is missing."""
+    current = now or datetime.now(UTC)
+    latest_result = await session.execute(
+        select(func.max(EdgeCalibrationScoreRow.computed_at))
+    )
+    latest = latest_result.scalar_one()
+    if latest is not None and latest.date() >= current.date():
+        return 0
+    return await refresh_edge_calibration_scores(session)
 
 
 async def run_source_quality_scheduler(
@@ -99,6 +118,37 @@ async def run_source_quality_scheduler(
                         await telemetry.mark_error(SERVICE_SOURCE_QUALITY_SCHEDULER, str(exc))
                     except Exception:
                         log.exception("source_quality_scheduler.telemetry_record_failed")
+
+            # Edge-band calibration — its own try/except and heartbeat, never
+            # shared with source quality or series history, so one failing job
+            # never masks or blocks the others.
+            try:
+                edge_rows_written = await refresh_edge_calibration_scores_if_due(session)
+                log.info(
+                    "edge_calibration_scheduler.refreshed",
+                    reason=reason,
+                    rows_written=edge_rows_written,
+                )
+                if telemetry is not None:
+                    from freqpred.runtime.telemetry import (
+                        SERVICE_EDGE_CALIBRATION,  # noqa: PLC0415
+                    )
+
+                    await telemetry.mark_success(
+                        SERVICE_EDGE_CALIBRATION,
+                        details={"reason": reason, "rows_written": edge_rows_written},
+                    )
+            except Exception as exc:
+                log.exception("edge_calibration_scheduler.error", reason=reason)
+                if telemetry is not None:
+                    from freqpred.runtime.telemetry import (
+                        SERVICE_EDGE_CALIBRATION,  # noqa: PLC0415
+                    )
+
+                    try:
+                        await telemetry.mark_error(SERVICE_EDGE_CALIBRATION, str(exc))
+                    except Exception:
+                        log.exception("edge_calibration_scheduler.telemetry_record_failed")
 
             # Series history — independent heartbeat
             if kalshi_client is not None:
