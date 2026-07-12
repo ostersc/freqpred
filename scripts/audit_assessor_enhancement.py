@@ -16,21 +16,22 @@ paths rather than reimplementing them:
     real sizing-decision audit trail) but still logs real spend to
     llm_queries under a clearly-labeled bucket.
 
-Two live calls per sampled signal, same judgment model (config.anthropic.
-judgment_model, i.e. whatever the assessor already runs in production):
-  A) CONTROL   — real _build_prompt_payload, unmodified, except market.
-                 days_to_close is corrected to be relative to the signal's
-                 own created_at (the real function uses wall-clock "now",
-                 which for a since-resolved market leaks "this already
-                 closed" — a point-in-time bug for this audit, not a feature
-                 under test).
-  B) ENHANCED  — same payload plus two new sections: edge_band_calibration
-                 (hit rate / market-implied p / model-implied p for this
-                 signal's own edge bucket, computed ONLY from markets that
-                 had already closed before this signal's created_at) and
-                 market_reevaluation_history (prior signal count / direction
-                 consistency / edge trend for this same market, from signals
-                 created before this one).
+One live call per sampled signal per arm. Two arms, selectable via --arms:
+  current    — the live production package: production _SYSTEM_PROMPT +
+               production section loaders + production _PROMPT_VERSION, on
+               the production judgment model (config.anthropic.
+               judgment_model). Needs no maintenance; it is whatever shipped.
+  challenger — the proposed package: defined per experiment via the
+               CHALLENGER block near the top of this script (version string,
+               system prompt, payload builder, optional judgment-model
+               override for model-swap experiments). Undefined by default;
+               the run fails loudly if requested without being defined.
+Both arms share the same PIT base payload and the same PIT edge-band
+calibration, so the paired contrast isolates exactly the challenger's change.
+market.days_to_close is corrected to be relative to the signal's own
+created_at in both arms (the real function uses wall-clock "now", which for
+a since-resolved market leaks "this already closed" — a point-in-time bug
+for this audit, not a feature under test).
 
 POINT-IN-TIME REVISION (v2): the first run of this audit used the production
 _load_similar_market_summary/_load_source_breakdown verbatim against current
@@ -49,9 +50,27 @@ Remaining accepted scope limit: phrase_data is passed as None for both
 conditions (production sometimes passes FactBase phrase-frequency context) —
 its count_365d field would leak future occurrences for a point-in-time
 signal, so it's dropped entirely rather than reconstructed.
+
+CURRENT-VS-CHALLENGER REVISION (v4): earlier revisions pinned each
+historical package (assessment-v4/v5/v6) as its own frozen arm to settle the
+T94/T95 adoption decisions (results: README → "Auditing the sizing
+assessor" reference runs; result CSVs remain in scripts/.audit_output/).
+Going forward the harness only ever needs to answer one question — does the
+proposed assessor beat the one in production? — so it now runs exactly the
+two arms above. --reuse-csv imports per-signal columns for arms NOT being
+re-run from a previous run over the same seed/sample, so a budget-
+constrained day pays only for the new arm(s).
+
+Note: the shipped edge_band_calibration loader reads the
+edge_calibration_scores snapshot table, which has no as_of filter
+(production always wants the latest snapshot — fine there, leaky here).
+Both arms therefore use this script's PIT _edge_band_calibration
+computation; it is byte-identical across the two arms, so it cancels out of
+the current-vs-challenger contrast.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import random
@@ -75,6 +94,7 @@ from freqpred.metrics.assessment import (
     _brier_from_rows,
     _build_prompt_payload,
     _clamp_multiplier,
+    _load_market_reevaluation_history,
     _parse_assessment_response,
     _question_first_line,
     _trust_score_to_multiplier,
@@ -91,6 +111,65 @@ MAX_PER_MARKET = 2
 JUDGMENT_QUERY_TYPE = "model_eval"  # never "signal_assessment" — no DB pollution
 EDGE_BINS = [-100, 0, 15, 40, 200]
 EDGE_LABELS = ["<0", "0-15", "15-40", ">40"]
+ARM_NAMES = ("current", "challenger")
+
+# ---------------------------------------------------------------------------
+# CHALLENGER definition — edit this block when screening a proposed change.
+#
+# The `current` arm always runs the live production package (production
+# _SYSTEM_PROMPT + production section loaders) and needs no maintenance.
+# The `challenger` arm is whatever you are proposing: set the three hooks
+# below before running with challenger in --arms. Leaving them as None makes
+# the run fail loudly instead of silently measuring current-vs-current.
+#
+#   CHALLENGER_VERSION       — prompt_version logged to llm_queries, e.g.
+#                              "assessment-v7-audit-pit-challenger"
+#   CHALLENGER_SYSTEM_PROMPT — the proposed system prompt, verbatim
+#   CHALLENGER_MODEL         — judgment model override for the challenger arm
+#                              only, e.g. "claude-opus-4-8"; None = same model
+#                              as production (config.anthropic.judgment_model)
+#   _challenger_payload      — builds the proposed payload from the same
+#                              PIT base payload + PIT edge calibration the
+#                              current arm gets, so the contrast isolates
+#                              exactly what you changed
+#
+# One axis per experiment. For a model-only swap: set CHALLENGER_MODEL, set
+# CHALLENGER_SYSTEM_PROMPT = _SYSTEM_PROMPT (production, unchanged), and make
+# _challenger_payload mirror the current arm exactly:
+#
+#     base_payload["edge_band_calibration"] = edge_calib
+#     base_payload["market_reevaluation_history"] = (
+#         await _load_market_reevaluation_history(session, signal)
+#     )
+#     return base_payload
+# ---------------------------------------------------------------------------
+# No active experiment. Last run (2026-07-12): judgment-model swap
+# opus-4-7 -> opus-4-8 (v6 package unchanged, baseline = adoption run's t95
+# columns via --reuse-csv). Result: wash — corr +0.588 vs +0.569, CI
+# (-0.175, +0.157), and 4.8 produced zero size_up where 4.7 had one (on a
+# winner). Stayed on opus-4-7. CSV: assessor_audit_pit_opus48.csv.
+CHALLENGER_VERSION: str | None = None
+CHALLENGER_SYSTEM_PROMPT: str | None = None
+CHALLENGER_MODEL: str | None = None
+
+
+async def _challenger_payload(
+    session, signal: Signal, base_payload: dict, edge_calib: dict | None
+) -> dict:
+    """Build the challenger arm's payload. Edit per experiment.
+
+    For a model-only swap, mirror the current arm's payload exactly:
+        base_payload["edge_band_calibration"] = edge_calib
+        base_payload["market_reevaluation_history"] = (
+            await _load_market_reevaluation_history(session, signal)
+        )
+        return base_payload
+    """
+    raise NotImplementedError(
+        "define the challenger package (CHALLENGER_VERSION, "
+        "CHALLENGER_SYSTEM_PROMPT, _challenger_payload) before running "
+        "with the challenger arm"
+    )
 
 
 def _edge_band(edge_pct: float) -> str:
@@ -418,35 +497,18 @@ def _edge_band_calibration(calib_df: pd.DataFrame, signal: Signal, as_of: dateti
     }
 
 
-def _market_reevaluation_history(all_signals_df: pd.DataFrame, signal: Signal) -> dict:
-    prior = all_signals_df[
-        (all_signals_df["market_id"] == signal.market_id)
-        & (all_signals_df["created_at"] < signal.created_at)
-    ].sort_values("created_at")
-    if len(prior) == 0:
-        return {"prior_signal_count": 0, "note": "First signal on this market."}
-    directions = prior["direction"].unique().tolist()
-    edges = prior["edge"].tolist()
-    trend = None
-    if len(edges) >= 2:
-        trend = "increasing" if edges[-1] > edges[0] else "decreasing_or_flat"
-    return {
-        "prior_signal_count": int(len(prior)),
-        "prior_directions": directions,
-        "direction_consistent_with_this_signal": all(d == signal.direction for d in directions),
-        "edge_trend_across_prior_signals": trend,
-        "note": (
-            "A market re-signaled many times with a consistent direction and "
-            "growing edge, as the market keeps moving further from the "
-            "model's estimate, is the specific pattern behind this "
-            "strategy's worst historical misses — the model held its ground "
-            "while the market kept disagreeing more, and the market was "
-            "usually right."
-        ),
-    }
-
-
-async def main() -> None:
+async def main(
+    arms: set[str], reuse_csv: str | None, out_path: str, dry_run: bool = False
+) -> None:
+    unknown = arms - set(ARM_NAMES)
+    if unknown:
+        raise SystemExit(f"ERROR: unknown arm(s) {sorted(unknown)}; valid: {ARM_NAMES}")
+    if "challenger" in arms and (CHALLENGER_VERSION is None or CHALLENGER_SYSTEM_PROMPT is None):
+        raise SystemExit(
+            "ERROR: challenger arm requested but no challenger package is defined — "
+            "set CHALLENGER_VERSION, CHALLENGER_SYSTEM_PROMPT, and _challenger_payload "
+            "(see the CHALLENGER block at the top of this script)."
+        )
     config = load_config()
     if not config.database.url:
         raise SystemExit("ERROR: DATABASE_URL not configured.")
@@ -501,30 +563,33 @@ async def main() -> None:
                 "market_p_side": market_p_side,
             }
         )
-    all_signals_df = pd.DataFrame(
-        [
-            {
-                "market_id": r.market_id,
-                "direction": r.direction,
-                "edge": r.edge * 100.0,
-                "created_at": r.created_at,
-            }
-            for r in rows
-        ]
-    )
     calib_df = pd.DataFrame(calib_records)
     calib_df = calib_df[calib_df["resolved"]].copy()
     print(f"  point-in-time calibration pool: {len(calib_df)} resolved signals")
 
-    async with session_factory() as session:
-        sample_ids = await _pick_sample(session)
-    print(f"Sampled {len(sample_ids)} signals (seed={SEED}, max {MAX_PER_MARKET}/market)")
+    reused: dict[str, dict] | None = None
+    if reuse_csv:
+        # The prior run's signals ARE the sample — pairing requires identical
+        # signals, and re-drawing with the seed is not reproducible once the
+        # assessment population has grown since that run.
+        prev_df = pd.read_csv(reuse_csv)
+        sample_ids = [uuid.UUID(str(s)) for s in prev_df["signal_id"]]
+        reused = {
+            str(r["signal_id"]): {k: v for k, v in r.items() if k != "signal_id"}
+            for _, r in prev_df.iterrows()
+        }
+        print(f"Sample = the {len(sample_ids)} signals from {reuse_csv} (paired reuse)")
+    else:
+        async with session_factory() as session:
+            sample_ids = await _pick_sample(session)
+        print(f"Sampled {len(sample_ids)} signals (seed={SEED}, max {MAX_PER_MARKET}/market)")
+    print(f"Live arms this run: {sorted(arms)}")
 
     llm_client = LLMClient(
         anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
         session_factory,
         default_strategy="model_eval",
-        prompt_version=f"{_PROMPT_VERSION}-audit",
+        prompt_version="assessor-audit-pit-v3",
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
         max_consecutive_errors=config.risk.max_consecutive_llm_errors,
     )
@@ -575,28 +640,30 @@ async def main() -> None:
             )
             base_payload = _fix_days_to_close(base_payload, market, signal.created_at)
 
-            enhanced_payload = json.loads(json.dumps(base_payload))  # deep copy
-            enhanced_payload["edge_band_calibration"] = _edge_band_calibration(
-                calib_df, signal, signal.created_at
-            )
-            enhanced_payload["market_reevaluation_history"] = _market_reevaluation_history(
-                all_signals_df, signal
-            )
-
             async def _call(
-                payload: dict, label: str, *, _market=market, _signal=signal, _i=i
+                payload: dict,
+                label: str,
+                *,
+                system: str,
+                version: str,
+                model: str | None = None,
+                _market=market,
+                _signal=signal,
+                _i=i,
             ) -> dict | None:
                 prompt = json.dumps(payload, indent=2, sort_keys=True)
+                if dry_run:  # payload built + serialized; skip the paid call
+                    return None
                 try:
                     resp = await llm_client.complete(
                         prompt=prompt,
-                        model=judgment_model,
+                        model=model or judgment_model,
                         query_type=JUDGMENT_QUERY_TYPE,
-                        system=_SYSTEM_PROMPT,
+                        system=system,
                         market_id=_market.id,
                         signal_id=_signal.id,
                         strategy=f"audit_{label}",
-                        prompt_version=f"{_PROMPT_VERSION}-audit-pit-{label}",
+                        prompt_version=version,
                         max_tokens=768,
                         json_tool=_ASSESSMENT_TOOL,
                     )
@@ -610,39 +677,76 @@ async def main() -> None:
                         scale_min=strategy.config.assessment_scale_min,
                         scale_max=strategy.config.assessment_scale_max,
                     )
-                    return {"trust_score": parsed["trust_score"], "multiplier": mult}
+                    return {
+                        "trust_score": parsed["trust_score"],
+                        "multiplier": mult,
+                        "verdict": parsed["verdict"],
+                    }
                 except Exception as exc:  # noqa: BLE001
                     print(f"  [{_i}/{len(sample_ids)}] {label} call failed: {exc}")
                     return None
 
-            control = await _call(base_payload, "control")
-            enhanced = await _call(enhanced_payload, "enhanced")
+            arm_results: dict[str, dict | None] = {}
+            edge_calib = _edge_band_calibration(calib_df, signal, signal.created_at)
+            if "current" in arms:
+                current_payload = json.loads(json.dumps(base_payload))  # deep copy
+                current_payload["edge_band_calibration"] = edge_calib
+                current_payload["market_reevaluation_history"] = (
+                    await _load_market_reevaluation_history(session, signal)
+                )
+                arm_results["current"] = await _call(
+                    current_payload,
+                    "current",
+                    system=_SYSTEM_PROMPT,
+                    version=f"{_PROMPT_VERSION}-audit-pit-current",
+                )
+            if "challenger" in arms:
+                challenger_payload = await _challenger_payload(
+                    session,
+                    signal,
+                    json.loads(json.dumps(base_payload)),  # deep copy
+                    edge_calib,
+                )
+                arm_results["challenger"] = await _call(
+                    challenger_payload,
+                    "challenger",
+                    system=CHALLENGER_SYSTEM_PROMPT,
+                    version=CHALLENGER_VERSION,
+                    model=CHALLENGER_MODEL,
+                )
 
-            out_rows.append(
-                {
-                    "signal_id": str(signal_id),
-                    "market_id": signal.market_id,
-                    "direction": signal.direction,
-                    "edge_pct": signal.edge * 100.0,
-                    "confidence": signal.confidence,
-                    "hit": hit,
-                    "existing_trust_score": existing.trust_score,
-                    "existing_multiplier": existing.size_multiplier,
-                    "control_trust_score": control["trust_score"] if control else None,
-                    "control_multiplier": control["multiplier"] if control else None,
-                    "enhanced_trust_score": enhanced["trust_score"] if enhanced else None,
-                    "enhanced_multiplier": enhanced["multiplier"] if enhanced else None,
-                }
+            row_out: dict = {
+                "signal_id": str(signal_id),
+                "market_id": signal.market_id,
+                "direction": signal.direction,
+                "edge_pct": signal.edge * 100.0,
+                "confidence": signal.confidence,
+                "hit": hit,
+                "existing_trust_score": existing.trust_score,
+                "existing_multiplier": existing.size_multiplier,
+            }
+            if reused is not None:
+                fresh_prefixes = tuple(f"{a}_" for a in arms)
+                for col, val in reused[str(signal_id)].items():
+                    if col in row_out or col.startswith(fresh_prefixes):
+                        continue
+                    row_out[col] = val
+            for arm, res in arm_results.items():
+                row_out[f"{arm}_trust_score"] = res["trust_score"] if res else None
+                row_out[f"{arm}_multiplier"] = res["multiplier"] if res else None
+                row_out[f"{arm}_verdict"] = res["verdict"] if res else None
+            out_rows.append(row_out)
+
+            live_bits = " ".join(
+                f"{a}={r['trust_score']:.2f}" if r else f"{a}=FAIL"
+                for a, r in arm_results.items()
             )
             print(
                 f"  [{i}/{len(sample_ids)}] {signal.market_id[:30]:30s} "
-                f"hit={hit} existing={existing.trust_score:.2f} "
-                f"control={control['trust_score'] if control else None} "
-                f"enhanced={enhanced['trust_score'] if enhanced else None}"
+                f"hit={hit} existing={existing.trust_score:.2f} {live_bits}"
             )
 
     out_df = pd.DataFrame(out_rows)
-    out_path = "scripts/.audit_output/assessor_enhancement_audit_pit.csv"
     import os
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -653,4 +757,36 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(
+        description="Paired live-Opus assessor audit (PIT). See module docstring."
+    )
+    parser.add_argument(
+        "--arms",
+        default=",".join(ARM_NAMES),
+        help="Comma-separated arms to run live this invocation (default: all).",
+    )
+    parser.add_argument(
+        "--reuse-csv",
+        default=None,
+        help="Prior run's CSV (same seed/sample); its columns for arms not in "
+        "--arms are carried into the output instead of re-bought.",
+    )
+    parser.add_argument(
+        "--out",
+        default="scripts/.audit_output/assessor_audit_pit.csv",
+        help="Output CSV path.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build and serialize every arm payload but make no LLM calls.",
+    )
+    args = parser.parse_args()
+    asyncio.run(
+        main(
+            {a.strip() for a in args.arms.split(",") if a.strip()},
+            args.reuse_csv,
+            args.out,
+            dry_run=args.dry_run,
+        )
+    )

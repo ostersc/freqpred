@@ -4,6 +4,28 @@ import pandas as pd
 RNG = np.random.default_rng(42)
 N_BOOT = 5000
 
+# Arm ladder, oldest package first. Only arms whose columns exist in the CSV
+# are analyzed, so this script works on historical (v2/v3) result files as
+# well as current-vs-challenger runs.
+ARM_LABELS = {
+    "existing": "existing   (production history, v4 era)",
+    "control": "control    (live, pre-T94: v4 prompt, no new sections)",
+    "enhanced": "t94-proto  (morning v2 run: v4 prompt + prototype sections)",
+    "t94": "t94        (as shipped: v5 prompt + shipped sections)",
+    "t95": "t95        (adopted as v6: prompt + bucketed verbatim history)",
+    "current": "current    (production package at run time)",
+    "challenger": "challenger (proposed package under screen)",
+}
+BOOT_PAIRS = [
+    ("control", "t94"),
+    ("t94", "t95"),
+    ("control", "t95"),
+    ("enhanced", "t95"),
+    ("current", "challenger"),
+    # model-swap screen: t95 = v6 package on opus-4-7 (adoption run, 768 tok)
+    ("t95", "challenger"),
+]
+
 
 def point_biserial(scores: pd.Series, hits: pd.Series) -> float:
     return float(pd.Series(scores).corr(pd.Series(hits.astype(float))))
@@ -33,6 +55,20 @@ def bootstrap_corr_diff(df: pd.DataFrame, col_a: str, col_b: str, hit_col: str =
         "ci_95": (lo, hi),
         "significant": (lo > 0) or (hi < 0),
     }
+
+
+def verdict_counts(df: pd.DataFrame, arm: str) -> dict[str, int] | None:
+    """Verdict distribution; uses the recorded verdict column when present,
+    otherwise derives it from trust_score with the production dead band."""
+    vcol, tcol = f"{arm}_verdict", f"{arm}_trust_score"
+    if vcol in df.columns and df[vcol].notna().any():
+        series = df[vcol].dropna()
+    elif tcol in df.columns:
+        ts = df[tcol].dropna()
+        series = ts.map(lambda t: "size_down" if t < 0.45 else ("size_up" if t > 0.55 else "neutral"))
+    else:
+        return None
+    return {v: int((series == v).sum()) for v in ("size_down", "neutral", "size_up")}
 
 
 def stake_sim(df: pd.DataFrame, mult_col: str, bankroll=1000.0, kelly_fraction=0.25, max_exposure_per_market=0.20):
@@ -74,49 +110,47 @@ def stake_sim(df: pd.DataFrame, mult_col: str, bankroll=1000.0, kelly_fraction=0
 if __name__ == "__main__":
     import sys
 
-    path = sys.argv[1] if len(sys.argv) > 1 else "scripts/.audit_output/assessor_enhancement_audit.csv"
+    path = sys.argv[1] if len(sys.argv) > 1 else "scripts/.audit_output/assessor_enhancement_audit_pit_v3.csv"
     df = pd.read_csv(path)
+    arms = [a for a in ARM_LABELS if f"{a}_trust_score" in df.columns]
     print(f"Source: {path}")
-    print(f"Loaded {len(df)} sampled signals")
-    print(f"  usable existing+control+enhanced triples: "
-          f"{df.dropna(subset=['existing_trust_score','control_trust_score','enhanced_trust_score']).shape[0]}")
+    print(f"Loaded {len(df)} sampled signals; arms present: {arms}")
     print()
 
-    for label, col in [
-        ("existing (production, historical)", "existing_trust_score"),
-        ("control (live now, unmodified)", "control_trust_score"),
-        ("enhanced (live now, + calibration data)", "enhanced_trust_score"),
-    ]:
-        sub = df.dropna(subset=[col, "hit"])
-        c = point_biserial(sub[col], sub["hit"])
-        print(f"corr(trust_score, hit) — {label}: r={c:.3f}  (n={len(sub)})")
+    print("=== corr(trust_score, hit) per arm ===")
+    for arm in arms:
+        sub = df.dropna(subset=[f"{arm}_trust_score", "hit"])
+        c = point_biserial(sub[f"{arm}_trust_score"], sub["hit"])
+        print(f"{ARM_LABELS[arm]}: r={c:+.3f}  (n={len(sub)})")
     print()
-    for label, col in [
-        ("existing", "existing_multiplier"),
-        ("control", "control_multiplier"),
-        ("enhanced", "enhanced_multiplier"),
-    ]:
-        sub = df.dropna(subset=[col, "hit"])
-        c = point_biserial(sub[col], sub["hit"])
-        print(f"corr(size_multiplier, hit) — {label}: r={c:.3f}  (n={len(sub)})")
+    print("=== corr(size_multiplier, hit) per arm ===")
+    for arm in arms:
+        sub = df.dropna(subset=[f"{arm}_multiplier", "hit"])
+        c = point_biserial(sub[f"{arm}_multiplier"], sub["hit"])
+        print(f"{ARM_LABELS[arm]}: r={c:+.3f}  (n={len(sub)})")
     print()
 
-    print("=== Bootstrap: enhanced vs control (same live model, only the calibration data differs) ===")
-    res_ts = bootstrap_corr_diff(df, "control_trust_score", "enhanced_trust_score")
-    print(f"trust_score:   corr_control={res_ts['corr_a']:.3f} corr_enhanced={res_ts['corr_b']:.3f} "
-          f"diff={res_ts['diff']:+.3f} 95% CI={tuple(round(x,3) for x in res_ts['ci_95'])} "
-          f"significant={res_ts['significant']} (n={res_ts['n']})")
-    res_mult = bootstrap_corr_diff(df, "control_multiplier", "enhanced_multiplier")
-    print(f"multiplier:    corr_control={res_mult['corr_a']:.3f} corr_enhanced={res_mult['corr_b']:.3f} "
-          f"diff={res_mult['diff']:+.3f} 95% CI={tuple(round(x,3) for x in res_mult['ci_95'])} "
-          f"significant={res_mult['significant']} (n={res_mult['n']})")
+    print("=== Verdict distribution per arm (dead band: <0.45 down, >0.55 up) ===")
+    for arm in arms:
+        vc = verdict_counts(df, arm)
+        if vc is None:
+            continue
+        print(
+            f"{ARM_LABELS[arm]}: size_down={vc['size_down']:2d}  "
+            f"neutral={vc['neutral']:2d}  size_up={vc['size_up']:2d}"
+        )
     print()
 
-    print("=== Bootstrap: enhanced vs existing (production historical baseline) ===")
-    res_ts2 = bootstrap_corr_diff(df, "existing_trust_score", "enhanced_trust_score")
-    print(f"trust_score:   corr_existing={res_ts2['corr_a']:.3f} corr_enhanced={res_ts2['corr_b']:.3f} "
-          f"diff={res_ts2['diff']:+.3f} 95% CI={tuple(round(x,3) for x in res_ts2['ci_95'])} "
-          f"significant={res_ts2['significant']} (n={res_ts2['n']})")
+    print("=== Bootstrap paired corr diffs (trust_score), 95% CI ===")
+    for a, b in BOOT_PAIRS:
+        if a not in arms or b not in arms:
+            continue
+        res = bootstrap_corr_diff(df, f"{a}_trust_score", f"{b}_trust_score")
+        print(
+            f"{b} - {a}: corr_{a}={res['corr_a']:+.3f} corr_{b}={res['corr_b']:+.3f} "
+            f"diff={res['diff']:+.3f} 95% CI={tuple(round(x, 3) for x in res['ci_95'])} "
+            f"significant={res['significant']} (n={res['n']})"
+        )
     print()
 
     # Stake-weighted P&L: join per-signal economics from the DB export.
@@ -126,17 +160,10 @@ if __name__ == "__main__":
     df["market_p_side_cost"] = df["market_ask_at_signal"]
     df["edge"] = df["edge_econ"] if "edge_econ" in df else df["edge_pct"] / 100.0
     print("=== Stake-weighted P&L within the audit sample ===")
-    for label, col in [
-        ("no multiplier (1.0x baseline)", None),
-        ("existing (production)", "existing_multiplier"),
-        ("control (live, unmodified)", "control_multiplier"),
-        ("enhanced (live, + calibration)", "enhanced_multiplier"),
-    ]:
-        d = df.copy()
-        if col is None:
-            d["_mult"] = 1.0
-            mcol = "_mult"
-        else:
-            mcol = col
-        staked, pnl, roi = stake_sim(d, mcol)
-        print(f"{label:35s}: staked=${staked:8.2f}  pnl=${pnl:8.2f}  roi={roi:6.1f}%")
+    df["_baseline_mult"] = 1.0
+    sim_arms = [("no multiplier (1.0x baseline)", "_baseline_mult")] + [
+        (ARM_LABELS[a], f"{a}_multiplier") for a in arms
+    ]
+    for label, col in sim_arms:
+        staked, pnl, roi = stake_sim(df, col)
+        print(f"{label:60s}: staked=${staked:8.2f}  pnl=${pnl:8.2f}  roi={roi:6.1f}%")

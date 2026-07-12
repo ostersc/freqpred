@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,7 +16,9 @@ import freqpred.rag.models  # noqa: F401
 import freqpred.signal.models  # noqa: F401
 from freqpred.markets.models import Market
 from freqpred.metrics.assessment import (
+    _bucketed_history_sample,
     _build_prompt_payload,
+    _direction_changes,
     _load_edge_band_calibration,
     _load_market_reevaluation_history,
     _parse_assessment_response,
@@ -496,23 +499,172 @@ async def test_load_market_reevaluation_history_first_signal() -> None:
     assert result == {"prior_signal_count": 0, "note": "First signal on this market."}
 
 
+# ---------------------------------------------------------------------------
+# T95 — verbatim bucketed market_reevaluation_history (issue #95 shape)
+# ---------------------------------------------------------------------------
+
+# The builder tests operate relative to the assessed signal's created_at (NOW);
+# no wall clock is involved anywhere in the history code, by construction.
+_HISTORY_T0 = NOW - timedelta(hours=400)
+
+
+def _prior_row(
+    hours_after_t0: float,
+    direction: str,
+    edge: float,
+    p: float,
+    mid: float,
+    ask: float | None,
+    conf: float = 0.7,
+    trigger: str = "scheduled",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        created_at=_HISTORY_T0 + timedelta(hours=hours_after_t0),
+        direction=direction,
+        edge=edge,
+        estimated_probability=p,
+        market_mid_at_signal=mid,
+        market_ask_at_signal=ask,
+        confidence=conf,
+        trigger=trigger,
+    )
+
+
+def test_bucketed_history_returns_all_when_under_cap() -> None:
+    rows = [_prior_row(i * 10, "YES", 0.1, 0.6, 0.5, 0.52) for i in range(5)]
+    points = _bucketed_history_sample(rows, NOW)
+    assert len(points) == 5
+    assert all("bucket_summary" not in p for p in points)
+    hours = [p["hours_before_current_signal"] for p in points]
+    assert hours == sorted(hours, reverse=True)  # chronological, oldest first
+
+
+def test_bucketed_history_always_anchors_first_and_latest() -> None:
+    rows = [_prior_row(i * 10, "YES", 0.1, 0.6, 0.5, 0.52) for i in range(35)]
+    points = _bucketed_history_sample(rows, NOW)
+    assert len(points) <= 10
+    assert points[0]["hours_before_current_signal"] == 400.0  # first prior, verbatim
+    assert points[-1]["hours_before_current_signal"] == 60.0  # latest prior, verbatim
+    assert "bucket_summary" not in points[0]
+    assert "bucket_summary" not in points[-1]
+
+
+def test_bucketed_history_buckets_are_time_even_not_index_even() -> None:
+    # 30 signals inside hour one, then 5 spread over a week: index-even sampling
+    # would spread points across the cluster; time-even bucketing must keep the
+    # cluster inside one bucket.
+    rows = [_prior_row(i / 30, "YES", 0.1, 0.6, 0.5, 0.52) for i in range(30)] + [
+        _prior_row(24.0 * (d + 1), "YES", 0.1, 0.6, 0.5, 0.52) for d in range(5)
+    ]
+    points = _bucketed_history_sample(rows, NOW)
+    covered = 2 + sum(
+        p["bucket_summary"]["signals_in_bucket"] for p in points if "bucket_summary" in p
+    )
+    assert covered == 35
+    first_bucket = next(p for p in points if "bucket_summary" in p)
+    assert first_bucket["bucket_summary"]["signals_in_bucket"] >= 28
+
+
+def test_bucketed_history_counts_cover_all_signals() -> None:
+    # Aliasing regression: direction alternates every signal, so any ≤10-point
+    # render could look calm — the per-bucket flip counts must expose it.
+    rows = [
+        _prior_row(i * 10, "YES" if i % 2 == 0 else "NO", 0.1 + i * 0.001, 0.6, 0.5, 0.52)
+        for i in range(35)
+    ]
+    points = _bucketed_history_sample(rows, NOW)
+    covered = 2 + sum(
+        p["bucket_summary"]["signals_in_bucket"] for p in points if "bucket_summary" in p
+    )
+    assert covered == 35
+    assert any(
+        p["bucket_summary"]["direction_changes_in_bucket"] > 0
+        for p in points
+        if "bucket_summary" in p
+    )
+
+
+def test_direction_change_count_total() -> None:
+    # SKIP <-> traded transitions count; the total is bucketing-independent.
+    assert _direction_changes(["YES", "YES", "NO", "SKIP", "NO", "NO"]) == 3
+    assert _direction_changes(["YES"] * 5) == 0
+    assert _direction_changes(["YES", "NO"] * 17 + ["YES"]) == 34
+
+
+def test_point_shape_yes_no_and_skip() -> None:
+    rows = [
+        _prior_row(370, "YES", 0.10, 0.62, 0.55, 0.57),
+        _prior_row(380, "NO", 0.08, 0.62, 0.55, 0.46),
+        _prior_row(390, "SKIP", 0.05, 0.62, 0.55, None),
+    ]
+    yes_point, no_point, skip_point = _bucketed_history_sample(rows, NOW)
+
+    assert yes_point["model_p_traded_side"] == 0.62
+    assert yes_point["market_cost_traded_side"] == 0.57
+    assert yes_point["edge_pct_traded_side"] == 10.0
+
+    # NO side: model probability converted to the traded side, cost is the NO ask
+    assert no_point["model_p_traded_side"] == pytest.approx(0.38)
+    assert no_point["market_cost_traded_side"] == 0.46
+    assert no_point["edge_pct_traded_side"] == 8.0
+
+    # SKIP: side-specific fields null, never converted as if NO
+    assert skip_point["model_p_traded_side"] is None
+    assert skip_point["market_cost_traded_side"] is None
+    assert skip_point["edge_pct_traded_side"] is None
+
+    # YES-space fields are direction-independent in all three cases
+    for point in (yes_point, no_point, skip_point):
+        assert point["model_p_event_yes"] == 0.62
+        assert point["market_p_event_yes"] == 0.55
+
+
 @pytest.mark.asyncio
-async def test_load_market_reevaluation_history_direction_and_trend() -> None:
+async def test_load_market_reevaluation_history_omits_old_derived_fields() -> None:
     prior_rows = [
-        MagicMock(direction="NO", edge=0.05),
-        MagicMock(direction="YES", edge=0.20),
+        _prior_row(0, "NO", 0.05, 0.40, 0.45, 0.62),
+        _prior_row(200, "YES", 0.20, 0.70, 0.50, 0.52),
     ]
     result_mock = MagicMock()
     result_mock.all.return_value = prior_rows
     session = AsyncMock()
     session.execute = AsyncMock(return_value=result_mock)
 
-    signal = _make_signal()  # direction="YES"
-    result = await _load_market_reevaluation_history(session, signal)
+    result = await _load_market_reevaluation_history(session, _make_signal())
     assert result["prior_signal_count"] == 2
-    assert result["prior_directions"] == ["NO", "YES"]
-    assert result["direction_consistent_with_this_signal"] is False
-    assert result["edge_trend_across_prior_signals"] == "increasing"
+    assert result["direction_change_count"] == 1
+    assert result["history_span_hours"] == 400.0
+    assert len(result["sampled_history"]) == 2
+    for gone in (
+        "direction_consistent_with_this_signal",
+        "edge_trend_across_prior_signals",
+        "prior_directions",
+        "note",
+    ):
+        assert gone not in result
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_payload_includes_sampled_history_description() -> None:
+    result_mock = MagicMock()
+    result_mock.all.return_value = [_prior_row(0, "YES", 0.1, 0.6, 0.5, 0.52)]
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+
+    history = await _load_market_reevaluation_history(session, _make_signal())
+    payload = _build_prompt_payload(
+        _make_signal(),
+        _make_market(),
+        "TestStrategy",
+        source_breakdown=[],
+        similar_market_summary={"available": False},
+        edge_band_calibration=None,
+        market_reevaluation_history=history,
+    )
+    description = payload["market_reevaluation_history"]["description"]
+    assert "_event_yes" in description
+    assert "_traded_side" in description
+    assert "bucket_summary" in description
 
 
 def test_build_prompt_payload_includes_new_sections() -> None:
@@ -564,10 +716,11 @@ async def test_assess_signal_context_passes_sections_to_llm() -> None:
     session.flush = AsyncMock()
     session.commit = AsyncMock()
 
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     async def _complete(**kwargs: object) -> MagicMock:
         captured["prompt"] = kwargs["prompt"]
+        captured["max_tokens"] = kwargs["max_tokens"]
         response = MagicMock()
         response.llm_query_id = 42
         response.content = json.dumps(
@@ -620,3 +773,6 @@ async def test_assess_signal_context_passes_sections_to_llm() -> None:
     assert "prompt" in captured
     assert "edge_band_calibration" in captured["prompt"]
     assert "market_reevaluation_history" in captured["prompt"]
+    # 768 is the audited v6 budget; 512 truncated the tool JSON on a live call
+    # (reasoning first, trust_score never emitted -> fail-open neutral sizing).
+    assert captured["max_tokens"] == 768

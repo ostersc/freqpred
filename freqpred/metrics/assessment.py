@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -29,12 +30,13 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_PROMPT_VERSION = "assessment-v5"
+_PROMPT_VERSION = "assessment-v6"
 _QUERY_TYPE = "signal_assessment"
 _LOOKBACK_DAYS = 90
 _MAX_FACTORS = 5
 _MAX_WARNINGS = 3
 _MIN_EDGE_CALIBRATION_SAMPLES = 10
+_MAX_HISTORY_POINTS = 10
 _SYSTEM_PROMPT = """\
 You are a risk and sizing judge for a prediction-market trading system.
 
@@ -60,6 +62,11 @@ avg_model_implied_p for this signal's own edge band — a wide gap there (the \
 model claims much more confidence than the band has actually earned) is the \
 warning sign, not the edge's raw size. A large edge with a well-calibrated \
 history for its band is not automatically suspect.
+- When `market_reevaluation_history` is present, read `sampled_history` for \
+the actual trajectory: is the edge widening or narrowing, are the model's \
+and the market's probabilities converging or diverging, and is the traded \
+direction stable (see direction_change_count)? Judge the observed \
+trajectory on its own terms — no single pattern is inherently suspect.
 
 Call the submit_assessment tool with your judgment:
 - trust_score: 0.0–1.0; 0.5 = neutral, < 0.5 = lower confidence, > 0.5 = higher confidence
@@ -473,18 +480,126 @@ async def _load_edge_band_calibration(
     }
 
 
+_REEVALUATION_HISTORY_DESCRIPTION = (
+    "History of this market's prior signals, oldest first. Field convention: "
+    "'_event_yes' fields are always in terms of the event resolving YES, "
+    "regardless of the side traded; '_traded_side' fields are converted to "
+    "whichever side (YES/NO) that point actually traded — compare "
+    "model_p_traded_side against market_cost_traded_side to read that "
+    "point's edge. model_confidence is the model's self-assessed reliability, "
+    "not an event probability. SKIP points are signals where the model "
+    "analyzed but declined to trade (side-specific fields null). When history "
+    "exceeds the point cap, points are the most recent signal of each even "
+    "TIME bucket between the first and latest prior signals (both always "
+    "shown verbatim); each bucketed point's bucket_summary carries raw counts "
+    "covering ALL signals in its bucket, so direction oscillation cannot hide "
+    "between points. Read the sequence for the actual trajectory: is the edge "
+    "widening or narrowing, are model and market converging or diverging, is "
+    "the direction stable — and compare the trajectory's endpoint against the "
+    "current signal in trade_context."
+)
+
+
+def _direction_changes(directions: list[str]) -> int:
+    return sum(1 for a, b in zip(directions, directions[1:], strict=False) if a != b)
+
+
+def _history_point(row: Any, current_created_at: datetime) -> dict[str, Any]:
+    """One rendered prior signal, per the issue #95 point schema: every field
+    self-describing on model-vs-market, YES-space-vs-traded-side, and
+    probability-vs-price. SKIP rows keep YES-space fields and null the
+    side-specific ones (the stored SKIP edge is a YES-space audit value,
+    never a tradeable edge)."""
+    is_skip = row.direction == "SKIP"
+    p_yes = float(row.estimated_probability)
+    return {
+        "hours_before_current_signal": round(
+            (current_created_at - row.created_at).total_seconds() / 3600, 1
+        ),
+        "trigger": row.trigger,
+        "traded_direction": row.direction,
+        "model_p_event_yes": round(p_yes, 3),
+        "model_p_traded_side": (
+            None if is_skip else round(p_yes if row.direction == "YES" else 1.0 - p_yes, 3)
+        ),
+        "model_confidence": round(float(row.confidence), 2),
+        "market_p_event_yes": round(float(row.market_mid_at_signal), 3),
+        "market_cost_traded_side": (
+            None
+            if is_skip or row.market_ask_at_signal is None
+            else round(float(row.market_ask_at_signal), 3)
+        ),
+        "edge_pct_traded_side": None if is_skip else round(float(row.edge) * 100.0, 1),
+    }
+
+
+def _bucketed_history_sample(
+    rows: list[Any],
+    current_created_at: datetime,
+    max_points: int = _MAX_HISTORY_POINTS,
+) -> list[dict[str, Any]]:
+    """Anchored even-TIME bucket sampling per issue #95.
+
+    <= max_points priors: every one rendered verbatim, no summaries.
+    Otherwise: first and latest priors are verbatim anchors; the span between
+    them splits into (max_points - 2) equal TIME buckets; each non-empty
+    bucket renders its most recent signal plus a count-only bucket_summary
+    covering ALL of that bucket's signals — never averaged probabilities, so
+    a direction flip inside a bucket stays visible instead of washing out.
+    """
+    if len(rows) <= max_points:
+        return [_history_point(r, current_created_at) for r in rows]
+    first, last, middle = rows[0], rows[-1], rows[1:-1]
+    n_buckets = max_points - 2
+    span = (last.created_at - first.created_at).total_seconds()
+    if span <= 0:  # degenerate: identical timestamps; render what fits
+        keep = list(rows[: max_points - 1]) + [last]
+        return [_history_point(r, current_created_at) for r in keep]
+    buckets: dict[int, list[Any]] = defaultdict(list)
+    for r in middle:
+        frac = (r.created_at - first.created_at).total_seconds() / span
+        buckets[min(int(frac * n_buckets), n_buckets - 1)].append(r)
+    rendered = [_history_point(first, current_created_at)]
+    for idx in sorted(buckets):
+        brows = buckets[idx]
+        point = _history_point(brows[-1], current_created_at)
+        non_skip_edges = [float(r.edge) * 100.0 for r in brows if r.direction != "SKIP"]
+        point["bucket_summary"] = {
+            "signals_in_bucket": len(brows),
+            "direction_changes_in_bucket": _direction_changes([r.direction for r in brows]),
+            "edge_pct_traded_side_min": (
+                round(min(non_skip_edges), 1) if non_skip_edges else None
+            ),
+            "edge_pct_traded_side_max": (
+                round(max(non_skip_edges), 1) if non_skip_edges else None
+            ),
+        }
+        rendered.append(point)
+    rendered.append(_history_point(last, current_created_at))
+    return rendered
+
+
 async def _load_market_reevaluation_history(
     session: AsyncSession,
     signal: Signal,
 ) -> dict[str, Any]:
-    """Prior signal count / direction consistency / edge trend for this market.
+    """Verbatim trajectory of this market's prior signals (issue #95 shape).
 
     PIT-safe by construction: only signals created before this one exist to
     query in production (the current signal has already been written, but
     later ones cannot exist yet).
     """
     result = await session.execute(
-        select(SignalRow.direction, SignalRow.edge)
+        select(
+            SignalRow.direction,
+            SignalRow.edge,
+            SignalRow.estimated_probability,
+            SignalRow.market_mid_at_signal,
+            SignalRow.market_ask_at_signal,
+            SignalRow.confidence,
+            SignalRow.created_at,
+            SignalRow.trigger,
+        )
         .where(
             SignalRow.market_id == signal.market_id,
             SignalRow.created_at < signal.created_at,
@@ -495,28 +610,14 @@ async def _load_market_reevaluation_history(
     if not prior:
         return {"prior_signal_count": 0, "note": "First signal on this market."}
 
-    directions: list[str] = []
-    for row in prior:
-        if row.direction not in directions:
-            directions.append(row.direction)
-    edges = [row.edge * 100.0 for row in prior]
-    trend = None
-    if len(edges) >= 2:
-        trend = "increasing" if edges[-1] > edges[0] else "decreasing_or_flat"
-
     return {
+        "description": _REEVALUATION_HISTORY_DESCRIPTION,
         "prior_signal_count": len(prior),
-        "prior_directions": directions,
-        "direction_consistent_with_this_signal": all(d == signal.direction for d in directions),
-        "edge_trend_across_prior_signals": trend,
-        "note": (
-            "A market re-signaled many times with a consistent direction and "
-            "growing edge, as the market keeps moving further from the "
-            "model's estimate, is the specific pattern behind this "
-            "strategy's worst historical misses — the model held its ground "
-            "while the market kept disagreeing more, and the market was "
-            "usually right."
+        "direction_change_count": _direction_changes([r.direction for r in prior]),
+        "history_span_hours": round(
+            (signal.created_at - prior[0].created_at).total_seconds() / 3600, 1
         ),
+        "sampled_history": _bucketed_history_sample(list(prior), signal.created_at),
     }
 
 
@@ -795,7 +896,10 @@ async def assess_signal_context(
             signal_id=signal.id,
             strategy=strategy.config.name,
             prompt_version=_PROMPT_VERSION,
-            max_tokens=512,
+            # 768 matches the audited v6 package; at 512 the judge's longer
+            # trajectory reasoning truncates the tool JSON before trust_score
+            # (observed live: falls back to neutral 1.0x, i.e. fail-open sizing).
+            max_tokens=768,
             json_tool=_ASSESSMENT_TOOL,
         )
         llm_query_id = llm_response.llm_query_id
