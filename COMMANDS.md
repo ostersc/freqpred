@@ -287,11 +287,11 @@ Command replies are sent with Telegram's HTML parse mode: bold section headers, 
 
 | Command | Description |
 |---|---|
-| `/start` | Set run loop to `running`; new positions resume |
+| `/start` | Set run loop to `running`; new positions resume. Also acknowledges the daily-loss circuit breaker — for the running process's trading mode only (paper and live acknowledgements are independent) |
 | `/pause` | Set run loop to `paused`; no new positions, existing positions still managed |
 | `/stop` | Halt signal analysis entirely; use `/start` to resume |
 | `/shutdown` | Gracefully shut down the freqpred process. Requires inline keyboard confirmation (30 s timeout). Sends a shutdown alert to all configured channels before exiting. |
-| `/reset_drawdown` | Reset the drawdown circuit breaker. Stores the current timestamp; drawdown is measured only from this point forward. |
+| `/reset_drawdown` | Reset the drawdown circuit breaker for the running process's trading mode. Stores the current timestamp and net bankroll as that mode's baseline; drawdown is measured only from this point forward. Paper and live baselines are independent — resetting one never touches the other. No-op in signal-only mode. |
 | `/show_config` | Show strategy name, mode, min edge, max position size, max open positions, LLM budget |
 | `/logs [n] [filter]` | Last *n* log lines (default 20), optionally filtered by logger name segment; rendered in a monospace block |
 | `/version` | freqpred version + short git commit hash |

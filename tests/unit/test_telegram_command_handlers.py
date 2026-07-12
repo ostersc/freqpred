@@ -115,6 +115,8 @@ async def test_start_sets_state_running():
     assert "running" in reply
     mock_set.assert_awaited_once()
     assert mock_set.await_args.args[1] == "running"
+    # /start must only acknowledge the daily-loss breaker for the running mode
+    assert mock_set.await_args.kwargs["mode"] == "paper"
 
 
 @pytest.mark.asyncio

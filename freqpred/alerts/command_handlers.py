@@ -206,7 +206,9 @@ def register_system_commands(
 
     async def handle_start(chat_id: int, args: list[str]) -> str:
         async with session_factory() as session:
-            await set_run_state(session, "running")
+            # mode-scoped: /start only acknowledges the daily-loss breaker for
+            # the mode this process is running in, never the other mode's.
+            await set_run_state(session, "running", mode=mode)
         log.info("telegram.start", chat_id=chat_id)
         return "Run loop state set to running."
 
@@ -285,19 +287,22 @@ def register_system_commands(
     # ------------------------------------------------------------------ #
 
     async def handle_reset_drawdown(chat_id: int, args: list[str]) -> str:
+        if mode not in ("paper", "live"):
+            return f"No drawdown baseline in {mode} mode — nothing to reset."
         from freqpred.trading import ledger as _ledger  # noqa: PLC0415
         async with session_factory() as session:
             net_bankroll = await _ledger.get_net_bankroll(
                 session, config.trading.bankroll_usd, mode=mode
             )
-            reset_at = await reset_drawdown(session, net_bankroll)
+            reset_at = await reset_drawdown(session, mode, net_bankroll)
             await set_cb_state(session, active=False, reason=None)
         log.info(
             "telegram.reset_drawdown",
-            chat_id=chat_id, reset_at=reset_at.isoformat(), net_bankroll=net_bankroll,
+            chat_id=chat_id, mode=mode,
+            reset_at=reset_at.isoformat(), net_bankroll=net_bankroll,
         )
         return (
-            f"Drawdown reset. Baseline set to ${net_bankroll:,.2f} "
+            f"Drawdown reset ({mode}). Baseline set to ${net_bankroll:,.2f} "
             f"at {reset_at.strftime('%Y-%m-%d %H:%M UTC')}."
         )
 
@@ -471,7 +476,7 @@ def register_system_commands(
 
         async with session_factory() as session:
             current_state = await get_run_state(session)
-            reset_at, reset_bankroll = await get_drawdown_window(session)
+            reset_at, reset_bankroll = await get_drawdown_window(session, mode)
             net_bankroll = await _ledger.get_net_bankroll(
                 session, config.trading.bankroll_usd, mode=mode
             )

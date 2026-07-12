@@ -17,6 +17,12 @@ class RunStateRow(Base):
 
     At most one row exists (id=1). Use ``run_state.get_run_state`` /
     ``run_state.set_run_state`` to read/write it.
+
+    The risk-window fields (drawdown baseline, daily-loss acknowledgement) are
+    partitioned per trading mode: paper and live bankrolls evolve on entirely
+    different scales, so a baseline captured in one mode is always wrong for
+    the other. Loop-control fields (state, cb_*, strategy_name, mode) stay
+    global — only one mode runs per process.
     """
 
     __tablename__ = "run_state"
@@ -26,10 +32,16 @@ class RunStateRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
     )
-    drawdown_reset_at: Mapped[datetime | None] = mapped_column(
+    drawdown_reset_at_paper: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True, default=None
     )
-    drawdown_reset_bankroll: Mapped[float | None] = mapped_column(
+    drawdown_reset_bankroll_paper: Mapped[float | None] = mapped_column(
+        nullable=True, default=None
+    )
+    drawdown_reset_at_live: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True, default=None
+    )
+    drawdown_reset_bankroll_live: Mapped[float | None] = mapped_column(
         nullable=True, default=None
     )
     strategy_name: Mapped[str | None] = mapped_column(
@@ -38,6 +50,9 @@ class RunStateRow(Base):
     mode: Mapped[str | None] = mapped_column(VARCHAR(20), nullable=True, default=None)
     cb_active: Mapped[bool] = mapped_column(nullable=False, default=False)
     cb_reason: Mapped[str | None] = mapped_column(nullable=True, default=None)
-    daily_loss_ack_at: Mapped[datetime | None] = mapped_column(
+    daily_loss_ack_at_paper: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True, default=None
+    )
+    daily_loss_ack_at_live: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True, default=None
     )

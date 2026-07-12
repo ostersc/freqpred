@@ -2455,3 +2455,67 @@ async def test_limit_entry_opens_pending() -> None:
         await om.submit(sig, market, strategy)
 
     assert mock_open.call_args.kwargs["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# T90: mode-scoped circuit breaker baselines (wiring)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("om_mode", "expect_trip"),
+    [("live", False), ("paper", True)],
+)
+async def test_circuit_breaker_uses_correct_mode_baseline(
+    om_mode: str, expect_trip: bool
+) -> None:
+    """Wiring: submit() must read the drawdown baseline for its OWN mode.
+
+    A stale paper baseline of $1M reads as a ~99% drawdown against the $10k
+    net bankroll, so the real check_circuit_breakers would trip on it. The
+    live order-manager path must never see that baseline (live's own window
+    is unset) — the paper control leg proves the baseline does trip when it
+    IS the running mode, so the live leg's "no trip" is meaningful.
+    """
+    from freqpred.config import RiskConfig
+
+    risk = MagicMock(spec=RiskEngine)
+    # Real CB math; mocked session's scalar_one() -> 0.0 keeps daily loss quiet.
+    risk.check_circuit_breakers = RiskEngine(RiskConfig()).check_circuit_breakers
+    # Stop submit() right after the CB check — order placement is out of scope.
+    risk.check_position = AsyncMock(
+        return_value=RiskDecision(allowed=False, reason="stop after CB", capped_size=0.0)
+    )
+    om, _ = _make_order_manager(risk=risk, mode=om_mode)
+    strategy = _make_strategy()
+
+    window_modes: list[str] = []
+    ack_modes: list[str] = []
+
+    async def _mode_scoped_window(session, mode):
+        window_modes.append(mode)
+        if mode == "paper":
+            return (NOW, 1_000_000.0)  # poisoned stale paper-era baseline
+        return (None, None)
+
+    async def _mode_scoped_ack(session, mode):
+        ack_modes.append(mode)
+        return None
+
+    with patch(
+        "freqpred.alerts.run_state.get_drawdown_window",
+        new=AsyncMock(side_effect=_mode_scoped_window),
+    ), patch(
+        "freqpred.alerts.run_state.get_daily_loss_ack_at",
+        new=AsyncMock(side_effect=_mode_scoped_ack),
+    ):
+        if expect_trip:
+            with pytest.raises(TradingCircuitBreakerError, match="drawdown"):
+                await om.submit(_make_signal(), _make_market(), strategy)
+        else:
+            result = await om.submit(_make_signal(), _make_market(), strategy)
+            assert result is None  # blocked by the check_position stub, not the CB
+
+    assert window_modes == [om_mode]
+    assert ack_modes == [om_mode]

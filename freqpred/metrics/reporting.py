@@ -81,7 +81,9 @@ async def generate_daily_digest(
     # --- Run state + drawdown ---
     from freqpred.alerts.run_state import get_drawdown_window, get_run_state  # noqa: PLC0415
     run_state = await get_run_state(session)
-    drawdown_reset_at, drawdown_reset_bankroll = await get_drawdown_window(session)
+    drawdown_reset_at, drawdown_reset_bankroll = await get_drawdown_window(
+        session, trading_mode
+    )
 
     # --- Open positions + unrealized P&L + excursion metrics ---
     open_result = await session.execute(

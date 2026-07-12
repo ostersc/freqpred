@@ -402,8 +402,8 @@ class OrderManager:
                 get_daily_loss_ack_at,
                 get_drawdown_window,
             )
-            _, drawdown_reset_bankroll = await get_drawdown_window(session)
-            daily_loss_ack_at = await get_daily_loss_ack_at(session)
+            _, drawdown_reset_bankroll = await get_drawdown_window(session, self._mode)
+            daily_loss_ack_at = await get_daily_loss_ack_at(session, self._mode)
             await self._risk.check_circuit_breakers(
                 session, net_bankroll, mode=self._mode,
                 drawdown_reset_bankroll=drawdown_reset_bankroll,

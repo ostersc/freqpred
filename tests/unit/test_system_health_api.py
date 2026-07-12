@@ -66,7 +66,8 @@ def _make_session(
     run_state_row.mode = mode
     run_state_row.cb_active = cb_active
     run_state_row.cb_reason = None
-    run_state_row.daily_loss_ack_at = None
+    run_state_row.daily_loss_ack_at_paper = None
+    run_state_row.daily_loss_ack_at_live = None
 
     rs_result = MagicMock()
     rs_result.scalar_one_or_none.return_value = run_state_row
@@ -242,7 +243,8 @@ def test_system_health_returns_pending_orders_detail() -> None:
     rs_row.mode = "paper"
     rs_row.cb_active = False
     rs_row.cb_reason = None
-    rs_row.daily_loss_ack_at = None
+    rs_row.daily_loss_ack_at_paper = None
+    rs_row.daily_loss_ack_at_live = None
     rs_result = MagicMock()
     rs_result.scalar_one_or_none.return_value = rs_row
 
@@ -291,7 +293,7 @@ def test_system_health_without_telemetry_returns_empty_services() -> None:
         *[_scalar_result(v) for v in [
             MagicMock(scalar_one_or_none=MagicMock(return_value=MagicMock(
                 state="running", mode="paper", cb_active=False, cb_reason=None,
-                daily_loss_ack_at=None,
+                daily_loss_ack_at_paper=None, daily_loss_ack_at_live=None,
             ))),
         ]],
     )

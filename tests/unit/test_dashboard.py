@@ -968,9 +968,12 @@ def _make_system_health_session(
     run_state_row.mode = mode
     run_state_row.cb_active = cb_active
     run_state_row.cb_reason = cb_reason
-    run_state_row.daily_loss_ack_at = daily_loss_ack_at
-    run_state_row.drawdown_reset_at = None
-    run_state_row.drawdown_reset_bankroll = None
+    run_state_row.daily_loss_ack_at_paper = daily_loss_ack_at if mode == "paper" else None
+    run_state_row.daily_loss_ack_at_live = daily_loss_ack_at if mode == "live" else None
+    run_state_row.drawdown_reset_at_paper = None
+    run_state_row.drawdown_reset_bankroll_paper = None
+    run_state_row.drawdown_reset_at_live = None
+    run_state_row.drawdown_reset_bankroll_live = None
 
     run_state_result = MagicMock()
     run_state_result.scalar_one_or_none.return_value = run_state_row

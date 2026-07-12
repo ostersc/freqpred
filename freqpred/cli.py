@@ -460,8 +460,12 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                             _net_bankroll = await _ledger.get_net_bankroll(
                                 cb_session, order_manager._bankroll, mode=order_manager._mode
                             )
-                            _, _reset_bankroll = await get_drawdown_window(cb_session)
-                            _daily_loss_ack_at = await get_daily_loss_ack_at(cb_session)
+                            _, _reset_bankroll = await get_drawdown_window(
+                                cb_session, order_manager._mode
+                            )
+                            _daily_loss_ack_at = await get_daily_loss_ack_at(
+                                cb_session, order_manager._mode
+                            )
                             await order_manager._risk.check_circuit_breakers(
                                 cb_session, _net_bankroll, mode=order_manager._mode,
                                 drawdown_reset_bankroll=_reset_bankroll,

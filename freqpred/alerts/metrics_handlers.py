@@ -430,7 +430,9 @@ def register_metrics_commands(
 
         async with session_factory() as session:
             summary = await get_portfolio_summary(session, mode=mode)
-            drawdown_reset_at, drawdown_reset_bankroll = await get_drawdown_window(session)
+            drawdown_reset_at, drawdown_reset_bankroll = await get_drawdown_window(
+                session, mode
+            )
 
         all_time_pnl = summary["all_time_pnl_usd"]
         net_value = bankroll + all_time_pnl

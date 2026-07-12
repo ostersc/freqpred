@@ -1891,6 +1891,7 @@ async def get_system_health(
 
     import freqpred.alerts.models  # noqa: F401 — ensure RunStateRow is registered  # noqa: PLC0415
     from freqpred.alerts.models import RunStateRow as _RunStateRow  # noqa: PLC0415
+    from freqpred.alerts.run_state import daily_loss_ack_from_row  # noqa: PLC0415
     from freqpred.trading.ledger import get_net_bankroll  # noqa: PLC0415
 
     db_ok = True
@@ -1949,7 +1950,7 @@ async def get_system_health(
             run_state = rs_row.state
             cb_halted = bool(rs_row.cb_active)
             cb_reason = rs_row.cb_reason
-            daily_loss_ack_at = rs_row.daily_loss_ack_at
+            daily_loss_ack_at = daily_loss_ack_from_row(rs_row, app_mode)
 
         net_bankroll = await get_net_bankroll(session, initial_bankroll, mode=app_mode)
 
@@ -2225,13 +2226,16 @@ async def set_run_state_endpoint(
     body: dict,
 ) -> dict:
     """Set the run-loop state to running / paused / stopped."""
-    from freqpred.alerts.run_state import set_run_state  # noqa: PLC0415
+    from freqpred.alerts.run_state import get_mode, set_run_state  # noqa: PLC0415
 
     state = body.get("state", "")
     if state not in _VALID_STATES:
         raise HTTPException(status_code=400, detail=f"Invalid state '{state}'. Must be one of: {sorted(_VALID_STATES)}")
-    await set_run_state(session, state)
-    log.info("dashboard.run_state_set", state=state)
+    # Resuming acknowledges the daily-loss breaker for the running loop's mode
+    # only — mirror the Telegram /start handler.
+    mode = await get_mode(session)
+    await set_run_state(session, state, mode=mode)
+    log.info("dashboard.run_state_set", state=state, mode=mode)
     return {"state": state}
 
 
