@@ -1,4 +1,4 @@
-"""FreshMarketStrategy: politics + tech markets created in the last 4 hours.
+"""FreshMarketStrategy: politics + tech markets created in the last 24 hours.
 
 Targets newly listed markets before they reach efficient pricing.
 Short-dated only (max 7 days), low volume threshold to catch markets early.
