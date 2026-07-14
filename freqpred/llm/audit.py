@@ -131,17 +131,47 @@ async def log_llm_query(
 # Sources: https://www.anthropic.com/pricing
 _COST_PER_TOKEN: dict[str, tuple[float, float]] = {
     # (input $/token, output $/token)
-    "claude-haiku-4-5-20251001": (0.80 / 1_000_000, 4.00 / 1_000_000),
+    "claude-haiku-4-5-20251001": (1.00 / 1_000_000, 5.00 / 1_000_000),
     "claude-sonnet-4-6":         (3.00 / 1_000_000, 15.00 / 1_000_000),
-    "claude-opus-4-6":           (15.00 / 1_000_000, 75.00 / 1_000_000),
+    "claude-opus-4-6":           (5.00 / 1_000_000, 25.00 / 1_000_000),
+    "claude-opus-4-7":           (5.00 / 1_000_000, 25.00 / 1_000_000),
     # Introductory pricing through 2026-08-31; standard rate is $3.00/$15.00 per MTok.
     # TODO: update to (3.00/1e6, 15.00/1e6) after the introductory window ends.
     "claude-sonnet-5":           (2.00 / 1_000_000, 10.00 / 1_000_000),
 }
+# Only hit for a model string with no pricing entry above — logged loudly
+# (see calculate_cost) because a silent fallback here previously mispriced
+# every claude-opus-4-7 call as claude-sonnet-4-6 for days before it was caught.
 _DEFAULT_COST_PER_TOKEN = (3.00 / 1_000_000, 15.00 / 1_000_000)
 
+# Cache tokens are billed at a different rate than regular input tokens.
+# Writes use the 1h-TTL rate (2x base input) since llm/client.py's cache_system
+# flag always requests ttl="1h"; reads are discounted to 0.1x base input.
+_CACHE_WRITE_MULTIPLIER = 2.0
+_CACHE_READ_MULTIPLIER = 0.1
 
-def calculate_cost(model: str, tokens_input: int, tokens_output: int) -> float:
-    """Return the USD cost for a given model and token counts."""
+
+def calculate_cost(
+    model: str,
+    tokens_input: int,
+    tokens_output: int,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> float:
+    """Return the USD cost for a given model and token counts.
+
+    ``cache_creation_tokens``/``cache_read_tokens`` are the
+    ``cache_creation_input_tokens``/``cache_read_input_tokens`` fields from the
+    Anthropic usage object — billed at different rates than plain input tokens
+    (see module-level multipliers above). Omitting them (the pre-cache-aware
+    behavior) undercounts cost for any call made with ``cache_system=True``.
+    """
+    if model not in _COST_PER_TOKEN:
+        log.warning("llm.unknown_model_pricing", model=model, using_default=_DEFAULT_COST_PER_TOKEN)
     input_rate, output_rate = _COST_PER_TOKEN.get(model, _DEFAULT_COST_PER_TOKEN)
-    return tokens_input * input_rate + tokens_output * output_rate
+    return (
+        tokens_input * input_rate
+        + tokens_output * output_rate
+        + cache_creation_tokens * input_rate * _CACHE_WRITE_MULTIPLIER
+        + cache_read_tokens * input_rate * _CACHE_READ_MULTIPLIER
+    )

@@ -31,6 +31,8 @@ def _make_anthropic_response(
     content: str = FAKE_CONTENT,
     input_tokens: int = 100,
     output_tokens: int = 30,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
 ) -> MagicMock:
     msg = MagicMock()
     block = MagicMock()
@@ -38,8 +40,8 @@ def _make_anthropic_response(
     msg.content = [block]
     msg.usage.input_tokens = input_tokens
     msg.usage.output_tokens = output_tokens
-    msg.usage.cache_read_input_tokens = 0
-    msg.usage.cache_creation_input_tokens = 0
+    msg.usage.cache_read_input_tokens = cache_read_tokens
+    msg.usage.cache_creation_input_tokens = cache_creation_tokens
     return msg
 
 
@@ -196,8 +198,8 @@ class TestCostCalculation:
             mock_log.return_value = 1
             result = await client.complete(PROMPT, "claude-haiku-4-5-20251001", QUERY_TYPE)
 
-        # 0.80/M input + 4.00/M output = $4.80
-        assert abs(result.cost_usd - 4.80) < 1e-6
+        # 1.00/M input + 5.00/M output = $6.00
+        assert abs(result.cost_usd - 6.00) < 1e-6
 
     @pytest.mark.asyncio
     async def test_sonnet_cost_computed_correctly(self) -> None:
@@ -209,6 +211,58 @@ class TestCostCalculation:
 
         # 3.00/M input + 15.00/M output = $18.00
         assert abs(result.cost_usd - 18.00) < 1e-6
+
+    @pytest.mark.asyncio
+    async def test_opus_4_7_priced_at_its_own_rate_not_sonnet_default(self) -> None:
+        """claude-opus-4-7 must have its own pricing entry, not silently fall
+        back to the Sonnet-level default — that fallback previously undercounted
+        every Opus 4.7 call by ~40%."""
+        resp = _make_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
+        client, _ = _make_client(anthropic_response=resp)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 1
+            result = await client.complete(PROMPT, "claude-opus-4-7", QUERY_TYPE)
+
+        # 5.00/M input + 25.00/M output = $30.00
+        assert abs(result.cost_usd - 30.00) < 1e-6
+
+    @pytest.mark.asyncio
+    async def test_cache_tokens_included_in_cost(self) -> None:
+        """Cache write/read tokens must be billed, not silently dropped —
+        cache_system=True calls previously counted only the uncached
+        input_tokens, undercounting real Anthropic billing."""
+        resp = _make_anthropic_response(
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_tokens=1_000_000,
+            cache_read_tokens=1_000_000,
+        )
+        client, _ = _make_client(anthropic_response=resp)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 1
+            result = await client.complete(PROMPT, "claude-sonnet-4-6", QUERY_TYPE)
+
+        # sonnet input rate $3.00/M: cache write @2x = $6.00, cache read @0.1x = $0.30
+        assert abs(result.cost_usd - 6.30) < 1e-6
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_falls_back_to_default_and_warns(self) -> None:
+        """A model string with no pricing entry must still produce a cost
+        (via the default rate) and must log a warning so a future model swap
+        without a matching pricing entry is caught immediately instead of
+        silently mispricing for days."""
+        resp = _make_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
+        client, _ = _make_client(anthropic_response=resp)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log, patch(
+            "freqpred.llm.audit.log"
+        ) as mock_audit_log:
+            mock_log.return_value = 1
+            result = await client.complete(PROMPT, "claude-opus-9000-hypothetical", QUERY_TYPE)
+
+        # falls back to _DEFAULT_COST_PER_TOKEN = 3.00/M input + 15.00/M output = $18.00
+        assert abs(result.cost_usd - 18.00) < 1e-6
+        mock_audit_log.warning.assert_called_once()
+        assert mock_audit_log.warning.call_args.args[0] == "llm.unknown_model_pricing"
 
 
 # ---------------------------------------------------------------------------

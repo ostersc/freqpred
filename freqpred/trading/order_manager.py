@@ -352,6 +352,24 @@ class OrderManager:
                     )
                     return None
 
+            # Global-capacity short-circuit: check_position() below will reject
+            # this order on the same max_open_positions/total_exposure cap
+            # regardless of what the assessment computes (both new entries and
+            # add-ons create a new PositionRow and count against it) — so skip
+            # the expensive judgment-model call when that rejection is already
+            # certain.
+            capacity_blocked, capacity_reason = await self._risk.check_entry_capacity(
+                session, net_bankroll, mode=self._mode
+            )
+            if capacity_blocked:
+                logger.info(
+                    "order_manager.capacity_full_pre_assessment",
+                    market_id=market.id,
+                    signal_id=signal.id,
+                    reason=capacity_reason,
+                )
+                return None
+
             assessment = None
             if self._llm_client is not None and self._judgment_model:
                 from freqpred.ingestion.fetchers.factbase import phrase_row_to_data  # noqa: PLC0415

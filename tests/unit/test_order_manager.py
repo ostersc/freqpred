@@ -157,6 +157,7 @@ def _make_order_manager(
     if risk is None:
         risk = MagicMock(spec=RiskEngine)
         risk.check_circuit_breakers = AsyncMock(return_value=None)
+        risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
         risk.check_position = AsyncMock(
             return_value=RiskDecision(allowed=True, reason="", capped_size=100.0)
         )
@@ -240,6 +241,7 @@ async def test_submit_returns_none_when_risk_blocks() -> None:
     """risk.check_position returns allowed=False → None, no ledger write."""
     risk = MagicMock(spec=RiskEngine)
     risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     risk.check_position = AsyncMock(
         return_value=RiskDecision(
             allowed=False, reason="edge below floor", capped_size=0.0
@@ -341,6 +343,7 @@ async def test_contracts_floored_to_integer() -> None:
     """$55 / $0.54 = floor(101.85) = 101 contracts."""
     risk = MagicMock(spec=RiskEngine)
     risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     risk.check_position = AsyncMock(
         return_value=RiskDecision(allowed=True, reason="", capped_size=55.0)
     )
@@ -363,6 +366,7 @@ async def test_returns_none_when_contracts_below_one() -> None:
     """Tiny edge → floor < 1 → return None without ledger write."""
     risk = MagicMock(spec=RiskEngine)
     risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     risk.check_position = AsyncMock(
         return_value=RiskDecision(allowed=True, reason="", capped_size=0.40)
     )
@@ -381,6 +385,7 @@ async def test_uses_yes_ask_as_entry_price_for_yes_direction() -> None:
     """YES direction → entry_price = market.yes_ask."""
     risk = MagicMock(spec=RiskEngine)
     risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     risk.check_position = AsyncMock(
         return_value=RiskDecision(allowed=True, reason="", capped_size=100.0)
     )
@@ -403,6 +408,7 @@ async def test_uses_no_price_for_no_direction() -> None:
     """NO direction → entry_price = 1 - market.yes_bid."""
     risk = MagicMock(spec=RiskEngine)
     risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     risk.check_position = AsyncMock(
         return_value=RiskDecision(allowed=True, reason="", capped_size=100.0)
     )
@@ -433,6 +439,7 @@ async def test_risk_uses_net_bankroll_not_initial() -> None:
     net_bankroll = 6_000.0
     risk = MagicMock(spec=RiskEngine)
     risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     risk.check_position = AsyncMock(
         return_value=RiskDecision(allowed=True, reason="", capped_size=100.0)
     )
@@ -464,6 +471,7 @@ async def test_risk_uses_net_bankroll_not_initial() -> None:
 async def test_circuit_breaker_errors_propagate() -> None:
     """TradingCircuitBreakerError from check_circuit_breakers propagates up."""
     risk = MagicMock(spec=RiskEngine)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     risk.check_circuit_breakers = AsyncMock(
         side_effect=TradingCircuitBreakerError("daily loss limit hit")
     )
@@ -603,6 +611,7 @@ async def test_live_mode_risk_check_still_runs(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
     risk = MagicMock(spec=RiskEngine)
     risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     risk.check_position = AsyncMock(
         return_value=RiskDecision(allowed=False, reason="exposure limit", capped_size=0.0)
     )
@@ -1161,6 +1170,42 @@ async def test_assessment_enabled_passes_assessment_to_supported_strategy() -> N
 
     assert result is expected_position
     assert captured_assessments == [assessment]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["YES", "NO"])
+async def test_capacity_full_skips_assessment_before_it_runs(direction: str) -> None:
+    """When check_entry_capacity() already guarantees check_position() will
+    reject this order (max_open_positions/total_exposure full), submit() must
+    skip the assessment LLM call entirely rather than pay for a judgment that
+    can't change the outcome — true for both new entries and add-ons, since
+    both create a new PositionRow and count against the same global cap.
+    """
+    risk = MagicMock(spec=RiskEngine)
+    risk.check_circuit_breakers = AsyncMock(return_value=None)
+    risk.check_entry_capacity = AsyncMock(
+        return_value=(True, "active positions 20 (open=20, pending=0) >= max 20")
+    )
+    risk.check_position = AsyncMock()
+    llm_client = MagicMock()
+    om, _ = _make_order_manager(
+        risk=risk, llm_client=llm_client, judgment_model="claude-opus-4-7"
+    )
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+
+    with patch(
+        "freqpred.metrics.assessment.assess_signal_context",
+        new_callable=AsyncMock,
+    ) as mock_assess, patch(
+        "freqpred.trading.order_manager.ledger.open_position"
+    ) as mock_ledger:
+        result = await om.submit(_make_signal(direction=direction), market, strategy)
+
+    assert result is None
+    mock_assess.assert_not_called()
+    risk.check_position.assert_not_called()
+    mock_ledger.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2481,6 +2526,7 @@ async def test_circuit_breaker_uses_correct_mode_baseline(
     from freqpred.config import RiskConfig
 
     risk = MagicMock(spec=RiskEngine)
+    risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
     # Real CB math; mocked session's scalar_one() -> 0.0 keeps daily loss quiet.
     risk.check_circuit_breakers = RiskEngine(RiskConfig()).check_circuit_breakers
     # Stop submit() right after the CB check — order placement is out of scope.

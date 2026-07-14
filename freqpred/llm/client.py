@@ -202,7 +202,9 @@ class LLMClient:
 
         tokens_in = message.usage.input_tokens
         tokens_out = message.usage.output_tokens
-        cost = calculate_cost(model, tokens_in, tokens_out)
+        cache_read = getattr(message.usage, "cache_read_input_tokens", 0) or 0
+        cache_created = getattr(message.usage, "cache_creation_input_tokens", 0) or 0
+        cost = calculate_cost(model, tokens_in, tokens_out, cache_created, cache_read)
 
         llm_query_id = await self._write_audit(
             prompt_version=effective_prompt_version,
@@ -220,8 +222,6 @@ class LLMClient:
             signal_id=signal_id,
         )
 
-        cache_read = getattr(message.usage, "cache_read_input_tokens", 0) or 0
-        cache_created = getattr(message.usage, "cache_creation_input_tokens", 0) or 0
         total_input = tokens_in + cache_read + cache_created
         log.debug(
             "llm_complete",
