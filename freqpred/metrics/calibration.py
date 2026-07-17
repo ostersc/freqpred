@@ -1,6 +1,7 @@
 """Brier score and calibration curve calculation."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -15,6 +16,17 @@ from freqpred.metrics.models import (
 )
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
 from freqpred.signal.models import SignalRow
+
+_VERSION_NUMBER_RE = re.compile(r"(\d+)")
+
+
+def prompt_version_sort_key(version: str) -> str:
+    """Sort key so prompt versions order numerically, e.g. "signal-v10" after
+    "signal-v9" rather than before it under plain string comparison.
+
+    Zero-pads each run of digits so string comparison matches numeric order.
+    """
+    return _VERSION_NUMBER_RE.sub(lambda m: m.group().zfill(10), version)
 
 # Edge-band boundaries (edge expressed as a percentage), shared by the daily
 # edge_calibration_scores snapshot job and the assessor's read-side lookup —
@@ -725,7 +737,7 @@ async def compute_calibration_heatmap(
         per_cell[key][2] += 1
 
     option_pairs: set[tuple[str, str]] = {(s, o) for s, o, _ in per_cell}
-    prompt_versions = sorted({pv for _, _, pv in per_cell})
+    prompt_versions = sorted({pv for _, _, pv in per_cell}, key=prompt_version_sort_key)
 
     # Fetch option labels
     option_label_map: dict[tuple[str, str], str] = {}

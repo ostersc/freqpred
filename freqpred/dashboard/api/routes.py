@@ -24,6 +24,7 @@ from freqpred.metrics.calibration import (
     compute_calibration_heatmap,
     compute_calibration_time_series,
     compute_source_brier_scores,
+    prompt_version_sort_key,
 )
 from freqpred.metrics.models import SignalAssessmentRow, SourceQualityScoreRow
 from freqpred.rag.models import DocumentMarketLinkRow, DocumentRow
@@ -1255,7 +1256,9 @@ async def get_calibration_time_series(
 
     available_categories = await _distinct(MarketRow.category)
     available_models = await _distinct(SignalRow.model_used)
-    available_prompt_versions = await _distinct(SignalRow.prompt_version)
+    available_prompt_versions = sorted(
+        await _distinct(SignalRow.prompt_version), key=prompt_version_sort_key
+    )
     available_directions = await _distinct(SignalRow.direction)
     available_series_tickers = await _distinct(MarketRow.series_ticker)
 
@@ -1407,7 +1410,9 @@ async def get_calibration(
 
     available_categories = await _distinct(MarketRow.category)
     available_models = await _distinct(SignalRow.model_used)
-    available_prompt_versions = await _distinct(SignalRow.prompt_version)
+    available_prompt_versions = sorted(
+        await _distinct(SignalRow.prompt_version), key=prompt_version_sort_key
+    )
     available_directions = await _distinct(SignalRow.direction)
     available_series_tickers = await _distinct(MarketRow.series_ticker)
 
@@ -1623,8 +1628,9 @@ async def get_pnl_time_series_endpoint(
     available_models = await _distinct_via(
         SignalRow.model_used, SignalRow, SignalRow.id == PositionRow.signal_id
     )
-    available_prompt_versions = await _distinct_via(
-        SignalRow.prompt_version, SignalRow, SignalRow.id == PositionRow.signal_id
+    available_prompt_versions = sorted(
+        await _distinct_via(SignalRow.prompt_version, SignalRow, SignalRow.id == PositionRow.signal_id),
+        key=prompt_version_sort_key,
     )
     available_categories = await _distinct_via(
         MarketRow.category, MarketRow, MarketRow.id == PositionRow.market_id
