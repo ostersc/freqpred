@@ -57,6 +57,13 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
   const pnlPctVal = d.status === 'open' ? d.unrealized_pnl_pct : d.pnl_pct
   const pnlColor = pnlVal === null ? 'var(--fg-2)' : pnlVal > 0 ? 'var(--pos)' : pnlVal < 0 ? 'var(--neg)' : 'var(--fg-2)'
 
+  // current_mid from the API is always the raw YES-side mid — flip it to the
+  // traded side for NO positions so it's comparable to effective_entry_price,
+  // which is already stored in the traded side's own price space.
+  const displayedCurrentMid = d.current_mid !== null
+    ? (d.direction === 'YES' ? d.current_mid : 1 - d.current_mid)
+    : null
+
   return (
     <div style={{ background: 'var(--bg-1)', borderTop: '1px solid var(--line-soft)', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
 
@@ -73,7 +80,7 @@ export default function PositionDetail({ positionId }: { positionId: string }) {
           <div style={miniLabel}>{d.status === 'open' ? 'Current mid' : 'Exit price'}</div>
           <div className="mono" style={{ fontWeight: 600 }}>
             {d.status === 'open'
-              ? d.current_mid !== null ? `${(d.current_mid * 100).toFixed(1)}¢` : '—'
+              ? displayedCurrentMid !== null ? `${(displayedCurrentMid * 100).toFixed(1)}¢` : '—'
               : d.exit_price !== null ? `${(d.exit_price * 100).toFixed(1)}¢` : '—'}
           </div>
         </div>
