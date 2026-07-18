@@ -5,7 +5,7 @@ even failed calls (success=False). This is non-negotiable.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy import func, select
@@ -27,10 +27,14 @@ async def get_daily_spend_usd(session: AsyncSession) -> float:
     Returns:
         Sum of cost_usd for all llm_queries rows timestamped today, or 0.0.
     """
-    today = datetime.now(UTC).date()
+    # Half-open UTC day range instead of date(timestamp) == today: a range
+    # predicate can use ix_llm_queries_timestamp; date() over the column cannot.
+    now = datetime.now(UTC)
+    day_start = datetime(now.year, now.month, now.day, tzinfo=UTC)
     result = await session.execute(
         select(func.coalesce(func.sum(LLMQueryRow.cost_usd), 0.0)).where(
-            func.date(LLMQueryRow.timestamp) == today
+            LLMQueryRow.timestamp >= day_start,
+            LLMQueryRow.timestamp < day_start + timedelta(days=1),
         )
     )
     return float(result.scalar_one())

@@ -1695,11 +1695,16 @@ async def get_llm_cost(
     )
     weekly_usd = float(weekly_result.scalar_one())
 
-    # Breakdown by query_type for today
-    today = datetime.now(UTC).date()
+    # Breakdown by query_type for today (UTC). Half-open range instead of
+    # date(timestamp) == today so ix_llm_queries_timestamp is usable.
+    now = datetime.now(UTC)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     by_type_result = await session.execute(
         select(LLMQueryRow.query_type, func.sum(LLMQueryRow.cost_usd))
-        .where(func.date(LLMQueryRow.timestamp) == today)
+        .where(
+            LLMQueryRow.timestamp >= day_start,
+            LLMQueryRow.timestamp < day_start + timedelta(days=1),
+        )
         .group_by(LLMQueryRow.query_type)
     )
     by_query_type = {row[0]: round(float(row[1]), 6) for row in by_type_result.all()}
