@@ -385,6 +385,8 @@ Reference runs: 2026-07-25, assessment-v8 + opus-5 on the frozen 76-signal set �
 
 Seven sections: the window ledger; **exit effectiveness** (what every early exit earned versus holding to settlement — the only unbiased counterfactual in the report); an MAE-based **stoploss threshold sweep**; **marginal entry-gate analysis** (for each `StrategyConfig` gate, the realised profit-vs-price of the signals it blocks versus the ones it admits, with every other gate held fixed); **signal accuracy** by week, prompt version, and correlate slice; **assessor capital tilt**; and **per-source realised edge**.
 
+Where candle coverage exists it also runs a **candle-based** stoploss sweep over real price paths — free of both biases in the MAE version, since the path continues past the actual exit and every covered position is included. `freqpred candles backfill` populates it; see COMMANDS.md.
+
 Three things it deliberately refuses to fake: `min_volume_24h` is not evaluable point-in-time (`markets.volume_24h` is the *current* value), a signal whose order book cannot be reconstructed is admitted rather than blocked by the spread gate, and the stoploss sweep reports both a censored and an uncensored arm because neither is unbiased on its own — MAE stops updating at the actual exit, while the uncensored population is conditioned on not having stopped.
 
 `.claude/skills/weekly-review/SKILL.md` (invoked as `/weekly-review`) is the weekly procedure built on it: read the review, discard what the traps explain, and produce at most three changes with an effect size, a confidence interval, a risk, and a revert trigger. Reports land in `docs/weekly-review/reports/` so each week scores the previous week's predictions.

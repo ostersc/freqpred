@@ -1940,6 +1940,186 @@ async def _metrics_weekly_review(
 
 
 @main.group()
+def candles() -> None:
+    """Historical market candlestick data."""
+
+
+@candles.command(name="backfill")
+@click.option("--market-id", default=None, help="Single market ticker to fetch.")
+@click.option("--series", default=None, help="Series/family ticker, e.g. KXTRUMPSAY.")
+@click.option("--start", default=None, help="Only markets closing on/after this ISO date.")
+@click.option("--end", default=None, help="Only markets closing on/before this ISO date.")
+@click.option(
+    "--interval",
+    type=click.Choice(["1", "60", "1440"]),
+    default="60",
+    show_default=True,
+    help="Candle resolution in minutes. Kalshi accepts only these three.",
+)
+@click.option(
+    "--traded-only",
+    is_flag=True,
+    default=False,
+    help="Only markets we hold or held a position in. Default covers every market in scope, "
+    "including signalled-but-never-entered ones, which the entry-gate counterfactual needs.",
+)
+@click.option(
+    "--max-requests",
+    type=int,
+    default=500,
+    show_default=True,
+    help="Hard cap on API requests for this run. Hitting it is a clean partial result — "
+    "cursors record coverage, so the next run resumes.",
+)
+@click.option("--force", is_flag=True, default=False, help="Re-fetch even where coverage exists.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="List what would be fetched and the request estimate. Makes no API calls.",
+)
+@click.pass_context
+def candles_backfill(
+    ctx: click.Context,
+    market_id: str | None,
+    series: str | None,
+    start: str | None,
+    end: str | None,
+    interval: str,
+    traded_only: bool,
+    max_requests: int,
+    force: bool,
+    dry_run: bool,
+) -> None:
+    """Fetch historical candlesticks into the market_candles table.
+
+    Kalshi's candle history is a rolling window (~67 days measured 2026-07-25);
+    markets that settled before the cutoff return 404 permanently. Anything not
+    captured before then is gone, so run this regularly rather than on demand.
+    """
+    if not market_id and not series:
+        raise click.UsageError("Specify --market-id or --series.")
+    config = ctx.obj["config"]
+    asyncio.run(
+        _candles_backfill(
+            config,
+            market_id=market_id,
+            series=series,
+            start=start,
+            end=end,
+            period_interval=int(interval),
+            traded_only=traded_only,
+            max_requests=max_requests,
+            force=force,
+            dry_run=dry_run,
+        )
+    )
+
+
+async def _candles_backfill(
+    config: object,
+    *,
+    market_id: str | None,
+    series: str | None,
+    start: str | None,
+    end: str | None,
+    period_interval: int,
+    traded_only: bool,
+    max_requests: int,
+    force: bool,
+    dry_run: bool,
+) -> None:
+    from datetime import datetime as _datetime  # noqa: PLC0415
+
+    import freqpred.ingestion.models  # noqa: F401, PLC0415
+    import freqpred.rag.models  # noqa: F401, PLC0415
+    import freqpred.signal.models  # noqa: F401, PLC0415
+    from freqpred.db import make_engine, make_session_factory  # noqa: PLC0415
+    from freqpred.markets.candles import (  # noqa: PLC0415
+        MAX_CANDLES_PER_REQUEST,
+        backfill_candles,
+        chunk_ranges,
+        select_target_markets,
+    )
+    from freqpred.markets.kalshi import KalshiClient  # noqa: PLC0415
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    def _parse(value: str | None):
+        return _datetime.fromisoformat(value).replace(tzinfo=UTC) if value else None
+
+    start_dt, end_dt = _parse(start), _parse(end)
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+    try:
+        async with session_factory() as session:
+            if dry_run:
+                targets = await select_target_markets(
+                    session,
+                    market_id=market_id,
+                    series=series,
+                    start=start_dt,
+                    end=end_dt,
+                    traded_only=traded_only,
+                )
+                requests = sum(
+                    len(
+                        chunk_ranges(
+                            int((t["starts"] or t["close_time"]).timestamp()),
+                            int(t["close_time"].timestamp()),
+                            period_interval,
+                        )
+                    )
+                    for t in targets
+                )
+                click.echo(f"markets in scope : {len(targets)}")
+                click.echo(f"interval         : {period_interval}m")
+                click.echo(
+                    f"requests (max)   : {requests}"
+                    f"  [budget {max_requests}, {MAX_CANDLES_PER_REQUEST} candles/request]"
+                )
+                if requests > max_requests:
+                    click.echo(
+                        f"NOTE: needs {requests - max_requests} more than the budget; "
+                        "the run will stop cleanly and resume next time.",
+                    )
+                for t in targets[:10]:
+                    click.echo(f"  {t['id']:<40} closes {t['close_time']:%Y-%m-%d}")
+                if len(targets) > 10:
+                    click.echo(f"  ... and {len(targets) - 10} more")
+                return
+
+            client = KalshiClient(
+                api_key=config.kalshi.api_key,
+                base_url=config.kalshi.base_url,
+                private_key_path=config.kalshi.private_key_path,
+            )
+            try:
+                result = await backfill_candles(
+                    session,
+                    client,
+                    market_id=market_id,
+                    series=series,
+                    start=start_dt,
+                    end=end_dt,
+                    period_interval=period_interval,
+                    traded_only=traded_only,
+                    max_requests=max_requests,
+                    force=force,
+                )
+            finally:
+                await client.close()
+    finally:
+        await engine.dispose()
+
+    click.echo(result.summary())
+    for err in result.errors[:10]:
+        click.echo(f"  error: {err}", err=True)
+
+
+@main.group()
 def report() -> None:
     """Reporting commands."""
 

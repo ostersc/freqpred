@@ -172,6 +172,34 @@ Seven sections: window ledger, exit effectiveness (early exits vs holding to set
 
 ---
 
+### `candles backfill` — fetch historical market candlesticks
+
+```bash
+uv run freqpred candles backfill --series KXTRUMPSAY --dry-run
+uv run freqpred candles backfill --series KXTRUMPSAY --start 2026-05-20 --interval 60
+uv run freqpred candles backfill --market-id KXTRUMPSAY-26JUL27-FRAU --interval 1
+uv run freqpred candles backfill --series KXTRUMPSAY --traded-only --max-requests 100
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--market-id` | — | Single market ticker. One of this or `--series` is required |
+| `--series` | — | Series/family ticker, e.g. `KXTRUMPSAY` |
+| `--start` / `--end` | — | Only markets closing within this ISO date range |
+| `--interval` | `60` | Candle resolution in minutes; Kalshi accepts only `1`, `60`, `1440` |
+| `--traded-only` | false | Only markets we hold or held. Default covers signalled-but-never-entered markets too, which the entry-gate counterfactual needs |
+| `--max-requests` | `500` | Hard cap for the run. Hitting it is a clean partial result — cursors record coverage so the next run resumes |
+| `--force` | false | Re-fetch even where coverage already exists (idempotent upsert) |
+| `--dry-run` | false | List markets in scope and the request estimate; makes no API calls |
+
+Stores OHLC for `price`, `yes_bid` and `yes_ask` plus volume and open interest in `market_candles`, keyed on `(market_id, period_interval, end_period_ts)` so re-fetching is an idempotent upsert. `candle_fetch_cursors` records what has been covered, so repeat runs cost zero requests.
+
+**Kalshi's candle history is a rolling window — measured at ~67 days on 2026-07-25.** Markets that settled before the cutoff return 404 permanently and are recorded as expired so no later run retries them. Anything not captured before it ages out is gone, which is why the daily `candle_refresh` scheduled task exists and prioritises the oldest markets still in range.
+
+Rate limiting comes from three places: `KalshiClient`'s `read_rps` throttle with 429/`Retry-After` backoff, the per-run `--max-requests` budget, and per-request accounting into `api_daily_counters` under the `kalshi_candles` service.
+
+---
+
 ### `report digest` — generate a daily summary
 
 ```bash

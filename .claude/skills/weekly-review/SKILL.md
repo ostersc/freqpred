@@ -59,6 +59,16 @@ uv run freqpred metrics weekly-review --weeks 1 --as-of "${WEEK_END}T00:00:00+00
 means positions were still live at the cutoff, so the window splits a resolution
 batch and the P&L is not the week's true result.
 
+**Top up candles first.** Section 3's best arm needs stored price paths, and
+Kalshi retains only ~67 days — whatever has aged out is gone for good, so this
+runs before the review, not after:
+
+```bash
+uv run freqpred candles backfill --series KXTRUMPSAY --interval 60
+```
+
+Already-covered markets cost zero requests, so re-running is free.
+
 Useful variants: `--history-days 0` (all history, for a thin cohort),
 `--all-versions` (pool signal prompt cohorts — read the per-version table first,
 they are not exchangeable), `--as-of` (analyse a past week).
@@ -112,7 +122,7 @@ which cell happened to clear zero.
 |---|---|---|
 | 1. Ledger | What happened | Nothing — these are counts, not inferences |
 | 2. Exit effectiveness | Did exiting beat holding to settlement? | The only unbiased counterfactual in the report. `n` is small; check `helped`/`hurt`, not just the total, because one large position can carry the sum |
-| 3. Stoploss sweep | Would another threshold have paid? | **Both arms are biased, in opposite directions.** "All positions" has MAE censored at the actual exit, so wide thresholds under-count stops that would still have fired. "Uncensored only" has full-life MAE but its population is conditioned on *not* having stopped, which flatters no-stoploss by construction. Truth is between them; section 2 is the clean read on the current threshold |
+| 3. Stoploss sweep | Would another threshold have paid? | **Read the CANDLE-BASED arm and ignore the other two whenever coverage is good** — it uses real price paths, so neither bias applies. The two MAE arms are biased in *opposite* directions: "all positions" has MAE censored at the actual exit, so wide thresholds under-count stops that would still have fired; "uncensored only" has full-life MAE but its population is conditioned on *not* having stopped, flattering no-stoploss by construction. When they disagree in sign, the candle arm settles it. Check the `no bid` count — those periods are excluded as untradeable, and a high share means thin liquidity the sweep cannot model |
 | 4. Entry gates | Are we refusing trades that pay? | Marginal — each gate is scored with the others held fixed, so a signal two gates reject counts against neither. Gates showing `blocked n=0` are inert given the rest of the config, not harmless in isolation |
 | 5. Signal accuracy | Getting better or worse, and where? | The most recent weeks are incomplete (only settled markets appear), so the last row over-represents short-dated markets. Read the trend from complete weeks. Prompt-version step changes are usually the real story |
 | 6. Assessor | Is sizing earning its cost? | Capital tilt near zero means a flat tax, not a discriminator. A rising neutral-fallback rate is an *outage*, not a quality change — check that first |

@@ -168,6 +168,27 @@ class StoplossPoint:
 
 
 @dataclass(frozen=True)
+class CandlePath:
+    """A position's realised price path in its own traded-side space.
+
+    `lows` is the worst exit price available in each period after entry — the
+    yes_bid for a YES position, `1 - yes_ask` for a NO one, since that is what
+    you could actually sell into. Periods with no bid are excluded rather than
+    recorded as 0.0: an empty book is not a price, and treating it as one would
+    trigger every stoploss counterfactual on illiquidity.
+    """
+
+    position_id: str
+    lows: tuple[float, ...]
+    n_periods: int
+    n_no_bid: int
+
+    def first_touch(self, entry_price: float, threshold: float) -> bool:
+        """Whether the exit price ever reached entry + threshold (threshold < 0)."""
+        return any(low <= entry_price + threshold for low in self.lows)
+
+
+@dataclass(frozen=True)
 class GroupStat:
     """Realised performance of a set of signals, deduped to one per market."""
 
@@ -225,6 +246,10 @@ class WeeklyReview:
     stoploss_actual_pnl: float
     stoploss_sweep_uncensored: list[StoplossPoint]
     stoploss_uncensored_pnl: float
+    stoploss_sweep_candles: list[StoplossPoint]
+    stoploss_candles_pnl: float
+    stoploss_candles_n: int
+    candle_coverage: dict[str, int]
     gate_stats: list[GateStat]
     gate_sweeps: list[SweepPoint]
     accuracy_by_week: list[GroupStat]
@@ -515,6 +540,133 @@ def stoploss_sweep(
 # --------------------------------------------------------------------------
 # 4. Entry gates
 # --------------------------------------------------------------------------
+
+
+def candle_stoploss_sweep(
+    positions: Sequence[ClosedPosition],
+    paths: dict[str, CandlePath],
+    thresholds: Sequence[float] = DEFAULT_STOPLOSS_GRID,
+    *,
+    exit_fee_per_contract: float = 0.0,
+) -> tuple[list[StoplossPoint], float, int]:
+    """Stoploss sweep over real price paths instead of MAE.
+
+    This is the sweep MAE cannot do. It is free of both biases in
+    `stoploss_sweep`: the path continues past the actual exit, so nothing is
+    censored (`n_censored` is always 0 here), and every position with a path is
+    included, so the population is not conditioned on having survived the live
+    rule. Returns `(points, actual_pnl, n_positions)` over the covered subset.
+
+    Still approximate in one way: the fill is assumed to occur at the threshold
+    once the bid touches it. When price gaps straight through, the real fill is
+    worse, so this remains mildly optimistic about stopping — just far less so
+    than the MAE version.
+    """
+    usable = [
+        p
+        for p in positions
+        if p.position_id in paths and settle_price(p.direction, p.result) is not None
+    ]
+    actual_pnl = sum(p.pnl for p in usable)
+
+    points: list[StoplossPoint] = []
+    for threshold in thresholds:
+        total = 0.0
+        n_stopped = 0
+        for pos in usable:
+            if paths[pos.position_id].first_touch(pos.entry_price, threshold):
+                n_stopped += 1
+                total += (
+                    threshold * pos.contracts
+                    - pos.entry_fee_usd
+                    - exit_fee_per_contract * pos.contracts
+                )
+            else:
+                hold = hold_to_resolution_pnl(pos)
+                total += hold if hold is not None else 0.0
+        points.append(
+            StoplossPoint(
+                threshold=threshold,
+                n_stopped=n_stopped,
+                n_censored=0,
+                total_pnl=total,
+                delta_vs_actual=total - actual_pnl,
+            )
+        )
+    return points, actual_pnl, len(usable)
+
+
+_CANDLE_PATH_SQL = text(
+    """
+    SELECT p.id::text AS position_id,
+           p.direction,
+           c.yes_bid_low,
+           c.yes_ask_high
+    FROM positions p
+    JOIN markets m ON m.id = p.market_id
+    JOIN market_candles c
+      ON c.market_id = p.market_id
+     AND c.period_interval = :interval
+     AND c.end_period_ts > p.entry_time
+     AND c.end_period_ts <= COALESCE(m.close_time, p.exit_time)
+    WHERE p.status = 'closed'
+      AND p.exit_time >= :start
+      AND p.exit_time < :end
+      AND (CAST(:mode AS text) IS NULL OR p.mode = CAST(:mode AS text))
+    ORDER BY p.id, c.end_period_ts
+    """
+)
+
+
+async def load_candle_paths(
+    session: AsyncSession,
+    *,
+    start: datetime,
+    end: datetime,
+    mode: str | None = None,
+    period_interval: int = 60,
+) -> dict[str, CandlePath]:
+    """Build each position's traded-side exit-price path from stored candles.
+
+    The path runs from entry to market close — deliberately past the actual exit,
+    because the whole point is to see what a position would have done had it not
+    been exited. Positions whose markets have no candles simply do not appear.
+    """
+    rows = (
+        await session.execute(
+            _CANDLE_PATH_SQL,
+            {"interval": period_interval, "start": start, "end": end, "mode": mode},
+        )
+    ).mappings().all()
+
+    lows: dict[str, list[float]] = defaultdict(list)
+    counts: dict[str, int] = defaultdict(int)
+    no_bid: dict[str, int] = defaultdict(int)
+    for row in rows:
+        pid = row["position_id"]
+        counts[pid] += 1
+        if row["direction"] == "YES":
+            # Exiting a YES position means selling into the yes_bid.
+            level = row["yes_bid_low"]
+        else:
+            # Exiting a NO position means selling into the no_bid = 1 - yes_ask.
+            level = None if row["yes_ask_high"] is None else 1.0 - row["yes_ask_high"]
+        # A 0.0 bid is an empty book, not a price. Counting it as a tradeable
+        # level would stop out every position on illiquidity alone.
+        if level is None or level <= 0.0:
+            no_bid[pid] += 1
+            continue
+        lows[pid].append(float(level))
+
+    return {
+        pid: CandlePath(
+            position_id=pid,
+            lows=tuple(lows.get(pid, ())),
+            n_periods=n,
+            n_no_bid=no_bid.get(pid, 0),
+        )
+        for pid, n in counts.items()
+    }
 
 
 def _gate_predicates(config: object) -> dict[str, tuple[str, Callable[[ResolvedSignal], bool]]]:
@@ -1260,6 +1412,31 @@ async def build_weekly_review(
     sweep_clean, sweep_clean_baseline = stoploss_sweep(
         history_positions, exit_fee_per_contract=exit_fee, uncensored_only=True
     )
+    paths = await load_candle_paths(
+        session,
+        start=history_start or datetime(1970, 1, 1, tzinfo=UTC),
+        end=window.end,
+        mode=mode,
+    )
+    sweep_candles, sweep_candles_pnl, sweep_candles_n = candle_stoploss_sweep(
+        history_positions, paths, exit_fee_per_contract=exit_fee
+    )
+    resolved_positions = [
+        p for p in history_positions if settle_price(p.direction, p.result) is not None
+    ]
+    coverage = {
+        "positions_resolved": len(resolved_positions),
+        "positions_with_path": sweep_candles_n,
+        "periods_no_bid": sum(p.n_no_bid for p in paths.values()),
+        "periods_total": sum(p.n_periods for p in paths.values()),
+    }
+    if resolved_positions and sweep_candles_n < len(resolved_positions) * 0.5:
+        warnings.append(
+            f"Candle coverage is only {sweep_candles_n}/{len(resolved_positions)} "
+            "resolved positions — the candle sweep describes a minority of the "
+            "book. Run `freqpred candles backfill` (history is a rolling ~67-day "
+            "window; what has aged out cannot be recovered)."
+        )
 
     assessed_rows = (
         await session.execute(_ASSESSED_SQL, {"since": history_start})
@@ -1288,6 +1465,10 @@ async def build_weekly_review(
         stoploss_actual_pnl=sweep_baseline,
         stoploss_sweep_uncensored=sweep_clean,
         stoploss_uncensored_pnl=sweep_clean_baseline,
+        stoploss_sweep_candles=sweep_candles,
+        stoploss_candles_pnl=sweep_candles_pnl,
+        stoploss_candles_n=sweep_candles_n,
+        candle_coverage=coverage,
         gate_stats=entry_gate_analysis(signals, config),
         gate_sweeps=gate_threshold_sweep(signals, config),
         accuracy_by_week=accuracy_by(
@@ -1424,6 +1605,31 @@ def render_text(review: WeeklyReview) -> str:  # noqa: C901 — a report is a lo
             f"  {point.threshold:>10.2f} {point.n_stopped:>8} {point.n_censored:>6} "
             f"${point.total_pnl:>+11.2f} ${point.delta_vs_actual:>+11.2f}"
         )
+
+    cov = review.candle_coverage
+    if review.stoploss_candles_n:
+        add("")
+        add("  CANDLE-BASED — real price paths, neither bias above applies.")
+        add("  The path continues past the actual exit (nothing censored) and every")
+        add("  covered position is included (no survivor conditioning). Prefer this row")
+        add("  set whenever coverage is good; the two above are the fallback.")
+        add(
+            f"  coverage: {cov.get('positions_with_path', 0)}/"
+            f"{cov.get('positions_resolved', 0)} resolved positions   "
+            f"periods with no bid (excluded): {cov.get('periods_no_bid', 0)}/"
+            f"{cov.get('periods_total', 0)}"
+        )
+        add(f"  actual P&L over the covered set: ${review.stoploss_candles_pnl:+.2f}")
+        add(f"  {'threshold':>10} {'stopped':>8} {'total P&L':>12} {'vs actual':>12}")
+        for point in review.stoploss_sweep_candles:
+            add(
+                f"  {point.threshold:>10.2f} {point.n_stopped:>8} "
+                f"${point.total_pnl:>+11.2f} ${point.delta_vs_actual:>+11.2f}"
+            )
+    else:
+        add("")
+        add("  CANDLE-BASED: no coverage. Run `freqpred candles backfill --series <X>`;")
+        add("  Kalshi retains only ~67 days, so uncaptured history is gone for good.")
     add("")
 
     # --- 4. entry gates --------------------------------------------------
@@ -1555,6 +1761,12 @@ def to_dict(review: WeeklyReview) -> dict:
         "stoploss_sweep": [_sweep_point(p) for p in review.stoploss_sweep],
         "stoploss_sweep_uncensored": [
             _sweep_point(p) for p in review.stoploss_sweep_uncensored
+        ],
+        "stoploss_candles_pnl": round(review.stoploss_candles_pnl, 2),
+        "stoploss_candles_n": review.stoploss_candles_n,
+        "candle_coverage": review.candle_coverage,
+        "stoploss_sweep_candles": [
+            _sweep_point(p) for p in review.stoploss_sweep_candles
         ],
         "gate_stats": [
             {

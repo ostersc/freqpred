@@ -21,6 +21,7 @@ SERVICE_SIGNAL_LOOP = "signal_loop"
 SERVICE_SOURCE_QUALITY_SCHEDULER = "source_quality_scheduler"
 SERVICE_EDGE_CALIBRATION = "edge_calibration_scheduler"
 SERVICE_SERIES_HISTORY_SCHEDULER = "series_history_scheduler"
+SERVICE_CANDLE_REFRESH = "candle_refresh"
 SERVICE_FACTBASE_SCHEDULER = "factbase_scheduler"
 SERVICE_POSITION_WATCHER_LAST_MESSAGE = "position_watcher_last_message"
 SERVICE_POSITION_WATCHER_RECONCILE = "position_watcher_reconcile"
@@ -102,6 +103,14 @@ def build_freshness_specs(
         SERVICE_SERIES_HISTORY_SCHEDULER: FreshnessSpec(
             service_name=SERVICE_SERIES_HISTORY_SCHEDULER,
             label="Series option history refresh",
+            stale_after_seconds=36 * 3600,
+        ),
+        SERVICE_CANDLE_REFRESH: FreshnessSpec(
+            service_name=SERVICE_CANDLE_REFRESH,
+            label="Market candle refresh",
+            # Kalshi's candle history is a rolling ~67-day window, so a stalled
+            # refresh silently loses the oldest markets for good. Flag after 36h
+            # (one missed daily cycle) rather than tolerating a longer gap.
             stale_after_seconds=36 * 3600,
         ),
         SERVICE_FACTBASE_SCHEDULER: FreshnessSpec(

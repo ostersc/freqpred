@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-07-25 — Sizing assessor shipped as `assessment-v8` on `claude-opus-5`, plus migration 0059 adding a `prompt_version` cohort dimension to `edge_calibration_scores` (NULL = the all-versions rollup, so pre-0059 rows need no backfill; cohort filtering widened live direction separation from 13pp to 21.8pp). the prompt now acts on `profit_edge_vs_price` (hit_rate minus the price actually paid) rather than the model-overconfidence gap, which measured self-knowledge instead of profitability and was sizing down profitable bands; adds `this_direction_all_bands`, severs the warning⇒score≤0.5 ceiling, and raises `max_tokens` to 1024. Screened on a new frozen, direction-balanced 76-signal eval set — capital tilt +0.0751x vs +0.0170x, 95% CI (+0.0161, +0.0988), the first significant arm difference measured; see §"Signal assessment" for limitations and the rollout guard. Prior work: `order_manager.submit()` skips `assess_signal_context()` when global position/exposure caps are already full, closing a gap where reinforcing signals on already-open-position markets (which always bypass the once-per-cycle pre-signal gate) burned an Opus assessment call that `check_position()` was guaranteed to reject anyway (see §5 "Pre-signal risk gate"). Also corrected stale LLM pricing in `llm/audit.py` — missing `claude-opus-4-7` entry (was silently falling back to Sonnet-level pricing), wrong `claude-opus-4-6`/Haiku 4.5 rates, and cache tokens that were never billed. Prior work: T90 mode-scoped circuit-breaker baselines, T95 reevaluation-history trajectory sampling, T94 edge-band calibration (assessment-v6) — see git log for full history.
+**Last updated:** 2026-07-26 — Added historical price paths and the weekly profitability review that consumes them. Migration 0060 adds `market_candles` + `candle_fetch_cursors`, populated by `freqpred candles backfill` and a daily `candle_refresh` task; Kalshi's candle history is a rolling ~67-day window, so uncaptured history is lost permanently. `freqpred metrics weekly-review` scores exits against holding to settlement, sweeps stoploss thresholds over real price paths, and measures each entry gate's marginal effect. Earlier: sizing assessor at `assessment-v8` on `claude-opus-5` with `prompt_version` cohorts in `edge_calibration_scores` (migration 0059) — see §"Signal assessment" for its limitations and rollout guard, and git log for full history.
 
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
@@ -940,6 +940,37 @@ class SeriesOptionHistory:
 - `MIN_SAMPLE = 3`: option rows with `yes_count + no_count < 3` are shown with a "small sample, treat as weak signal" note; the series aggregate is always shown when available.
 - **Type A series** (e.g. `KXTRUMPSAY`, `KXTRUMPACT`): option code repeats across weekly events, so per-option rates are meaningful.
 - **Type B series** (e.g. `KXTRUMPPHOTO`): option code encodes the event date — each code is unique, so per-option rows have `n=1`. The series aggregate still applies; the option block is omitted from the prompt when below `MIN_SAMPLE`.
+
+---
+
+### MarketCandle + CandleFetchCursor
+
+Stores historical OHLC price paths from Kalshi's candlestick endpoint. This is the only source in the system of a **price path**: everything else persists point observations (`Signal.market_mid_at_signal` / `market_ask_at_signal`, roughly at signal cadence — measured at a median of 22 observations across a median 72h live hold) or censored extremes (`Position.mae`, which stops updating at the exit).
+
+```python
+@dataclass
+class MarketCandle:
+    market_id: str             # PK part 1 — no FK; the tool works for untracked tickers
+    period_interval: int       # PK part 2 — minutes; Kalshi accepts only 1, 60, 1440
+    end_period_ts: datetime    # PK part 3 — period end
+    series_ticker: str
+    price_open/high/low/close/mean: float | None   # None when the period had no trades
+    yes_bid_open/high/low/close: float | None
+    yes_ask_open/high/low/close: float | None
+    volume: float
+    open_interest: float
+    fetched_at: datetime
+    created_at: datetime
+```
+
+**Key rules:**
+- Primary key is the natural composite `(market_id, period_interval, end_period_ts)`, not a UUID, so re-fetching an overlapping window is an idempotent upsert. `SeriesOptionHistory` sets the same precedent.
+- **Kalshi's candle history is a rolling window — measured at ~67 days on 2026-07-25** (markets closing 2026-05-20 returned data; 2026-05-18 returned 404). Expired candles never come back, so this is a store-to-DB tool rather than an on-demand fetch.
+- **A `yes_bid` of 0.0 means "no bid", not a price of zero.** Any consumer must exclude those periods; treating an empty book as a tradeable level makes every stoploss counterfactual trigger on illiquidity. Measured at 818 of 8,684 periods (9.4%) across live positions.
+- `CandleFetchCursor` records `(covered_from, covered_to, candle_count, expired)` per `(market_id, period_interval)`. Coverage only ever widens. Without it there is no way to distinguish "fetched, market was quiet" from "never fetched", and the scheduler would re-request empty ranges forever. `expired=True` is set on a 404 and is permanent — that market is never requested again.
+- Populated by `freqpred/markets/candles.py`, via `freqpred candles backfill` (ad-hoc, by market or family) and `refresh_recent_candles()` (daily task, own `candle_refresh` telemetry heartbeat). The daily task orders **oldest-first** — the opposite of the CLI — because under a request budget the right thing to prioritise is what is about to expire.
+- Rate limiting is threefold: `KalshiClient`'s `read_rps` throttle with 429/`Retry-After` backoff, a per-run `max_requests` budget whose exhaustion is a clean resumable partial, and per-request accounting into `api_daily_counters` under the `kalshi_candles` service.
+- Consumed by the weekly review's candle-based stoploss sweep, which is free of both biases in the MAE-based version: the path continues past the actual exit (no censoring) and every covered position is included (no survivor conditioning).
 
 ---
 

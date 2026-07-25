@@ -627,6 +627,15 @@ def _review():
         stoploss_actual_pnl=baseline,
         stoploss_sweep_uncensored=sweep,
         stoploss_uncensored_pnl=baseline,
+        stoploss_sweep_candles=sweep,
+        stoploss_candles_pnl=baseline,
+        stoploss_candles_n=1,
+        candle_coverage={
+            "positions_resolved": 1,
+            "positions_with_path": 1,
+            "periods_no_bid": 0,
+            "periods_total": 4,
+        },
         gate_stats=entry_gate_analysis(signals, _Config()),
         gate_sweeps=gate_threshold_sweep(signals, _Config()),
         accuracy_by_week=accuracy_by(signals, lambda s: "2026-W30"),
@@ -662,3 +671,12 @@ def test_to_dict_is_json_serialisable() -> None:
     payload = to_dict(_review())
     assert json.loads(json.dumps(payload))["scope"] == {"mode": "live"}
     assert payload["stoploss_sweep"][0]["n_censored"] == 0
+    assert payload["candle_coverage"]["positions_with_path"] == 1
+
+
+def test_render_text_prompts_for_a_backfill_when_candle_coverage_is_missing() -> None:
+    """A silent empty section would read as "no stoploss would have helped"."""
+    review = _review()
+    review.stoploss_candles_n = 0
+    review.stoploss_sweep_candles = []
+    assert "candles backfill" in render_text(review)

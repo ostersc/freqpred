@@ -455,6 +455,12 @@
       "version": "neutral-fallback"
     }
   ],
+  "candle_coverage": {
+    "periods_no_bid": 818,
+    "periods_total": 8684,
+    "positions_resolved": 74,
+    "positions_with_path": 74
+  },
   "exit_stats": [
     {
       "actual_pnl": -1.0,
@@ -1042,6 +1048,8 @@
     }
   ],
   "stoploss_actual_pnl": -3.96,
+  "stoploss_candles_n": 74,
+  "stoploss_candles_pnl": -4.23,
   "stoploss_sweep": [
     {
       "delta_vs_actual": -6.28,
@@ -1112,6 +1120,78 @@
       "n_stopped": 0,
       "threshold": -1.0,
       "total_pnl": -19.98
+    }
+  ],
+  "stoploss_sweep_candles": [
+    {
+      "delta_vs_actual": -7.46,
+      "n_censored": 0,
+      "n_stopped": 69,
+      "threshold": -0.05,
+      "total_pnl": -11.69
+    },
+    {
+      "delta_vs_actual": -10.84,
+      "n_censored": 0,
+      "n_stopped": 68,
+      "threshold": -0.08,
+      "total_pnl": -15.07
+    },
+    {
+      "delta_vs_actual": -12.92,
+      "n_censored": 0,
+      "n_stopped": 67,
+      "threshold": -0.1,
+      "total_pnl": -17.15
+    },
+    {
+      "delta_vs_actual": -13.36,
+      "n_censored": 0,
+      "n_stopped": 64,
+      "threshold": -0.12,
+      "total_pnl": -17.59
+    },
+    {
+      "delta_vs_actual": -11.5,
+      "n_censored": 0,
+      "n_stopped": 58,
+      "threshold": -0.15,
+      "total_pnl": -15.73
+    },
+    {
+      "delta_vs_actual": -15.88,
+      "n_censored": 0,
+      "n_stopped": 55,
+      "threshold": -0.2,
+      "total_pnl": -20.11
+    },
+    {
+      "delta_vs_actual": -15.52,
+      "n_censored": 0,
+      "n_stopped": 49,
+      "threshold": -0.25,
+      "total_pnl": -19.75
+    },
+    {
+      "delta_vs_actual": -18.23,
+      "n_censored": 0,
+      "n_stopped": 43,
+      "threshold": -0.3,
+      "total_pnl": -22.46
+    },
+    {
+      "delta_vs_actual": -10.42,
+      "n_censored": 0,
+      "n_stopped": 27,
+      "threshold": -0.4,
+      "total_pnl": -14.65
+    },
+    {
+      "delta_vs_actual": -16.57,
+      "n_censored": 0,
+      "n_stopped": 0,
+      "threshold": -1.0,
+      "total_pnl": -20.8
     }
   ],
   "stoploss_sweep_uncensored": [

@@ -41,6 +41,9 @@ _MAX_RETRIES = 3
 _PAGE_SIZE = 1000
 _EVENTS_PAGE_SIZE = 200  # Kalshi /events max page size
 
+#: Candlestick period intervals Kalshi accepts, in minutes.
+VALID_PERIOD_INTERVALS = frozenset({1, 60, 1440})
+
 
 class KalshiClient(IMarketClient):
     """Concrete IMarketClient implementation for the Kalshi exchange.
@@ -429,6 +432,43 @@ class KalshiClient(IMarketClient):
                 break
 
         return results
+
+    async def get_market_candlesticks(
+        self,
+        series_ticker: str,
+        market_id: str,
+        *,
+        start_ts: int,
+        end_ts: int,
+        period_interval: int,
+    ) -> list[dict[str, Any]]:
+        """Return raw candlesticks for one market and time range.
+
+        ``period_interval`` is in minutes and Kalshi accepts only 1, 60 and 1440.
+        Timestamps are unix seconds; Kalshi includes candles *ending* within
+        ``[start_ts, end_ts]``.
+
+        Raises ``KalshiAPIError`` on 404, which for this endpoint means the market
+        settled before the retention cutoff (~67 days, measured 2026-07-25) rather
+        than "no such market". Callers must distinguish that from an empty result:
+        404 is permanent and must not be retried, while an empty list just means a
+        quiet market. Rate limiting and 429 backoff come from ``_get``.
+        """
+        if period_interval not in VALID_PERIOD_INTERVALS:
+            raise ValueError(
+                f"period_interval must be one of {sorted(VALID_PERIOD_INTERVALS)}, "
+                f"got {period_interval}"
+            )
+        data = await self._get(
+            f"/series/{series_ticker}/markets/{market_id}/candlesticks",
+            params={
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "period_interval": period_interval,
+            },
+        )
+        candles: list[dict[str, Any]] = data.get("candlesticks", []) or []
+        return candles
 
     async def get_orderbook(self, market_id: str) -> dict[str, float]:
         """Return best bid/ask from the Kalshi orderbook.

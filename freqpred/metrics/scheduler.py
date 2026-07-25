@@ -72,9 +72,12 @@ async def run_source_quality_scheduler(
     lookback_days: int = 90,
     kalshi_client: KalshiClient | None = None,
     series_lookback_days: int = 7,
+    candle_period_interval: int = 60,
+    candle_max_markets: int = 200,
+    candle_max_requests: int = 250,
     telemetry: object | None = None,
 ) -> None:
-    """Refresh source-quality snapshots and series history once per day."""
+    """Refresh source-quality, calibration, series-history and candle snapshots daily."""
     tz = ZoneInfo(refresh_timezone)
     log.info(
         "source_quality_scheduler.started",
@@ -186,6 +189,54 @@ async def run_source_quality_scheduler(
                             await telemetry.mark_error(SERVICE_SERIES_HISTORY_SCHEDULER, str(exc))
                         except Exception:
                             log.exception("series_history.scheduler.telemetry_record_failed")
+
+            # Market candles — independent heartbeat. Kalshi's candle history is
+            # a rolling ~67-day window, so a missed cycle permanently loses the
+            # oldest markets; that failure has to be visible on its own and not
+            # hidden behind another job's status.
+            if kalshi_client is not None:
+                try:
+                    from freqpred.markets.candles import (
+                        refresh_recent_candles,  # noqa: PLC0415
+                    )
+                    from freqpred.runtime.telemetry import (
+                        SERVICE_CANDLE_REFRESH,  # noqa: PLC0415
+                    )
+
+                    candle_result = await refresh_recent_candles(
+                        session,
+                        kalshi_client,
+                        period_interval=candle_period_interval,
+                        max_markets=candle_max_markets,
+                        max_requests=candle_max_requests,
+                    )
+                    log.info(
+                        "candles.scheduler.refreshed",
+                        reason=reason,
+                        summary=candle_result.summary(),
+                    )
+                    if telemetry is not None:
+                        await telemetry.mark_success(
+                            SERVICE_CANDLE_REFRESH,
+                            details={
+                                "reason": reason,
+                                "markets_fetched": candle_result.markets_fetched,
+                                "candles_written": candle_result.candles_written,
+                                "requests_made": candle_result.requests_made,
+                                "budget_exhausted": candle_result.budget_exhausted,
+                            },
+                        )
+                except Exception as exc:
+                    log.exception("candles.scheduler.error", reason=reason)
+                    if telemetry is not None:
+                        from freqpred.runtime.telemetry import (
+                            SERVICE_CANDLE_REFRESH,  # noqa: PLC0415
+                        )
+
+                        try:
+                            await telemetry.mark_error(SERVICE_CANDLE_REFRESH, str(exc))
+                        except Exception:
+                            log.exception("candles.scheduler.telemetry_record_failed")
 
             try:
                 await session.commit()

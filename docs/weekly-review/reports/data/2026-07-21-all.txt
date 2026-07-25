@@ -62,6 +62,24 @@ generated 2026-07-21 00:00 UTC   scope: {'mode': 'all', 'signal_prompt_version':
        -0.40       93      0 $    -189.70 $    -574.67
        -1.00        0      0 $    +383.22 $      -1.75
 
+  CANDLE-BASED — real price paths, neither bias above applies.
+  The path continues past the actual exit (nothing censored) and every
+  covered position is included (no survivor conditioning). Prefer this row
+  set whenever coverage is good; the two above are the fallback.
+  coverage: 232/430 resolved positions   periods with no bid (excluded): 1728/25270
+  actual P&L over the covered set: $+5.36
+   threshold  stopped    total P&L    vs actual
+       -0.05      215 $     -92.43 $     -97.79
+       -0.08      205 $     -68.15 $     -73.51
+       -0.10      199 $     -78.21 $     -83.57
+       -0.12      189 $     -79.96 $     -85.33
+       -0.15      173 $     -64.06 $     -69.42
+       -0.20      153 $     -52.08 $     -57.44
+       -0.25      137 $     -42.45 $     -47.81
+       -0.30      108 $     +18.72 $     +13.36
+       -0.40       70 $     +19.93 $     +14.56
+       -1.00        0 $    +100.38 $     +95.01
+
 4. ENTRY GATES  (marginal: every OTHER gate held at its configured value)
    A profitable 'blocked' row means the gate is refusing trades that pay. * = CI excludes zero.
   min_confidence = 0.60

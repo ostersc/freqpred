@@ -6,7 +6,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import VARCHAR, Float, ForeignKey, Integer, Text
+from sqlalchemy import (
+    VARCHAR,
+    Boolean,
+    Float,
+    ForeignKey,
+    Integer,
+    SmallInteger,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -107,6 +115,97 @@ class SeriesOptionHistoryRow(Base):
     option_label: Mapped[str] = mapped_column(Text, nullable=False)
     yes_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     no_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_fetched_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
+
+
+class MarketCandleRow(Base):
+    """One OHLC candlestick for one market at one period interval.
+
+    Kalshi's candlestick endpoint is the only source of a real intra-hold price
+    path — the rest of the system persists only point observations
+    (``signals.market_*_at_signal``) and censored extremes (``positions.mae``).
+
+    **Retention is a rolling window (~67 days measured 2026-07-25).** Candles for
+    markets that settled before the cutoff return 404 and are gone permanently,
+    which is why this table exists rather than fetching on demand.
+
+    The primary key is the natural composite (market_id, period_interval,
+    end_period_ts) rather than a UUID, so re-fetching an overlapping window is an
+    idempotent upsert instead of a duplicate. ``series_option_history`` sets the
+    same precedent.
+
+    There is deliberately no FK to ``markets``: the backfill tool must work for
+    any ticker, including markets this system never ingested.
+
+    Price fields are nullable because a period with no trades has no ``price``
+    OHLC, and an empty book yields a 0.0 bid. **A 0.0 bid means "no bid", not a
+    price of zero** — anything reading these must not treat it as a tradeable
+    level, or every stoploss counterfactual will trigger on an empty book.
+    """
+
+    __tablename__ = "market_candles"
+
+    market_id: Mapped[str] = mapped_column(VARCHAR(255), primary_key=True)
+    period_interval: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    end_period_ts: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), primary_key=True
+    )
+    series_ticker: Mapped[str] = mapped_column(Text, nullable=False)
+
+    price_open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_mean: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    yes_bid_open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yes_bid_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yes_bid_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yes_bid_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    yes_ask_open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yes_ask_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yes_ask_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yes_ask_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    volume: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    open_interest: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    fetched_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
+    )
+
+
+class CandleFetchCursorRow(Base):
+    """Per-(market, interval) record of what has already been fetched.
+
+    Without this the scheduler cannot tell "we fetched this window and the market
+    was quiet" from "we never fetched this window", and would re-request empty
+    ranges forever against a rate-limited API.
+    """
+
+    __tablename__ = "candle_fetch_cursors"
+
+    market_id: Mapped[str] = mapped_column(VARCHAR(255), primary_key=True)
+    period_interval: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    covered_from: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    covered_to: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    candle_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Set when the API returned 404 — the market settled before the retention
+    # cutoff. Permanent: never retry, the data does not come back.
+    expired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_fetched_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
     )
