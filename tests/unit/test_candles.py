@@ -146,6 +146,39 @@ def test_chunk_ranges_empty_for_inverted_or_zero_range() -> None:
     assert chunk_ranges(2000, 1000, 60) == []
 
 
+def test_batch_rows_keeps_every_insert_under_the_bind_parameter_cap() -> None:
+    """asyncpg rejects >32767 bind params, and a long-dated market exceeds it.
+
+    Regression: KXTRUMPSAYNICKNAME markets run ~2,200 hours, so at hourly
+    resolution one INSERT carried ~44,000 parameters and the whole scheduled
+    refresh failed. A KXTRUMPSAY-only backfill never hit it — weekly markets
+    are ~178 candles.
+    """
+    from freqpred.markets.candles import _MAX_BIND_PARAMS, _batch_rows
+
+    rows = [_row() for _ in range(2200)]
+    batches = _batch_rows(rows)
+    assert sum(len(b) for b in batches) == 2200
+    assert all(len(b) * len(rows[0]) < _MAX_BIND_PARAMS for b in batches)
+    # Order must be preserved so the upsert is deterministic.
+    assert [r for b in batches for r in b] == rows
+
+
+def test_batch_rows_scales_with_row_width() -> None:
+    """Derived from the actual column count, so a new column cannot regress it."""
+    from freqpred.markets.candles import _MAX_BIND_PARAMS, _batch_rows
+
+    wide = [{f"c{i}": i for i in range(100)} for _ in range(500)]
+    assert all(len(b) * 100 < _MAX_BIND_PARAMS for b in _batch_rows(wide))
+
+
+def test_batch_rows_empty_and_single_batch() -> None:
+    from freqpred.markets.candles import _batch_rows
+
+    assert _batch_rows([]) == []
+    assert len(_batch_rows([_row()])) == 1
+
+
 def test_backfill_result_summary_flags_budget_exhaustion() -> None:
     result = BackfillResult(markets_fetched=3, candles_written=90, requests_made=5)
     assert "BUDGET EXHAUSTED" not in result.summary()

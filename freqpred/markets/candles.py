@@ -173,22 +173,46 @@ def chunk_ranges(
     ]
 
 
+#: asyncpg refuses a statement with more than this many bind parameters.
+_MAX_BIND_PARAMS = 32767
+
+
+def _batch_rows(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Split rows so no single INSERT exceeds the bind-parameter limit.
+
+    A candle row is ~20 columns, so the ceiling is ~1600 rows per statement.
+    Weekly markets stay well under it (~178 hourly candles), which is why a
+    KXTRUMPSAY-only backfill never hit this — but the scheduler also picks up
+    monthly series, and KXTRUMPSAYNICKNAME markets run ~2,200 hours, which
+    overflowed and failed the whole refresh cycle.
+
+    The batch size is derived from the actual row width rather than hardcoded,
+    so adding a column cannot silently reintroduce the overflow.
+    """
+    if not rows:
+        return []
+    per_row = max(len(rows[0]), 1)
+    size = max(1, (_MAX_BIND_PARAMS // per_row) - 1)
+    return [rows[i : i + size] for i in range(0, len(rows), size)]
+
+
 async def _upsert_candles(session: AsyncSession, rows: list[dict[str, Any]]) -> int:
     """Idempotent upsert on the natural key. Re-fetching a window costs nothing."""
     if not rows:
         return 0
-    stmt = insert(MarketCandleRow).values(rows)
-    update_cols = {
-        c: getattr(stmt.excluded, c)
-        for c in rows[0]
-        if c not in ("market_id", "period_interval", "end_period_ts")
-    }
-    await session.execute(
-        stmt.on_conflict_do_update(
-            index_elements=["market_id", "period_interval", "end_period_ts"],
-            set_=update_cols,
+    for batch in _batch_rows(rows):
+        stmt = insert(MarketCandleRow).values(batch)
+        update_cols = {
+            c: getattr(stmt.excluded, c)
+            for c in batch[0]
+            if c not in ("market_id", "period_interval", "end_period_ts")
+        }
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["market_id", "period_interval", "end_period_ts"],
+                set_=update_cols,
+            )
         )
-    )
     return len(rows)
 
 
