@@ -169,8 +169,8 @@ ARM_NAMES = ("current", "challenger")
 #     prompt-version cohort; production cannot do this yet (edge_calibration_scores
 #     has no prompt_version column), so it was omitted from the shipped prompt.
 #     It applied to only 38 of 76 audited signals in any case.
-CHALLENGER_VERSION: str | None = "assessment-v8-audit-pit-opus5"
-CHALLENGER_MODEL: str | None = "claude-opus-5"
+CHALLENGER_VERSION: str | None = None
+CHALLENGER_MODEL: str | None = None
 
 # Deliberately a BUNDLED change (prompt v7 + opus-5), at the user's direction:
 # staying on opus-4-7 indefinitely is not viable, so the two axes move together.
@@ -211,7 +211,11 @@ CHALLENGER_MODEL: str | None = "claude-opus-5"
 # The liquidity-note fix that was the fourth finding is handled in the harness
 # (_mask_unreconstructible_liquidity) rather than the prompt, because it was a
 # point-in-time leak affecting BOTH arms, not a prompt defect.
-CHALLENGER_SYSTEM_PROMPT: str | None = """\
+# The adopted v8 prompt, kept verbatim as the record of what was screened.
+# It is NOT wired to CHALLENGER_SYSTEM_PROMPT: v8 is production now, so
+# arming it would measure current-vs-current and burn a paid run on a
+# guaranteed null result. Set CHALLENGER_SYSTEM_PROMPT = your new prompt.
+ADOPTED_V8_SYSTEM_PROMPT = """\
 You are a risk and sizing judge for a prediction-market trading system.
 
 The trade direction and base edge have already been decided upstream.
@@ -340,19 +344,32 @@ def _add_profit_edge(edge_calib: dict | None) -> dict | None:
     return out
 
 
+CHALLENGER_SYSTEM_PROMPT: str | None = None
+
+
 async def _challenger_payload(
     session, signal: Signal, base_payload: dict, edge_calib: dict | None
 ) -> dict:
-    """v8 package: production data plus the profit-edge framing.
+    """Build the challenger arm's payload. Edit per experiment.
 
-    Everything else is byte-identical to the current arm, so the contrast
-    isolates the v8 prompt + the profit_edge_vs_price field + opus-5.
+    Disarmed after the v8 adoption (2026-07-25): v8 is production, so wiring the
+    old challenger back up would measure current-vs-current and spend real money
+    on a guaranteed null result. For a model-only swap, mirror the current arm:
+
+        base_payload["edge_band_calibration"] = edge_calib
+        base_payload["market_reevaluation_history"] = (
+            await _load_market_reevaluation_history(session, signal)
+        )
+        return base_payload
+
+    The v8 shape is preserved above as ADOPTED_V8_SYSTEM_PROMPT and _add_profit_edge
+    if you need to diff a new proposal against what was actually screened.
     """
-    base_payload["edge_band_calibration"] = _add_profit_edge(edge_calib)
-    base_payload["market_reevaluation_history"] = await _load_market_reevaluation_history(
-        session, signal
+    raise NotImplementedError(
+        "define the challenger package (CHALLENGER_VERSION, "
+        "CHALLENGER_SYSTEM_PROMPT, CHALLENGER_MODEL, _challenger_payload) "
+        "before running with the challenger arm"
     )
-    return base_payload
 
 
 def _edge_band(edge_pct: float) -> str:
@@ -890,48 +907,22 @@ def _version_cohort(prior: pd.DataFrame, signal: Signal) -> tuple[pd.DataFrame, 
 
 
 def _edge_band_calibration(calib_df: pd.DataFrame, signal: Signal, as_of: datetime) -> dict:
-    edge_pct = signal.edge * 100.0
-    band = _edge_band(edge_pct)
-    prior = calib_df[calib_df["close_time"] < as_of]
-    same_band = prior[prior["edge_band"] == band]
-    same_band_dir = same_band[same_band["direction"] == signal.direction]
+    """Point-in-time mirror of production's `_load_edge_band_calibration`.
 
-    def _summarize(df: pd.DataFrame) -> dict:
-        if len(df) == 0:
-            return {"n_signals": 0, "n_markets": 0}
-        return {
-            "n_signals": int(len(df)),
-            "n_markets": int(df["market_id"].nunique()),
-            "hit_rate": round(float(df["hit"].mean()), 3),
-            "avg_market_implied_p": round(float(df["market_p_side"].mean()), 3),
-            "avg_model_implied_p": round(float(df["p_side"].mean()), 3),
-        }
+    This MUST track production's shape exactly. The `current` arm is defined as
+    "whatever shipped", so any divergence means the baseline is being measured on
+    a payload production never sends, and every adoption decision inherits that
+    error. It exists as a separate implementation only because production reads
+    the `edge_calibration_scores` snapshot table, which has no as_of filter —
+    fine live (it always wants the latest), leaky for a retrospective audit.
 
-    return {
-        "description": (
-            "Empirical calibration for signals whose edge fell in the same "
-            "band as this one, computed ONLY from markets that had already "
-            "closed before this signal fired (no lookahead). hit_rate is "
-            "what actually happened; avg_model_implied_p is what the model "
-            "claimed at signal time — a large gap between them for this "
-            "band is a documented failure mode, not a hypothetical one."
-        ),
-        "this_signal_edge_band": band,
-        "all_directions": _summarize(same_band),
-        "same_direction_only": _summarize(same_band_dir),
-    }
-
-
-def _edge_band_calibration_v8(calib_df: pd.DataFrame, signal: Signal, as_of: datetime) -> dict:
-    """v8 cohort-filtered calibration, plus a direction-only aggregate.
-
-    Two changes over the shipped block, both driven by measurement rather than
-    intuition (see _version_cohort and _add_profit_edge):
-      - history is restricted to this signal's own prompt-version cohort;
-      - `this_direction_all_bands` reports the traded direction across ALL bands,
-        because the band-level cell is often thin while direction is the most
-        persistent discriminator in the data (KXTRUMPSAY: NO +7.3pp vs YES -7.6pp
-        over 8,410 resolved signals, with YES negative under every version).
+    Mirrors, as of the v8 adoption (2026-07-25):
+      - `profit_edge_vs_price` on every cell, the figure that determines whether
+        a cell earned money rather than whether the model knew itself;
+      - `this_direction_all_bands`, because the band cell is often thin while
+        direction is the most persistent discriminator in the data;
+      - prompt-version cohort filtering, with `cohort_prompt_version` naming the
+        cohort actually used.
     """
     band = _edge_band(signal.edge * 100.0)
     prior = calib_df[calib_df["close_time"] < as_of]
@@ -949,13 +940,19 @@ def _edge_band_calibration_v8(calib_df: pd.DataFrame, signal: Signal, as_of: dat
             "avg_model_implied_p": round(float(df["p_side"].mean()), 3),
         }
 
-    return {
-        "this_signal_edge_band": band,
-        "cohort_prompt_version": cohort_label,
-        "all_directions": _summarize(same_band),
-        "same_direction_only": _summarize(same_band[same_band["direction"] == signal.direction]),
-        "this_direction_all_bands": _summarize(cohort[cohort["direction"] == signal.direction]),
-    }
+    return _add_profit_edge(
+        {
+            "this_signal_edge_band": band,
+            "cohort_prompt_version": cohort_label,
+            "all_directions": _summarize(same_band),
+            "same_direction_only": _summarize(
+                same_band[same_band["direction"] == signal.direction]
+            ),
+            "this_direction_all_bands": _summarize(
+                cohort[cohort["direction"] == signal.direction]
+            ),
+        }
+    )
 
 
 async def main(
@@ -1142,7 +1139,7 @@ async def main(
                     # v8 uses its own cohort-filtered calibration block; the
                     # current arm keeps the production one so the contrast is
                     # exactly "production package vs proposed package".
-                    _edge_band_calibration_v8(calib_df, signal, signal.created_at),
+                    _edge_band_calibration(calib_df, signal, signal.created_at),
                 )
                 arm_results["challenger"] = await _call(
                     challenger_payload,

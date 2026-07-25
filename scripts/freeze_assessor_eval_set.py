@@ -64,7 +64,7 @@ from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.llm.models import LLMQueryRow
 from freqpred.markets.models import MarketRow
-from freqpred.metrics.assessment import _build_prompt_payload
+from freqpred.metrics.assessment import _PROMPT_VERSION, _build_prompt_payload
 from freqpred.signal.models import SignalRow
 from freqpred.strategy.loader import load_strategy
 
@@ -77,15 +77,23 @@ SEED = 20260724
 SERIES = "KXTRUMPSAY"
 STRATEGY_NAME = "PoliticsEdgeStrategy"  # matches the audit harness
 SIGNAL_PROMPT_VERSION = "signal-v11"
-CURRENT_ARM_VERSION = "assessment-v6-audit-pit-current"
 DEFAULT_OUT = Path("scripts/.audit_output/frozen_eval_set.json")
 
 
+def _hash_text(text: str) -> str:
+    """Hash of exact prompt bytes — the cache-validity key."""
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
 def _payload_hash(payload: dict) -> str:
-    """Stable hash of the rendered prompt bytes — the cache-validity key."""
-    return hashlib.sha256(
-        json.dumps(payload, indent=2, sort_keys=True).encode()
-    ).hexdigest()[:16]
+    """Hash of a payload rendered the way every producer renders it.
+
+    Must stay byte-identical to how the audit, the runner, and production
+    serialise payloads (json.dumps(..., indent=2, sort_keys=True)), or a cached
+    response's hash will never match a freshly-rendered one and reuse silently
+    stops working.
+    """
+    return _hash_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
 async def _select_balanced(session) -> list[dict]:
@@ -135,18 +143,39 @@ async def main(out_path: Path) -> None:
         calib_df = await audit.build_calibration_pool(session)
         print(f"  calibration pool: {len(calib_df)} resolved signals")
 
-        cached = {
-            str(r.signal_id): r.response
+        # Reuse an already-paid response only when it is provably the same
+        # computation. Three things must match:
+        #   * the SYSTEM PROMPT — llm_queries never stores it, so it is identified
+        #     indirectly by the assessment prompt-version family;
+        #   * the MODEL;
+        #   * the PAYLOAD, matched by hashing llm_queries.prompt (the user message
+        #     verbatim) and comparing to the freshly-rendered payload hash. Every
+        #     producer serialises identically (json.dumps(..., indent=2,
+        #     sort_keys=True)), so the two are directly comparable.
+        # Matching on the payload alone would be unsound: two packages can send an
+        # identical payload under different system prompts, and reusing a v6 answer
+        # as a v8 baseline would silently corrupt the control arm. Matching on a
+        # prompt_version label alone was the original bug — the freezer looked for
+        # "assessment-v6-audit-pit-current" while the runner writes
+        # "{_PROMPT_VERSION}-frozen-current", so it found nothing and reuse was
+        # silently, permanently off.
+        cached_by_hash = {
+            _hash_text(r.prompt): r.response
             for r in (
                 await session.execute(
-                    select(LLMQueryRow.signal_id, LLMQueryRow.response).where(
+                    select(LLMQueryRow.response, LLMQueryRow.prompt).where(
                         LLMQueryRow.query_type == "model_eval",
-                        LLMQueryRow.prompt_version == CURRENT_ARM_VERSION,
                         LLMQueryRow.success.is_(True),
+                        LLMQueryRow.model_used == config.anthropic.judgment_model,
+                        LLMQueryRow.prompt_version.like(f"{_PROMPT_VERSION}%"),
                     )
                 )
             ).all()
         }
+        print(
+            f"  harvestable prior responses ({_PROMPT_VERSION} on "
+            f"{config.anthropic.judgment_model}): {len(cached_by_hash)}"
+        )
 
         entries: list[dict[str, Any]] = []
         for i, row in enumerate(picked, 1):
@@ -190,11 +219,13 @@ async def main(out_path: Path) -> None:
             )
             cur["market_reevaluation_history"] = history
 
-            chal = json.loads(json.dumps(base))
-            chal["edge_band_calibration"] = audit._add_profit_edge(
-                audit._edge_band_calibration_v8(calib_df, signal, signal.created_at)
-            )
-            chal["market_reevaluation_history"] = history
+            # With no challenger armed, the challenger payload is the current one:
+            # most experiments change the PROMPT or MODEL, not the payload, and for
+            # those an identical payload is exactly right — it isolates the change
+            # under test. An experiment that also changes the payload shape must
+            # define _challenger_payload and regenerate this set, otherwise it
+            # would be scored against a payload it does not actually send.
+            chal = json.loads(json.dumps(cur))
 
             entries.append(
                 {
@@ -215,8 +246,15 @@ async def main(out_path: Path) -> None:
                         "current": {"payload": cur, "hash": _payload_hash(cur)},
                         "challenger": {"payload": chal, "hash": _payload_hash(chal)},
                     },
-                    # Already-paid response, reusable because the judge is deterministic.
-                    "cached_current_response": cached.get(row["signal_id"]),
+                    # Already-paid response, reusable because the judge is
+                    # deterministic — but only when cached_hash matches the
+                    # current-arm payload hash, proving identical input.
+                    # Looked up by the current payload's own hash: if a prior
+                    # run scored byte-identical input, that response is reusable.
+                    "cached_current_response": cached_by_hash.get(
+                        _payload_hash(cur)
+                    ),
+                    "cached_hash": _payload_hash(cur),
                 }
             )
             if i % 10 == 0:
@@ -224,6 +262,8 @@ async def main(out_path: Path) -> None:
 
     await engine.dispose()
 
+    # Only responses whose stored prompt still hashes to the freshly-rendered
+    # current-arm payload are actually reusable; the rest must be re-scored.
     n_cached = sum(1 for e in entries if e["cached_current_response"])
     doc = {
         "seed": SEED,
@@ -242,7 +282,7 @@ async def main(out_path: Path) -> None:
     for d in ("NO", "YES"):
         sub = [e for e in entries if e["direction"] == d]
         print(f"  {d:3s}: n={len(sub):2d} hits={sum(e['hit'] for e in sub):2d}")
-    print(f"  current-arm responses already paid for: {n_cached}/{len(entries)}")
+    print(f"  current-arm responses reusable (hash matches): {n_cached}/{len(entries)}")
     print(f"  still to score: current={len(entries) - n_cached}, challenger={len(entries)}")
 
 

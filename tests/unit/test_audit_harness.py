@@ -30,6 +30,20 @@ def _load_audit_module() -> Any:
 audit = _load_audit_module()
 
 
+def _load_freezer_module() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "freeze_assessor_eval_set",
+        Path(__file__).resolve().parents[2] / "scripts" / "freeze_assessor_eval_set.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+freezer = _load_freezer_module()
+
+
 def _payload_with_liquidity() -> dict:
     """A payload shaped like _build_prompt_payload's market_liquidity block,
     carrying the settled-state values a finalized market returns today."""
@@ -325,86 +339,63 @@ class TestVersionCohort:
         assert "fallback" in label
 
 
-class TestChallengerPackageIsWellFormed:
-    """The run fails loudly if the challenger is half-defined; these catch that
-    at test time instead of after the first paid calls have already billed."""
+class TestChallengerIsDisarmedAfterAdoption:
+    """After an adoption the challenger MUST be undefined. v8 shipped to
+    production on 2026-07-25, so leaving CHALLENGER_* pointing at it would make a
+    re-run measure current-vs-current — a guaranteed null result billed at real
+    API rates (~$3.30 for the challenger arm on the 76-signal frozen set)."""
 
-    def test_challenger_is_fully_defined(self) -> None:
-        assert audit.CHALLENGER_VERSION
-        assert audit.CHALLENGER_SYSTEM_PROMPT
-        assert audit.CHALLENGER_MODEL
+    def test_challenger_hooks_are_unset(self) -> None:
+        assert audit.CHALLENGER_VERSION is None
+        assert audit.CHALLENGER_SYSTEM_PROMPT is None
+        assert audit.CHALLENGER_MODEL is None
 
-    def test_challenger_version_is_distinguishable_in_llm_queries(self) -> None:
-        """Audit calls share the llm_queries table with production; the version
-        string is what keeps them separable after the fact."""
-        assert audit.CHALLENGER_VERSION != audit._PROMPT_VERSION
-        assert "audit" in audit.CHALLENGER_VERSION
+    def test_payload_builder_refuses_to_run(self) -> None:
+        import asyncio
 
-    def test_challenger_prompt_severs_the_warning_score_coupling(self) -> None:
-        """v6's 'any warning => trust_score MUST be <= 0.5' capped the scale:
-        opus-5 emitted warnings on 30/30 calls and so could never score above
-        neutral (across 60 calls, the single response above 0.5 was the only one
-        with zero warnings). Raising the BAR for what counts as a warning was
-        tried first and failed — opus-5 still found three "material" concerns on
-        8/8 calls. v7 severs the coupling entirely, so warnings must carry no
-        arithmetic tie to the score in either direction."""
-        prompt = audit.CHALLENGER_SYSTEM_PROMPT
-        assert "MUST be ≤ 0.5" not in prompt
-        assert "MUST be <= 0.5" not in prompt
-        assert "contradictory" not in prompt
-        assert "NO arithmetic relationship" in prompt
+        with pytest.raises(NotImplementedError):
+            asyncio.run(audit._challenger_payload(None, None, {}, None))
 
-    def test_verdict_derivation_has_no_warning_dependency(self) -> None:
-        """The coupling lived only in the prompt — verdict is derived from
-        trust_score alone. This asserts that severing it in the prompt is
-        sufficient and no parsing change is owed."""
-        from freqpred.metrics.assessment import _parse_assessment_response
+    def test_adopted_prompt_is_retained_as_a_record(self) -> None:
+        """The screened prompt stays available to diff a future proposal
+        against — just not wired to the live hook."""
+        assert "profit_edge_vs_price" in audit.ADOPTED_V8_SYSTEM_PROMPT
+        assert audit.ADOPTED_V8_SYSTEM_PROMPT is not audit.CHALLENGER_SYSTEM_PROMPT
 
-        base = {"trust_score": 0.8, "reasoning": "r", "key_factors": ["k"]}
-        with_warning = _parse_assessment_response(
-            json.dumps({**base, "warnings": ["a real concern"]})
+
+class TestFrozenSetCacheKey:
+    """The freezer harvests already-paid current-arm responses from llm_queries.
+    Reuse is only sound if the stored response came from byte-identical input, so
+    the freezer records a hash of the STORED PROMPT and the runner compares it to
+    the freshly-rendered payload hash. Before this fix the freezer never wrote
+    `cached_hash` at all, so the runner's check compared against a missing field
+    and reuse was silently, permanently disabled."""
+
+    def test_hash_is_over_exact_bytes(self) -> None:
+        import hashlib
+
+        text = '{"a": 1}'
+        expected = hashlib.sha256(text.encode()).hexdigest()[:16]
+        assert freezer._hash_text(text) == expected
+
+    def test_payload_hash_matches_hashing_the_rendered_prompt(self) -> None:
+        """The whole scheme rests on this: a payload hashed as a dict must equal
+        the prompt string hashed as text, because every producer renders with
+        json.dumps(..., indent=2, sort_keys=True). If those ever diverge, cached
+        responses stop matching and the harness silently re-pays for them."""
+        payload = {"z": 1, "a": {"nested": True}}
+        rendered = json.dumps(payload, indent=2, sort_keys=True)
+        assert freezer._payload_hash(payload) == freezer._hash_text(rendered)
+
+    def test_key_ordering_does_not_change_the_hash(self) -> None:
+        assert freezer._payload_hash({"a": 1, "b": 2}) == freezer._payload_hash(
+            {"b": 2, "a": 1}
         )
-        without = _parse_assessment_response(json.dumps({**base, "warnings": []}))
-        assert with_warning["verdict"] == without["verdict"] == "size_up"
-        assert with_warning["trust_score"] == 0.8
 
-    def test_challenger_prompt_demands_non_transferable_scores(self) -> None:
-        """The core v7 intervention: family-level stats are identical across a
-        series, so a score derived only from them cannot discriminate."""
-        prompt = audit.CHALLENGER_SYSTEM_PROMPT.lower()
-        assert "reference class" in prompt
-        assert "identical" in prompt
-        assert "full 0.0-1.0 range" in prompt
-
-    def test_challenger_prompt_neutralises_the_masked_liquidity_sentinel(self) -> None:
-        assert audit.LIQUIDITY_UNAVAILABLE in audit.CHALLENGER_SYSTEM_PROMPT
-
-    def test_trust_score_is_emitted_first_for_truncation_safety(self) -> None:
-        """trust_score is the only field that affects sizing; the rest is audit
-        metadata. In the first v7 attempt (2026-07-24) two challenger calls hit
-        the 768-token cap and were cut off mid-sentence, losing key_factors and
-        warnings entirely — trust_score survived only because opus-5 happened to
-        emit it first. In the earlier v6 run it frequently emitted trust_score
-        LAST, which under the same truncation would have lost the sizing decision
-        and dropped the row. Ordering it first makes truncation cost only
-        transparency, never the decision."""
-        prompt = audit.CHALLENGER_SYSTEM_PROMPT
-        assert "FIRST field" in prompt
-        assert prompt.index("trust_score") < prompt.index("key_factors")
-
-    def test_challenger_prompt_constrains_output_length(self) -> None:
-        """Output tokens are billed; only trust_score carries decision value, so
-        the prose fields must be explicitly bounded rather than left open-ended."""
-        prompt = audit.CHALLENGER_SYSTEM_PROMPT
-        assert "at most 2 sentences" in prompt
-        assert "1-3 short strings" in prompt
-        assert "1-5 short strings" not in prompt
-
-    def test_audit_never_writes_to_signal_assessments(self) -> None:
-        """Hard constraint: nothing from an audit may reach the production
-        sizing-decision audit trail."""
-        assert audit.JUDGMENT_QUERY_TYPE == "model_eval"
-        assert audit.JUDGMENT_QUERY_TYPE != "signal_assessment"
+    def test_any_content_change_changes_the_hash(self) -> None:
+        """A harness change that alters the payload must invalidate the cache
+        rather than pair an old score with a new prompt."""
+        assert freezer._payload_hash({"a": 1}) != freezer._payload_hash({"a": 2})
 
 
 @pytest.mark.parametrize("arm", ["current", "challenger"])

@@ -86,6 +86,19 @@ async def main(eval_set: Path, out_path: Path, arms: set[str]) -> None:
         max_consecutive_errors=config.risk.max_consecutive_llm_errors,
     )
 
+    # Fail loudly rather than sending system=None, which would silently score the
+    # challenger arm with no system prompt at all and look like a real result.
+    if "challenger" in arms and not (
+        audit.CHALLENGER_SYSTEM_PROMPT and audit.CHALLENGER_VERSION
+    ):
+        raise SystemExit(
+            "ERROR: the challenger arm is not defined. Set CHALLENGER_VERSION, "
+            "CHALLENGER_SYSTEM_PROMPT, CHALLENGER_MODEL and _challenger_payload in "
+            "scripts/audit_assessor_enhancement.py before screening a package. "
+            "(It is deliberately disarmed after an adoption so a re-run cannot "
+            "measure current-vs-current and bill for a guaranteed null result.)"
+        )
+
     arm_cfg = {
         "current": (_SYSTEM_PROMPT, f"{_PROMPT_VERSION}-frozen-current", None),
         "challenger": (
