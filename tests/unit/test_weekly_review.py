@@ -637,6 +637,7 @@ def _review():
             "periods_total": 4,
         },
         gate_stats=entry_gate_analysis(signals, _Config()),
+        gate_replays=[],
         gate_sweeps=gate_threshold_sweep(signals, _Config()),
         accuracy_by_week=accuracy_by(signals, lambda s: "2026-W30"),
         accuracy_by_version=accuracy_by(signals, lambda s: s.prompt_version),

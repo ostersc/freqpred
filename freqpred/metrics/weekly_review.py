@@ -54,6 +54,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from freqpred.metrics.entry_counterfactual import (
+    load_paths_and_signals,
+    simulate_trade,
+)
+
 # Positions closed for these reasons never had a "hold to resolution"
 # alternative — the market resolving IS the exit, or the position never opened.
 _NON_DISCRETIONARY_EXITS = frozenset({"market_resolved", "cancelled"})
@@ -214,6 +219,37 @@ class GateStat:
 
 
 @dataclass(frozen=True)
+class ReplayStat:
+    """A set of signals replayed through the strategy's real entry and exit rules.
+
+    The counterpart to `GroupStat`, which prices a signal as "buy at the ask,
+    hold to settlement". That approximation flatters blocked signals twice over:
+    it invents a fill the limit order would often never have got, and it skips
+    the exits an admitted market would have been managed by.
+    """
+
+    key: str
+    n_signals: int
+    n_filled: int
+    n_markets: int
+    pnl_per_contract: float
+    pnl_ci: tuple[float, float]
+    exit_mix: dict[str, int]
+
+    @property
+    def fill_rate(self) -> float:
+        return self.n_filled / self.n_signals if self.n_signals else 0.0
+
+    @property
+    def pnl_per_filled(self) -> float:
+        return (
+            self.pnl_per_contract * self.n_signals / self.n_filled
+            if self.n_filled
+            else 0.0
+        )
+
+
+@dataclass(frozen=True)
 class SweepPoint:
     gate: str
     value: float
@@ -251,6 +287,7 @@ class WeeklyReview:
     stoploss_candles_n: int
     candle_coverage: dict[str, int]
     gate_stats: list[GateStat]
+    gate_replays: list[tuple[str, str, ReplayStat, ReplayStat]]
     gate_sweeps: list[SweepPoint]
     accuracy_by_week: list[GroupStat]
     accuracy_by_version: list[GroupStat]
@@ -752,6 +789,69 @@ def entry_gate_analysis(
     return stats
 
 
+def replay_stat(
+    key: str,
+    trades: Sequence[object],
+    *,
+    seed: int = _DEFAULT_SEED,
+) -> ReplayStat:
+    """Aggregate replayed trades. Unfilled orders count as n with 0 P&L.
+
+    Including them is the point: a gate that blocks signals whose limit would
+    never have filled is costing nothing, and averaging over filled trades only
+    would hide that.
+    """
+    if not trades:
+        return ReplayStat(key, 0, 0, 0, 0.0, (0.0, 0.0), {})
+    pnls = [t.pnl_per_contract for t in trades]  # type: ignore[attr-defined]
+    mix: dict[str, int] = defaultdict(int)
+    for t in trades:
+        mix[t.exit_reason] += 1  # type: ignore[attr-defined]
+    return ReplayStat(
+        key=key,
+        n_signals=len(trades),
+        n_filled=sum(1 for t in trades if t.filled),  # type: ignore[attr-defined]
+        n_markets=len({t.market_id for t in trades}),  # type: ignore[attr-defined]
+        pnl_per_contract=sum(pnls) / len(pnls),
+        pnl_ci=bootstrap_mean_ci(pnls, seed=seed),
+        exit_mix=dict(mix),
+    )
+
+
+def gate_replay_analysis(
+    signals: Sequence[ResolvedSignal],
+    config: object,
+    simulate: Callable[[ResolvedSignal], object | None],
+    *,
+    seed: int = _DEFAULT_SEED,
+) -> list[GateStat] | list[tuple[str, str, ReplayStat, ReplayStat]]:
+    """Marginal gate analysis, but scoring both sides through the real rules.
+
+    Same marginal construction as `entry_gate_analysis` — every other gate held
+    at its configured value — so the two are directly comparable and the
+    difference between them is exactly the cost of the buy-and-hold shortcut.
+    Signals whose market has no candle coverage are dropped rather than falling
+    back to the approximation, so a row never mixes the two methods.
+    """
+    gates = _gate_predicates(config)
+    out: list[tuple[str, str, ReplayStat, ReplayStat]] = []
+    for name, (setting, predicate) in gates.items():
+        others = [p for gname, (_, p) in gates.items() if gname != name]
+        eligible = first_per_market([s for s in signals if all(p(s) for p in others)])
+        admitted_trades = [t for s in eligible if predicate(s) and (t := simulate(s))]
+        blocked_trades = [t for s in eligible if not predicate(s) and (t := simulate(s))]
+        out.append(
+            (
+                name,
+                setting,
+                replay_stat(f"{name} admitted", admitted_trades, seed=seed),
+                replay_stat(f"{name} blocked", blocked_trades, seed=seed),
+            )
+        )
+    out.sort(key=lambda g: -g[3].pnl_per_contract * g[3].n_markets)
+    return out
+
+
 def gate_threshold_sweep(
     signals: Sequence[ResolvedSignal],
     config: object,
@@ -1091,6 +1191,23 @@ async def load_resolved_signals(
         )
         for r in rows
     ]
+
+
+async def _markets_with_candles(
+    session: AsyncSession, signals: Sequence[ResolvedSignal]
+) -> set[str]:
+    """Market IDs among `signals` that have a stored candle path."""
+    ids = sorted({s.market_id for s in signals})
+    if not ids:
+        return set()
+    rows = await session.execute(
+        text(
+            "SELECT DISTINCT market_id FROM market_candles "
+            "WHERE period_interval = 60 AND market_id = ANY(:ids)"
+        ),
+        {"ids": ids},
+    )
+    return {r[0] for r in rows}
 
 
 async def latest_signal_prompt_version(
@@ -1448,6 +1565,43 @@ async def build_weekly_review(
 
     sources, source_pool = source_analysis(signals)
 
+    # Replay the gate analysis through the strategy's real entry/exit rules,
+    # over stored price paths. Restricted to markets with candle coverage so a
+    # row never silently mixes replayed trades with buy-and-hold approximations.
+    gate_replays: list[tuple[str, str, ReplayStat, ReplayStat]] = []
+    covered_ids = await _markets_with_candles(session, signals)
+    if covered_ids:
+        paths, later_signals = await load_paths_and_signals(
+            session, sorted(covered_ids)
+        )
+        order_types = getattr(config, "order_types", None)
+        entry_mode = getattr(order_types, "entry", "market") if order_types else "market"
+
+        def _simulate(sig: ResolvedSignal):
+            path = paths.get(sig.market_id)
+            if not path:
+                return None
+            return simulate_trade(
+                market_id=sig.market_id,
+                signal_id=sig.signal_id,
+                direction=sig.direction,
+                signal_time=sig.created_at,
+                estimated_probability=sig.estimated_probability,
+                result=sig.result,
+                candles=path,
+                later_signals=later_signals.get(sig.market_id, []),
+                min_edge=float(getattr(config, "min_edge", 0.0)),
+                min_confidence=float(getattr(config, "min_confidence", 0.0)),
+                stoploss=float(getattr(config, "stoploss", -1.0)),
+                entry_mode=entry_mode,
+                market_ask_at_signal=sig.market_ask_at_signal,
+                limit_timeout_hours=float(
+                    getattr(config, "limit_order_timeout_hours", 2.0)
+                ),
+            )
+
+        gate_replays = gate_replay_analysis(signals, config, _simulate)
+
     if mode is None and len({p.mode for p in history_positions}) > 1:
         warnings.append(
             "Paper and live positions are both in scope. Paper fills are "
@@ -1470,6 +1624,7 @@ async def build_weekly_review(
         stoploss_candles_n=sweep_candles_n,
         candle_coverage=coverage,
         gate_stats=entry_gate_analysis(signals, config),
+        gate_replays=gate_replays,
         gate_sweeps=gate_threshold_sweep(signals, config),
         accuracy_by_week=accuracy_by(
             signals, lambda s: f"{s.created_at:%Y-W%V}", min_signals=5
@@ -1642,6 +1797,30 @@ def render_text(review: WeeklyReview) -> str:  # noqa: C901 — a report is a lo
     add(f"  not evaluable point-in-time: {', '.join(UNEVALUABLE_GATES)}")
     add("")
 
+    if review.gate_replays:
+        add("   REPLAYED through the real entry/exit rules over stored price paths.")
+        add("   The rows above buy at the ask and hold to settlement; these post the")
+        add("   strategy's actual limit entry, honour its timeout, and apply stoploss +")
+        add("   should_exit before settlement. Unfilled orders are counted at $0 — a gate")
+        add("   that blocks a signal whose limit would never have filled costs nothing.")
+        add("   Excludes force_exit (needs 5m candles; ~16% of real live exits).")
+        add(
+            f"   {'gate':<22} {'n':>4} {'fill':>6} {'mkts':>5} "
+            f"{'$/contract':>11}  95% CI"
+        )
+        for name, setting, admitted, blocked in review.gate_replays:
+            add(f"  {name} = {setting}")
+            for label, stat in (("admitted", admitted), ("blocked", blocked)):
+                marker = " *" if _significant(stat.pnl_ci) else ""
+                add(
+                    f"   {label:<22} {stat.n_signals:>4} {stat.fill_rate:>6.0%} "
+                    f"{stat.n_markets:>5} {stat.pnl_per_contract:>+11.3f}  "
+                    f"{_ci(stat.pnl_ci)}{marker}"
+                )
+                if stat.exit_mix:
+                    add(f"     exits: {dict(sorted(stat.exit_mix.items()))}")
+        add("")
+
     add("   threshold sweeps (profit_edge x n_markets = volume-aware total, ignores exposure caps)")
     current_gate = ""
     for point in review.gate_sweeps:
@@ -1776,6 +1955,26 @@ def to_dict(review: WeeklyReview) -> dict:
                 "blocked": group(g.blocked),
             }
             for g in review.gate_stats
+        ],
+        "gate_replays": [
+            {
+                "gate": name,
+                "setting": setting,
+                **{
+                    side: {
+                        "n_signals": stat.n_signals,
+                        "n_filled": stat.n_filled,
+                        "fill_rate": round(stat.fill_rate, 4),
+                        "n_markets": stat.n_markets,
+                        "pnl_per_contract": round(stat.pnl_per_contract, 4),
+                        "pnl_ci": [round(v, 4) for v in stat.pnl_ci],
+                        "significant": _significant(stat.pnl_ci),
+                        "exit_mix": stat.exit_mix,
+                    }
+                    for side, stat in (("admitted", admitted), ("blocked", blocked))
+                },
+            }
+            for name, setting, admitted, blocked in review.gate_replays
         ],
         "gate_sweeps": [
             {

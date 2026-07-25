@@ -93,6 +93,42 @@ generated 2026-07-21 00:00 UTC   scope: {'mode': 'live', 'signal_prompt_version'
   min_edge blocked           n=   32 mkts=  32 hit= 81.2% ask=0.836 edge= -0.023 [-0.161, +0.094]  
   not evaluable point-in-time: min_volume_24h
 
+   REPLAYED through the real entry/exit rules over stored price paths.
+   The rows above buy at the ask and hold to settlement; these post the
+   strategy's actual limit entry, honour its timeout, and apply stoploss +
+   should_exit before settlement. Unfilled orders are counted at $0 — a gate
+   that blocks a signal whose limit would never have filled costs nothing.
+   Excludes force_exit (needs 5m candles; ~16% of real live exits).
+   gate                      n   fill  mkts  $/contract  95% CI
+  min_confidence = 0.60
+   admitted                 35   100%    35      -0.125  [-0.269, +0.018]
+     exits: {'resolution': 25, 'signal': 10}
+   blocked                   3   100%     3      +0.197  [-0.350, +0.570]
+     exits: {'resolution': 3}
+  min_edge = 0.150
+   admitted                 23   100%    23      -0.210  [-0.369, -0.057] *
+     exits: {'resolution': 14, 'signal': 9}
+   blocked                  32    12%    32      +0.008  [-0.061, +0.069]
+     exits: {'resolution': 4, 'unfilled': 28}
+  days_to_close = [0.25, 7]
+   admitted                 36   100%    36      -0.106  [-0.256, +0.040]
+     exits: {'resolution': 26, 'signal': 10}
+   blocked                   0     0%     0      +0.000  [+0.000, +0.000]
+  mid_price_band = [0.10, 0.95]
+   admitted                 36   100%    36      -0.106  [-0.256, +0.040]
+     exits: {'resolution': 26, 'signal': 10}
+   blocked                   0     0%     0      +0.000  [+0.000, +0.000]
+  max_spread = 0.075
+   admitted                 34   100%    34      -0.083  [-0.245, +0.068]
+     exits: {'resolution': 25, 'signal': 9}
+   blocked                   2   100%     2      -0.505  [-0.540, -0.470] *
+     exits: {'resolution': 1, 'signal': 1}
+  max_edge = 0.400
+   admitted                 31   100%    31      -0.082  [-0.237, +0.066]
+     exits: {'resolution': 23, 'signal': 8}
+   blocked                   8   100%     8      -0.271  [-0.514, -0.031] *
+     exits: {'resolution': 5, 'signal': 3}
+
    threshold sweeps (profit_edge x n_markets = volume-aware total, ignores exposure caps)
    min_edge:
        0.00  mkts=  48 hit= 62.5% edge= -0.083  total=   -3.99

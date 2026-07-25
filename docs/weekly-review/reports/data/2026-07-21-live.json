@@ -575,6 +575,217 @@
       "significant": false
     }
   ],
+  "gate_replays": [
+    {
+      "admitted": {
+        "exit_mix": {
+          "resolution": 25,
+          "signal": 10
+        },
+        "fill_rate": 1.0,
+        "n_filled": 35,
+        "n_markets": 35,
+        "n_signals": 35,
+        "pnl_ci": [
+          -0.2686,
+          0.0183
+        ],
+        "pnl_per_contract": -0.1246,
+        "significant": false
+      },
+      "blocked": {
+        "exit_mix": {
+          "resolution": 3
+        },
+        "fill_rate": 1.0,
+        "n_filled": 3,
+        "n_markets": 3,
+        "n_signals": 3,
+        "pnl_ci": [
+          -0.35,
+          0.57
+        ],
+        "pnl_per_contract": 0.1967,
+        "significant": false
+      },
+      "gate": "min_confidence",
+      "setting": "0.60"
+    },
+    {
+      "admitted": {
+        "exit_mix": {
+          "resolution": 14,
+          "signal": 9
+        },
+        "fill_rate": 1.0,
+        "n_filled": 23,
+        "n_markets": 23,
+        "n_signals": 23,
+        "pnl_ci": [
+          -0.3691,
+          -0.0574
+        ],
+        "pnl_per_contract": -0.21,
+        "significant": true
+      },
+      "blocked": {
+        "exit_mix": {
+          "resolution": 4,
+          "unfilled": 28
+        },
+        "fill_rate": 0.125,
+        "n_filled": 4,
+        "n_markets": 32,
+        "n_signals": 32,
+        "pnl_ci": [
+          -0.0609,
+          0.0694
+        ],
+        "pnl_per_contract": 0.0081,
+        "significant": false
+      },
+      "gate": "min_edge",
+      "setting": "0.150"
+    },
+    {
+      "admitted": {
+        "exit_mix": {
+          "resolution": 26,
+          "signal": 10
+        },
+        "fill_rate": 1.0,
+        "n_filled": 36,
+        "n_markets": 36,
+        "n_signals": 36,
+        "pnl_ci": [
+          -0.2561,
+          0.04
+        ],
+        "pnl_per_contract": -0.1064,
+        "significant": false
+      },
+      "blocked": {
+        "exit_mix": {},
+        "fill_rate": 0.0,
+        "n_filled": 0,
+        "n_markets": 0,
+        "n_signals": 0,
+        "pnl_ci": [
+          0.0,
+          0.0
+        ],
+        "pnl_per_contract": 0.0,
+        "significant": false
+      },
+      "gate": "days_to_close",
+      "setting": "[0.25, 7]"
+    },
+    {
+      "admitted": {
+        "exit_mix": {
+          "resolution": 26,
+          "signal": 10
+        },
+        "fill_rate": 1.0,
+        "n_filled": 36,
+        "n_markets": 36,
+        "n_signals": 36,
+        "pnl_ci": [
+          -0.2561,
+          0.04
+        ],
+        "pnl_per_contract": -0.1064,
+        "significant": false
+      },
+      "blocked": {
+        "exit_mix": {},
+        "fill_rate": 0.0,
+        "n_filled": 0,
+        "n_markets": 0,
+        "n_signals": 0,
+        "pnl_ci": [
+          0.0,
+          0.0
+        ],
+        "pnl_per_contract": 0.0,
+        "significant": false
+      },
+      "gate": "mid_price_band",
+      "setting": "[0.10, 0.95]"
+    },
+    {
+      "admitted": {
+        "exit_mix": {
+          "resolution": 25,
+          "signal": 9
+        },
+        "fill_rate": 1.0,
+        "n_filled": 34,
+        "n_markets": 34,
+        "n_signals": 34,
+        "pnl_ci": [
+          -0.245,
+          0.0676
+        ],
+        "pnl_per_contract": -0.0829,
+        "significant": false
+      },
+      "blocked": {
+        "exit_mix": {
+          "resolution": 1,
+          "signal": 1
+        },
+        "fill_rate": 1.0,
+        "n_filled": 2,
+        "n_markets": 2,
+        "n_signals": 2,
+        "pnl_ci": [
+          -0.54,
+          -0.47
+        ],
+        "pnl_per_contract": -0.505,
+        "significant": true
+      },
+      "gate": "max_spread",
+      "setting": "0.075"
+    },
+    {
+      "admitted": {
+        "exit_mix": {
+          "resolution": 23,
+          "signal": 8
+        },
+        "fill_rate": 1.0,
+        "n_filled": 31,
+        "n_markets": 31,
+        "n_signals": 31,
+        "pnl_ci": [
+          -0.2374,
+          0.0665
+        ],
+        "pnl_per_contract": -0.0819,
+        "significant": false
+      },
+      "blocked": {
+        "exit_mix": {
+          "resolution": 5,
+          "signal": 3
+        },
+        "fill_rate": 1.0,
+        "n_filled": 8,
+        "n_markets": 8,
+        "n_signals": 8,
+        "pnl_ci": [
+          -0.5137,
+          -0.0312
+        ],
+        "pnl_per_contract": -0.2712,
+        "significant": true
+      },
+      "gate": "max_edge",
+      "setting": "0.400"
+    }
+  ],
   "gate_stats": [
     {
       "admitted": {
