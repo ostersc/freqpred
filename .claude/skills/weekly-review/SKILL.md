@@ -128,6 +128,14 @@ which cell happened to clear zero.
 | 6. Assessor | Is sizing earning its cost? | Capital tilt near zero means a flat tax, not a discriminator. A rising neutral-fallback rate is an *outage*, not a quality change — check that first |
 | 7. Sources | Which sources correlate with profit? | Overlapping populations: a signal retrieving six sources counts under all six, so these do not decompose additively, and a bad-looking source may just co-occur with hard markets |
 
+**The threshold-sweep trap.** When per-signal value is negative at every setting
+— which it currently is for every gate — the sweep's optimum is always "trade
+less", and the limiting case is trading nothing, worth $0. A row showing
+`max_days_to_close = 1.0` beating the current setting is not an edge
+improvement; it keeps 3 of 36 markets. Before quoting any sweep row as a gain,
+check whether `$/sig` is positive at that value. If it is not, the only honest
+conclusion is that gate tuning cannot fix the problem.
+
 Two things the report cannot see, which you must not paper over:
 
 - **`min_volume_24h` is not evaluable.** `markets.volume_24h` holds the current

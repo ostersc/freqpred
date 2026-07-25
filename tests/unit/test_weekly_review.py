@@ -456,6 +456,35 @@ def test_entry_gate_analysis_days_to_close_band() -> None:
     assert stats["days_to_close"].admitted.n_markets == 1
 
 
+def test_a_gate_delays_entry_rather_than_dropping_the_market() -> None:
+    """Filter-then-dedupe, not dedupe-then-filter.
+
+    Production evaluates every signal and enters on the first that passes, so a
+    market whose FIRST signal fails a gate is entered later, not lost. Getting
+    this backwards understates volume at tighter thresholds and mislabels a
+    delayed entry as a blocked one — it fabricated a `max_days_to_close` win
+    worth +1.47 that vanished once the order was corrected.
+    """
+    signals = [
+        _signal(market_id="M1", edge=0.02, created_offset_h=1, signal_id="early-weak"),
+        _signal(market_id="M1", edge=0.25, created_offset_h=5, signal_id="late-strong"),
+    ]
+    stats = {g.gate: g for g in entry_gate_analysis(signals, _Config())}
+    # The market qualifies via its later signal, so it is admitted, not blocked.
+    assert stats["min_edge"].admitted.n_markets == 1
+    assert stats["min_edge"].blocked.n_markets == 0
+
+
+def test_a_market_no_signal_ever_qualifies_for_is_blocked() -> None:
+    signals = [
+        _signal(market_id="M1", edge=0.02, created_offset_h=1, signal_id="a"),
+        _signal(market_id="M1", edge=0.03, created_offset_h=5, signal_id="b"),
+    ]
+    stats = {g.gate: g for g in entry_gate_analysis(signals, _Config())}
+    assert stats["min_edge"].admitted.n_markets == 0
+    assert stats["min_edge"].blocked.n_markets == 1
+
+
 def test_gate_threshold_sweep_is_monotone_in_admitted_count() -> None:
     signals = [
         _signal(market_id=f"M{i}", edge=i / 100.0, result="yes") for i in range(1, 40)
@@ -638,6 +667,7 @@ def _review():
         },
         gate_stats=entry_gate_analysis(signals, _Config()),
         gate_replays=[],
+        gate_replay_sweeps=[],
         gate_sweeps=gate_threshold_sweep(signals, _Config()),
         accuracy_by_week=accuracy_by(signals, lambda s: "2026-W30"),
         accuracy_by_version=accuracy_by(signals, lambda s: s.prompt_version),

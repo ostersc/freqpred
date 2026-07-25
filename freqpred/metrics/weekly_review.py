@@ -260,6 +260,30 @@ class SweepPoint:
 
 
 @dataclass(frozen=True)
+class ReplaySweepPoint:
+    """One candidate threshold, scored through the strategy's real rules.
+
+    `total_pnl` is the sum over admitted signals, not the mean — it is what the
+    setting would have earned at one contract each, so it already accounts for
+    unfilled orders (worth $0) rather than averaging them away. That is the
+    objective to optimise; `pnl_per_signal` is only there to show the mix.
+    """
+
+    gate: str
+    value: float
+    n_signals: int
+    n_filled: int
+    n_markets: int
+    pnl_per_signal: float
+    total_pnl: float
+    is_current: bool
+
+    @property
+    def fill_rate(self) -> float:
+        return self.n_filled / self.n_signals if self.n_signals else 0.0
+
+
+@dataclass(frozen=True)
 class AssessorStat:
     version: str
     n_signals: int
@@ -288,6 +312,7 @@ class WeeklyReview:
     candle_coverage: dict[str, int]
     gate_stats: list[GateStat]
     gate_replays: list[tuple[str, str, ReplayStat, ReplayStat]]
+    gate_replay_sweeps: list[ReplaySweepPoint]
     gate_sweeps: list[SweepPoint]
     accuracy_by_week: list[GroupStat]
     accuracy_by_version: list[GroupStat]
@@ -391,6 +416,13 @@ def first_per_market(signals: Iterable[ResolvedSignal]) -> list[ResolvedSignal]:
     Entry is a once-per-market decision — the strategy does not re-enter a market
     it already holds — so counterfactual entry analysis must not count the same
     market once per re-evaluation. Ties break on signal_id for determinism.
+
+    **Order matters: filter, then call this.** Production evaluates every signal
+    as it arrives and enters on the first that passes every gate, so a market
+    whose first signal fails a gate is not lost — it is entered later, on a
+    signal that passes. Taking the earliest signal and then testing the gate
+    instead answers "did the FIRST signal pass", which understates volume at
+    tighter thresholds and mislabels a delayed entry as no entry at all.
     """
     best: dict[str, ResolvedSignal] = {}
     for sig in sorted(signals, key=lambda s: (s.created_at, s.signal_id)):
@@ -774,9 +806,14 @@ def entry_gate_analysis(
     for name, (setting, predicate) in gates.items():
         others = [p for gname, (_, p) in gates.items() if gname != name]
         candidates = [s for s in signals if all(p(s) for p in others)]
-        eligible = first_per_market(candidates)
-        admitted = [s for s in eligible if predicate(s)]
-        blocked = [s for s in eligible if not predicate(s)]
+        # Filter, then dedupe: a market whose first signal fails this gate is
+        # entered later on one that passes, not lost. Blocked means no signal
+        # ever cleared it.
+        admitted = first_per_market([s for s in candidates if predicate(s)])
+        admitted_ids = {s.market_id for s in admitted}
+        blocked = [
+            s for s in first_per_market(candidates) if s.market_id not in admitted_ids
+        ]
         stats.append(
             GateStat(
                 gate=name,
@@ -837,9 +874,20 @@ def gate_replay_analysis(
     out: list[tuple[str, str, ReplayStat, ReplayStat]] = []
     for name, (setting, predicate) in gates.items():
         others = [p for gname, (_, p) in gates.items() if gname != name]
-        eligible = first_per_market([s for s in signals if all(p(s) for p in others)])
-        admitted_trades = [t for s in eligible if predicate(s) and (t := simulate(s))]
-        blocked_trades = [t for s in eligible if not predicate(s) and (t := simulate(s))]
+        eligible = [s for s in signals if all(p(s) for p in others)]
+
+        # Admitted: markets where SOME signal clears this gate too — entered on
+        # the first one that does, exactly as production would.
+        admitted_sigs = first_per_market([s for s in eligible if predicate(s)])
+        admitted_ids = {s.market_id for s in admitted_sigs}
+        # Blocked: markets where NO signal ever cleared it. The counterfactual
+        # entry is their earliest otherwise-eligible signal.
+        blocked_sigs = [
+            s for s in first_per_market(eligible) if s.market_id not in admitted_ids
+        ]
+
+        admitted_trades = [t for s in admitted_sigs if (t := simulate(s))]
+        blocked_trades = [t for s in blocked_sigs if (t := simulate(s))]
         out.append(
             (
                 name,
@@ -849,6 +897,131 @@ def gate_replay_analysis(
             )
         )
     out.sort(key=lambda g: -g[3].pnl_per_contract * g[3].n_markets)
+    return out
+
+
+#: Candidate values per gate. Each grid includes the current production value so
+#: the "what we run now" row is directly comparable to the alternatives.
+DEFAULT_REPLAY_GRIDS: dict[str, tuple[float, ...]] = {
+    "min_edge": (0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30),
+    "max_edge": (0.20, 0.30, 0.40, 0.50, 0.75, 1.0),
+    "min_confidence": (0.0, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80),
+    "max_spread": (0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 1.0),
+    "max_days_to_close": (1.0, 2.0, 3.0, 5.0, 7.0, 14.0),
+    "max_mid_price": (0.80, 0.85, 0.90, 0.95, 1.0),
+    "min_mid_price": (0.0, 0.05, 0.10, 0.15, 0.20),
+}
+
+
+def _threshold_predicate(gate: str, value: float) -> Callable[[ResolvedSignal], bool]:
+    """Admission test for one gate at a candidate value."""
+    if gate == "min_edge":
+        return lambda s: s.edge >= value
+    if gate == "max_edge":
+        return lambda s: s.edge <= value
+    if gate == "min_confidence":
+        return lambda s: s.confidence >= value
+    if gate == "max_days_to_close":
+        return lambda s: s.days_to_close <= value
+    if gate == "max_mid_price":
+        return lambda s: entry_side_cost(s.direction, s.market_mid_at_signal) <= value
+    if gate == "min_mid_price":
+        return lambda s: entry_side_cost(s.direction, s.market_mid_at_signal) >= value
+    if gate == "max_spread":
+
+        def _spread_ok(s: ResolvedSignal) -> bool:
+            # Unreconstructible books are admitted, never blocked — an artefact
+            # must not masquerade as a gate rejecting a trade.
+            spread = reconstruct_spread(
+                s.direction, s.market_mid_at_signal, s.market_ask_at_signal
+            )
+            return True if spread is None else spread <= value
+
+        return _spread_ok
+    raise ValueError(f"no threshold predicate for gate {gate!r}")
+
+
+def _current_setting(gate: str, config: object) -> float | None:
+    """The production value for a gate, for marking the baseline row."""
+    mapping = {
+        "min_edge": "min_edge",
+        "max_edge": "max_edge",
+        "min_confidence": "min_confidence",
+        "max_days_to_close": "max_days_to_close",
+        "max_mid_price": "max_mid_price",
+        "min_mid_price": "min_mid_price",
+    }
+    if gate in mapping:
+        raw = getattr(config, mapping[gate], None)
+        return None if raw is None else float(raw)
+    if gate == "max_spread":
+        raw = getattr(config, "max_spread", None)
+        return (
+            float(raw)
+            if raw is not None
+            else float(getattr(config, "min_edge", 0.0)) / 2.0
+        )
+    return None
+
+
+def gate_threshold_replay_sweep(
+    signals: Sequence[ResolvedSignal],
+    config: object,
+    simulate: Callable[[ResolvedSignal], object | None],
+    *,
+    grids: dict[str, Sequence[float]] | None = None,
+) -> list[ReplaySweepPoint]:
+    """Sweep each gate's threshold, scoring through the real entry/exit rules.
+
+    One gate moves at a time with the others held at their configured values, so
+    each row answers "what if we changed only this". That deliberately cannot
+    find interactions — two gates that are jointly wrong will each look fine —
+    and the grids are only as good as the coverage behind them, so a row backed
+    by a handful of markets is a direction, not a target.
+
+    Unlike `gate_threshold_sweep`, an unfilled limit order counts as an admitted
+    signal worth $0 rather than a trade at the ask. On a limit-entry strategy
+    that is the difference between a real answer and a fictional one.
+    """
+    grids = grids or DEFAULT_REPLAY_GRIDS
+    base = _gate_predicates(config)
+    out: list[ReplaySweepPoint] = []
+
+    for gate, values in grids.items():
+        # Hold every OTHER configured gate fixed. `mid_price_band` and
+        # `days_to_close` are single predicates covering both bounds, so they are
+        # dropped whenever this sweep moves either of their edges.
+        excluded = {gate}
+        if gate in ("max_mid_price", "min_mid_price"):
+            excluded.add("mid_price_band")
+        if gate == "max_days_to_close":
+            excluded.add("days_to_close")
+        if gate in ("min_edge", "max_edge"):
+            excluded.add({"min_edge": "min_edge", "max_edge": "max_edge"}[gate])
+        others = [p for gname, (_, p) in base.items() if gname not in excluded]
+        eligible = [s for s in signals if all(p(s) for p in others)]
+        current = _current_setting(gate, config)
+
+        for value in values:
+            predicate = _threshold_predicate(gate, value)
+            # Filter first, then take the earliest survivor per market: a tighter
+            # threshold delays entry to a later qualifying signal rather than
+            # dropping the market.
+            admitted = first_per_market([s for s in eligible if predicate(s)])
+            trades = [t for s in admitted if (t := simulate(s))]
+            pnls = [t.pnl_per_contract for t in trades]  # type: ignore[attr-defined]
+            out.append(
+                ReplaySweepPoint(
+                    gate=gate,
+                    value=value,
+                    n_signals=len(trades),
+                    n_filled=sum(1 for t in trades if t.filled),  # type: ignore[attr-defined]
+                    n_markets=len({t.market_id for t in trades}),  # type: ignore[attr-defined]
+                    pnl_per_signal=(sum(pnls) / len(pnls)) if pnls else 0.0,
+                    total_pnl=sum(pnls),
+                    is_current=current is not None and abs(value - current) < 1e-9,
+                )
+            )
     return out
 
 
@@ -875,7 +1048,9 @@ def gate_threshold_sweep(
         if gate not in base:
             continue
         others = [p for gname, (_, p) in base.items() if gname != gate]
-        candidates = first_per_market([s for s in signals if all(p(s) for p in others)])
+        # Filter, then dedupe — same reason as `first_per_market`'s docstring:
+        # a tighter threshold delays entry rather than removing the market.
+        candidates = [s for s in signals if all(p(s) for p in others)]
         for value in values:
             if gate == "min_edge":
                 kept = [s for s in candidates if s.edge >= value]
@@ -893,7 +1068,7 @@ def gate_threshold_sweep(
                     is None
                     or sp <= value
                 ]
-            stat = group_stat(f"{gate}={value}", kept, bootstrap=False)
+            stat = group_stat(f"{gate}={value}", first_per_market(kept), bootstrap=False)
             out.append(
                 SweepPoint(
                     gate=gate,
@@ -1569,6 +1744,7 @@ async def build_weekly_review(
     # over stored price paths. Restricted to markets with candle coverage so a
     # row never silently mixes replayed trades with buy-and-hold approximations.
     gate_replays: list[tuple[str, str, ReplayStat, ReplayStat]] = []
+    gate_replay_sweeps: list[ReplaySweepPoint] = []
     covered_ids = await _markets_with_candles(session, signals)
     if covered_ids:
         paths, later_signals = await load_paths_and_signals(
@@ -1601,6 +1777,7 @@ async def build_weekly_review(
             )
 
         gate_replays = gate_replay_analysis(signals, config, _simulate)
+        gate_replay_sweeps = gate_threshold_replay_sweep(signals, config, _simulate)
 
     if mode is None and len({p.mode for p in history_positions}) > 1:
         warnings.append(
@@ -1625,6 +1802,7 @@ async def build_weekly_review(
         candle_coverage=coverage,
         gate_stats=entry_gate_analysis(signals, config),
         gate_replays=gate_replays,
+        gate_replay_sweeps=gate_replay_sweeps,
         gate_sweeps=gate_threshold_sweep(signals, config),
         accuracy_by_week=accuracy_by(
             signals, lambda s: f"{s.created_at:%Y-W%V}", min_signals=5
@@ -1821,7 +1999,30 @@ def render_text(review: WeeklyReview) -> str:  # noqa: C901 — a report is a lo
                     add(f"     exits: {dict(sorted(stat.exit_mix.items()))}")
         add("")
 
-    add("   threshold sweeps (profit_edge x n_markets = volume-aware total, ignores exposure caps)")
+    if review.gate_replay_sweeps:
+        add("   THRESHOLD SWEEPS, replayed through the real rules. One gate moves at a")
+        add("   time with the others held at their configured values, so each row answers")
+        add("   'what if we changed only this'. It cannot find interactions. `total` is the")
+        add("   sum over admitted signals — what the setting earns at one contract each,")
+        add("   with unfilled orders correctly worth $0. Optimise `total`, not `$/sig`.")
+        add("   `<` marks the value in production today.")
+        current_gate = ""
+        for point in review.gate_replay_sweeps:
+            if point.gate != current_gate:
+                current_gate = point.gate
+                add(f"   {current_gate}:")
+                add(
+                    f"     {'value':>7} {'n':>4} {'fill':>6} {'mkts':>5} "
+                    f"{'$/sig':>8} {'total':>9}"
+                )
+            add(
+                f"     {point.value:>7.2f} {point.n_signals:>4} {point.fill_rate:>6.0%} "
+                f"{point.n_markets:>5} {point.pnl_per_signal:>+8.3f} "
+                f"{point.total_pnl:>+9.2f}{'  <' if point.is_current else ''}"
+            )
+        add("")
+
+    add("   legacy sweeps (buy-at-ask, hold-to-settlement — superseded by the block above)")
     current_gate = ""
     for point in review.gate_sweeps:
         if point.gate != current_gate:
@@ -1975,6 +2176,20 @@ def to_dict(review: WeeklyReview) -> dict:
                 },
             }
             for name, setting, admitted, blocked in review.gate_replays
+        ],
+        "gate_replay_sweeps": [
+            {
+                "gate": p.gate,
+                "value": p.value,
+                "n_signals": p.n_signals,
+                "n_filled": p.n_filled,
+                "fill_rate": round(p.fill_rate, 4),
+                "n_markets": p.n_markets,
+                "pnl_per_signal": round(p.pnl_per_signal, 4),
+                "total_pnl": round(p.total_pnl, 3),
+                "is_current": p.is_current,
+            }
+            for p in review.gate_replay_sweeps
         ],
         "gate_sweeps": [
             {
