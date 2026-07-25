@@ -182,7 +182,13 @@ Sends a test message to confirm that the configured credentials work. This comma
 uv run freqpred db migrate
 ```
 
-Equivalent to `alembic upgrade head`. Safe to run repeatedly.
+Equivalent to `alembic upgrade head` — it shells out to exactly that. Safe to run repeatedly.
+
+**Requires `DATABASE_URL` to be exported.** Migrations resolve the database from the environment only; `migrations/env.py` does not read `config/config.yaml`, and `.env` is not auto-loaded by `uv run`. Without it the command exits with `RuntimeError: DATABASE_URL environment variable is not set`. To target a non-default database (test, demo), pass it inline and call alembic directly:
+
+```bash
+DATABASE_URL="postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test" uv run alembic upgrade head
+```
 
 ---
 

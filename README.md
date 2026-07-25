@@ -39,6 +39,9 @@ cp config/config.example.yaml config/config.yaml
 docker-compose up -d db
 
 # 4. Apply database migrations
+#    Migrations read DATABASE_URL from the environment ONLY — they do not read
+#    config.yaml, and .env is not auto-loaded. Export it first:
+export DATABASE_URL="postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred"
 uv run freqpred db migrate
 
 # 5. (Optional) Database web UI at http://localhost:8080
@@ -195,6 +198,35 @@ Red dashed edges show `IPredictionStrategy` callback invocations — the single 
 
 See [SPEC.md §6](SPEC.md) for component responsibilities, [SPEC.md §8](SPEC.md) for the full strategy interface, and [SPEC.md §9](SPEC.md) for the signal pipeline.
 
+### Code layout
+
+Where each subsystem above lives:
+
+```
+freqpred/
+├── markets/       Kalshi REST client, market watcher, position watcher
+├── ingestion/     market selector, catalyst generator, schedulers, fetchers, document store
+├── rag/           sentence-transformers embedder + pgvector retriever
+├── signal/        signal pipeline + LLM analysis
+├── strategy/      IPredictionStrategy interface + bundled strategies
+├── trading/       order manager, risk caps, ledger
+├── metrics/       calibration, sizing assessment, reporting, series history
+├── llm/           Claude client + LLM audit log
+├── runtime/       freshness telemetry (per-service heartbeats)
+├── alerts/        Telegram + Discord dispatch
+├── bench/         benchmark harness internals
+├── replay/        frozen fixture replay
+├── ops/           operational helpers
+└── dashboard/
+    ├── api/       FastAPI routes, schemas, app
+    └── ui/        React app (Vite) — src/{api,components,hooks,pages}, 10 pages
+
+benchmarks/   scenario banks + eval cache        migrations/   Alembic revisions
+config/       config.example.yaml (+ gitignored local config.yaml)
+scripts/      audit + eval tooling               strategies/   user strategy files (gitignored)
+tests/        unit/ (no DB, mocked) + integration/ (needs Postgres)
+```
+
 ---
 
 ## CLI and alerts
@@ -241,8 +273,12 @@ uv run ruff check .
 # Create a new migration
 uv run alembic revision --autogenerate -m "description"
 
-# Apply migrations
+# Apply migrations (needs DATABASE_URL exported — see Setup step 4)
 uv run freqpred db migrate
+
+# Apply/roll back against a non-default database (test, demo) — pass it inline
+DATABASE_URL="postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test" uv run alembic upgrade head
+DATABASE_URL="postgresql+asyncpg://freqpred:freqpred@localhost:5432/freqpred_test" uv run alembic downgrade base
 
 # Dashboard dev server (frontend hot-reload, proxies /api to freqpred run on 8000)
 # Start freqpred run first, then:
@@ -353,10 +389,14 @@ Other one-off analysis and maintenance scripts live in `scripts/` — see each s
 
 - **Python 3.12+**, FastAPI, SQLAlchemy 2.0 async, Alembic
 - **PostgreSQL 16 + pgvector** — market/signal/position storage + vector search
+- **Pydantic v2** — config validation and all external data models
 - **Claude (Anthropic)** — signal analysis (`claude-sonnet-4-6`) + catalyst generation (`claude-haiku-4-5`)
 - **sentence-transformers** — local document embeddings (`all-MiniLM-L6-v2`, 384 dims, no API key)
-- **Tavily + NewsAPI + Reddit + GDELT + Internet Archive TV** — news ingestion
+- **Kalshi Trade API v2** — REST `https://api.elections.kalshi.com/trade-api/v2`, WebSocket `wss://api.elections.kalshi.com/trade-api/ws/v2`
+- **Tavily + NewsAPI + Reddit + GDELT + Internet Archive TV** — news ingestion, over **httpx** (async)
 - **React 18 + TypeScript + Vite + Tailwind CSS** — dashboard frontend (served from FastAPI `/` when built; Vite in dev)
+- **TanStack Query v5 + Recharts** — dashboard data fetching/polling and charts
+- **pytest + pytest-asyncio** — testing
 - **uv** — dependency management
 
 ---
