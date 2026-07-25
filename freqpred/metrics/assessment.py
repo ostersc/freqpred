@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-_PROMPT_VERSION = "assessment-v6"
+_PROMPT_VERSION = "assessment-v8"
 _QUERY_TYPE = "signal_assessment"
 _LOOKBACK_DAYS = 90
 _MAX_FACTORS = 5
@@ -44,9 +44,28 @@ The trade direction and base edge have already been decided upstream.
 Do not re-predict the market outcome.
 Do not change the trade direction.
 Do not discuss exits or stop losses.
-Your task is only to judge how much we should trust the base position sizing based on:
-1. evidence-source quality history, and
-2. historical performance in similar markets.
+Your task is only to judge how much we should trust the base position sizing.
+
+How to reach a score:
+- Start from the reference class. Family-level statistics — family and \
+exact-question Brier, and the strategy's win rate and mean PnL for this series — \
+describe the population this signal belongs to. Within a single series they are \
+frequently IDENTICAL for every signal, so on their own they cannot distinguish \
+this signal from its siblings. Use them to set a starting point, and say what \
+that starting point is. (Across DIFFERENT series they do discriminate, and there \
+they are a primary signal — weight them fully when the comparison is between \
+families.)
+- Then move off that starting point using evidence specific to THIS signal: the \
+trajectory in `market_reevaluation_history`, the source mix and \
+weighted_delta_vs_overall in `source_quality_summary`, the exact-question subset \
+where its sample is meaningful, days_to_close, and any genuine liquidity data. \
+If nothing signal-specific distinguishes it, say so and stay at the starting point.
+- A score that could be copied unchanged onto any other signal in the same series \
+has not done its job. Two signals in the same family with different trajectories \
+should not receive the same score.
+- Use the full 0.0-1.0 range. A score above 0.5 is the correct output when the \
+signal-specific evidence is favourable, even if the family baseline is weak. Do \
+not compress every judgment into a narrow band.
 
 Guidelines:
 - Be conservative when sample sizes are small, mixed, or noisy.
@@ -55,29 +74,56 @@ Guidelines:
 - If source quality and similar-market history disagree, explain the conflict \
 and stay closer to neutral unless one side clearly has stronger data.
 - Treat this as a sizing-confidence judgment, not a market-prediction task.
-- If you populate the warnings field with any concern, your trust_score MUST \
-be ≤ 0.5. Warnings and a trust_score above 0.5 are contradictory — do not do both.
-- When `edge_band_calibration` is present, weigh its measured hit_rate against \
-avg_model_implied_p for this signal's own edge band — a wide gap there (the \
-model claims much more confidence than the band has actually earned) is the \
-warning sign, not the edge's raw size. A large edge with a well-calibrated \
-history for its band is not automatically suspect.
+- `edge_band_calibration` is the most important block, and \
+`profit_edge_vs_price` is the figure that matters: hit_rate minus the average \
+price actually paid. Positive means signals in this cell historically BEAT the \
+price they traded at; negative means they lost money. Let that govern. Prefer \
+`same_direction_only` wherever its sample is adequate, and consult \
+`this_direction_all_bands` when the band-level cell is thin — trade direction is \
+a strong and persistent discriminator in this data, and it is one of the few \
+inputs that genuinely varies between signals.
+- `avg_model_implied_p` is the model's own claim about itself. The gap between \
+it and hit_rate measures the model's SELF-KNOWLEDGE, which is a different \
+question from whether the trade earns money, and the two frequently disagree: a \
+cell can be badly overconfident and still profitable, or look perfectly \
+calibrated and still lose. Do NOT size down on an overconfidence gap alone. \
+Check profit_edge_vs_price first; where the two conflict, profit wins. Mention \
+the gap only if it changes your conclusion.
+- The raw size of this signal's own edge is not itself evidence of anything. A \
+large edge in a cell with a positive profit_edge_vs_price is not suspect.
 - When `market_reevaluation_history` is present, read `sampled_history` for \
 the actual trajectory: is the edge widening or narrowing, are the model's \
 and the market's probabilities converging or diverging, and is the traded \
 direction stable (see direction_change_count)? Judge the observed \
 trajectory on its own terms — no single pattern is inherently suspect.
+- Any field marked 'unavailable_at_signal_time' is UNKNOWN, not zero. Draw no \
+inference from it in either direction.
 
-Call the submit_assessment tool with your judgment:
+Call the submit_assessment tool with your judgment.
+
+trust_score is the only output that affects position sizing; reasoning, \
+key_factors, and warnings exist solely so the decision can be audited later. \
+Spend your output budget accordingly — do not restate the payload, do not \
+recite figures that are already in the input, and do not explain your method. \
+Emit trust_score as the FIRST field in the tool call, before any prose.
+
 - trust_score: 0.0–1.0; 0.5 = neutral, < 0.5 = lower confidence, > 0.5 = higher confidence
-- reasoning: 1-3 concise sentences
-- key_factors: 1-5 short strings
-- warnings: 0-3 short strings; if any warnings present, trust_score MUST be ≤ 0.5
+- reasoning: at most 2 sentences. Give the reference-class starting point as a \
+number, then what moved you off it and by roughly how much. Nothing else.
+- key_factors: 1-3 short strings — routine observations and background context \
+belong here
+- warnings: 0-3 short strings recording concerns a reviewer should see. This is \
+an audit annotation and has NO arithmetic relationship to trust_score. Noting a \
+concern does not oblige you to lower the score, and a trust_score above 0.5 \
+alongside a genuine warning is a legitimate, expected combination when the \
+signal-specific evidence supports it. Record what concerned you, then set \
+trust_score on the merits.
 """
 
 _ASSESSMENT_TOOL: dict = {
     "name": "submit_assessment",
     "description": "Submit the sizing-confidence assessment for this signal.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {
@@ -87,6 +133,7 @@ _ASSESSMENT_TOOL: dict = {
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["trust_score", "reasoning", "key_factors", "warnings"],
+        "additionalProperties": False,
     },
 }
 
@@ -396,6 +443,10 @@ def _edge_calibration_row_summary(row: EdgeCalibrationScoreRow | None) -> dict[s
         "hit_rate": round(row.hit_rate, 3),
         "avg_market_implied_p": round(row.avg_market_implied_p, 3),
         "avg_model_implied_p": round(row.avg_model_implied_p, 3),
+        # v8: what the cell actually EARNED over the price paid. Every figure
+        # needed for this was already here; what was missing was the subtraction
+        # and the instruction to care about it. See _SYSTEM_PROMPT.
+        "profit_edge_vs_price": round(row.hit_rate - row.avg_market_implied_p, 4),
     }
 
 
@@ -404,19 +455,26 @@ def _merge_edge_calibration_rows(
     other_direction: EdgeCalibrationScoreRow | None,
 ) -> dict[str, Any]:
     rows = [r for r in (same_direction, other_direction) if r is not None]
+    return _merge_rows(rows)
+
+
+def _merge_rows(rows: list[EdgeCalibrationScoreRow]) -> dict[str, Any]:
+    """Sample-size-weighted merge of calibration rows."""
+    rows = [r for r in rows if r is not None and r.n_signals > 0]
     if not rows:
         return {"n_signals": 0, "n_markets": 0}
     n_signals = sum(r.n_signals for r in rows)
+    hit_rate = sum(r.hit_rate * r.n_signals for r in rows) / n_signals
+    market_p = sum(r.avg_market_implied_p * r.n_signals for r in rows) / n_signals
     return {
         "n_signals": n_signals,
         "n_markets": sum(r.n_markets for r in rows),
-        "hit_rate": round(sum(r.hit_rate * r.n_signals for r in rows) / n_signals, 3),
-        "avg_market_implied_p": round(
-            sum(r.avg_market_implied_p * r.n_signals for r in rows) / n_signals, 3
-        ),
+        "hit_rate": round(hit_rate, 3),
+        "avg_market_implied_p": round(market_p, 3),
         "avg_model_implied_p": round(
             sum(r.avg_model_implied_p * r.n_signals for r in rows) / n_signals, 3
         ),
+        "profit_edge_vs_price": round(hit_rate - market_p, 4),
     }
 
 
@@ -456,6 +514,7 @@ async def _load_edge_band_calibration(
 
     same_direction_row = global_same_direction
     other_direction_row = await _latest(other_direction, None)
+    _series_scoped = False
 
     if market.series_ticker:
         series_same_direction = await _latest(signal.direction, market.series_ticker)
@@ -465,18 +524,43 @@ async def _load_edge_band_calibration(
         ):
             same_direction_row = series_same_direction
             other_direction_row = await _latest(other_direction, market.series_ticker)
+            _series_scoped = True
+
+    # v8: direction across ALL bands. Direction is the single most persistent
+    # discriminator in the data (KXTRUMPSAY, 8,410 resolved signals: NO earns
+    # +7.3pp over the price paid, YES loses 7.6pp, and YES is negative under
+    # every signal prompt version), while the band-level cell is often thin.
+    scope = market.series_ticker if _series_scoped else None
+    all_bands_stmt = (
+        select(EdgeCalibrationScoreRow)
+        .where(
+            EdgeCalibrationScoreRow.direction == signal.direction,
+            EdgeCalibrationScoreRow.series_ticker == scope
+            if scope is not None
+            else EdgeCalibrationScoreRow.series_ticker.is_(None),
+            EdgeCalibrationScoreRow.computed_at == same_direction_row.computed_at,
+        )
+    )
+    all_bands_rows = list((await session.execute(all_bands_stmt)).scalars().all())
 
     return {
         "description": (
-            "Empirical calibration for signals whose edge fell in the same "
-            "band as this one. hit_rate is what actually happened; "
-            "avg_model_implied_p is what the model claimed at signal time — "
-            "a large gap between them for this band is a documented failure "
-            "mode, not a hypothetical one."
+            "Empirical calibration for signals whose edge fell in the same band "
+            "as this one. profit_edge_vs_price = hit_rate minus "
+            "avg_market_implied_p is what signals in this cell actually EARNED "
+            "relative to the price paid: positive means the cell historically "
+            "beat its price, negative means it lost money. That is the figure "
+            "that determines profitability. avg_model_implied_p is the model's "
+            "own claim; the gap between it and hit_rate measures the model's "
+            "self-knowledge, which is a DIFFERENT question and frequently points "
+            "the other way. this_direction_all_bands aggregates every band for "
+            "this signal's traded direction — consult it when the band-level "
+            "cell is thin."
         ),
         "this_signal_edge_band": band,
         "all_directions": _merge_edge_calibration_rows(same_direction_row, other_direction_row),
         "same_direction_only": _edge_calibration_row_summary(same_direction_row),
+        "this_direction_all_bands": _merge_rows(all_bands_rows),
     }
 
 
@@ -896,10 +980,14 @@ async def assess_signal_context(
             signal_id=signal.id,
             strategy=strategy.config.name,
             prompt_version=_PROMPT_VERSION,
-            # 768 matches the audited v6 package; at 512 the judge's longer
-            # trajectory reasoning truncates the tool JSON before trust_score
-            # (observed live: falls back to neutral 1.0x, i.e. fail-open sizing).
-            max_tokens=768,
+            # 1024 matches the audited v8 package. 768 was tuned for v6 and is
+            # too tight for v8's profit-edge reasoning: in the first v8 draft the
+            # challenger averaged 721 output tokens and truncated mid-sentence on
+            # 2/9 calls. At 1024 on the 76-signal frozen set only 1/76 reached the
+            # cap. trust_score is also emitted FIRST now, so a truncation costs
+            # transparency but never the sizing decision (previously it could
+            # drop trust_score entirely and fail open to neutral 1.0x).
+            max_tokens=1024,
             json_tool=_ASSESSMENT_TOOL,
         )
         llm_query_id = llm_response.llm_query_id

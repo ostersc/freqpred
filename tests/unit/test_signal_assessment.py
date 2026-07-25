@@ -16,11 +16,15 @@ import freqpred.rag.models  # noqa: F401
 import freqpred.signal.models  # noqa: F401
 from freqpred.markets.models import Market
 from freqpred.metrics.assessment import (
+    _ASSESSMENT_TOOL,
+    _SYSTEM_PROMPT,
     _bucketed_history_sample,
     _build_prompt_payload,
     _direction_changes,
+    _edge_calibration_row_summary,
     _load_edge_band_calibration,
     _load_market_reevaluation_history,
+    _merge_rows,
     _parse_assessment_response,
     _trust_score_to_multiplier,
     assess_signal_context,
@@ -89,6 +93,74 @@ class _StubStrategy(IPredictionStrategy):
 
     def should_trade(self, signal: Signal, market: Market) -> bool:
         return True
+
+
+class TestV8ProfitEdgeFraming:
+    """v8's core change. Measured 2026-07-24 across 34 calibration cells with
+    n>=50: profit-vs-price and the model-overconfidence gap correlate only
+    +0.397, and 8 cells covering 2,880 signals point opposite ways. On
+    KXTRUMPSAY/NO/>40 the cell earns +0.043 over the price while showing a
+    -0.558 overconfidence gap, so a judge told to treat that gap as the warning
+    sign sizes DOWN a profitable band — observed live before the fix."""
+
+    def _row(self, hit_rate: float, market_p: float, model_p: float, n: int = 150):
+        return SimpleNamespace(
+            n_signals=n, n_markets=n // 4, hit_rate=hit_rate,
+            avg_market_implied_p=market_p, avg_model_implied_p=model_p,
+        )
+
+    def test_summary_reports_profit_over_price(self) -> None:
+        out = _edge_calibration_row_summary(self._row(0.281, 0.238, 0.839))
+        assert out["profit_edge_vs_price"] == pytest.approx(0.043, abs=1e-3)
+        # Profitable, yet deeply "overconfident" — the two disagree in sign.
+        assert out["hit_rate"] - out["avg_model_implied_p"] < -0.5
+
+    def test_merge_weights_by_sample_size_and_recomputes_profit(self) -> None:
+        merged = _merge_rows([
+            self._row(0.90, 0.60, 0.85, n=100),
+            self._row(0.50, 0.40, 0.85, n=100),
+        ])
+        assert merged["hit_rate"] == pytest.approx(0.70)
+        assert merged["avg_market_implied_p"] == pytest.approx(0.50)
+        # Recomputed from the merged aggregates, not averaged from the parts.
+        assert merged["profit_edge_vs_price"] == pytest.approx(0.20)
+
+    def test_merge_ignores_empty_rows(self) -> None:
+        assert _merge_rows([]) == {"n_signals": 0, "n_markets": 0}
+        assert _merge_rows([None]) == {"n_signals": 0, "n_markets": 0}
+
+    def test_prompt_directs_at_profit_not_self_consistency(self) -> None:
+        p = _SYSTEM_PROMPT
+        assert "profit_edge_vs_price" in p
+        assert "this_direction_all_bands" in p
+        assert "Do NOT size down on an overconfidence gap alone" in p
+        assert "where the two conflict, profit wins" in p
+
+    def test_prompt_no_longer_caps_score_on_warnings(self) -> None:
+        """v6 forced trust_score <= 0.5 whenever any warning was present. opus-5
+        emitted warnings on 30/30 calls, so it could never score above neutral —
+        across 60 calls the single response above 0.5 was the only one with zero
+        warnings. Severing that coupling produced 19 size_ups on the frozen set,
+        at a 78.9% hit rate against a 54.1% base."""
+        p = _SYSTEM_PROMPT
+        assert "MUST be ≤ 0.5" not in p
+        assert "NO arithmetic relationship" in p
+
+    def test_prompt_orders_trust_score_first_for_truncation_safety(self) -> None:
+        assert "FIRST field" in _SYSTEM_PROMPT
+
+
+def test_assessment_tool_is_strict_with_no_additional_properties() -> None:
+    """Without strict mode, a forced tool call has no server-side guarantee
+    on the shape of tool_use.input — an Opus 5 screen (2026-07-24) showed
+    this concretely: 5/30 live calls wrapped the whole payload in a bogus
+    envelope key ("parameters", "body", "paramName", or a hallucinated
+    {"tool_use_id", "input"} pair) instead of the flat schema, silently
+    failing _parse_assessment_response. strict + additionalProperties=false
+    makes that structurally impossible regardless of which model is behind
+    the call."""
+    assert _ASSESSMENT_TOOL["strict"] is True
+    assert _ASSESSMENT_TOOL["input_schema"]["additionalProperties"] is False
 
 
 def test_trust_score_to_multiplier_maps_neutral_and_edges() -> None:
@@ -773,6 +845,7 @@ async def test_assess_signal_context_passes_sections_to_llm() -> None:
     assert "prompt" in captured
     assert "edge_band_calibration" in captured["prompt"]
     assert "market_reevaluation_history" in captured["prompt"]
-    # 768 is the audited v6 budget; 512 truncated the tool JSON on a live call
-    # (reasoning first, trust_score never emitted -> fail-open neutral sizing).
-    assert captured["max_tokens"] == 768
+    # 1024 is the audited v8 budget. 768 was the v6 figure and is too tight for
+    # v8's profit-edge reasoning (2/9 calls truncated mid-sentence in the first
+    # draft); at 1024 only 1/76 reached the cap on the frozen eval set.
+    assert captured["max_tokens"] == 1024

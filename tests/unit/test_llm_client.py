@@ -227,6 +227,19 @@ class TestCostCalculation:
         assert abs(result.cost_usd - 30.00) < 1e-6
 
     @pytest.mark.asyncio
+    async def test_opus_5_priced_at_its_own_rate_not_sonnet_default(self) -> None:
+        """claude-opus-5 must have its own pricing entry, not silently fall
+        back to the Sonnet-level default."""
+        resp = _make_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
+        client, _ = _make_client(anthropic_response=resp)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock) as mock_log:
+            mock_log.return_value = 1
+            result = await client.complete(PROMPT, "claude-opus-5", QUERY_TYPE)
+
+        # 5.00/M input + 25.00/M output = $30.00
+        assert abs(result.cost_usd - 30.00) < 1e-6
+
+    @pytest.mark.asyncio
     async def test_cache_tokens_included_in_cost(self) -> None:
         """Cache write/read tokens must be billed, not silently dropped —
         cache_system=True calls previously counted only the uncached

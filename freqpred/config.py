@@ -36,7 +36,7 @@ class AnthropicConfig(BaseModel):
     api_key: str = Field(default="")
     primary_model: str = Field(default="claude-sonnet-4-6")
     cheap_model: str = Field(default="claude-haiku-4-5-20251001")
-    judgment_model: str = Field(default="claude-opus-4-7")
+    judgment_model: str = Field(default="claude-opus-5")
 
 
 class TavilyConfig(BaseModel):
