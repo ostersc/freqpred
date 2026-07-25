@@ -379,6 +379,16 @@ How it works and what it protects against:
 
 Reference runs: 2026-07-25, assessment-v8 + opus-5 on the frozen 76-signal set — capital tilt **+0.0751x vs +0.0170x, 95% CI (+0.0161, +0.0988)**, the first significant arm difference across the whole effort; ranking a wash (AUC 0.700 vs 0.674); v6 was inert (sd 0.027, 76/76 size_down) while v8 issued 19 size_up at a 78.9% hit rate vs a 54.1% base. Caveats: v8's edge is almost entirely *between* directions (within-YES AUC 0.294, below random), and neither arm beat the free prior (0.685). 2026-07-11, T94 ([#94](https://github.com/ostersc/freqpred/issues/94)) — prototype payload lifted corr(trust, outcome) 0.432 → 0.623 (95% CI on diff +0.019..+0.42) on 30 signals. 2026-07-12, T95 ([#95](https://github.com/ostersc/freqpred/issues/95)) three-arm re-run on the same 30 signals — control 0.432 / t94-as-shipped 0.492 / t95 0.569; the t95−t94 CI spanned zero at n=30 but t95 led every point estimate and produced the only size_up verdict (on a winner); note t94-as-shipped did not replicate the prototype's significance (+0.060 vs +0.191 against the same control), a caution on trusting any single n=30 run's CI. 2026-07-12, judgment-model screen opus-4-7 → opus-4-8 (v6 package unchanged; baseline = the adoption run's t95 arm via `--reuse-csv`) — wash: corr +0.588 vs +0.569, CI (−0.175, +0.157), same multiplier corr, slightly worse sample ROI, and 4.8 issued zero size_up where 4.7 had one (on a winner); stayed on opus-4-7 (`assessor_audit_pit_opus48.csv`).
 
+### Weekly profitability review
+
+`freqpred metrics weekly-review` is the recurring counterfactual analysis over resolved markets — the counterpart to the two audit harnesses above, but for the *strategy* rather than a model or prompt. It is deterministic, makes no LLM calls, writes nothing, and is free to re-run, so it can be pointed at any window.
+
+Seven sections: the window ledger; **exit effectiveness** (what every early exit earned versus holding to settlement — the only unbiased counterfactual in the report); an MAE-based **stoploss threshold sweep**; **marginal entry-gate analysis** (for each `StrategyConfig` gate, the realised profit-vs-price of the signals it blocks versus the ones it admits, with every other gate held fixed); **signal accuracy** by week, prompt version, and correlate slice; **assessor capital tilt**; and **per-source realised edge**.
+
+Three things it deliberately refuses to fake: `min_volume_24h` is not evaluable point-in-time (`markets.volume_24h` is the *current* value), a signal whose order book cannot be reconstructed is admitted rather than blocked by the spread gate, and the stoploss sweep reports both a censored and an uncensored arm because neither is unbiased on its own — MAE stops updating at the actual exit, while the uncensored population is conditioned on not having stopped.
+
+`.claude/skills/weekly-review/SKILL.md` (invoked as `/weekly-review`) is the weekly procedure built on it: read the review, discard what the traps explain, and produce at most three changes with an effect size, a confidence interval, a risk, and a revert trigger. Reports land in `docs/weekly-review/reports/` so each week scores the previous week's predictions.
+
 ### Utility scripts
 
 Other one-off analysis and maintenance scripts live in `scripts/` — see each script's module docstring for full usage.

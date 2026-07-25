@@ -171,6 +171,14 @@ The system monitors the Kalshi API changelog daily via `freqpred/ingestion/kalsh
 
 ---
 
+## Weekly profitability review
+
+Run weekly, after the week's markets settle. `freqpred metrics weekly-review` (engine: `freqpred/metrics/weekly_review.py`) produces the deterministic counterfactual analysis — exits vs holding to settlement, a stoploss sweep, marginal entry-gate effects, signal accuracy trend, assessor capital tilt, per-source edge. The interpretation procedure, the statistical traps in each section, and the required six-field format for a quantified recommendation live in the **`weekly-review` skill** — invoke it when asked to run the weekly review or "what should we improve". Reports are kept in `docs/weekly-review/reports/` so each week scores the previous week's predictions.
+
+The review may **nominate** a signal-prompt or assessor change but never adopt one — those go through the gates in `freqpred/signal/CLAUDE.md` and `freqpred/metrics/CLAUDE.md`.
+
+---
+
 ## Definition of done
 
 Before declaring any task complete, verify every acceptance criterion listed in the GitHub issue was actually met — not just that the code was written.

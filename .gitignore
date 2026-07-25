@@ -57,6 +57,11 @@ config/config.yaml
 strategies/*
 !strategies/.gitkeep
 
+# Weekly review: the authored reports and their JSON snapshots ARE tracked (a
+# snapshot cannot be regenerated later — outcomes accumulate, so re-running an
+# old week returns different numbers). One-time backfill dumps are not.
+docs/weekly-review/backfill/
+
 # Node / frontend
 freqpred/dashboard/ui/node_modules/
 freqpred/dashboard/ui/dist/

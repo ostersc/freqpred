@@ -148,6 +148,30 @@ Options:
 
 ---
 
+### `metrics weekly-review` — weekly profitability review with counterfactuals
+
+```bash
+uv run freqpred metrics weekly-review
+uv run freqpred metrics weekly-review --weeks 1 --mode live
+uv run freqpred metrics weekly-review --history-days 0 --all-versions
+uv run freqpred metrics weekly-review --json-out docs/weekly-review/reports/data/2026-07-21-live.json
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--strategy` | `PoliticsEdgeStrategy` | Strategy whose config supplies the entry-gate thresholds to counterfactual |
+| `--weeks` | `1` | Window length in weeks |
+| `--mode` | both | Restrict position analysis to `paper` or `live` |
+| `--history-days` | `90` | Lookback for the diagnostic sections; `0` = all history |
+| `--signal-prompt-version` | live cohort | Pin the signal cohort instead of using whichever version is currently producing signals |
+| `--all-versions` | false | Pool every signal prompt version (cohorts are not exchangeable — read the per-version table first) |
+| `--as-of` | now | Treat this ISO timestamp as "now", to reproduce a past week's review |
+| `--json-out` | — | Also write the review as JSON, for diffing one week against another |
+
+Seven sections: window ledger, exit effectiveness (early exits vs holding to settlement), an MAE-based stoploss threshold sweep, marginal entry-gate analysis (what each gate admits vs blocks, in realised profit-vs-price), signal accuracy by week/prompt-version/correlate slice, sizing-assessor capital tilt, and per-source realised edge. Deterministic — no LLM calls, no DB writes, free to re-run. Drives the `weekly-review` skill, which reads this output and proposes changes.
+
+---
+
 ### `report digest` — generate a daily summary
 
 ```bash

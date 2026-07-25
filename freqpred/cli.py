@@ -1812,6 +1812,133 @@ async def _metrics_source_calibration(
         )
 
 
+@metrics.command(name="weekly-review")
+@click.option(
+    "--strategy", "strategy_name", default="PoliticsEdgeStrategy", show_default=True,
+    help="Strategy whose config supplies the entry-gate thresholds to counterfactual.",
+)
+@click.option("--weeks", type=int, default=1, show_default=True, help="Window length in weeks.")
+@click.option(
+    "--mode",
+    type=click.Choice(["paper", "live"]),
+    default=None,
+    help="Restrict position analysis to one mode. Default: both, reported separately.",
+)
+@click.option(
+    "--history-days",
+    type=int,
+    default=90,
+    show_default=True,
+    help="Lookback for the diagnostic sections. 0 = all history.",
+)
+@click.option(
+    "--signal-prompt-version",
+    default=None,
+    help="Pin the signal cohort. Default: whichever version is currently producing signals.",
+)
+@click.option(
+    "--all-versions",
+    is_flag=True,
+    default=False,
+    help="Pool every signal prompt version instead of the live cohort. Cohorts are not exchangeable.",
+)
+@click.option(
+    "--as-of",
+    default=None,
+    help="Treat this ISO timestamp as 'now' (for reproducing a past week's review).",
+)
+@click.option("--json-out", type=click.Path(dir_okay=False), default=None, help="Also write the review as JSON.")
+@click.pass_context
+def metrics_weekly_review(
+    ctx: click.Context,
+    strategy_name: str,
+    weeks: int,
+    mode: str | None,
+    history_days: int,
+    signal_prompt_version: str | None,
+    all_versions: bool,
+    as_of: str | None,
+    json_out: str | None,
+) -> None:
+    """Weekly profitability review — exits, entry gates, accuracy, assessor, sources.
+
+    Deterministic counterfactual analysis over resolved markets. Makes no LLM
+    calls and writes nothing to the DB, so it is free to re-run. Drives the
+    `goal` skill, which reads this output and proposes changes.
+    """
+    config = ctx.obj["config"]
+    asyncio.run(
+        _metrics_weekly_review(
+            config,
+            strategy_name=strategy_name,
+            weeks=weeks,
+            mode=mode,
+            history_days=history_days or None,
+            signal_prompt_version=signal_prompt_version,
+            all_versions=all_versions,
+            as_of=as_of,
+            json_out=json_out,
+        )
+    )
+
+
+async def _metrics_weekly_review(
+    config: object,
+    *,
+    strategy_name: str,
+    weeks: int,
+    mode: str | None,
+    history_days: int | None,
+    signal_prompt_version: str | None,
+    all_versions: bool,
+    as_of: str | None,
+    json_out: str | None,
+) -> None:
+    import json as _json  # noqa: PLC0415
+    from datetime import datetime as _datetime  # noqa: PLC0415
+
+    import freqpred.ingestion.models  # noqa: F401, PLC0415 — registers mapper
+    import freqpred.llm.models  # noqa: F401, PLC0415
+    import freqpred.rag.models  # noqa: F401, PLC0415
+    import freqpred.signal.models  # noqa: F401, PLC0415
+    from freqpred.db import make_engine, make_session_factory  # noqa: PLC0415
+    from freqpred.metrics.weekly_review import (  # noqa: PLC0415
+        build_weekly_review,
+        render_text,
+        to_dict,
+    )
+    from freqpred.strategy.loader import load_strategy  # noqa: PLC0415
+
+    if not config.database.url:
+        click.echo("ERROR: DATABASE_URL not configured.", err=True)
+        return
+
+    now = _datetime.fromisoformat(as_of).astimezone(UTC) if as_of else None
+    strategy = load_strategy(strategy_name)
+    engine = make_engine(config.database.url)
+    session_factory = make_session_factory(engine)
+    try:
+        async with session_factory() as session:
+            review = await build_weekly_review(
+                session,
+                weeks=weeks,
+                mode=mode,
+                config=strategy.config,
+                history_days=history_days,
+                signal_prompt_version=signal_prompt_version,
+                all_versions=all_versions,
+                _now=now,
+            )
+    finally:
+        await engine.dispose()
+
+    click.echo(render_text(review))
+    if json_out:
+        Path(json_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(json_out).write_text(_json.dumps(to_dict(review), indent=2, sort_keys=True))
+        click.echo(f"\nwrote {json_out}")
+
+
 @main.group()
 def report() -> None:
     """Reporting commands."""
