@@ -32,6 +32,10 @@ def prompt_version_sort_key(version: str) -> str:
 # edge_calibration_scores snapshot job and the assessor's read-side lookup —
 # both must bucket a given edge into the same band.
 EDGE_CALIBRATION_BANDS = ["<0", "0-15", "15-40", ">40"]
+# Minimum resolved signals for an edge-calibration cell to be worth anything.
+# Shared with the assessor's render gate so the writer never emits a version
+# cohort the reader would refuse to show.
+MIN_EDGE_CALIBRATION_SAMPLES = 10
 _EDGE_BAND_BINS = [-100.0, 0.0, 15.0, 40.0, 200.0]
 
 
@@ -425,6 +429,7 @@ async def refresh_edge_calibration_scores(session: AsyncSession) -> int:
             SignalRow.estimated_probability,
             SignalRow.market_ask_at_signal,
             SignalRow.market_id,
+            SignalRow.prompt_version,
             MarketRow.series_ticker,
             MarketRow.result,
         )
@@ -456,6 +461,7 @@ async def refresh_edge_calibration_scores(session: AsyncSession) -> int:
                 "edge_band": edge_band(row.edge * 100.0),
                 "direction": row.direction,
                 "series_ticker": row.series_ticker,
+                "prompt_version": row.prompt_version,
                 "market_id": row.market_id,
                 "hit": 1 if hit else 0,
                 "market_p_side": row.market_ask_at_signal,
@@ -463,23 +469,35 @@ async def refresh_edge_calibration_scores(session: AsyncSession) -> int:
             }
         )
 
-    grouped: dict[tuple[str, str, str | None], list[dict]] = {}
+    # Four cells per record: {global, series} x {all-versions, this-version}.
+    # prompt_version=None is the all-versions rollup — the historical shape, kept
+    # both for continuity and as the fallback when a version cohort is too thin.
+    grouped: dict[tuple[str, str, str | None, str | None], list[dict]] = {}
     for rec in records:
-        global_key = (rec["edge_band"], rec["direction"], None)
-        grouped.setdefault(global_key, []).append(rec)
-        if rec["series_ticker"] is not None:
-            series_key = (rec["edge_band"], rec["direction"], rec["series_ticker"])
-            grouped.setdefault(series_key, []).append(rec)
+        band, direction = rec["edge_band"], rec["direction"]
+        version, series = rec["prompt_version"], rec["series_ticker"]
+        scopes = [None] if series is None else [None, series]
+        for scope in scopes:
+            grouped.setdefault((band, direction, scope, None), []).append(rec)
+            if version is not None:
+                grouped.setdefault((band, direction, scope, version), []).append(rec)
 
     rows_written = 0
-    for (band, direction, series_ticker), recs in grouped.items():
+    for (band, direction, series_ticker, prompt_version), recs in grouped.items():
         n_signals = len(recs)
+        # Version-scoped cells below the render gate would never be shown to the
+        # assessor anyway; skipping them keeps this table from multiplying by the
+        # number of prompt versions ever run. All-versions rollups are always
+        # written, preserving the pre-0059 row set exactly.
+        if prompt_version is not None and n_signals < MIN_EDGE_CALIBRATION_SAMPLES:
+            continue
         n_markets = len({r["market_id"] for r in recs})
         session.add(
             EdgeCalibrationScoreRow(
                 edge_band=band,
                 direction=direction,
                 series_ticker=series_ticker,
+                prompt_version=prompt_version,
                 n_signals=n_signals,
                 n_markets=n_markets,
                 hit_rate=sum(r["hit"] for r in recs) / n_signals,

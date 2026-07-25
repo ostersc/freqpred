@@ -50,6 +50,13 @@ class EdgeCalibrationScoreRow(Base):
     edge_band: Mapped[str] = mapped_column(VARCHAR(10), nullable=False)
     direction: Mapped[str] = mapped_column(VARCHAR(10), nullable=False)
     series_ticker: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NULL = the all-versions rollup (the historical shape, and the fallback when
+    # a version cohort is too thin). Non-NULL rows are scoped to one signal prompt
+    # version, because measured performance is strongly version-dependent: on
+    # KXTRUMPSAY the NO-side profit edge runs -0.240 (signal-v7), -0.067 (v4),
+    # +0.120 (v9), +0.133 (v11), so an all-versions pool describes a model
+    # production no longer runs.
+    prompt_version: Mapped[str | None] = mapped_column(VARCHAR(100), nullable=True)
     n_signals: Mapped[int] = mapped_column(Integer, nullable=False)
     n_markets: Mapped[int] = mapped_column(Integer, nullable=False)
     hit_rate: Mapped[float] = mapped_column(Float, nullable=False)

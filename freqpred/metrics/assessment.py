@@ -11,7 +11,7 @@ import structlog
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from freqpred.metrics.calibration import edge_band
+from freqpred.metrics.calibration import MIN_EDGE_CALIBRATION_SAMPLES, edge_band
 from freqpred.metrics.models import (
     EdgeCalibrationScoreRow,
     SignalAssessment,
@@ -35,7 +35,7 @@ _QUERY_TYPE = "signal_assessment"
 _LOOKBACK_DAYS = 90
 _MAX_FACTORS = 5
 _MAX_WARNINGS = 3
-_MIN_EDGE_CALIBRATION_SAMPLES = 10
+_MIN_EDGE_CALIBRATION_SAMPLES = MIN_EDGE_CALIBRATION_SAMPLES  # single source of truth
 _MAX_HISTORY_POINTS = 10
 _SYSTEM_PROMPT = """\
 You are a risk and sizing judge for a prediction-market trading system.
@@ -494,16 +494,43 @@ async def _load_edge_band_calibration(
     other_direction = "NO" if signal.direction == "YES" else "YES"
 
     async def _latest(direction: str, series_ticker: str | None) -> EdgeCalibrationScoreRow | None:
-        stmt = select(EdgeCalibrationScoreRow).where(
-            EdgeCalibrationScoreRow.edge_band == band,
-            EdgeCalibrationScoreRow.direction == direction,
-            EdgeCalibrationScoreRow.series_ticker == series_ticker
-            if series_ticker is not None
-            else EdgeCalibrationScoreRow.series_ticker.is_(None),
-        )
-        stmt = stmt.order_by(EdgeCalibrationScoreRow.computed_at.desc()).limit(1)
-        result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        """Latest cell, preferring this signal's own prompt-version cohort.
+
+        Measured performance is strongly version-dependent (KXTRUMPSAY NO-side
+        profit edge: -0.240 on signal-v7, -0.067 on v4, +0.120 on v9, +0.133 on
+        v11), so an all-versions pool describes a model production no longer
+        runs. Falls back to the all-versions rollup (prompt_version IS NULL)
+        when the cohort is missing or too thin — which is also the only shape
+        that exists for rows written before migration 0059.
+        """
+
+        def _q(version_filter):
+            return (
+                select(EdgeCalibrationScoreRow)
+                .where(
+                    EdgeCalibrationScoreRow.edge_band == band,
+                    EdgeCalibrationScoreRow.direction == direction,
+                    EdgeCalibrationScoreRow.series_ticker == series_ticker
+                    if series_ticker is not None
+                    else EdgeCalibrationScoreRow.series_ticker.is_(None),
+                    version_filter,
+                )
+                .order_by(EdgeCalibrationScoreRow.computed_at.desc())
+                .limit(1)
+            )
+
+        cohort = (
+            await session.execute(
+                _q(EdgeCalibrationScoreRow.prompt_version == signal.prompt_version)
+            )
+        ).scalar_one_or_none()
+        if cohort is not None and cohort.n_signals >= _MIN_EDGE_CALIBRATION_SAMPLES:
+            return cohort
+        return (
+            await session.execute(
+                _q(EdgeCalibrationScoreRow.prompt_version.is_(None))
+            )
+        ).scalar_one_or_none()
 
     global_same_direction = await _latest(signal.direction, None)
     if (
@@ -531,15 +558,19 @@ async def _load_edge_band_calibration(
     # +7.3pp over the price paid, YES loses 7.6pp, and YES is negative under
     # every signal prompt version), while the band-level cell is often thin.
     scope = market.series_ticker if _series_scoped else None
-    all_bands_stmt = (
-        select(EdgeCalibrationScoreRow)
-        .where(
-            EdgeCalibrationScoreRow.direction == signal.direction,
-            EdgeCalibrationScoreRow.series_ticker == scope
-            if scope is not None
-            else EdgeCalibrationScoreRow.series_ticker.is_(None),
-            EdgeCalibrationScoreRow.computed_at == same_direction_row.computed_at,
-        )
+    # Must pin the SAME prompt-version scope as the chosen cell. Without this the
+    # query returns both the version-scoped rows and the all-versions rollups,
+    # which cover overlapping signals — the merge would double-count them.
+    cohort_version = same_direction_row.prompt_version
+    all_bands_stmt = select(EdgeCalibrationScoreRow).where(
+        EdgeCalibrationScoreRow.direction == signal.direction,
+        EdgeCalibrationScoreRow.series_ticker == scope
+        if scope is not None
+        else EdgeCalibrationScoreRow.series_ticker.is_(None),
+        EdgeCalibrationScoreRow.prompt_version == cohort_version
+        if cohort_version is not None
+        else EdgeCalibrationScoreRow.prompt_version.is_(None),
+        EdgeCalibrationScoreRow.computed_at == same_direction_row.computed_at,
     )
     all_bands_rows = list((await session.execute(all_bands_stmt)).scalars().all())
 
@@ -555,9 +586,15 @@ async def _load_edge_band_calibration(
             "self-knowledge, which is a DIFFERENT question and frequently points "
             "the other way. this_direction_all_bands aggregates every band for "
             "this signal's traded direction — consult it when the band-level "
-            "cell is thin."
+            "cell is thin. All figures are drawn from the cohort named in "
+            "cohort_prompt_version: this signal's own signal prompt version "
+            "where that cohort is large enough, otherwise the all-versions "
+            "rollup — measured performance is strongly version-dependent."
         ),
         "this_signal_edge_band": band,
+        # Which history cohort these numbers came from: this signal's own signal
+        # prompt version, or the all-versions rollup when that cohort was too thin.
+        "cohort_prompt_version": cohort_version or "all_versions_fallback",
         "all_directions": _merge_edge_calibration_rows(same_direction_row, other_direction_row),
         "same_direction_only": _edge_calibration_row_summary(same_direction_row),
         "this_direction_all_bands": _merge_rows(all_bands_rows),
