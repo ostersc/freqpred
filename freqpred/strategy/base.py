@@ -161,6 +161,47 @@ class IPredictionStrategy(ABC):
         """
         return [m for m in markets if self.is_market_interesting(m)]
 
+    def should_analyze_position(self, position: Position, market: Market) -> bool:
+        """Return True if a market held open by ``position`` still warrants LLM re-analysis.
+
+        Markets with an open position bypass ``is_market_interesting`` so that
+        signal-driven exits keep firing. This hook is the counterpart gate: it
+        lets a strategy decline the (paid) LLM call once the position's outcome
+        is no longer in genuine doubt.
+
+        Default implementation applies ``min_analysis_price`` /
+        ``max_analysis_price`` to the position's *own* side price — the YES mid
+        for YES positions, ``1 - mid`` for NO positions. Both tails are dead:
+        above the upper bound, holding to fee-free settlement strictly beats
+        selling; below the lower bound, the recoverable value is smaller than
+        the cost of deciding whether to recover it.
+
+        Returning False suppresses only the signal-driven exit path. Stoploss,
+        trailing stop, ROI, ``force_exit`` and settlement are evaluated by
+        PositionMonitor from its own ledger query and still run every tick.
+
+        Override for custom logic — e.g. to keep analysing a decided position
+        that is large enough for the recovery to be worth the call.
+        """
+        # Round the complement: Kalshi quotes in whole cents, but 1.0 - 0.97
+        # evaluates to 0.030000000000000027, which would let a NO position
+        # sitting exactly on min_analysis_price escape a bound its YES mirror
+        # is caught by. Rounding restores symmetry between the two directions.
+        side_price = (
+            market.mid_price
+            if position.direction == "YES"
+            else round(1.0 - market.mid_price, 6)
+        )
+        if (
+            self.config.min_analysis_price is not None
+            and side_price <= self.config.min_analysis_price
+        ):
+            return False
+        return not (
+            self.config.max_analysis_price is not None
+            and side_price >= self.config.max_analysis_price
+        )
+
     def should_exit(self, position: Position, signal: Signal, market: Market) -> bool:
         """Signal-driven exit.
 

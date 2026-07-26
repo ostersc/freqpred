@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import textwrap
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -560,6 +561,89 @@ class TestLoadStrategyFromFile:
         empty_file.write_text("x = 1\n")
         with pytest.raises(ValueError, match="No concrete IPredictionStrategy"):
             load_strategy(str(empty_file))
+
+# ---------------------------------------------------------------------------
+# should_analyze_position — decided-position analysis gate
+# ---------------------------------------------------------------------------
+
+class TestShouldAnalyzePosition:
+    """The gate reads the position's *own* side price, not the raw YES mid.
+
+    Defaults are min_analysis_price=0.03 / max_analysis_price=0.97, so a YES
+    position and a NO position on the same market must reach opposite verdicts.
+    """
+
+    strategy = ConservativeDefault()
+
+    def _position(self, direction: str) -> MagicMock:
+        pos = MagicMock()
+        pos.direction = direction
+        return pos
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    def test_analyzes_undecided_position(self, direction: str) -> None:
+        # mid 0.42 → YES side 0.42, NO side 0.58; both well inside the band.
+        assert self.strategy.should_analyze_position(
+            self._position(direction), _market(mid_price=0.42)
+        )
+
+    def test_skips_yes_position_at_winning_tail(self) -> None:
+        # YES side = 0.99 — settlement pays 1.00 fee-free, holding dominates.
+        assert not self.strategy.should_analyze_position(
+            self._position("YES"), _market(mid_price=0.99)
+        )
+
+    def test_skips_yes_position_at_losing_tail(self) -> None:
+        # YES side = 0.01 — settlement pays 0.00, nothing worth recovering.
+        assert not self.strategy.should_analyze_position(
+            self._position("YES"), _market(mid_price=0.01)
+        )
+
+    def test_skips_no_position_at_losing_tail(self) -> None:
+        # mid 0.99 → NO side = 0.01. This is the live case: a NO position on a
+        # KXTRUMPSAY market after the phrase was said.
+        assert not self.strategy.should_analyze_position(
+            self._position("NO"), _market(mid_price=0.99)
+        )
+
+    def test_skips_no_position_at_winning_tail(self) -> None:
+        # mid 0.01 → NO side = 0.99.
+        assert not self.strategy.should_analyze_position(
+            self._position("NO"), _market(mid_price=0.01)
+        )
+
+    def test_yes_and_no_disagree_inside_the_band(self) -> None:
+        # mid 0.98 → YES side 0.98 (skip), NO side 0.02 (skip). Both decided,
+        # but via opposite bounds — proves the side flip is actually applied.
+        market = _market(mid_price=0.98)
+        assert not self.strategy.should_analyze_position(self._position("YES"), market)
+        assert not self.strategy.should_analyze_position(self._position("NO"), market)
+        # mid 0.90 → YES side 0.90, NO side 0.10; neither bound is hit.
+        market = _market(mid_price=0.90)
+        assert self.strategy.should_analyze_position(self._position("YES"), market)
+        assert self.strategy.should_analyze_position(self._position("NO"), market)
+
+    @pytest.mark.parametrize(
+        ("direction", "mid"),
+        [("YES", 0.03), ("NO", 0.97), ("YES", 0.97), ("NO", 0.03)],
+    )
+    def test_bounds_are_inclusive(self, direction: str, mid: float) -> None:
+        # Exactly at a bound counts as decided for both directions.
+        assert not self.strategy.should_analyze_position(
+            self._position(direction), _market(mid_price=mid)
+        )
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    def test_none_bounds_disable_the_gate(self, direction: str) -> None:
+        strategy = ConservativeDefault()
+        strategy.config = replace(
+            strategy.config, min_analysis_price=None, max_analysis_price=None
+        )
+        for mid in (0.0, 0.01, 0.99, 1.0):
+            assert strategy.should_analyze_position(
+                self._position(direction), _market(mid_price=mid)
+            )
+
 
 # ---------------------------------------------------------------------------
 # should_exit — default implementation

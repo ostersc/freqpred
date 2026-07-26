@@ -425,15 +425,13 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                 # no longer pass filter_markets (e.g. price drifted outside
                 # the min/max mid_price window). Signal-driven exits must
                 # still fire for existing positions.
-                from freqpred.markets.models import PositionRow  # noqa: PLC0415
+                from freqpred.markets.models import Position  # noqa: PLC0415
+                from freqpred.trading import ledger as _pos_ledger  # noqa: PLC0415
                 async with session_factory() as pos_session:
-                    open_pos_result = await pos_session.execute(
-                        select(PositionRow.market_id).where(
-                            PositionRow.status == "open",
-                            PositionRow.mode == mode,
-                        ).distinct()
-                    )
-                    open_market_ids = {row.market_id for row in open_pos_result.all()}
+                    open_positions_by_market: dict[str, list[Position]] = {}
+                    for _pos in await _pos_ledger.get_open_positions(pos_session, mode=mode):
+                        open_positions_by_market.setdefault(_pos.market_id, []).append(_pos)
+                    open_market_ids = set(open_positions_by_market)
 
                 interesting_ids = {m.id for m in interesting}
                 market_by_id = {m.id: m for m in markets}
@@ -543,6 +541,23 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
                                 reason=_gate_reason,
                             )
                             continue
+
+                    # Decided-position gate: a market is only kept alive past
+                    # filter_markets so signal exits can fire. Once every open
+                    # position in it has priced to a near-certain outcome there
+                    # is no exit worth paying an LLM call to find. Deterministic
+                    # exits still run — PositionMonitor queries the ledger itself.
+                    _held = open_positions_by_market.get(market.id)
+                    if _held and not any(
+                        strategy.should_analyze_position(p, market) for p in _held
+                    ):
+                        log.info(
+                            "signal.skipped.position_decided",
+                            market_id=market.id,
+                            mid_price=market.mid_price,
+                            directions=sorted({p.direction for p in _held}),
+                        )
+                        continue
 
                     signal = await pipeline.analyze(market, trigger="scheduled")
                     if signal is None:

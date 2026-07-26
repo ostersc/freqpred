@@ -68,7 +68,47 @@ def _make_fake_signal(direction: str = "YES") -> Signal:
     )
 
 
-def _make_run_mocks(market_row: MagicMock, signal: Signal | None):
+def _make_position_row(market_id: str = "MKT-1", direction: str = "YES") -> MagicMock:
+    """A PositionRow stand-in that survives ledger._row_to_position()."""
+    row = MagicMock()
+    row.id = uuid.uuid4()
+    row.market_id = market_id
+    row.signal_id = uuid.uuid4()
+    row.strategy_name = "TestStrategy"
+    row.strategy_version = "1"
+    row.signal_confidence = 0.85
+    row.signal_edge = 0.15
+    row.signal_estimated_prob = 0.70
+    row.direction = direction
+    row.contracts = 3
+    row.entry_price = 0.40
+    row.entry_time = NOW
+    row.mode = "paper"
+    row.status = "open"
+    row.exit_price = None
+    row.exit_time = None
+    row.exit_reason = None
+    row.resolution = None
+    row.pnl = None
+    row.pnl_pct = None
+    row.mae = None
+    row.mfe = None
+    row.exchange_order_id = None
+    row.entry_fee_usd = 0.0
+    row.exit_order_id = None
+    row.exit_fee_usd = 0.0
+    row.exit_requested_contracts = None
+    row.exit_filled_contracts = None
+    row.realized_pnl_accumulator = 0.0
+    row.exchange_stoploss_order_id = None
+    return row
+
+
+def _make_run_mocks(
+    market_row: MagicMock,
+    signal: Signal | None,
+    position_rows: list[MagicMock] | None = None,
+):
     """Build the full set of mocks needed to run _run_main for one signal loop cycle."""
     # DB session returns the market row
     mock_scalars = MagicMock()
@@ -77,9 +117,24 @@ def _make_run_mocks(market_row: MagicMock, signal: Signal | None):
     mock_result.scalars.return_value = mock_scalars
     # get_run_state uses scalar_one_or_none; None → default "running" state
     mock_result.scalar_one_or_none.return_value = None
+    mock_result.all.return_value = []
+
+    # The open-positions query selects PositionRow entities, same call shape as
+    # the markets query, so route by target table rather than call order.
+    pos_scalars = MagicMock()
+    pos_scalars.all.return_value = list(position_rows or [])
+    pos_result = MagicMock()
+    pos_result.scalars.return_value = pos_scalars
+    pos_result.scalar_one_or_none.return_value = None
+    pos_result.all.return_value = list(position_rows or [])
+
+    async def _execute(stmt, *args, **kwargs):
+        if "FROM positions" in str(stmt):
+            return pos_result
+        return mock_result
 
     mock_session = AsyncMock()
-    mock_session.execute = AsyncMock(return_value=mock_result)
+    mock_session.execute = AsyncMock(side_effect=_execute)
     ctx_mgr = MagicMock()
     ctx_mgr.__aenter__ = AsyncMock(return_value=mock_session)
     ctx_mgr.__aexit__ = AsyncMock(return_value=False)
@@ -112,7 +167,8 @@ def _make_run_mocks(market_row: MagicMock, signal: Signal | None):
         "pipeline_instance": mock_pipeline_instance,
         "strategy": mock_strategy,
         "kalshi_cls": mock_kalshi_cls,
-        "session_result": mock_result,  # expose so tests can configure .all() for positions query
+        "session_result": mock_result,
+        "position_result": pos_result,
     }
 
 
@@ -483,13 +539,11 @@ class TestPaperTradingSignalLoop:
         config = _make_config()
         market_row = _make_market_row("MKT-1")
         fake_signal = _make_fake_signal(direction="NO")  # flipped from existing YES position
-        mocks = _make_run_mocks(market_row, fake_signal)
-
-        # Make the open-positions query return one open position for MKT-1 so
-        # open_market_ids = {"MKT-1"} and the monitor call fires.
-        pos_row = MagicMock()
-        pos_row.market_id = "MKT-1"
-        mocks["session_result"].all.return_value = [pos_row]
+        # One open position for MKT-1 so open_market_ids = {"MKT-1"} and the
+        # monitor call fires.
+        mocks = _make_run_mocks(
+            market_row, fake_signal, position_rows=[_make_position_row("MKT-1", "YES")]
+        )
 
         mock_om_instance = AsyncMock()
         mock_om_instance._risk = AsyncMock()
@@ -542,6 +596,115 @@ class TestPaperTradingSignalLoop:
         assert call_order == ["check_all_positions", "submit"], (
             "check_all_positions must be called before submit on a direction flip"
         )
+
+
+class TestDecidedPositionAnalysisGate:
+    """Wiring for the decided-position gate.
+
+    Proves the run loop actually consults strategy.should_analyze_position()
+    for markets kept alive by an open position, and skips pipeline.analyze()
+    when it declines. Uses the real default implementation rather than a stub
+    so the configured bounds are exercised end to end.
+    """
+
+    @staticmethod
+    async def _run_cycle(mid_price: float, position_rows: list[MagicMock]):
+        from freqpred.cli import _run_main
+        from freqpred.strategy.defaults.conservative import ConservativeDefault
+
+        config = _make_config()
+        market_row = _make_market_row("MKT-1")
+        market_row.mid_price = mid_price
+        market_row.yes_bid = max(mid_price - 0.01, 0.0)
+        market_row.yes_ask = min(mid_price + 0.01, 1.0)
+
+        mocks = _make_run_mocks(
+            market_row, _make_fake_signal(direction="NO"), position_rows=position_rows
+        )
+        # filter_markets rejects the extreme price, exactly as in production —
+        # the market is only in play because of the open-position bypass.
+        mocks["strategy"].filter_markets = MagicMock(return_value=[])
+        mocks["strategy"].should_analyze_position = MagicMock(
+            side_effect=ConservativeDefault().should_analyze_position
+        )
+
+        mock_om_instance = AsyncMock()
+        mock_om_instance.submit = AsyncMock(return_value=None)
+        mock_om_instance._risk = AsyncMock()
+        mock_om_instance._risk.check_circuit_breakers = AsyncMock(return_value=None)
+        mock_om_instance._risk.check_entry_capacity = AsyncMock(return_value=(False, ""))
+        mock_om_instance._risk.pre_signal_gate = AsyncMock(return_value=(False, ""))
+        mock_om_instance._bankroll = 1000.0
+        mock_om_instance._mode = "paper"
+
+        async def _cancel_on_sleep(_: float) -> None:
+            raise asyncio.CancelledError()
+
+        with patch("freqpred.db.make_engine", return_value=mocks["engine"]), \
+             patch("freqpred.db.make_session_factory", return_value=mocks["factory"]), \
+             patch("freqpred.strategy.loader.load_strategy", return_value=mocks["strategy"]), \
+             patch("freqpred.signal.pipeline.SignalPipeline", mocks["pipeline_cls"]), \
+             patch("freqpred.rag.embedder.LocalEmbedder"), \
+             patch("freqpred.llm.client.LLMClient"), \
+             patch("freqpred.markets.kalshi.KalshiClient", mocks["kalshi_cls"]), \
+             patch("freqpred.trading.risk.RiskEngine", MagicMock(return_value=MagicMock())), \
+             patch("freqpred.trading.order_manager.OrderManager",
+                   MagicMock(return_value=mock_om_instance)), \
+             patch("freqpred.trading.position_monitor.PositionMonitor",
+                   MagicMock(return_value=AsyncMock())), \
+             patch("asyncio.sleep", side_effect=_cancel_on_sleep), \
+             patch("anthropic.AsyncAnthropic"):
+            await _run_main(config, "TestStrategy", "paper")
+
+        return mocks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("direction", "mid_price"),
+        [
+            ("NO", 0.99),   # NO side ~0.01 — dead loss, settlement pays 0
+            ("YES", 0.99),  # YES side ~0.99 — fee-free settlement beats selling
+            ("YES", 0.01),  # YES side ~0.01
+            ("NO", 0.01),   # NO side ~0.99
+        ],
+    )
+    async def test_skips_llm_for_decided_position(
+        self, direction: str, mid_price: float
+    ) -> None:
+        mocks = await self._run_cycle(
+            mid_price, [_make_position_row("MKT-1", direction)]
+        )
+        mocks["strategy"].should_analyze_position.assert_called_once()
+        mocks["pipeline_instance"].analyze.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    async def test_analyzes_undecided_position(self, direction: str) -> None:
+        # mid 0.42 → YES side 0.42, NO side 0.58; neither bound is hit.
+        mocks = await self._run_cycle(
+            0.42, [_make_position_row("MKT-1", direction)]
+        )
+        mocks["pipeline_instance"].analyze.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_analyzes_when_only_one_of_two_positions_is_decided(self) -> None:
+        """A market is skipped only when *every* open position in it is decided.
+
+        At mid 0.97 the NO side is exactly on min_analysis_price (decided) while
+        a hypothetical position whose side is still live must keep the market
+        analysed. Here the second position is undecided by construction, so the
+        any() in the run loop must keep the LLM call.
+        """
+        undecided = _make_position_row("MKT-1", "YES")
+        decided = _make_position_row("MKT-1", "NO")
+        mocks = await self._run_cycle(0.90, [decided, undecided])
+        mocks["pipeline_instance"].analyze.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_gate_not_consulted_for_markets_without_positions(self) -> None:
+        """Markets with no open position go through the risk gate, not this one."""
+        mocks = await self._run_cycle(0.42, [])
+        mocks["strategy"].should_analyze_position.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

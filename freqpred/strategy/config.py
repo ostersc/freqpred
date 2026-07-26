@@ -64,6 +64,27 @@ class StrategyConfig:
     min_mid_price: float | None = 0.05
     max_mid_price: float | None = 0.95
 
+    # Decided-position analysis gate. Markets with an open position bypass
+    # is_market_interesting so signal-driven exits keep firing (see the run
+    # loop), which means a position whose own side has priced to a near-certain
+    # outcome is otherwise re-analysed by the LLM every cycle until the market
+    # settles. Both tails are economically dead, for different reasons:
+    #
+    #   side >= max_analysis_price: selling now nets side * (1 - fee_rate * (1 - side))
+    #     while settlement pays 1.00 and is fee-free, so holding strictly
+    #     dominates — no signal should trigger a sale.
+    #   side <= min_analysis_price: settlement pays 0.00 and selling recovers at
+    #     most side * (1 - fee_rate * (1 - side)) per contract, which at typical
+    #     size is worth less than the LLM call needed to decide it.
+    #
+    # Bounds apply to the position's *own* side price — the YES mid for YES
+    # positions, 1 - mid for NO positions. Set either to None to disable that
+    # bound and always re-analyse. Deterministic exits (stoploss, trailing stop,
+    # ROI, force_exit, settlement) are unaffected: PositionMonitor loads open
+    # positions itself and does not depend on a fresh signal.
+    min_analysis_price: float | None = 0.03
+    max_analysis_price: float | None = 0.97
+
     # Liquidity filter: reject entry if yes_ask - yes_bid exceeds this threshold.
     # None = auto-compute as min_edge / 2 (spread must consume < half your edge).
     max_spread: float | None = None

@@ -3,7 +3,7 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-07-26 — Added historical price paths and the weekly profitability review that consumes them. Migration 0060 adds `market_candles` + `candle_fetch_cursors`, populated by `freqpred candles backfill` and a daily `candle_refresh` task; Kalshi's candle history is a rolling ~67-day window, so uncaptured history is lost permanently. `freqpred metrics weekly-review` scores exits against holding to settlement, sweeps stoploss thresholds over real price paths, and measures each entry gate's marginal effect. Earlier: sizing assessor at `assessment-v8` on `claude-opus-5` with `prompt_version` cohorts in `edge_calibration_scores` (migration 0059) — see §"Signal assessment" for its limitations and rollout guard, and git log for full history.
+**Last updated:** 2026-07-26 — Added the decided-position analysis gate: `StrategyConfig.min_analysis_price`/`max_analysis_price` (0.03/0.97) and the `IPredictionStrategy.should_analyze_position()` hook stop the signal loop paying for LLM re-analysis of open positions whose own side has priced to a near-certain outcome — ~12% of signal spend, no effect on deterministic exits. Also added historical price paths and the weekly profitability review that consumes them: migration 0060 adds `market_candles` + `candle_fetch_cursors`, populated by `freqpred candles backfill` and a daily `candle_refresh` task, with Kalshi's candle history a rolling ~67-day window so uncaptured history is lost permanently. Sizing assessor remains at `assessment-v8` on `claude-opus-5` — see §"Signal assessment" for its limitations and rollout guard, and git log for full history.
 
 **Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
 
@@ -685,6 +685,28 @@ class StrategyConfig:
     # Applied in is_market_interesting() so it gates both ingestion and signal
     # generation. Set either bound to None to disable that side of the filter.
 
+    # --- Decided-position analysis gate ---
+    min_analysis_price: float | None = 0.03
+    max_analysis_price: float | None = 0.97
+    # Stop paying for LLM re-analysis of an open position whose outcome is no
+    # longer in doubt. Markets with an open position bypass is_market_interesting
+    # (so signal exits keep firing), which means the price-range filter above
+    # does NOT protect them — without this gate a position that priced to a
+    # near-certain outcome is re-analysed every cycle until the market settles.
+    # Bounds apply to the position's OWN side price: the YES mid for YES
+    # positions, 1 - mid for NO positions. Both tails are economically dead:
+    #   side >= max_analysis_price — settlement pays 1.00 and is fee-free, while
+    #     selling nets side * (1 - fee_rate * (1 - side)); holding strictly
+    #     dominates, so no signal should ever trigger a sale.
+    #   side <= min_analysis_price — settlement pays 0.00 and selling recovers at
+    #     most side * (1 - fee_rate * (1 - side)) per contract, which at typical
+    #     size is worth less than the LLM call needed to decide it.
+    # Applied in should_analyze_position(), consulted by the signal loop for
+    # every market held open by a position. A market is skipped only when EVERY
+    # open position in it is decided. Set either bound to None to disable that
+    # side. Deterministic exits are unaffected — PositionMonitor queries the
+    # ledger on its own loop and never depends on a fresh signal.
+
     # --- Loss re-entry guards ---
     block_reentry_after_stoploss: bool = False
     # If True, permanently block re-entry into any market that has ever had a
@@ -1055,6 +1077,33 @@ class IPredictionStrategy(ABC):
     # Exit interface (optional overrides — defaults handle the common cases)
     # -------------------------------------------------------------------------
 
+    def should_analyze_position(self, position: Position, market: Market) -> bool:
+        """
+        Return True if a market held open by `position` still warrants a (paid)
+        LLM re-analysis. Called by the signal loop for every market kept alive
+        by an open position, before pipeline.analyze().
+
+        Markets with an open position bypass is_market_interesting so signal
+        exits keep firing; this hook is the counterpart gate that declines the
+        call once the position's outcome is no longer in genuine doubt.
+
+        Default: applies min_analysis_price / max_analysis_price to the
+        position's OWN side price — the YES mid for YES positions, 1 - mid for
+        NO positions. (The complement is rounded to 6dp: 1.0 - 0.97 evaluates
+        to 0.030000000000000027, which would otherwise let a NO position on the
+        bound escape a bound its YES mirror is caught by.)
+
+        Returning False suppresses ONLY the signal-driven exit path. Stoploss,
+        trailing stop, ROI, force_exit and settlement are evaluated by
+        PositionMonitor from its own ledger query on an independent loop, and
+        still run every tick.
+
+        Override to keep analysing a decided position that is large enough for
+        the recovery to justify the call — e.g.
+        `position.contracts * side_price > some_threshold`.
+        """
+        ...
+
     def should_exit(self, position: Position, signal: Signal, market: Market) -> bool:
         """
         Signal-driven exit. Called after every LLM re-analysis of a market
@@ -1222,7 +1271,9 @@ Runs when a signal refresh trigger fires (scheduled, price moved, new evidence, 
 flowchart TD
     T([Signal trigger fires for a market])
     T --> HOP{Has open position?}
-    HOP -->|yes| CQ
+    HOP -->|yes| DP{Every open position decided?}
+    DP -->|yes - side outside analysis band| SKIP3([Skip - hold or write off])
+    DP -->|no| CQ
     HOP -->|no| RG{Pre-signal risk gate enabled?}
     RG -->|no - gate disabled| CQ
     RG -->|yes| GC{Global capacity full or per-market blocked?}
@@ -1241,7 +1292,9 @@ flowchart TD
     LLM --> SC[Signal Creation]
 ```
 
-**Pre-signal risk gate:** when running in trading mode (`order_manager` active) with `StrategyConfig.pre_signal_risk_gate=True` (default), the signal loop evaluates two gate layers for each new-entry market before invoking the LLM pipeline. First, a single cycle-level check (`check_entry_capacity`) determines whether global caps (max open positions, total exposure ceiling) are already full — if so, every new-entry market in that cycle is skipped. Then, per-market checks (`pre_signal_gate`) verify that the spread is within limits and the stoploss re-entry policy allows entry. Markets with existing open positions bypass both gates — exit signals must always fire, so the Sonnet signal LLM always runs for them.
+**Pre-signal risk gate:** when running in trading mode (`order_manager` active) with `StrategyConfig.pre_signal_risk_gate=True` (default), the signal loop evaluates two gate layers for each new-entry market before invoking the LLM pipeline. First, a single cycle-level check (`check_entry_capacity`) determines whether global caps (max open positions, total exposure ceiling) are already full — if so, every new-entry market in that cycle is skipped. Then, per-market checks (`pre_signal_gate`) verify that the spread is within limits and the stoploss re-entry policy allows entry. Markets with existing open positions bypass both gates — exit signals must always fire, so the Sonnet signal LLM runs for them regardless of entry capacity.
+
+**Decided-position gate:** that open-position bypass also defeats the `min_mid_price`/`max_mid_price` filter, so a position that has priced to a near-certain outcome would otherwise be re-analysed every cycle until the market settles — for days, on a decision with no value left in it. Before `pipeline.analyze()`, the signal loop therefore calls `strategy.should_analyze_position(position, market)` for each open position in the market and skips the LLM when **every** one of them declines (log event `signal.skipped.position_decided`). The default implementation applies `min_analysis_price`/`max_analysis_price` to the position's own side price. Both tails are dead for different reasons: above the upper bound settlement pays 1.00 fee-free so holding strictly dominates selling, and below the lower bound the recoverable value is smaller than the LLM call needed to decide it. This gate is independent of `pre_signal_risk_gate` — it applies to markets held open by a position, which that gate deliberately exempts. Deterministic exits are unaffected: `PositionMonitor.check_all_positions()` loads open positions from the ledger on its own background loop and never depends on a fresh signal, so stoploss, trailing stop, ROI, `force_exit` and settlement still run every tick.
 
 That open-position bypass, however, only covers signal generation — it does not mean an add-on entry attempt on that market is exempt from capacity. `order_manager.submit()` therefore repeats the global-capacity check (`check_entry_capacity`) itself, immediately before the assessment step described below, using the same request-time snapshot `check_position()` will later re-check. This closes the gap the once-per-cycle gate can't: a reinforcing (non-exit) signal on a market that already holds a position, arriving after global capacity filled mid-cycle, would otherwise still trigger a full `assess_signal_context()` judgment-model call before being rejected by `check_position()`'s own cap a few lines later. Skipping it there instead saves the LLM spend without changing the final accept/reject outcome, since both checks read the identical `max_open_positions`/`total_exposure` decision.
 
