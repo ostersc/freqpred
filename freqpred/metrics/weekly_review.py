@@ -274,6 +274,7 @@ class ReplaySweepPoint:
     n_signals: int
     n_filled: int
     n_markets: int
+    n_deferred: int
     pnl_per_signal: float
     total_pnl: float
     is_current: bool
@@ -1000,6 +1001,7 @@ def gate_threshold_replay_sweep(
             excluded.add({"min_edge": "min_edge", "max_edge": "max_edge"}[gate])
         others = [p for gname, (_, p) in base.items() if gname not in excluded]
         eligible = [s for s in signals if all(p(s) for p in others)]
+        earliest = {s.market_id: s.signal_id for s in first_per_market(eligible)}
         current = _current_setting(gate, config)
 
         for value in values:
@@ -1008,6 +1010,13 @@ def gate_threshold_replay_sweep(
             # threshold delays entry to a later qualifying signal rather than
             # dropping the market.
             admitted = first_per_market([s for s in eligible if predicate(s)])
+            # How many of those entries moved to a LATER signal than the market
+            # would otherwise have used. Reported because a tightened gate that
+            # merely defers entry is a very different thing from one that skips
+            # the market, and the totals alone cannot distinguish them.
+            n_deferred = sum(
+                1 for s in admitted if earliest.get(s.market_id) != s.signal_id
+            )
             trades = [t for s in admitted if (t := simulate(s))]
             pnls = [t.pnl_per_contract for t in trades]  # type: ignore[attr-defined]
             out.append(
@@ -1017,6 +1026,7 @@ def gate_threshold_replay_sweep(
                     n_signals=len(trades),
                     n_filled=sum(1 for t in trades if t.filled),  # type: ignore[attr-defined]
                     n_markets=len({t.market_id for t in trades}),  # type: ignore[attr-defined]
+                    n_deferred=n_deferred,
                     pnl_per_signal=(sum(pnls) / len(pnls)) if pnls else 0.0,
                     total_pnl=sum(pnls),
                     is_current=current is not None and abs(value - current) < 1e-9,
@@ -2005,6 +2015,10 @@ def render_text(review: WeeklyReview) -> str:  # noqa: C901 — a report is a lo
         add("   'what if we changed only this'. It cannot find interactions. `total` is the")
         add("   sum over admitted signals — what the setting earns at one contract each,")
         add("   with unfilled orders correctly worth $0. Optimise `total`, not `$/sig`.")
+        add("   `defer` = entries that moved to a LATER signal because the tighter gate")
+        add("   excluded the market's earlier one. Those are priced off the candle path at")
+        add("   the later signal's own time, so a tightened gate that merely delays entry")
+        add("   is distinguishable from one that skips the market entirely.")
         add("   `<` marks the value in production today.")
         current_gate = ""
         for point in review.gate_replay_sweeps:
@@ -2012,12 +2026,12 @@ def render_text(review: WeeklyReview) -> str:  # noqa: C901 — a report is a lo
                 current_gate = point.gate
                 add(f"   {current_gate}:")
                 add(
-                    f"     {'value':>7} {'n':>4} {'fill':>6} {'mkts':>5} "
+                    f"     {'value':>7} {'n':>4} {'fill':>6} {'mkts':>5} {'defer':>6} "
                     f"{'$/sig':>8} {'total':>9}"
                 )
             add(
                 f"     {point.value:>7.2f} {point.n_signals:>4} {point.fill_rate:>6.0%} "
-                f"{point.n_markets:>5} {point.pnl_per_signal:>+8.3f} "
+                f"{point.n_markets:>5} {point.n_deferred:>6} {point.pnl_per_signal:>+8.3f} "
                 f"{point.total_pnl:>+9.2f}{'  <' if point.is_current else ''}"
             )
         add("")
@@ -2185,6 +2199,7 @@ def to_dict(review: WeeklyReview) -> dict:
                 "n_filled": p.n_filled,
                 "fill_rate": round(p.fill_rate, 4),
                 "n_markets": p.n_markets,
+                "n_deferred": p.n_deferred,
                 "pnl_per_signal": round(p.pnl_per_signal, 4),
                 "total_pnl": round(p.total_pnl, 3),
                 "is_current": p.is_current,

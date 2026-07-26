@@ -485,6 +485,41 @@ def test_a_market_no_signal_ever_qualifies_for_is_blocked() -> None:
     assert stats["min_edge"].blocked.n_markets == 1
 
 
+def test_replay_sweep_counts_deferred_entries() -> None:
+    """A tightened gate that delays entry must be distinguishable from one that skips.
+
+    M1's first signal is 6 days out and its second is 2 days out. At
+    max_days_to_close=3 the market is still traded — on the later signal — and
+    that must be reported as a deferral, not as the market being dropped.
+    """
+    from freqpred.metrics.weekly_review import gate_threshold_replay_sweep
+
+    signals = [
+        _signal(market_id="M1", days_to_close=6.0, created_offset_h=1, signal_id="early"),
+        _signal(market_id="M1", days_to_close=2.0, created_offset_h=50, signal_id="late"),
+    ]
+
+    class _Trade:
+        def __init__(self, sig):
+            self.market_id = sig.market_id
+            self.pnl_per_contract = 0.1
+            self.filled = True
+            self.exit_reason = "resolution"
+
+    points = {
+        p.value: p
+        for p in gate_threshold_replay_sweep(
+            signals, _Config(), _Trade, grids={"max_days_to_close": (3.0, 7.0)}
+        )
+    }
+    # At 7 days the earliest signal qualifies — nothing is deferred.
+    assert points[7.0].n_markets == 1
+    assert points[7.0].n_deferred == 0
+    # At 3 days the market is kept via its later signal.
+    assert points[3.0].n_markets == 1
+    assert points[3.0].n_deferred == 1
+
+
 def test_gate_threshold_sweep_is_monotone_in_admitted_count() -> None:
     signals = [
         _signal(market_id=f"M{i}", edge=i / 100.0, result="yes") for i in range(1, 40)
