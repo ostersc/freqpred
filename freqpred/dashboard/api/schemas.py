@@ -557,6 +557,11 @@ class PnLTimeSeriesResponse(BaseModel):
     llm_series: list[LLMSpendDayOut]
     prompt_version_starts: list[PromptVersionStart]
     initial_bankroll: float         # from app.state.bankroll_usd; needed for "days until broke"
+    # Current trading bankroll = initial_bankroll + ALL-TIME closed P&L for this mode.
+    # Deliberately not window-scoped: pnl_series/llm_series cumulatives restart at the
+    # lookback edge, so anchoring the projection on them made "now" move when the
+    # 7d/30d/90d toggle changed. The projection anchors on this instead.
+    net_bankroll_now: float
     total_trades: int
     all_time_pnl: float
     available_strategies: list[str]

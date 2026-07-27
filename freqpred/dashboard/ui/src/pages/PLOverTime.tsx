@@ -70,32 +70,64 @@ function fmtDateFull(ts: number) {
 // Projection math (pure functions, no side-effects)
 // ---------------------------------------------------------------------------
 
-function linearTrend(values: number[]): { slope: number; intercept: number } {
-  const n = values.length
-  if (n < 2) return { slope: 0, intercept: values[0] ?? 0 }
-  const xBar = (n - 1) / 2
-  const yBar = values.reduce((a, b) => a + b, 0) / n
+export const MS_PER_DAY = 24 * 3600 * 1000
+
+/**
+ * Least-squares fit of `value` against elapsed CALENDAR days since the first point.
+ *
+ * Regressing on the array index instead would treat a gap day (no LLM rows at
+ * all) as one step, compressing the x-axis and biasing the extrapolated slope.
+ */
+export function linearTrendByDay(
+  points: { ts: number; value: number }[],
+): { slope: number; intercept: number } {
+  const n = points.length
+  if (n === 0) return { slope: 0, intercept: 0 }
+  if (n === 1) return { slope: 0, intercept: points[0].value }
+  const t0 = points[0].ts
+  const xs = points.map((p) => (p.ts - t0) / MS_PER_DAY)
+  const xBar = xs.reduce((a, b) => a + b, 0) / n
+  const yBar = points.reduce((a, p) => a + p.value, 0) / n
   let num = 0
   let den = 0
   for (let i = 0; i < n; i++) {
-    num += (i - xBar) * (values[i] - yBar)
-    den += (i - xBar) ** 2
+    num += (xs[i] - xBar) * (points[i].value - yBar)
+    den += (xs[i] - xBar) ** 2
   }
   const slope = den === 0 ? 0 : num / den
   return { slope, intercept: yBar - slope * xBar }
 }
 
-function computeGBMParams(bankrollSeries: number[]): { mu: number; sigma: number } | null {
+/**
+ * GBM drift and volatility expressed per CALENDAR day.
+ *
+ * `pnl_series` only carries a row on days that closed a position, so the raw
+ * per-observation moments are on a "per closing day" clock while the projection
+ * advances one calendar day at a time — which overstated both drift and vol by
+ * the ratio between the two. Rescale by observations-per-calendar-day: drift is
+ * linear in time, volatility scales with its square root.
+ */
+export function computeGBMParams(
+  points: { ts: number; bankroll: number }[],
+): { mu: number; sigma: number } | null {
   const logReturns: number[] = []
-  for (let i = 1; i < bankrollSeries.length; i++) {
-    if (bankrollSeries[i] > 0 && bankrollSeries[i - 1] > 0) {
-      logReturns.push(Math.log(bankrollSeries[i] / bankrollSeries[i - 1]))
-    }
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1].bankroll
+    const cur = points[i].bankroll
+    if (cur > 0 && prev > 0) logReturns.push(Math.log(cur / prev))
   }
   if (logReturns.length < 2) return null
-  const mu = logReturns.reduce((a, b) => a + b, 0) / logReturns.length
-  const variance = logReturns.reduce((a, r) => a + (r - mu) ** 2, 0) / (logReturns.length - 1)
-  return { mu, sigma: Math.sqrt(variance) }
+
+  const muPerObs = logReturns.reduce((a, b) => a + b, 0) / logReturns.length
+  const variance =
+    logReturns.reduce((a, r) => a + (r - muPerObs) ** 2, 0) / (logReturns.length - 1)
+  const sigmaPerObs = Math.sqrt(variance)
+
+  const spanDays = (points[points.length - 1].ts - points[0].ts) / MS_PER_DAY
+  // A sub-day span would blow the rescale up; leave the moments unscaled.
+  const obsPerDay = spanDays >= 1 ? logReturns.length / spanDays : 1
+
+  return { mu: muPerObs * obsPerDay, sigma: sigmaPerObs * Math.sqrt(obsPerDay) }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +154,10 @@ interface ProjPoint {
   proj_1s_spread: number | null
   proj_2s_lo: number | null
   proj_2s_spread: number | null
-  proj_llm_spend: number | null
+  /** Cumulative spend carried forward from the window's running total. */
+  proj_llm_cum: number | null
+  /** Burn accumulated from $0 at Today — the runway line `daysUntilBroke` uses. */
+  proj_llm_fwd: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -176,10 +211,19 @@ function ProjTooltip({ active, payload, label }: {
         </div>
       )}
       {pt.hist_llm_spend != null && (
-        <div style={{ color: '#dc2626', fontSize: 12 }}>LLM spend: {fmtMoney(pt.hist_llm_spend, 4)}</div>
+        <div style={{ color: 'var(--viz-llm)', fontSize: 12 }}>
+          LLM spend: {fmtMoney(pt.hist_llm_spend, 4)}
+        </div>
       )}
-      {pt.proj_llm_spend != null && (
-        <div style={{ color: '#dc2626', fontSize: 12, opacity: 0.7 }}>LLM spend (proj): {fmtMoney(pt.proj_llm_spend, 4)}</div>
+      {pt.proj_llm_cum != null && (
+        <div style={{ color: 'var(--viz-llm)', fontSize: 12, opacity: 0.8 }}>
+          LLM spend (proj): {fmtMoney(pt.proj_llm_cum, 4)}
+        </div>
+      )}
+      {pt.proj_llm_fwd != null && (
+        <div style={{ color: 'var(--viz-llm)', fontSize: 12, opacity: 0.8 }}>
+          LLM burn since today: {fmtMoney(pt.proj_llm_fwd, 4)}
+        </div>
       )}
     </div>
   )
@@ -295,8 +339,23 @@ export default function PLOverTime() {
   const projection = useMemo(() => {
     if (!data || data.pnl_series.length === 0) return null
 
-    const dailyLlmValues = data.llm_series.map((d) => d.daily_spend)
-    const llmTrend = linearTrend(dailyLlmValues.length > 0 ? dailyLlmValues : [0])
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const todayTs = today.getTime()
+
+    // The current day is still accruing spend, so its partial total drags the
+    // burn-rate fit down. Fit the trend on completed days only.
+    const todayIso = new Date().toISOString().slice(0, 10)
+    const completedLlm = data.llm_series.filter((d) => d.date < todayIso)
+    const llmFitRows = completedLlm.length >= 2 ? completedLlm : data.llm_series
+    const llmTrend = linearTrendByDay(
+      llmFitRows.map((d) => ({ ts: new Date(d.date).getTime(), value: d.daily_spend })),
+    )
+    // Today's position on the fitted line, so forward days extrapolate from now.
+    const llmFitT0 = llmFitRows.length > 0 ? new Date(llmFitRows[0].date).getTime() : todayTs
+    const llmX0 = (todayTs - llmFitT0) / MS_PER_DAY
+    const burnOnDay = (d: number) =>
+      Math.max(0, llmTrend.intercept + llmTrend.slope * (llmX0 + d))
 
     const lastPnlPoint = data.pnl_series[data.pnl_series.length - 1]
     const lastLlmPoint = data.llm_series[data.llm_series.length - 1]
@@ -304,66 +363,110 @@ export default function PLOverTime() {
     const lastCumLlm = lastLlmPoint?.cumulative_spend ?? 0
 
     const initialBankroll = data.initial_bankroll
-    const netBankrollNow = initialBankroll + lastCumPnl - lastCumLlm
+    // All-time and mode-scoped — the same figure risk sizing uses. Previously this
+    // was `initialBankroll + windowPnl − windowLlmSpend`, which (a) moved with the
+    // 7d/30d/90d toggle because both cumulatives restart at the lookback edge, and
+    // (b) charged a month of already-spent LLM cost as a single overnight drop at
+    // the history→projection seam. Past spend belongs in history; only FUTURE burn
+    // may erode the forward path.
+    const netBankrollNow = data.net_bankroll_now
 
-    // GBM parameters estimated from the P&L bankroll series (log-returns)
-    const bankrollSeries = data.pnl_series.map((d) => initialBankroll + d.cumulative_pnl)
-    const gbm = computeGBMParams(bankrollSeries)
+    // GBM parameters estimated from the bankroll series (log-returns). The series
+    // is anchored the same way as the history curve below so both agree.
+    const gbm = computeGBMParams(
+      data.pnl_series.map((d) => ({
+        ts: new Date(d.date).getTime(),
+        bankroll: netBankrollNow - (lastCumPnl - d.cumulative_pnl),
+      })),
+    )
 
     // CAGR = geometric mean daily log-return annualized (e^(μ·365) − 1)
     const cagr = gbm ? Math.exp(gbm.mu * 365) - 1 : null
 
-    // Days until broke: GBM central path minus projected LLM spend
+    // Days until broke = runway: where the projected bankroll crosses LLM burn
+    // accumulated *from today*, i.e. how many more days of API spend the account
+    // can cover. LLM spend is paid from outside the trading account, so it is
+    // never subtracted from the bankroll path — the two are compared, not netted.
+    //
+    // Forward burn deliberately restarts at zero rather than continuing from the
+    // window's cumulative spend: that cumulative restarts at the lookback edge, so
+    // carrying it forward made the crossing an artifact of the chosen preset
+    // (2 days on 90d, 1 on all-time) instead of a forecast.
+    //
+    // Computed against the same series the chart plots, so the stat and the
+    // visible crossing cannot disagree.
     const daysUntilBroke = (() => {
       if (netBankrollNow <= 0) return 0
       if (!gbm) return null
-      let addlLlm = 0
+      let fwdBurn = 0
       for (let d = 1; d <= 3650; d++) {
-        const projBankroll = netBankrollNow * Math.exp(gbm.mu * d)
-        addlLlm += Math.max(0, llmTrend.intercept + llmTrend.slope * (dailyLlmValues.length - 1 + d))
-        if (projBankroll - addlLlm <= 0) return d
+        fwdBurn += burnOnDay(d)
+        if (netBankrollNow * Math.exp(gbm.mu * d) <= fwdBurn) return d
       }
       return null
     })()
 
     // Projected 30-day LLM burn (linear trend, unchanged)
     let proj30LlmBurn = 0
-    for (let d = 1; d <= 30; d++) {
-      proj30LlmBurn += Math.max(0, llmTrend.intercept + llmTrend.slope * (dailyLlmValues.length - 1 + d))
-    }
+    for (let d = 1; d <= 30; d++) proj30LlmBurn += burnOnDay(d)
 
-    // Build projection chart points: history + forward window sized to the selected preset
-    const HISTORY_DAYS = 90
-    const FORWARD_DAYS = preset === 'all' ? data.pnl_series.length : Number(preset)
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const todayTs = today.getTime()
-    const msPerDay = 24 * 3600 * 1000
+    // Build projection chart points: history + forward window sized to the selected preset.
+    //
+    // No display-side truncation. This used to slice to the last 90 rows, which
+    // dropped rows off the FRONT without re-basing the running totals that were
+    // computed over the full set — so on "All time" the spend line began partway
+    // up its own accumulation (~$85 on the first plotted day) instead of at $0,
+    // and the axis silently started ~40 days after the real first row. The API's
+    // `lookback_days` already scopes the window; "All time" means all of it.
+    const histSlice = chartData
+    const histSpanDays =
+      histSlice.length > 1
+        ? (histSlice[histSlice.length - 1].ts - histSlice[0].ts) / MS_PER_DAY
+        : 30
+    const FORWARD_DAYS =
+      preset === 'all' ? Math.max(30, Math.round(histSpanDays)) : Number(preset)
 
     const projPoints: ProjPoint[] = []
 
-    // Historical bankroll curve (last HISTORY_DAYS of data).
-    const histSlice = chartData.slice(-HISTORY_DAYS)
+    // Historical bankroll curve, anchored on the CURRENT bankroll and walked
+    // backwards through the in-window P&L deltas. Plotting
+    // `initialBankroll + cumulative_pnl` instead planted the configured bankroll at
+    // the window's LEFT edge, so the whole curve shifted whenever the lookback
+    // preset — or the configured bankroll — changed.
+    // `cumulative_pnl` is null on rows contributed only by llm_series; carry the
+    // last known value forward, and treat rows before the window's first close as
+    // zero in-window P&L.
+    let runningCumPnl = 0
     for (const pt of histSlice) {
+      if (pt.cumulative_pnl != null) runningCumPnl = pt.cumulative_pnl
       projPoints.push({
         ts: pt.ts,
         date: pt.date,
-        hist_bankroll: pt.cumulative_pnl != null
-          ? Math.max(0, initialBankroll + pt.cumulative_pnl)
-          : null,
+        hist_bankroll: Math.max(0, netBankrollNow - (lastCumPnl - runningCumPnl)),
         hist_llm_spend: pt.cumulative_spend ?? null,
         proj_central: null,
         proj_1s_lo: null,
         proj_1s_spread: null,
         proj_2s_lo: null,
         proj_2s_spread: null,
-        proj_llm_spend: null,
+        proj_llm_cum: null,
+        proj_llm_fwd: null,
       })
     }
 
-    // GBM fan projection forward
+    // GBM fan projection forward — trading P&L only. LLM spend is paid from
+    // outside the trading account and is absent from the history curve, so
+    // subtracting it here would make the forward line mean something the trailing
+    // line does not. It stays a separate series; `daysUntilBroke` compares them.
     if (gbm && netBankrollNow > 0) {
-      let fwdCumLlm = lastCumLlm
+      // Two views of the same burn rate, both plotted:
+      //   cum — carries the window's running total forward (continuous with the
+      //         history line, so the spend curve doesn't appear to reset)
+      //   fwd — accumulates from $0 at Today (the runway `daysUntilBroke` uses)
+      // They differ only by the constant `lastCumLlm`, so the gap between them is
+      // exactly what has already been spent inside the window.
+      let cumLlm = lastCumLlm
+      let fwdCumLlm = 0
       for (let d = 1; d <= FORWARD_DAYS; d++) {
         const sqrtD = Math.sqrt(d)
         const central = netBankrollNow * Math.exp(gbm.mu * d)
@@ -371,10 +474,12 @@ export default function PLOverTime() {
         const hi1 = netBankrollNow * Math.exp(gbm.mu * d + gbm.sigma * sqrtD)
         const lo2 = netBankrollNow * Math.exp(gbm.mu * d - 2 * gbm.sigma * sqrtD)
         const hi2 = netBankrollNow * Math.exp(gbm.mu * d + 2 * gbm.sigma * sqrtD)
-        fwdCumLlm += Math.max(0, llmTrend.intercept + llmTrend.slope * (dailyLlmValues.length - 1 + d))
+        const burn = burnOnDay(d)
+        cumLlm += burn
+        fwdCumLlm += burn
         const lo2c = Math.max(0, lo2)
         const lo1c = Math.max(0, lo1)
-        const ts = todayTs + d * msPerDay
+        const ts = todayTs + d * MS_PER_DAY
         projPoints.push({
           ts,
           date: new Date(ts).toISOString().slice(0, 10),
@@ -385,12 +490,15 @@ export default function PLOverTime() {
           proj_1s_spread: Math.max(0, Math.max(0, hi1) - lo1c),
           proj_2s_lo: lo2c,
           proj_2s_spread: Math.max(0, Math.max(0, hi2) - lo2c),
-          proj_llm_spend: fwdCumLlm,
+          proj_llm_cum: cumLlm,
+          proj_llm_fwd: fwdCumLlm,
         })
       }
     }
 
     // Bridge history→projection: pin the fan to the last known bankroll value.
+    // With the anchoring above this is already `netBankrollNow`, so the seam is
+    // continuous by construction rather than by patching over a jump.
     const lastHistWithData = [...projPoints].reverse().find(p => p.hist_bankroll != null)
     if (lastHistWithData && gbm && netBankrollNow > 0) {
       const b = lastHistWithData.hist_bankroll!
@@ -399,10 +507,15 @@ export default function PLOverTime() {
       lastHistWithData.proj_1s_spread = 0
       lastHistWithData.proj_2s_lo = b
       lastHistWithData.proj_2s_spread = 0
-      lastHistWithData.proj_llm_spend = lastHistWithData.hist_llm_spend
+      // The cumulative line continues the history line unbroken; the forward line
+      // is a different quantity and starts from zero at the seam.
+      lastHistWithData.proj_llm_cum = lastHistWithData.hist_llm_spend
+      lastHistWithData.proj_llm_fwd = 0
     }
 
-    // Gradient stop from TOP (0%=hi, 100%=lo)
+    // Where the initial-bankroll line falls as % from the TOP of the plotted
+    // range — the gradient flips green→red there, so the bankroll line reads
+    // profit vs loss against where it started.
     function bankrollGradStop(vals: (number | null)[], ref: number): string {
       const nums = vals.filter((v): v is number => v != null)
       if (nums.length === 0) return '0%'
@@ -414,7 +527,29 @@ export default function PLOverTime() {
     const histBankrollGradPct = bankrollGradStop(projPoints.map(p => p.hist_bankroll), initialBankroll)
     const projBankrollGradPct = bankrollGradStop(projPoints.map(p => p.proj_central), initialBankroll)
 
+    // The σ fans get the same treatment, computed over each band's own extent
+    // (lo .. lo+spread) — a stacked Area's bounding box spans exactly that, and
+    // the gradient is in objectBoundingBox units. Where a band straddles the
+    // starting bankroll the break flips mid-band, so the red portion is literally
+    // the share of the distribution that has lost money.
+    function bandExtent(lo: (p: ProjPoint) => number | null, spread: (p: ProjPoint) => number | null) {
+      return projPoints.flatMap((p) => {
+        const l = lo(p)
+        const s = spread(p)
+        return l != null && s != null ? [l, l + s] : []
+      })
+    }
+    const band1GradPct = bankrollGradStop(
+      bandExtent(p => p.proj_1s_lo, p => p.proj_1s_spread), initialBankroll,
+    )
+    const band2GradPct = bankrollGradStop(
+      bandExtent(p => p.proj_2s_lo, p => p.proj_2s_spread), initialBankroll,
+    )
+
     return {
+      initialBankroll,
+      band1GradPct,
+      band2GradPct,
       netBankrollNow,
       cagr,
       gbm,
@@ -665,7 +800,7 @@ export default function PLOverTime() {
           {/* Projection summary stats */}
           <div className="grid grid-4" style={{ marginBottom: 12 }}>
             <Stat
-              label="Net bankroll now"
+              label="Bankroll now"
               value={(() => {
                 const change = projection.netBankrollNow - data.initial_bankroll
                 const isPos = change >= 0
@@ -680,6 +815,7 @@ export default function PLOverTime() {
                   </span>
                 )
               })()}
+              sub="realized P&L only — LLM spend is paid outside the account"
             />
             <Stat
               label="Proj. CAGR"
@@ -701,7 +837,11 @@ export default function PLOverTime() {
             <Stat
               label="Days until broke"
               value={projection.daysUntilBroke == null ? '∞' : String(projection.daysUntilBroke)}
-              sub={projection.daysUntilBroke == null ? 'GBM central path positive' : 'GBM central path'}
+              sub={
+                projection.daysUntilBroke == null
+                  ? 'bankroll outpaces forward LLM burn'
+                  : 'bankroll crosses forward LLM burn'
+              }
               deltaKind={projection.daysUntilBroke == null ? 'pos' : projection.daysUntilBroke < 90 ? 'neg' : 'warn'}
             />
           </div>
@@ -722,20 +862,34 @@ export default function PLOverTime() {
                 <YAxis tickFormatter={(v) => fmtSignedMoney(v)} tick={{ fontSize: 11 }} width={72} domain={[0, 'auto']} />
                 <Tooltip content={<ProjTooltip />} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
+                {/* Bankroll keeps the pos/neg polarity gradient — green above the
+                    starting bankroll, red below. LLM cost is a separate entity in
+                    its own hue (blue); dash encodes actual vs projected. */}
                 {((<defs>
                   <linearGradient id="histBankrollAreaGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%"                            stopColor="#22c55e" stopOpacity={0.6} />
-                    <stop offset={projection.histBankrollGradPct} stopColor="#22c55e" stopOpacity={0.04} />
-                    <stop offset={projection.histBankrollGradPct} stopColor="#ef4444" stopOpacity={0.04} />
-                    <stop offset="100%"                          stopColor="#ef4444" stopOpacity={0.6} />
+                    <stop offset="0%"                             stopColor="var(--pos)" stopOpacity={0.55} />
+                    <stop offset={projection.histBankrollGradPct} stopColor="var(--pos)" stopOpacity={0.04} />
+                    <stop offset={projection.histBankrollGradPct} stopColor="var(--neg)" stopOpacity={0.04} />
+                    <stop offset="100%"                           stopColor="var(--neg)" stopOpacity={0.55} />
                   </linearGradient>
                   <linearGradient id="histBankrollLineGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset={projection.histBankrollGradPct} stopColor="#22c55e" />
-                    <stop offset={projection.histBankrollGradPct} stopColor="#ef4444" />
+                    <stop offset={projection.histBankrollGradPct} stopColor="var(--pos)" />
+                    <stop offset={projection.histBankrollGradPct} stopColor="var(--neg)" />
                   </linearGradient>
                   <linearGradient id="projBankrollLineGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset={projection.projBankrollGradPct} stopColor="#22c55e" />
-                    <stop offset={projection.projBankrollGradPct} stopColor="#ef4444" />
+                    <stop offset={projection.projBankrollGradPct} stopColor="var(--pos)" />
+                    <stop offset={projection.projBankrollGradPct} stopColor="var(--neg)" />
+                  </linearGradient>
+                  {/* σ fans: green above the starting bankroll, red below, with a
+                      hard break at break-even — a soft fade would blur exactly the
+                      threshold the fan exists to show. */}
+                  <linearGradient id="band1Grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset={projection.band1GradPct} stopColor="var(--pos)" stopOpacity={0.24} />
+                    <stop offset={projection.band1GradPct} stopColor="var(--neg)" stopOpacity={0.24} />
+                  </linearGradient>
+                  <linearGradient id="band2Grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset={projection.band2GradPct} stopColor="var(--pos)" stopOpacity={0.13} />
+                    <stop offset={projection.band2GradPct} stopColor="var(--neg)" stopOpacity={0.13} />
                   </linearGradient>
                 </defs>) as React.ReactNode)}
 
@@ -743,8 +897,8 @@ export default function PLOverTime() {
                 <ReferenceArea
                   x1={projection.todayTs}
                   x2={projection.projPoints[projection.projPoints.length - 1]?.ts}
-                  fill="var(--accent, #3b82f6)"
-                  fillOpacity={0.05}
+                  fill="var(--fg-3)"
+                  fillOpacity={0.06}
                 />
                 <ReferenceLine
                   x={projection.todayTs}
@@ -752,7 +906,15 @@ export default function PLOverTime() {
                   strokeDasharray="4 2"
                   label={{ value: 'Today', position: 'top', fontSize: 11 }}
                 />
-                <ReferenceLine y={0} stroke="var(--neg, #ef4444)" strokeWidth={1} />
+                <ReferenceLine y={0} stroke="var(--neg)" strokeWidth={1} />
+                {/* Where every green/red break on this chart is anchored. */}
+                <ReferenceLine
+                  y={projection.initialBankroll}
+                  stroke="var(--fg-3)"
+                  strokeDasharray="2 4"
+                  strokeWidth={1}
+                  label={{ value: 'break-even', position: 'insideBottomLeft', fontSize: 10, fill: 'var(--fg-3)' }}
+                />
 
                 <Area
                   dataKey="hist_bankroll"
@@ -766,15 +928,15 @@ export default function PLOverTime() {
                 />
                 {/* ±2σ fan band — stacked: transparent base + visible spread */}
                 <Area type="monotone" stackId="band2" dataKey="proj_2s_lo"     fill="transparent" stroke="none" legendType="none" dot={false} />
-                <Area type="monotone" stackId="band2" dataKey="proj_2s_spread" fill="#3b82f6" fillOpacity={0.08} stroke="none" name="±2σ band" dot={false} />
+                <Area type="monotone" stackId="band2" dataKey="proj_2s_spread" fill="url(#band2Grad)" stroke="none" name="±2σ band" dot={false} />
                 {/* ±1σ fan band */}
                 <Area type="monotone" stackId="band1" dataKey="proj_1s_lo"     fill="transparent" stroke="none" legendType="none" dot={false} />
-                <Area type="monotone" stackId="band1" dataKey="proj_1s_spread" fill="#3b82f6" fillOpacity={0.16} stroke="none" name="±1σ band" dot={false} />
+                <Area type="monotone" stackId="band1" dataKey="proj_1s_spread" fill="url(#band1Grad)" stroke="none" name="±1σ band" dot={false} />
                 {/* GBM central path */}
                 <Line
                   type="monotone"
                   dataKey="proj_central"
-                  name="Projection"
+                  name="Bankroll (projected)"
                   stroke="url(#projBankrollLineGrad)"
                   strokeWidth={1.5}
                   strokeDasharray="5 3"
@@ -784,17 +946,27 @@ export default function PLOverTime() {
                 <Line
                   dataKey="hist_llm_spend"
                   name="LLM spend (history)"
-                  stroke="#dc2626"
+                  stroke="var(--viz-llm)"
                   strokeWidth={2}
                   dot={false}
                   connectNulls
                 />
                 <Line
-                  dataKey="proj_llm_spend"
+                  dataKey="proj_llm_cum"
                   name="LLM spend (projected)"
-                  stroke="#dc2626"
+                  stroke="var(--viz-llm)"
                   strokeWidth={1.5}
                   strokeDasharray="5 3"
+                  dot={false}
+                  connectNulls
+                />
+                <Line
+                  dataKey="proj_llm_fwd"
+                  name="LLM burn (from today)"
+                  stroke="var(--viz-llm)"
+                  strokeWidth={1.5}
+                  strokeDasharray="1 4"
+                  strokeOpacity={0.85}
                   dot={false}
                   connectNulls
                 />

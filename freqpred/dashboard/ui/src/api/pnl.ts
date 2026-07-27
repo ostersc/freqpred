@@ -23,6 +23,8 @@ export interface PnLTimeSeriesResponse {
   llm_series: LLMSpendDayOut[]
   prompt_version_starts: PromptVersionStart[]
   initial_bankroll: number
+  /** initial_bankroll + all-time closed P&L for the active mode. Not window-scoped. */
+  net_bankroll_now: number
   total_trades: number
   all_time_pnl: number
   available_strategies: string[]

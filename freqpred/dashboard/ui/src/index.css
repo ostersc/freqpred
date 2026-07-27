@@ -30,6 +30,19 @@
   --info: oklch(0.78 0.10 230);
   --info-soft: oklch(0.78 0.10 230 / 0.13);
 
+  /* Chart series colors.
+     The bankroll keeps the pos/neg gradient — polarity against the starting
+     bankroll is the point of that line. LLM cost was ALSO red, which is what
+     made the two indistinguishable; it moves to blue rather than the bankroll
+     moving off green/red. Measured against this surface (OKLab ×100): LLM-blue
+     vs neg-red CVD ΔE 20.4 / normal 29.1, vs pos-green CVD ΔE 26.1 / normal
+     28.3 — both far clear of the 8 and 15 floors. Amber was rejected: at steps
+     that also clear the light-mode contrast gate it lands at normal-vision
+     ΔE 14.6 against neg-red, a hard fail.
+     The σ fans reuse --pos/--neg at low alpha rather than a hue of their own —
+     they are the same quantity as the bankroll line, just spread out. */
+  --viz-llm: oklch(0.66 0.16 265);
+
   --r-sm: 6px;
   --r-md: 10px;
   --r-lg: 14px;
@@ -525,6 +538,10 @@ body.light {
   --fg-2: oklch(0.52 0.008 255);
   --fg-3: oklch(0.62 0.008 255);
   --shadow-panel: 0 0 0 1px var(--line) inset, 0 1px 2px oklch(0 0 0 / 0.03);
+
+  /* Re-stepped for the white surface — not an automatic flip. The dark steps
+     sit at 1.8–3.0:1 on white; these clear 3:1. */
+  --viz-llm: oklch(0.52 0.16 265);
 }
 body.light .expo-bar { background: oklch(0.92 0.005 255); }
 body.light .tbl thead th { background: var(--bg-2); }

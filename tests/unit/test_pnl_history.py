@@ -51,6 +51,12 @@ def _mode_result(mode: str = "paper") -> MagicMock:
     return r
 
 
+def _scalar_result(value: float) -> MagicMock:
+    r = MagicMock()
+    r.scalar_one.return_value = value
+    return r
+
+
 # ---------------------------------------------------------------------------
 # get_pnl_time_series — unit tests (no DB, no HTTP)
 # ---------------------------------------------------------------------------
@@ -172,12 +178,15 @@ def _build_endpoint_session(
     pnl_rows: list,
     llm_rows: list,
     available_rows: list | None = None,
+    all_time_pnl: float = 0.0,
 ) -> MagicMock:
     """Build a mock session whose execute() cycles through:
     1. _get_mode (scalar_one_or_none)
     2. get_pnl_time_series execute → .all()
     3. get_llm_spend_time_series execute → .all()
     4-10. 7× distinct available_* queries → .all() each
+    11. prompt_version_starts → .all()
+    12. get_net_bankroll → .scalar_one()
     """
     if available_rows is None:
         available_rows = []
@@ -194,6 +203,8 @@ def _build_endpoint_session(
         _all_result(available_rows),  # 8. available_prompt_versions (join)
         _all_result(available_rows),  # 9. available_categories (join)
         _all_result(available_rows),  # 10. available_series_tickers (join)
+        _all_result([]),              # 11. prompt_version_starts
+        _scalar_result(all_time_pnl),  # 12. get_net_bankroll
     ]
 
     async def _execute(stmt: object) -> MagicMock:
@@ -256,7 +267,11 @@ async def test_endpoint_available_filters_stable() -> None:
     pnl_r = _all_result(pnl_rows)
     llm_r = _all_result(llm_rows)
 
-    results = [mode_r, pnl_r, llm_r] + [_all_result([("TestStrategy",)])] * 7
+    results = (
+        [mode_r, pnl_r, llm_r]
+        + [_all_result([("TestStrategy",)])] * 7
+        + [_all_result([]), _scalar_result(0.0)]  # prompt_version_starts, get_net_bankroll
+    )
 
     async def _execute(stmt: object) -> MagicMock:
         nonlocal call_idx
@@ -288,3 +303,41 @@ async def test_endpoint_initial_bankroll_included() -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["initial_bankroll"] == pytest.approx(2500.0)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_net_bankroll_now_is_all_time_not_windowed() -> None:
+    """net_bankroll_now must use all-time closed P&L, not the lookback window's.
+
+    The projection anchors on this field. Deriving the anchor from
+    pnl_series/llm_series instead made "now" move whenever the 7d/30d/90d toggle
+    changed, because both cumulative series restart at the lookback edge.
+    """
+    # Window shows +10.0, but all-time closed P&L is -40.0.
+    pnl_rows = [(date(2026, 1, 1), 10.0, 2)]
+    session = _build_endpoint_session(
+        pnl_rows=pnl_rows, llm_rows=[], all_time_pnl=-40.0
+    )
+    app = _make_app(session, bankroll_usd=1000.0)
+
+    with TestClient(app) as client:
+        resp = client.get("/api/pnl/time-series?lookback_days=7")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # 1000 + (-40), NOT 1000 + 10 from the window.
+    assert body["net_bankroll_now"] == pytest.approx(960.0)
+    assert body["all_time_pnl"] == pytest.approx(10.0)  # window-scoped, unchanged
+
+
+@pytest.mark.asyncio
+async def test_endpoint_net_bankroll_now_floored_at_zero() -> None:
+    """Losses exceeding the bankroll must not produce a negative anchor."""
+    session = _build_endpoint_session(pnl_rows=[], llm_rows=[], all_time_pnl=-5000.0)
+    app = _make_app(session, bankroll_usd=1000.0)
+
+    with TestClient(app) as client:
+        resp = client.get("/api/pnl/time-series")
+
+    assert resp.status_code == 200
+    assert resp.json()["net_bankroll_now"] == pytest.approx(0.0)

@@ -37,6 +37,7 @@ from freqpred.runtime.telemetry import (
 from freqpred.signal.models import SignalRow
 from freqpred.trading.ledger import (
     get_llm_spend_time_series,
+    get_net_bankroll,
     get_pnl_time_series,
     get_portfolio_summary,
 )
@@ -1657,11 +1658,16 @@ async def get_pnl_time_series_endpoint(
     total_trades = sum(d["trade_count"] for d in pnl_series_raw)
     all_time_pnl = pnl_series_raw[-1]["cumulative_pnl"] if pnl_series_raw else 0.0
 
+    # Preset-independent: the same value the risk checks size against, so the
+    # projection anchor does not drift when the lookback toggle changes.
+    net_bankroll_now = await get_net_bankroll(session, initial_bankroll, mode=app_mode)
+
     return PnLTimeSeriesResponse(
         pnl_series=[PnLDayOut(**d) for d in pnl_series_raw],
         llm_series=[LLMSpendDayOut(**d) for d in llm_series_raw],
         prompt_version_starts=prompt_version_starts,
         initial_bankroll=initial_bankroll,
+        net_bankroll_now=net_bankroll_now,
         total_trades=total_trades,
         all_time_pnl=all_time_pnl,
         available_strategies=available_strategies,
@@ -1903,7 +1909,6 @@ async def get_system_health(
     import freqpred.alerts.models  # noqa: F401 — ensure RunStateRow is registered  # noqa: PLC0415
     from freqpred.alerts.models import RunStateRow as _RunStateRow  # noqa: PLC0415
     from freqpred.alerts.run_state import daily_loss_ack_from_row  # noqa: PLC0415
-    from freqpred.trading.ledger import get_net_bankroll  # noqa: PLC0415
 
     db_ok = True
     app_mode = "paper"
