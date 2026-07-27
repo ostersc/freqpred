@@ -2484,6 +2484,109 @@ async def test_limit_entry_respects_custom_price_hook() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("direction,estimated_probability,expected_price", [
+    # 0.735 - 0.12 = 0.615 → snaps down to 0.61
+    ("YES", 0.735, 0.61),
+    # (1 - 0.145) - 0.12 = 0.735 → snaps down to 0.73
+    ("NO", 0.145, 0.73),
+])
+async def test_limit_entry_snaps_off_grid_price_to_whole_cent(
+    direction: str, estimated_probability: float, expected_price: float
+) -> None:
+    """Computed entry prices land on Kalshi's tick grid, rounded down.
+
+    An estimated_probability with sub-cent precision otherwise yields an
+    off-grid limit price that Kalshi rejects.
+    """
+    om, _ = _make_order_manager()
+    strategy = _make_limit_strategy(custom_price=None, min_edge=0.12)
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+    sig = _make_signal(direction=direction, estimated_probability=estimated_probability)
+    expected_pos = _make_position(entry_price=expected_price, direction=direction)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_pos,
+    ) as mock_open:
+        await om.submit(sig, market, strategy)
+
+    entry_price = mock_open.call_args.kwargs["entry_price"]
+    assert entry_price == pytest.approx(expected_price, abs=1e-9)
+    # Never rounds up — that would erode the required edge.
+    unrounded = (
+        estimated_probability - 0.12 if direction == "YES"
+        else (1.0 - estimated_probability) - 0.12
+    )
+    assert entry_price <= unrounded + 1e-9
+
+
+@pytest.mark.asyncio
+async def test_limit_entry_snaps_custom_price_to_grid() -> None:
+    """A custom_entry_price() override is snapped to the grid too."""
+    om, _ = _make_order_manager()
+    strategy = _make_limit_strategy(custom_price=0.4267)
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+    sig = _make_signal(direction="YES", estimated_probability=0.65)
+    expected_pos = _make_position(entry_price=0.42)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected_pos,
+    ) as mock_open:
+        await om.submit(sig, market, strategy)
+
+    assert mock_open.call_args.kwargs["entry_price"] == pytest.approx(0.42)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["YES", "NO"])
+async def test_limit_entry_skipped_when_price_rounds_below_one_tick(direction: str) -> None:
+    """A computed price at or below one tick is rejected, not submitted at zero.
+
+    Previously this divided by zero when sizing contracts.
+    """
+    om, _ = _make_order_manager()
+    strategy = _make_limit_strategy(custom_price=None, min_edge=0.12)
+    market = _make_market(yes_bid=0.52, yes_ask=0.56)
+    # YES: 0.124 - 0.12 = 0.004 → 0.0.  NO: (1 - 0.876) - 0.12 = 0.004 → 0.0.
+    prob = 0.124 if direction == "YES" else 0.876
+    sig = _make_signal(direction=direction, estimated_probability=prob)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+    ) as mock_open:
+        result = await om.submit(sig, market, strategy)
+
+    assert result is None
+    mock_open.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_market_entry_price_not_snapped() -> None:
+    """Book-sourced prices are already on the market's grid — left untouched.
+
+    Sub-cent tick markets quote sub-cent bids/asks; re-rounding them would
+    push the order off the top of the book.
+    """
+    om, _ = _make_order_manager()
+    strategy = _make_strategy(should_trade_result=True, position_size_result=100.0)
+    market = _make_market(yes_bid=0.52, yes_ask=0.565)
+    expected = _make_position(entry_price=0.565)
+
+    with patch(
+        "freqpred.trading.order_manager.ledger.open_position",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as mock_open:
+        await om.submit(_make_signal(direction="YES"), market, strategy)
+
+    assert mock_open.call_args.kwargs["entry_price"] == pytest.approx(0.565)
+
+
+@pytest.mark.asyncio
 async def test_limit_entry_opens_pending() -> None:
     """entry='limit' → ledger.open_position called with status='pending'."""
     om, _ = _make_order_manager()

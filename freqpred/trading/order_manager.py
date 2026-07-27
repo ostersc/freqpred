@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from freqpred.markets.kalshi import KalshiAPIError
 from freqpred.markets.models import Fill, Market, MarketRow, Order, Position, PositionRow
+from freqpred.markets.ticks import round_to_tick
 from freqpred.signal.models import Signal
 from freqpred.strategy.base import IPredictionStrategy
 from freqpred.trading import ledger
@@ -466,6 +467,20 @@ class OrderManager:
                     entry_price = round(
                         (1.0 - signal.estimated_probability) - strategy.config.min_edge, 4
                     )
+                # These are computed prices, not book prices, so they can land
+                # off Kalshi's tick grid (e.g. an estimated_probability of 0.735
+                # with min_edge 0.12 gives 0.615). Kalshi rejects off-grid limit
+                # prices. Round down: an entry must never pay more than the price
+                # the required edge was derived from.
+                entry_price = round_to_tick(entry_price, action="buy")
+                if entry_price <= 0:
+                    logger.info(
+                        "order_manager.entry_price_below_tick",
+                        market_id=market.id,
+                        signal_id=signal.id,
+                        direction=signal.direction,
+                    )
+                    return None
                 initial_status = "pending"
             else:
                 entry_price = (
