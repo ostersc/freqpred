@@ -168,7 +168,7 @@ uv run freqpred metrics weekly-review --json-out docs/weekly-review/reports/data
 | `--as-of` | now | Treat this ISO timestamp as "now", to reproduce a past week's review |
 | `--json-out` | — | Also write the review as JSON, for diffing one week against another |
 
-Seven sections: window ledger, exit effectiveness (early exits vs holding to settlement), an MAE-based stoploss threshold sweep, marginal entry-gate analysis (what each gate admits vs blocks, in realised profit-vs-price), signal accuracy by week/prompt-version/correlate slice, sizing-assessor capital tilt, and per-source realised edge. Deterministic — no LLM calls, no DB writes, free to re-run. Drives the `weekly-review` skill, which reads this output and proposes changes.
+Eight sections: window ledger, exit effectiveness (early exits vs holding to settlement), an MAE-based stoploss threshold sweep, a trailing-stop sweep over real candle paths reported both with and without re-entry (§3b), marginal entry-gate analysis (what each gate admits vs blocks, in realised profit-vs-price), signal accuracy by week/prompt-version/correlate slice, sizing-assessor capital tilt, and per-source realised edge. Deterministic — no LLM calls, no DB writes, free to re-run. Drives the `weekly-review` skill, which reads this output and proposes changes.
 
 ---
 

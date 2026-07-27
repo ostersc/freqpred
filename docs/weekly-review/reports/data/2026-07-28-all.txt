@@ -5,9 +5,9 @@ generated 2026-07-28 00:00 UTC   scope: {'mode': 'all', 'signal_prompt_version':
 ! Paper and live positions are both in scope. Paper fills are frictionless — never read a pooled P&L number as evidence about live execution. Re-run with --mode live to isolate.
 
 1. WINDOW LEDGER  (always all modes; the analysis sections below respect --mode)
-  live   entered=  20 closed=  20 open=  0 pnl=$    +0.27 win_rate= 45.0%
+  live   entered=  21 closed=  20 open=  1 pnl=$    +0.27 win_rate= 45.0%
   paper  entered=   0 closed=   0 open=  0 pnl=$    +0.00 win_rate=  0.0%
-  signals=445 over 27 markets   llm=$22.94 in 872 calls
+  signals=450 over 31 markets   llm=$23.12 in 880 calls
 
 2. EXIT EFFECTIVENESS  (actual minus hold-to-settlement; negative = the exit cost money)
   exit_reason              dir     n     actual       held      saved  per-trade 95% CI
@@ -80,6 +80,36 @@ generated 2026-07-28 00:00 UTC   scope: {'mode': 'all', 'signal_prompt_version':
        -0.30      147 $     -33.17 $      -7.02
        -0.40       97 $     -41.28 $     -15.12
        -1.00        0 $    +117.09 $    +143.25
+
+3b. TRAILING STOP SWEEP  (real price paths; profit-only trail)
+   Unlike a fixed take-profit, a trailing stop never caps a winner — it exits
+   only after a reversal from the peak. On the first leg it pre-empts the real
+   exit only if it fires earlier; otherwise the real exit stands.
+   READ THE 'with re-entry' COLUMN. A trail firing above its trigger always
+   exits in PROFIT, and risk.py's cooldown blocks only on a LOSING close — so
+   nothing stops the strategy re-entering the same market on its next signal.
+   Scoring the exit alone credits a saving the book never keeps: each re-entry
+   re-exposes capital to the same admitted-signal edge, so on a negative-edge
+   book the trail multiplies the losses it appears to prevent. 'no re-entry' is
+   an upper bound needing a block on re-entry after a PROFITABLE trailing exit,
+   which no current config option expresses.
+   Re-entry is modelled permissively (min_confidence + the real limit price
+   only — no exposure caps, mid-price band, max_edge or max_days_to_close), so
+   the re-entry count is an over-estimate. Offsets at or inside the typical
+   spread are not tradeable; check the spread before believing a tight row.
+  positions covered: 302   actual P&L: $-22.48
+   trigger  offset  fired  re-ent  no re-entry         CI (no re-ent)  with re-entry       CI (with re-ent)
+     +0.05    0.02    234     336       +12.84 [-0.427, +0.576]         -27.54 [-0.648, +0.413] 
+     +0.05    0.03    234     332        -2.72 [-0.491, +0.510]         -60.24 [-0.796, +0.265] 
+     +0.08    0.02    221     264        -4.67 [-0.463, +0.429]         +23.22 [-0.359, +0.576] 
+     +0.08    0.03    221     264       -18.88 [-0.529, +0.364]          +0.75 [-0.454, +0.466] 
+     +0.08    0.05    221     258       -42.58 [-0.648, +0.254]         -45.70 [-0.669, +0.245] 
+     +0.10    0.02    207     209        -0.03 [-0.436, +0.467]          +1.11 [-0.406, +0.418] 
+     +0.10    0.03    205     209       -18.66 [-0.529, +0.386]         -27.97 [-0.572, +0.300] 
+     +0.10    0.05    205     207       -42.38 [-0.648, +0.269]         -70.74 [-0.799, +0.096] 
+     +0.15    0.02    184     137        -8.20 [-0.484, +0.420]          -0.29 [-0.405, +0.420] 
+     +0.15    0.03    184     137       -19.25 [-0.544, +0.359]         -16.10 [-0.484, +0.336] 
+     +0.15    0.05    183     136       -40.70 [-0.690, +0.292]         -46.41 [-0.687, +0.161] 
 
 4. ENTRY GATES  (marginal: every OTHER gate held at its configured value)
    A profitable 'blocked' row means the gate is refusing trades that pay. * = CI excludes zero.

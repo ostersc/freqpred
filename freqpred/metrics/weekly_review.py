@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -55,6 +55,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from freqpred.metrics.entry_counterfactual import (
+    limit_entry_price,
     load_paths_and_signals,
     simulate_trade,
 )
@@ -311,6 +312,9 @@ class WeeklyReview:
     stoploss_candles_pnl: float
     stoploss_candles_n: int
     candle_coverage: dict[str, int]
+    trailing_sweep: list[TrailingPoint]
+    trailing_actual_pnl: float
+    trailing_n: int
     gate_stats: list[GateStat]
     gate_replays: list[tuple[str, str, ReplayStat, ReplayStat]]
     gate_replay_sweeps: list[ReplaySweepPoint]
@@ -664,6 +668,318 @@ def candle_stoploss_sweep(
             )
         )
     return points, actual_pnl, len(usable)
+
+
+@dataclass(frozen=True)
+class TrailingBar:
+    """One period of a position's path, in the traded side's own price space."""
+
+    end_ts: datetime
+    sell_high: float   # best price the side could have been SOLD at
+    sell_low: float    # worst price the side could have been SOLD at
+    buy_low: float | None  # cheapest the side could have been BOUGHT at (re-entry)
+
+
+@dataclass(frozen=True)
+class TrailingPoint:
+    positive: float
+    offset: float
+    n_fired: int
+    n_reentries: int
+    total_no_reentry: float
+    total_with_reentry: float
+    delta_no_reentry: float
+    delta_with_reentry: float
+    ci_with_reentry: tuple[float, float]
+    # Only meaningful if re-entry after a PROFITABLE trailing exit is blocked —
+    # which needs a guard that does not exist today. See the class docstring.
+    ci_no_reentry: tuple[float, float]
+
+
+def _trailing_stop_level(
+    entry: float, peak: float, stoploss: float, positive: float, offset: float
+) -> float:
+    """Mirror of `position_monitor._compute_trailing_stop_level`."""
+    trail = offset if (peak - entry) >= positive else -stoploss
+    return round(peak - trail, 4)
+
+
+def trailing_stop_sweep(
+    positions: Sequence[ClosedPosition],
+    paths: Mapping[str, Sequence[TrailingBar]],
+    signals_by_market: Mapping[str, Sequence[tuple[datetime, str, float]]],
+    *,
+    stoploss: float,
+    min_edge: float,
+    exit_fee_per_contract: float = 0.0,
+    limit_timeout_hours: float = 2.0,
+    positives: Sequence[float] = (0.05, 0.08, 0.10, 0.15),
+    offsets: Sequence[float] = (0.02, 0.03, 0.05),
+) -> tuple[list[TrailingPoint], float, int]:
+    """Would a trailing stop have paid — and does re-entry give the gain back?
+
+    Replays `position_monitor._check_trailing_stop` over real price paths. The
+    trailing stop sits ABOVE force_exit/signal in the exit ladder, so on a
+    position's first leg it only pre-empts the real exit when it fires earlier;
+    if it never fires, the real exit stands exactly as it happened.
+
+    **Read the with-re-entry column, not the no-re-entry one.** A trailing stop
+    that fires above `trailing_stop_positive` always exits in profit, and the
+    loss cooldown in `risk.py` triggers only on a *losing* close — so nothing
+    stops the strategy re-entering the same market on its next signal. Scoring
+    the exit while ignoring the re-entry credits the rule with a saving the book
+    never keeps: each re-entry re-exposes capital to the same admitted-signal
+    edge, so on a negative-edge book the trailing stop multiplies the losses it
+    appears to prevent. The no-re-entry column is the upper bound that would
+    require blocking re-entry after a *profitable* trailing exit — which no
+    current config option expresses.
+
+    Re-entry is modelled permissively: a later real signal on the same market
+    passing `min_confidence` posts its real limit (`p_est - min_edge`) and fills
+    if the ask reaches it within `limit_timeout_hours`. Exposure caps, the
+    mid-price band, `max_edge` and `max_days_to_close` are NOT applied, so the
+    re-entry count is an over-estimate — treat it as a bound, not a forecast.
+    Contract count is held at the original position's size; real sizing runs
+    through Kelly and the assessor.
+    """
+    usable = [
+        p
+        for p in positions
+        if p.position_id in paths and settle_price(p.direction, p.result) is not None
+    ]
+    actual = sum(p.pnl for p in usable)
+
+    points: list[TrailingPoint] = []
+    for positive in positives:
+        for offset in offsets:
+            if offset >= positive:
+                continue  # a trail wider than its own trigger is incoherent
+            tot_no = tot_re = 0.0
+            fired = reentries = 0
+            deltas: list[float] = []
+            deltas_no: list[float] = []
+            for pos in usable:
+                path = paths[pos.position_id]
+                sigs = signals_by_market.get(pos.market_id, ())
+                pnl_no, n_fired, _ = _walk_position(
+                    pos, path, sigs, positive, offset,
+                    stoploss=stoploss, min_edge=min_edge,
+                    exit_fee=exit_fee_per_contract,
+                    timeout_h=limit_timeout_hours, allow_reentry=False,
+                )
+                pnl_re, _, n_re = _walk_position(
+                    pos, path, sigs, positive, offset,
+                    stoploss=stoploss, min_edge=min_edge,
+                    exit_fee=exit_fee_per_contract,
+                    timeout_h=limit_timeout_hours, allow_reentry=True,
+                )
+                tot_no += pnl_no
+                tot_re += pnl_re
+                fired += n_fired
+                reentries += n_re
+                if abs(pnl_re - pos.pnl) > 1e-9:
+                    deltas.append(pnl_re - pos.pnl)
+                if abs(pnl_no - pos.pnl) > 1e-9:
+                    deltas_no.append(pnl_no - pos.pnl)
+            points.append(
+                TrailingPoint(
+                    positive=positive,
+                    offset=offset,
+                    n_fired=fired,
+                    n_reentries=reentries,
+                    total_no_reentry=tot_no,
+                    total_with_reentry=tot_re,
+                    delta_no_reentry=tot_no - actual,
+                    delta_with_reentry=tot_re - actual,
+                    ci_with_reentry=bootstrap_mean_ci(deltas),
+                    ci_no_reentry=bootstrap_mean_ci(deltas_no),
+                )
+            )
+    return points, actual, len(usable)
+
+
+def _walk_position(
+    pos: ClosedPosition,
+    path: Sequence[TrailingBar],
+    signals: Sequence[tuple[datetime, str, float]],
+    positive: float,
+    offset: float,
+    *,
+    stoploss: float,
+    min_edge: float,
+    exit_fee: float,
+    timeout_h: float,
+    allow_reentry: bool,
+) -> tuple[float, int, int]:
+    """Total P&L over one position's market.
+
+    Returns (pnl, legs_exited_by_trail, n_reentries). The two counts differ: a
+    re-entered leg that rides to settlement never fires the trail, so counting
+    re-entries from fired legs alone would silently under-report them.
+    """
+    settle = settle_price(pos.direction, pos.result)
+    if settle is None:
+        return pos.pnl, 0, 0
+    n = pos.contracts
+    total = 0.0
+    entry, entry_fee = pos.entry_price, pos.entry_fee_usd
+    idx = 0
+    legs = 0
+    reentries = 0
+    first_leg = True
+
+    while True:
+        peak = entry
+        exited_at: datetime | None = None
+        for i in range(idx, len(path)):
+            bar = path[i]
+            if first_leg and bar.end_ts > pos.exit_time:
+                break  # the real exit came first; the trail never fired
+            peak = max(peak, bar.sell_high)
+            stop = _trailing_stop_level(entry, peak, stoploss, positive, offset)
+            if bar.sell_low <= stop:
+                total += (stop - entry) * n - entry_fee - exit_fee * n
+                exited_at, idx = bar.end_ts, i + 1
+                legs += 1
+                break
+        if exited_at is None:
+            # Never fired on this leg: leg 1 keeps its real outcome, a
+            # re-entered leg has no real history and rides to settlement.
+            total += pos.pnl if first_leg else (settle - entry) * n - entry_fee
+            return total, legs, reentries
+        first_leg = False
+        if not allow_reentry:
+            return total, legs, reentries
+
+        entry_next = _next_fill(path, signals, exited_at, idx, min_edge, timeout_h)
+        if entry_next is None:
+            return total, legs, reentries
+        entry, idx = entry_next
+        entry_fee = 0.0
+        reentries += 1
+
+
+def _next_fill(
+    path: Sequence[TrailingBar],
+    signals: Sequence[tuple[datetime, str, float]],
+    after: datetime,
+    idx: int,
+    min_edge: float,
+    timeout_h: float,
+) -> tuple[float, int] | None:
+    """First later signal whose resting limit would have filled: (price, path idx)."""
+    for sig_ts, sig_dir, p_est in signals:
+        if sig_ts <= after:
+            continue
+        limit_px = limit_entry_price(sig_dir, p_est, min_edge)
+        deadline = sig_ts + timedelta(hours=timeout_h)
+        for j in range(idx, len(path)):
+            bar = path[j]
+            if bar.end_ts <= sig_ts:
+                continue
+            if bar.end_ts > deadline:
+                break
+            if bar.buy_low is not None and bar.buy_low <= limit_px:
+                return limit_px, j + 1
+    return None
+
+
+_TRAILING_PATH_SQL = text(
+    """
+    SELECT p.id::text AS position_id,
+           p.direction,
+           c.end_period_ts,
+           c.yes_bid_high,
+           c.yes_bid_low,
+           c.yes_ask_high,
+           c.yes_ask_low
+    FROM positions p
+    JOIN markets m ON m.id = p.market_id
+    JOIN market_candles c
+      ON c.market_id = p.market_id
+     AND c.period_interval = :interval
+     AND c.end_period_ts > p.entry_time
+     AND c.end_period_ts <= COALESCE(m.close_time, p.exit_time)
+    WHERE p.status = 'closed'
+      AND p.exit_time >= :start
+      AND p.exit_time < :end
+      AND (CAST(:mode AS text) IS NULL OR p.mode = CAST(:mode AS text))
+    ORDER BY p.id, c.end_period_ts
+    """
+)
+
+_TRAILING_SIGNALS_SQL = text(
+    """
+    SELECT market_id, created_at, direction, estimated_probability
+    FROM signals
+    WHERE created_at >= :start AND created_at < :end
+      AND estimated_probability IS NOT NULL
+      AND confidence >= :min_confidence
+    ORDER BY market_id, created_at
+    """
+)
+
+
+async def load_trailing_paths(
+    session: AsyncSession,
+    *,
+    start: datetime,
+    end: datetime,
+    mode: str | None = None,
+    period_interval: int = 60,
+) -> dict[str, list[TrailingBar]]:
+    """Per-position bars carrying both extremes plus the re-entry cost."""
+    rows = (
+        await session.execute(
+            _TRAILING_PATH_SQL,
+            {"interval": period_interval, "start": start, "end": end, "mode": mode},
+        )
+    ).mappings().all()
+
+    out: dict[str, list[TrailingBar]] = defaultdict(list)
+    for row in rows:
+        if row["direction"] == "YES":
+            sell_hi, sell_lo = row["yes_bid_high"], row["yes_bid_low"]
+            buy_lo = row["yes_ask_low"]
+        else:
+            # NO sells into 1 - yes_ask and buys at 1 - yes_bid.
+            sell_hi = None if row["yes_ask_low"] is None else 1.0 - row["yes_ask_low"]
+            sell_lo = None if row["yes_ask_high"] is None else 1.0 - row["yes_ask_high"]
+            buy_lo = None if row["yes_bid_high"] is None else 1.0 - row["yes_bid_high"]
+        # An empty book is not a price — same guard as `load_candle_paths`.
+        if sell_hi is None or sell_lo is None or sell_hi <= 0.0 or sell_lo <= 0.0:
+            continue
+        out[row["position_id"]].append(
+            TrailingBar(
+                end_ts=row["end_period_ts"],
+                sell_high=float(sell_hi),
+                sell_low=float(sell_lo),
+                buy_low=None if buy_lo is None else float(buy_lo),
+            )
+        )
+    return dict(out)
+
+
+async def load_signals_by_market(
+    session: AsyncSession,
+    *,
+    start: datetime,
+    end: datetime,
+    min_confidence: float,
+) -> dict[str, list[tuple[datetime, str, float]]]:
+    """Confidence-passing signals per market, for the re-entry replay."""
+    rows = (
+        await session.execute(
+            _TRAILING_SIGNALS_SQL,
+            {"start": start, "end": end, "min_confidence": min_confidence},
+        )
+    ).mappings().all()
+    out: dict[str, list[tuple[datetime, str, float]]] = defaultdict(list)
+    for r in rows:
+        out[r["market_id"]].append(
+            (r["created_at"], r["direction"], float(r["estimated_probability"]))
+        )
+    return dict(out)
 
 
 _CANDLE_PATH_SQL = text(
@@ -1723,6 +2039,27 @@ async def build_weekly_review(
     sweep_candles, sweep_candles_pnl, sweep_candles_n = candle_stoploss_sweep(
         history_positions, paths, exit_fee_per_contract=exit_fee
     )
+    trailing_paths = await load_trailing_paths(
+        session,
+        start=history_start or datetime(1970, 1, 1, tzinfo=UTC),
+        end=window.end,
+        mode=mode,
+    )
+    trailing_signals = await load_signals_by_market(
+        session,
+        start=history_start or datetime(1970, 1, 1, tzinfo=UTC),
+        end=window.end,
+        min_confidence=config.min_confidence,
+    )
+    trailing_sweep, trailing_actual_pnl, trailing_n = trailing_stop_sweep(
+        history_positions,
+        trailing_paths,
+        trailing_signals,
+        stoploss=config.stoploss,
+        min_edge=config.min_edge,
+        exit_fee_per_contract=exit_fee,
+        limit_timeout_hours=config.limit_order_timeout_hours,
+    )
     resolved_positions = [
         p for p in history_positions if settle_price(p.direction, p.result) is not None
     ]
@@ -1810,6 +2147,9 @@ async def build_weekly_review(
         stoploss_candles_pnl=sweep_candles_pnl,
         stoploss_candles_n=sweep_candles_n,
         candle_coverage=coverage,
+        trailing_sweep=trailing_sweep,
+        trailing_actual_pnl=trailing_actual_pnl,
+        trailing_n=trailing_n,
         gate_stats=entry_gate_analysis(signals, config),
         gate_replays=gate_replays,
         gate_replay_sweeps=gate_replay_sweeps,
@@ -1973,6 +2313,43 @@ def render_text(review: WeeklyReview) -> str:  # noqa: C901 — a report is a lo
         add("")
         add("  CANDLE-BASED: no coverage. Run `freqpred candles backfill --series <X>`;")
         add("  Kalshi retains only ~67 days, so uncaptured history is gone for good.")
+    add("")
+
+    # --- 3b. trailing stop ------------------------------------------------
+    add("3b. TRAILING STOP SWEEP  (real price paths; profit-only trail)")
+    add("   Unlike a fixed take-profit, a trailing stop never caps a winner — it exits")
+    add("   only after a reversal from the peak. On the first leg it pre-empts the real")
+    add("   exit only if it fires earlier; otherwise the real exit stands.")
+    add("   READ THE 'with re-entry' COLUMN. A trail firing above its trigger always")
+    add("   exits in PROFIT, and risk.py's cooldown blocks only on a LOSING close — so")
+    add("   nothing stops the strategy re-entering the same market on its next signal.")
+    add("   Scoring the exit alone credits a saving the book never keeps: each re-entry")
+    add("   re-exposes capital to the same admitted-signal edge, so on a negative-edge")
+    add("   book the trail multiplies the losses it appears to prevent. 'no re-entry' is")
+    add("   an upper bound needing a block on re-entry after a PROFITABLE trailing exit,")
+    add("   which no current config option expresses.")
+    add("   Re-entry is modelled permissively (min_confidence + the real limit price")
+    add("   only — no exposure caps, mid-price band, max_edge or max_days_to_close), so")
+    add("   the re-entry count is an over-estimate. Offsets at or inside the typical")
+    add("   spread are not tradeable; check the spread before believing a tight row.")
+    if review.trailing_sweep:
+        add(f"  positions covered: {review.trailing_n}   "
+            f"actual P&L: ${review.trailing_actual_pnl:+.2f}")
+        add(f"  {'trigger':>8} {'offset':>7} {'fired':>6} {'re-ent':>7} "
+            f"{'no re-entry':>12} {'CI (no re-ent)':>22} "
+            f"{'with re-entry':>14} {'CI (with re-ent)':>22}")
+        for pt in review.trailing_sweep:
+            s_re = "*" if (pt.ci_with_reentry[0] > 0 or pt.ci_with_reentry[1] < 0) else " "
+            s_no = "*" if (pt.ci_no_reentry[0] > 0 or pt.ci_no_reentry[1] < 0) else " "
+            add(
+                f"  {pt.positive:>+8.2f} {pt.offset:>7.2f} {pt.n_fired:>6} "
+                f"{pt.n_reentries:>7} {pt.delta_no_reentry:>+12.2f} "
+                f"[{pt.ci_no_reentry[0]:+.3f}, {pt.ci_no_reentry[1]:+.3f}]{s_no}"
+                f"{pt.delta_with_reentry:>+14.2f} "
+                f"[{pt.ci_with_reentry[0]:+.3f}, {pt.ci_with_reentry[1]:+.3f}]{s_re}"
+            )
+    else:
+        add("  no coverage — needs stored candles and resolved positions.")
     add("")
 
     # --- 4. entry gates --------------------------------------------------
@@ -2159,6 +2536,29 @@ def to_dict(review: WeeklyReview) -> dict:
         "stoploss_candles_pnl": round(review.stoploss_candles_pnl, 2),
         "stoploss_candles_n": review.stoploss_candles_n,
         "candle_coverage": review.candle_coverage,
+        "trailing_actual_pnl": round(review.trailing_actual_pnl, 2),
+        "trailing_n": review.trailing_n,
+        "trailing_sweep": [
+            {
+                "positive": p.positive,
+                "offset": p.offset,
+                "n_fired": p.n_fired,
+                "n_reentries": p.n_reentries,
+                "total_no_reentry": round(p.total_no_reentry, 2),
+                "total_with_reentry": round(p.total_with_reentry, 2),
+                "delta_no_reentry": round(p.delta_no_reentry, 2),
+                "delta_with_reentry": round(p.delta_with_reentry, 2),
+                "ci_with_reentry": [
+                    round(p.ci_with_reentry[0], 4),
+                    round(p.ci_with_reentry[1], 4),
+                ],
+                "ci_no_reentry": [
+                    round(p.ci_no_reentry[0], 4),
+                    round(p.ci_no_reentry[1], 4),
+                ],
+            }
+            for p in review.trailing_sweep
+        ],
         "stoploss_sweep_candles": [
             _sweep_point(p) for p in review.stoploss_sweep_candles
         ],

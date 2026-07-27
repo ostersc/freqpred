@@ -14,6 +14,7 @@ import pytest
 from freqpred.metrics.weekly_review import (
     ClosedPosition,
     ResolvedSignal,
+    TrailingBar,
     accuracy_by,
     bootstrap_mean_ci,
     capital_tilt,
@@ -31,6 +32,7 @@ from freqpred.metrics.weekly_review import (
     source_analysis,
     stoploss_sweep,
     to_dict,
+    trailing_stop_sweep,
 )
 
 # Fixed reference instant. Nothing in this module reads the wall clock — every
@@ -668,6 +670,28 @@ def test_source_analysis_applies_min_signals() -> None:
 # --------------------------------------------------------------------------
 
 
+def _trailing_fixture():
+    """One trailing-stop row, built through the real sweep rather than by hand."""
+    pos = _position(exit_reason="market_resolved", entry_price=0.40, pnl=1.0)
+    path = {
+        pos.position_id: [
+            TrailingBar(
+                end_ts=pos.entry_time + timedelta(minutes=60),
+                sell_high=0.50, sell_low=0.50, buy_low=0.50,
+            ),
+            TrailingBar(
+                end_ts=pos.entry_time + timedelta(minutes=120),
+                sell_high=0.50, sell_low=0.40, buy_low=0.40,
+            ),
+        ]
+    }
+    points, _, _ = trailing_stop_sweep(
+        [pos], path, {}, stoploss=-1.0, min_edge=0.15,
+        positives=(0.08,), offsets=(0.03,),
+    )
+    return points
+
+
 def _review():
     from freqpred.metrics.weekly_review import WeeklyReview, Window
 
@@ -700,6 +724,9 @@ def _review():
             "periods_no_bid": 0,
             "periods_total": 4,
         },
+        trailing_sweep=_trailing_fixture(),
+        trailing_actual_pnl=baseline,
+        trailing_n=1,
         gate_stats=entry_gate_analysis(signals, _Config()),
         gate_replays=[],
         gate_replay_sweeps=[],
@@ -722,6 +749,7 @@ def test_render_text_covers_every_section() -> None:
         "1. WINDOW LEDGER",
         "2. EXIT EFFECTIVENESS",
         "3. STOPLOSS SWEEP",
+        "3b. TRAILING STOP SWEEP",
         "4. ENTRY GATES",
         "5. SIGNAL ACCURACY",
         "6. SIZING ASSESSOR",
@@ -729,6 +757,10 @@ def test_render_text_covers_every_section() -> None:
     ):
         assert heading in text
     assert "test warning" in text
+    # The re-entry warning is the whole point of section 3b — a reader who
+    # takes the 'no re-entry' column at face value draws the wrong conclusion.
+    assert "with re-entry" in text
+    assert "LOSING close" in text
 
 
 def test_to_dict_is_json_serialisable() -> None:
@@ -738,6 +770,10 @@ def test_to_dict_is_json_serialisable() -> None:
     assert json.loads(json.dumps(payload))["scope"] == {"mode": "live"}
     assert payload["stoploss_sweep"][0]["n_censored"] == 0
     assert payload["candle_coverage"]["positions_with_path"] == 1
+    row = payload["trailing_sweep"][0]
+    assert row["positive"] == 0.08
+    assert row["n_fired"] == 1
+    assert "delta_with_reentry" in row
 
 
 def test_render_text_prompts_for_a_backfill_when_candle_coverage_is_missing() -> None:
@@ -746,3 +782,113 @@ def test_render_text_prompts_for_a_backfill_when_candle_coverage_is_missing() ->
     review.stoploss_candles_n = 0
     review.stoploss_sweep_candles = []
     assert "candles backfill" in render_text(review)
+
+
+# --------------------------------------------------------------------------
+# Trailing stop sweep
+#
+# The rule only ever fires in profit, so the interesting behaviour is not the
+# exit itself but what happens AFTER it: production is free to re-enter, and
+# that is what decides whether the rule pays. Both directions throughout.
+# --------------------------------------------------------------------------
+
+
+def _bar(minutes: int, sell_high: float, sell_low: float, buy_low: float | None = None):
+    return TrailingBar(
+        end_ts=_NOW - timedelta(days=3) + timedelta(minutes=minutes),
+        sell_high=sell_high,
+        sell_low=sell_low,
+        buy_low=buy_low,
+    )
+
+
+@pytest.mark.parametrize("direction,result", [("YES", "yes"), ("NO", "no")])
+def test_trailing_stop_fires_at_peak_minus_offset(direction, result):
+    """A reversal past the trail exits at peak - offset, identically both sides."""
+    pos = _position(
+        direction=direction, result=result, entry_price=0.40, contracts=10,
+        pnl=0.0, exit_reason="market_resolved",
+    )
+    # Rises to 0.50 (peak_gain 0.10 >= trigger 0.08), then reverses through
+    # the 0.50 - 0.03 = 0.47 trail.
+    path = {pos.position_id: [_bar(60, 0.50, 0.50), _bar(120, 0.50, 0.40)]}
+    points, actual, n = trailing_stop_sweep(
+        [pos], path, {}, stoploss=-1.0, min_edge=0.15,
+        positives=(0.08,), offsets=(0.03,),
+    )
+    assert n == 1
+    pt = points[0]
+    assert pt.n_fired == 1
+    # (0.47 - 0.40) * 10 = 0.70, and with no later signals nothing re-enters.
+    assert pt.total_no_reentry == pytest.approx(0.70)
+    assert pt.total_with_reentry == pytest.approx(0.70)
+    assert pt.n_reentries == 0
+
+
+@pytest.mark.parametrize("direction,result", [("YES", "yes"), ("NO", "no")])
+def test_trailing_stop_does_not_fire_below_trigger(direction, result):
+    """Below trailing_stop_positive the trail is the (disabled) stoploss distance."""
+    pos = _position(
+        direction=direction, result=result, entry_price=0.40, contracts=10,
+        pnl=6.0, exit_reason="market_resolved",
+    )
+    # Peak gain of 0.04 never reaches the 0.08 trigger, so with stoploss=-1.0
+    # the trail sits at peak - 1.0 and can never be touched.
+    path = {pos.position_id: [_bar(60, 0.44, 0.44), _bar(120, 0.44, 0.30)]}
+    points, _, _ = trailing_stop_sweep(
+        [pos], path, {}, stoploss=-1.0, min_edge=0.15,
+        positives=(0.08,), offsets=(0.03,),
+    )
+    assert points[0].n_fired == 0
+    # Never fired on leg 1, so the real outcome stands untouched.
+    assert points[0].total_no_reentry == pytest.approx(6.0)
+
+
+@pytest.mark.parametrize("direction,result", [("YES", "yes"), ("NO", "no")])
+def test_reentry_gives_back_the_trailing_gain(direction, result):
+    """The headline trap: re-entry re-exposes capital and erases the save.
+
+    The position banks a small trailing profit, then a later signal's resting
+    limit fills and the re-entered leg rides a losing market to settlement. The
+    no-re-entry column looks like a gain; the with-re-entry column is the truth.
+    """
+    pos = _position(
+        direction=direction, result="no" if result == "yes" else "yes",
+        entry_price=0.40, contracts=10, pnl=-4.0, exit_reason="market_resolved",
+    )
+    path = {
+        pos.position_id: [
+            _bar(60, 0.50, 0.50, buy_low=0.50),
+            _bar(120, 0.50, 0.40, buy_low=0.40),   # trail fires at 0.47
+            _bar(180, 0.40, 0.20, buy_low=0.20),   # re-entry fills here
+        ]
+    }
+    # A later signal at p_est such that the limit (p_est - min_edge) is 0.25,
+    # which bar 3 reaches.
+    sig_ts = pos.entry_time + timedelta(minutes=130)
+    p_est = 0.40 if direction == "YES" else 0.60  # -> limit 0.25 either side
+    signals = {pos.market_id: [(sig_ts, direction, p_est)]}
+
+    points, _, _ = trailing_stop_sweep(
+        [pos], path, signals, stoploss=-1.0, min_edge=0.15,
+        positives=(0.08,), offsets=(0.03,), limit_timeout_hours=2.0,
+    )
+    pt = points[0]
+    assert pt.n_fired == 1
+    assert pt.n_reentries == 1
+    # Banked +0.70 on the trail, then re-entered at 0.25 into a market that
+    # settles against us: -0.25 * 10 = -2.50, for -1.80 net.
+    assert pt.total_no_reentry == pytest.approx(0.70)
+    assert pt.total_with_reentry == pytest.approx(-1.80)
+    assert pt.delta_with_reentry < pt.delta_no_reentry
+
+
+def test_trailing_sweep_skips_incoherent_offsets():
+    """An offset wider than its own trigger is not a configuration."""
+    pos = _position(exit_reason="market_resolved")
+    path = {pos.position_id: [_bar(60, 0.45, 0.45)]}
+    points, _, _ = trailing_stop_sweep(
+        [pos], path, {}, stoploss=-1.0, min_edge=0.15,
+        positives=(0.05,), offsets=(0.02, 0.05, 0.10),
+    )
+    assert [p.offset for p in points] == [0.02]

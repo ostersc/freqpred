@@ -366,7 +366,7 @@
       }
     ]
   },
-  "assessor_neutral_fallback_rate": 0.15471698113207547,
+  "assessor_neutral_fallback_rate": 0.15461973601508486,
   "assessor_stats": [
     {
       "capital_tilt": 0.0154,
@@ -1772,17 +1772,17 @@
   "generated_at": "2026-07-28T00:00:00+00:00",
   "ledger": {
     "_llm": {
-      "calls": 872.0,
-      "usd": 22.9360022
+      "calls": 880.0,
+      "usd": 23.124729
     },
     "_signals": {
-      "markets": 27.0,
-      "n": 445.0
+      "markets": 31.0,
+      "n": 450.0
     },
     "live": {
       "closed": 20.0,
-      "entered": 20.0,
-      "open_now": 0.0,
+      "entered": 21.0,
+      "open_now": 1.0,
       "pnl": 0.2702000000000001,
       "wins": 9.0
     },
@@ -2143,6 +2143,208 @@
     }
   ],
   "stoploss_uncensored_pnl": 283.61,
+  "trailing_actual_pnl": -22.48,
+  "trailing_n": 302,
+  "trailing_sweep": [
+    {
+      "ci_no_reentry": [
+        -0.427,
+        0.5755
+      ],
+      "ci_with_reentry": [
+        -0.6485,
+        0.4131
+      ],
+      "delta_no_reentry": 12.84,
+      "delta_with_reentry": -27.54,
+      "n_fired": 234,
+      "n_reentries": 336,
+      "offset": 0.02,
+      "positive": 0.05,
+      "total_no_reentry": -9.64,
+      "total_with_reentry": -50.02
+    },
+    {
+      "ci_no_reentry": [
+        -0.4913,
+        0.5102
+      ],
+      "ci_with_reentry": [
+        -0.7958,
+        0.2645
+      ],
+      "delta_no_reentry": -2.72,
+      "delta_with_reentry": -60.24,
+      "n_fired": 234,
+      "n_reentries": 332,
+      "offset": 0.03,
+      "positive": 0.05,
+      "total_no_reentry": -25.2,
+      "total_with_reentry": -82.72
+    },
+    {
+      "ci_no_reentry": [
+        -0.4627,
+        0.4291
+      ],
+      "ci_with_reentry": [
+        -0.359,
+        0.5764
+      ],
+      "delta_no_reentry": -4.67,
+      "delta_with_reentry": 23.22,
+      "n_fired": 221,
+      "n_reentries": 264,
+      "offset": 0.02,
+      "positive": 0.08,
+      "total_no_reentry": -27.15,
+      "total_with_reentry": 0.73
+    },
+    {
+      "ci_no_reentry": [
+        -0.5291,
+        0.3642
+      ],
+      "ci_with_reentry": [
+        -0.4536,
+        0.466
+      ],
+      "delta_no_reentry": -18.88,
+      "delta_with_reentry": 0.75,
+      "n_fired": 221,
+      "n_reentries": 264,
+      "offset": 0.03,
+      "positive": 0.08,
+      "total_no_reentry": -41.36,
+      "total_with_reentry": -21.73
+    },
+    {
+      "ci_no_reentry": [
+        -0.6476,
+        0.2538
+      ],
+      "ci_with_reentry": [
+        -0.6691,
+        0.2453
+      ],
+      "delta_no_reentry": -42.58,
+      "delta_with_reentry": -45.7,
+      "n_fired": 221,
+      "n_reentries": 258,
+      "offset": 0.05,
+      "positive": 0.08,
+      "total_no_reentry": -65.06,
+      "total_with_reentry": -68.18
+    },
+    {
+      "ci_no_reentry": [
+        -0.436,
+        0.467
+      ],
+      "ci_with_reentry": [
+        -0.4056,
+        0.4184
+      ],
+      "delta_no_reentry": -0.03,
+      "delta_with_reentry": 1.11,
+      "n_fired": 207,
+      "n_reentries": 209,
+      "offset": 0.02,
+      "positive": 0.1,
+      "total_no_reentry": -22.51,
+      "total_with_reentry": -21.37
+    },
+    {
+      "ci_no_reentry": [
+        -0.5293,
+        0.386
+      ],
+      "ci_with_reentry": [
+        -0.5717,
+        0.2997
+      ],
+      "delta_no_reentry": -18.66,
+      "delta_with_reentry": -27.97,
+      "n_fired": 205,
+      "n_reentries": 209,
+      "offset": 0.03,
+      "positive": 0.1,
+      "total_no_reentry": -41.14,
+      "total_with_reentry": -50.45
+    },
+    {
+      "ci_no_reentry": [
+        -0.6482,
+        0.2694
+      ],
+      "ci_with_reentry": [
+        -0.7988,
+        0.0958
+      ],
+      "delta_no_reentry": -42.38,
+      "delta_with_reentry": -70.74,
+      "n_fired": 205,
+      "n_reentries": 207,
+      "offset": 0.05,
+      "positive": 0.1,
+      "total_no_reentry": -64.86,
+      "total_with_reentry": -93.22
+    },
+    {
+      "ci_no_reentry": [
+        -0.484,
+        0.4202
+      ],
+      "ci_with_reentry": [
+        -0.4045,
+        0.4204
+      ],
+      "delta_no_reentry": -8.2,
+      "delta_with_reentry": -0.29,
+      "n_fired": 184,
+      "n_reentries": 137,
+      "offset": 0.02,
+      "positive": 0.15,
+      "total_no_reentry": -30.68,
+      "total_with_reentry": -22.77
+    },
+    {
+      "ci_no_reentry": [
+        -0.5439,
+        0.3592
+      ],
+      "ci_with_reentry": [
+        -0.4839,
+        0.3365
+      ],
+      "delta_no_reentry": -19.25,
+      "delta_with_reentry": -16.1,
+      "n_fired": 184,
+      "n_reentries": 137,
+      "offset": 0.03,
+      "positive": 0.15,
+      "total_no_reentry": -41.73,
+      "total_with_reentry": -38.58
+    },
+    {
+      "ci_no_reentry": [
+        -0.6899,
+        0.2919
+      ],
+      "ci_with_reentry": [
+        -0.687,
+        0.1613
+      ],
+      "delta_no_reentry": -40.7,
+      "delta_with_reentry": -46.41,
+      "n_fired": 183,
+      "n_reentries": 136,
+      "offset": 0.05,
+      "positive": 0.15,
+      "total_no_reentry": -63.18,
+      "total_with_reentry": -68.89
+    }
+  ],
   "warnings": [
     "Paper and live positions are both in scope. Paper fills are frictionless \u2014 never read a pooled P&L number as evidence about live execution. Re-run with --mode live to isolate."
   ],
