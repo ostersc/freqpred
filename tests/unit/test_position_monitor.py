@@ -1023,7 +1023,9 @@ class TestLiveExit:
         assert submitted.direction == "YES"         # same side as position
         assert submitted.action == "sell"
         assert submitted.contracts == 50
-        assert submitted.time_in_force == "fill_or_kill"
+        # IOC, never FOK: selling at the bid can only fill at the bid, so
+        # all-or-nothing buys no price protection and costs partial fills.
+        assert submitted.time_in_force == "immediate_or_cancel"
         assert submitted.market_id == pos.market_id
 
     @pytest.mark.asyncio
@@ -1132,6 +1134,7 @@ class TestLiveExit:
                 exit_reason="roi",
                 exit_price=0.65,
                 resolution=None,
+                config=_make_strategy().config,
             )
 
         mock_close.assert_awaited_once()
@@ -2055,3 +2058,348 @@ class TestT48LimitExits:
             trailing_stop_positive_offset=0.02,
         )
         assert level == pytest.approx(0.68)  # 0.70 - 0.02
+
+
+# ---------------------------------------------------------------------------
+# Wide-spread exit deferral + IOC partial fills
+#
+# Regression cover for KXTRUMPSAY-26AUG03-TIKT (2026-07-28): an algo_exit fired
+# on a 0.38/0.57 book and was filled by crossing to the 0.38 bid, ~9.5c below
+# mid, after eleven FOK rejections. The market was back at 0.88 two hours later.
+# ---------------------------------------------------------------------------
+
+def _make_wide_market(*, yes_bid: float, yes_ask: float) -> Market:
+    """Market with an explicitly-set book, so spread is independent of mid."""
+    return Market(
+        id="MKT-1",
+        platform="kalshi",
+        question="Will X happen?",
+        category="politics",
+        close_time=datetime.now(UTC) + timedelta(days=10),
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
+        mid_price=round((yes_bid + yes_ask) / 2, 4),
+        volume_24h=1000.0,
+        open_interest=5000.0,
+        last_fetched_at=NOW,
+        price_updated_at=NOW,
+        metadata_fetched_at=NOW,
+    )
+
+
+class TestWideSpreadExitDeferral:
+    """_execute_exit defers discretionary exits when the book is untradeable."""
+
+    def _make_monitor(self, mode: str = "live") -> PositionMonitor:
+        kalshi_client = MagicMock()
+        kalshi_client.place_order = AsyncMock()
+        monitor = PositionMonitor(
+            session_factory=MagicMock(),
+            strategies={"TestStrategy": _make_strategy()},
+            mode=mode,
+            kalshi_client=kalshi_client,
+        )
+        return monitor
+
+    # min_edge=0.10 on _make_strategy → effective_max_spread = 0.05.
+    # The TIKT book (0.38/0.57) is a 0.19 spread — nearly 4x the threshold.
+    TIKT_BOOK = {"yes_bid": 0.38, "yes_ask": 0.57}
+    TIGHT_BOOK = {"yes_bid": 0.60, "yes_ask": 0.63}
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    @pytest.mark.parametrize(
+        "exit_reason", ["force_exit:algo_exit", "custom_exit:something", "signal"]
+    )
+    @pytest.mark.asyncio
+    async def test_discretionary_exit_deferred_on_wide_spread(
+        self, direction: str, exit_reason: str
+    ) -> None:
+        """Strategy-opinion exits hold rather than pay a 19c spread — both sides."""
+        pos = _make_position(direction=direction, mode="live")
+        market = _make_wide_market(**self.TIKT_BOOK)
+        monitor = self._make_monitor()
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.partial_close_position",
+            new_callable=AsyncMock,
+        ) as mock_close:
+            result = await monitor._execute_exit(
+                session=AsyncMock(),
+                position=pos,
+                market=market,
+                exit_reason=exit_reason,
+                exit_price=market.yes_bid,
+                resolution=None,
+                config=_make_strategy().config,
+            )
+
+        assert result is None
+        mock_close.assert_not_awaited()
+        monitor._kalshi_client.place_order.assert_not_awaited()
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    @pytest.mark.parametrize("exit_reason", ["stoploss", "trailing_stop", "market_resolved"])
+    @pytest.mark.asyncio
+    async def test_risk_exit_never_deferred_on_wide_spread(
+        self, direction: str, exit_reason: str
+    ) -> None:
+        """Loss-capping exits must always execute — a wide book is not a reason to hold."""
+        pos = _make_position(direction=direction, contracts=10, mode="live")
+        market = _make_wide_market(**self.TIKT_BOOK)
+        monitor = self._make_monitor()
+
+        expected_limit = (
+            round(market.yes_bid, 4) if direction == "YES"
+            else round(1.0 - market.yes_ask, 4)
+        )
+        monitor._kalshi_client.place_order = AsyncMock(
+            return_value=Order(
+                market_id=pos.market_id, direction=direction, contracts=10,
+                price=expected_limit, mode="live", status="executed",
+                exchange_order_id="ord-1",
+                filled_yes_count=10 if direction == "YES" else 0,
+                filled_no_count=0 if direction == "YES" else 10,
+            )
+        )
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.partial_close_position",
+            new_callable=AsyncMock,
+            return_value=MagicMock(status="closed"),
+        ) as mock_close:
+            await monitor._execute_exit(
+                session=AsyncMock(),
+                position=pos,
+                market=market,
+                exit_reason=exit_reason,
+                exit_price=expected_limit,
+                resolution=None,
+                config=_make_strategy().config,
+            )
+
+        monitor._kalshi_client.place_order.assert_awaited_once()
+        mock_close.assert_awaited_once()
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    @pytest.mark.asyncio
+    async def test_discretionary_exit_proceeds_on_tight_spread(self, direction: str) -> None:
+        """A tradeable book lets the same discretionary exit through — both sides."""
+        pos = _make_position(direction=direction, contracts=10, mode="live")
+        market = _make_wide_market(**self.TIGHT_BOOK)
+        monitor = self._make_monitor()
+
+        expected_limit = (
+            round(market.yes_bid, 4) if direction == "YES"
+            else round(1.0 - market.yes_ask, 4)
+        )
+        monitor._kalshi_client.place_order = AsyncMock(
+            return_value=Order(
+                market_id=pos.market_id, direction=direction, contracts=10,
+                price=expected_limit, mode="live", status="executed",
+                exchange_order_id="ord-1",
+                filled_yes_count=10 if direction == "YES" else 0,
+                filled_no_count=0 if direction == "YES" else 10,
+            )
+        )
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.partial_close_position",
+            new_callable=AsyncMock,
+            return_value=MagicMock(status="closed"),
+        ):
+            await monitor._execute_exit(
+                session=AsyncMock(),
+                position=pos,
+                market=market,
+                exit_reason="force_exit:algo_exit",
+                exit_price=expected_limit,
+                resolution=None,
+                config=_make_strategy().config,
+            )
+
+        monitor._kalshi_client.place_order.assert_awaited_once()
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    @pytest.mark.asyncio
+    async def test_paper_exit_deferred_identically_to_live(self, direction: str) -> None:
+        """Paper must make the same call as live, or paper results overstate the strategy."""
+        pos = _make_position(direction=direction, mode="paper")
+        market = _make_wide_market(**self.TIKT_BOOK)
+        monitor = self._make_monitor(mode="paper")
+
+        with patch(
+            "freqpred.trading.position_monitor.ledger.close_position",
+            new_callable=AsyncMock,
+        ) as mock_close:
+            result = await monitor._execute_exit(
+                session=AsyncMock(),
+                position=pos,
+                market=market,
+                exit_reason="force_exit:algo_exit",
+                exit_price=market.yes_bid,
+                resolution=None,
+                config=_make_strategy().config,
+            )
+
+        assert result is None
+        mock_close.assert_not_awaited()
+
+    def test_effective_max_spread_falls_back_to_half_min_edge(self) -> None:
+        """Guard threshold matches the entry gate's documented auto-compute."""
+        cfg = _make_strategy().config
+        assert cfg.max_spread is None
+        assert cfg.effective_max_spread == pytest.approx(cfg.min_edge / 2)
+
+
+class TestCheckAllPositionsExitWiring:
+    """Wiring: the real check_all_positions loop, not a reimplementation of it.
+
+    Proves the loop actually hands the strategy's config to _execute_exit (the
+    spread guard is inert if it is never given a threshold) and that a partial
+    IOC fill is not mistaken for a close.
+    """
+
+    def _run_loop(self, *, position: Position, market: Market, execute_exit: AsyncMock,
+                  alert_dispatcher: MagicMock | None = None,
+                  strategy: IPredictionStrategy | None = None) -> tuple[PositionMonitor, object]:
+        strategy = strategy or _make_strategy()
+        session = MagicMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+        rows = MagicMock()
+        # markets dict is keyed off row.id — a bare MagicMock id makes every
+        # lookup miss and the loop skip the position with market_not_found.
+        market_row = MagicMock()
+        market_row.id = market.id
+        rows.scalars.return_value.all.return_value = [market_row]
+        session.execute = AsyncMock(return_value=rows)
+        session_factory = MagicMock(return_value=session)
+
+        monitor = PositionMonitor(
+            session_factory=session_factory,
+            strategies={"TestStrategy": strategy},
+            mode=position.mode,
+            alert_dispatcher=alert_dispatcher,
+        )
+        monitor._execute_exit = execute_exit  # type: ignore[method-assign]
+        monitor.evaluate_exit = MagicMock(  # type: ignore[method-assign]
+            return_value=("force_exit:algo_exit", market.yes_bid)
+        )
+        return monitor, strategy
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    @pytest.mark.asyncio
+    async def test_loop_passes_strategy_config_to_execute_exit(self, direction: str) -> None:
+        """The spread guard can only work if the loop supplies the config."""
+        pos = _make_position(direction=direction, strategy_name="TestStrategy", mode="paper")
+        market = _make_wide_market(yes_bid=0.38, yes_ask=0.57)
+        execute_exit = AsyncMock(return_value=None)
+        monitor, strategy = self._run_loop(
+            position=pos, market=market, execute_exit=execute_exit
+        )
+
+        with (
+            patch(
+                "freqpred.trading.position_monitor.ledger.get_open_positions",
+                new_callable=AsyncMock, return_value=[pos],
+            ),
+            patch(
+                "freqpred.trading.position_monitor.ledger.get_pending_positions",
+                new_callable=AsyncMock, return_value=[],
+            ),
+            patch(
+                "freqpred.trading.position_monitor._market_row_to_domain",
+                return_value=market,
+            ),
+        ):
+            closed = await monitor.check_all_positions()
+
+        execute_exit.assert_awaited_once()
+        assert execute_exit.call_args.kwargs["config"] is strategy.config
+        assert closed == []
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    @pytest.mark.asyncio
+    async def test_partial_fill_is_not_reported_as_an_exit(self, direction: str) -> None:
+        """A partial IOC fill leaves the position open: no alert, no tracker reset."""
+        pos = _make_position(
+            direction=direction, contracts=10, strategy_name="TestStrategy", mode="live",
+        )
+        market = _make_wide_market(yes_bid=0.60, yes_ask=0.63)
+
+        still_open = Position(**{**pos.__dict__, "status": "open", "contracts": 4,
+                                 "exit_filled_contracts": 6})
+        execute_exit = AsyncMock(return_value=still_open)
+
+        alert_dispatcher = MagicMock()
+        alert_dispatcher.exit_alert = AsyncMock()
+
+        monitor, _ = self._run_loop(
+            position=pos, market=market, execute_exit=execute_exit,
+            alert_dispatcher=alert_dispatcher,
+        )
+        # Seed a trailing-stop peak the residual position still needs.
+        monitor._peak_prices[pos.id] = 0.90
+
+        with (
+            patch(
+                "freqpred.trading.position_monitor.ledger.get_open_positions",
+                new_callable=AsyncMock, return_value=[pos],
+            ),
+            patch(
+                "freqpred.trading.position_monitor.ledger.update_position_excursions",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "freqpred.trading.position_monitor._market_row_to_domain",
+                return_value=market,
+            ),
+        ):
+            closed = await monitor.check_all_positions()
+
+        execute_exit.assert_awaited_once()  # guard: the loop really reached the exit
+        assert closed == [], "a partially-filled exit is not a closed position"
+        alert_dispatcher.exit_alert.assert_not_awaited()
+        assert monitor._peak_prices[pos.id] == pytest.approx(0.90), (
+            "trailing-stop peak must survive a partial exit"
+        )
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    @pytest.mark.asyncio
+    async def test_full_fill_is_reported_as_an_exit(self, direction: str) -> None:
+        """Control for the above: a real close does alert and does clear trackers."""
+        pos = _make_position(
+            direction=direction, contracts=10, strategy_name="TestStrategy", mode="live",
+        )
+        market = _make_wide_market(yes_bid=0.60, yes_ask=0.63)
+
+        closed_pos = Position(**{**pos.__dict__, "status": "closed", "contracts": 0,
+                                 "exit_filled_contracts": 10, "exit_price": 0.60,
+                                 "pnl": 1.0})
+        execute_exit = AsyncMock(return_value=closed_pos)
+
+        alert_dispatcher = MagicMock()
+        alert_dispatcher.exit_alert = AsyncMock()
+
+        monitor, _ = self._run_loop(
+            position=pos, market=market, execute_exit=execute_exit,
+            alert_dispatcher=alert_dispatcher,
+        )
+        monitor._peak_prices[pos.id] = 0.90
+
+        with (
+            patch(
+                "freqpred.trading.position_monitor.ledger.get_open_positions",
+                new_callable=AsyncMock, return_value=[pos],
+            ),
+            patch(
+                "freqpred.trading.position_monitor._market_row_to_domain",
+                return_value=market,
+            ),
+        ):
+            closed = await monitor.check_all_positions()
+
+        execute_exit.assert_awaited_once()  # guard: the loop really reached the exit
+        assert closed == [closed_pos]
+        alert_dispatcher.exit_alert.assert_awaited_once()
+        assert pos.id not in monitor._peak_prices

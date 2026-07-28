@@ -136,3 +136,13 @@ class StrategyConfig:
     # Reconcile sweeps (startup, periodic, WS reconnect) check the age and cancel
     # any pending row whose created_at exceeds the cutoff.
     pending_order_timeout_seconds: float = 900.0
+
+    @property
+    def effective_max_spread(self) -> float:
+        """``max_spread``, or the documented ``min_edge / 2`` auto-compute when unset.
+
+        Single source of truth for "is this book tight enough to act on". Used by
+        the exit-side liquidity guards; the entry-side gates in order_manager.py,
+        risk.py and replay/engine.py still inline the same expression.
+        """
+        return self.max_spread if self.max_spread is not None else self.min_edge / 2

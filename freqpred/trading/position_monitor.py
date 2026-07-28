@@ -36,6 +36,19 @@ logger = structlog.get_logger(__name__)
 # Sentinel returned by check_position when no exit should fire.
 _NO_EXIT: tuple[str, float] | None = None
 
+# Exit reasons that exist to cap a loss or record a settled outcome. These must
+# always execute at whatever price the book offers — see _defer_on_wide_spread.
+_RISK_EXIT_REASONS = frozenset({"stoploss", "trailing_stop", "market_resolved"})
+
+
+def _is_discretionary_exit(exit_reason: str) -> bool:
+    """True for strategy-opinion exits (force_exit:*, custom_exit:*, signal).
+
+    Matches on the bare reason for risk exits; strategy exits carry a ``:tag``
+    suffix (``force_exit:algo_exit``) so the prefix is stripped before comparing.
+    """
+    return exit_reason.split(":", 1)[0] not in _RISK_EXIT_REASONS
+
 
 class PositionMonitor:
     """Evaluates exit conditions for all open positions on each price poll.
@@ -281,14 +294,34 @@ class PositionMonitor:
                     exit_reason=exit_reason,
                     exit_price=exit_price,
                     resolution=resolution,
+                    config=strategy.config,
                 )
             if closed_position is None:
-                # Live exit failed — position stays open; skip cleanup and alert
+                # Live exit failed or was deferred — position stays open; skip
+                # cleanup and alert
                 logger.warning(
                     "position_monitor.live_exit_skipped",
                     position_id=position.id,
                     exit_reason=exit_reason,
                 )
+                continue
+            if closed_position.status != "closed":
+                # Partial IOC fill: contracts were decremented but the position is
+                # still open, so it is NOT an exit. Keep every tracker alive — the
+                # residual still needs its trailing-stop peak and MAE/MFE — and do
+                # not alert or count it as closed. The next tick re-attempts the
+                # remainder.
+                logger.info(
+                    "position_monitor.exit_partial_fill",
+                    position_id=position.id,
+                    market_id=position.market_id,
+                    exit_reason=exit_reason,
+                    filled_contracts=closed_position.exit_filled_contracts,
+                    remaining_contracts=closed_position.contracts,
+                    mode=position.mode,
+                )
+                self._update_peak(position, current_price)
+                await self._update_excursions(position, current_price)
                 continue
             # Clean up trackers
             self._peak_prices.pop(position.id, None)
@@ -528,8 +561,22 @@ class PositionMonitor:
         exit_reason: str,
         exit_price: float,
         resolution: int | None,
+        config: StrategyConfig,
     ) -> Position | None:
-        """Route to live or paper exit branch."""
+        """Route to live or paper exit branch, deferring discretionary wide-spread exits.
+
+        The guard sits here rather than in the live branch so paper and live make the
+        same decision — a paper run that took exits live would have skipped would
+        overstate the strategy and quietly corrupt the weekly review's counterfactuals.
+        """
+        if self._defer_on_wide_spread(
+            position=position,
+            market=market,
+            exit_reason=exit_reason,
+            config=config,
+        ):
+            return None
+
         if position.mode == "live":
             return await self._execute_live_exit(
                 session=session,
@@ -610,7 +657,14 @@ class PositionMonitor:
             contracts=position.contracts,
             price=limit_price,
             mode="live",
-            time_in_force="fill_or_kill",
+            # IOC, not FOK. Selling at the bid can only ever fill *at* the bid —
+            # nothing rests above it — so all-or-nothing buys no price protection
+            # and only costs fills: an order larger than the depth at the bid is
+            # rejected outright (409 fill_or_kill_insufficient_resting_volume)
+            # rather than taking what is there. IOC sells the available depth and
+            # leaves the residual open for the next tick, which is exactly what
+            # the partial-fill handling below is written for.
+            time_in_force="immediate_or_cancel",
             action="sell",
         )
 
@@ -701,6 +755,52 @@ class PositionMonitor:
             exit_requested_contracts=position.contracts,
             resolution=resolution,
         )
+
+    def _defer_on_wide_spread(
+        self,
+        *,
+        position: Position,
+        market: Market,
+        exit_reason: str,
+        config: StrategyConfig,
+    ) -> bool:
+        """True when a discretionary exit should wait for a tradeable book.
+
+        Exiting means crossing to the bid, so a wide spread is paid in full and
+        immediately: a 19c-wide book costs ~9.5c against mid the moment the order
+        lands. That is worth paying to escape risk, and not worth paying to act on
+        an opinion — so the guard is selective by exit reason.
+
+        Deferred (discretionary — the position is fine to hold one more tick):
+          force_exit:*, custom_exit:*, signal
+
+        Never deferred (the whole point is to get out now, or there is nothing
+        left to decide):
+          stoploss, trailing_stop, market_resolved
+
+        Self-limiting by construction: nothing here can trap a position, because
+        every exit that exists to cap a loss bypasses it, and settlement closes
+        the position regardless.
+        """
+        if not _is_discretionary_exit(exit_reason):
+            return False
+
+        spread = round((market.yes_ask or 1.0) - (market.yes_bid or 0.0), 4)
+        max_spread = config.effective_max_spread
+        if spread <= max_spread:
+            return False
+
+        logger.info(
+            "position_monitor.exit_deferred_wide_spread",
+            position_id=position.id,
+            market_id=position.market_id,
+            exit_reason=exit_reason,
+            spread=spread,
+            max_spread=max_spread,
+            yes_bid=market.yes_bid,
+            yes_ask=market.yes_ask,
+        )
+        return True
 
     async def _poll_order_terminal(
         self,
