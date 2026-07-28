@@ -379,3 +379,107 @@ async def test_refresh_skips_markets_that_are_still_open(session) -> None:
     await refresh_recent_candles(session, client, _now=NOW)
 
     assert open_id not in {c["market_id"] for c in client.calls}
+
+
+# ---------------------------------------------------------------------------
+# Cursor coverage must never claim the future.
+#
+# Regression cover for the 2026-07-27 backfill that swept 32 still-open markets
+# and stamped each cursor with its close_time. Because refresh_recent_candles
+# skips any market whose cursor already reaches close_time, those markets were
+# excluded permanently — including after they closed and their candles existed.
+# ---------------------------------------------------------------------------
+
+async def _make_open_market(session, market_id: str, *, closes_in_days: float) -> None:
+    await _make_market(session, market_id)
+    await session.execute(
+        text("UPDATE markets SET close_time = :t, status = 'active' WHERE id = :i"),
+        {"t": NOW + timedelta(days=closes_in_days), "i": market_id},
+    )
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_backfill_of_an_open_market_does_not_record_future_coverage(session) -> None:
+    """Coverage ends where the fetch ended, not at a close_time still days away."""
+    open_id = f"{SERIES}-OPEN2"
+    await _make_open_market(session, open_id, closes_in_days=6)
+
+    await backfill_candles(
+        session,
+        FakeKalshi([_candle(0, yes_bid_low="0.3", yes_ask_high="0.7")]),
+        market_id=open_id,
+        _now=NOW,
+    )
+
+    cursor = (
+        await session.execute(
+            select(CandleFetchCursorRow).where(CandleFetchCursorRow.market_id == open_id)
+        )
+    ).scalar_one()
+    assert cursor.covered_to <= NOW, (
+        "cursor claims coverage of candles that do not exist yet"
+    )
+    assert cursor.covered_to >= cursor.covered_from, "window must not invert"
+
+
+@pytest.mark.asyncio
+async def test_market_backfilled_while_open_is_refetched_after_it_closes(session) -> None:
+    """The end-to-end failure: TIKT was frozen at ten candles for its whole life."""
+    mkt = f"{SERIES}-TIKT"
+    await _make_open_market(session, mkt, closes_in_days=6)
+    await _make_position(session, mkt, "YES", 0.65)  # gives it a recent signal
+
+    # Day 1: backfill runs while the market is still trading.
+    await backfill_candles(
+        session,
+        FakeKalshi([_candle(0, yes_bid_low="0.3", yes_ask_high="0.7")]),
+        market_id=mkt,
+        _now=NOW,
+    )
+
+    # Day 8: the market has closed. The daily refresh must now pick it up.
+    later = NOW + timedelta(days=8)
+    client = FakeKalshi([_candle(1, yes_bid_low="0.35", yes_ask_high="0.65")])
+    await refresh_recent_candles(session, client, _now=later)
+
+    assert mkt in {c["market_id"] for c in client.calls}, (
+        "closed market must be refetched to complete its history"
+    )
+
+    cursor = (
+        await session.execute(
+            select(CandleFetchCursorRow).where(CandleFetchCursorRow.market_id == mkt)
+        )
+    ).scalar_one()
+    assert cursor.covered_to <= later
+
+
+@pytest.mark.asyncio
+async def test_closed_market_coverage_is_unchanged_by_the_clamp(session) -> None:
+    """The clamp is a no-op for closed markets — no extra requests are burned."""
+    closed_id = f"{SERIES}-CLOSED"
+    await _make_market(session, closed_id)  # close_time = NOW - 1 day
+
+    await backfill_candles(
+        session,
+        FakeKalshi([_candle(0, yes_bid_low="0.3", yes_ask_high="0.7")]),
+        market_id=closed_id,
+        _now=NOW,
+    )
+    cursor = (
+        await session.execute(
+            select(CandleFetchCursorRow).where(CandleFetchCursorRow.market_id == closed_id)
+        )
+    ).scalar_one()
+    close_time = (
+        await session.execute(
+            text("SELECT close_time FROM markets WHERE id = :i"), {"i": closed_id}
+        )
+    ).scalar_one()
+    assert cursor.covered_to == close_time, "closed-market coverage must be untouched"
+
+    # And a second backfill still skips it as already covered.
+    second = FakeKalshi([_candle(0, yes_bid_low="0.3", yes_ask_high="0.7")])
+    await backfill_candles(session, second, market_id=closed_id, _now=NOW)
+    assert second.calls == []

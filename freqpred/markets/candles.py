@@ -232,7 +232,24 @@ async def _record_cursor(
     Coverage only ever grows: a later run over a narrower range must not shrink
     what an earlier wide run already established, or the scheduler would re-fetch
     ground it has already paid for.
+
+    ``covered_to`` is clamped to ``now``. The requested window runs to the
+    market's close_time, which for a market still trading is in the future — and
+    candles that do not exist yet cannot have been covered. Recording the
+    unclamped end makes the row claim coverage the fetch never had, and because
+    ``_REFRESH_TARGETS_SQL`` skips any market whose cursor already reaches its
+    close_time, that claim is self-perpetuating: the market is excluded forever,
+    including after it closes and its candles finally do exist. That is how
+    KXTRUMPSAY-26AUG03-TIKT ended up frozen at ten candles — a `candles backfill`
+    on 2026-07-27 swept 32 open markets and stamped each with its future close.
+
+    Clamping is a no-op for a closed market (end <= now already), so it only ever
+    affects the open-market case it exists to fix.
     """
+    covered_to = min(covered_to, now)
+    # A market that opened after `now` covers nothing; keep the window non-inverted.
+    covered_to = max(covered_to, covered_from)
+
     stmt = insert(CandleFetchCursorRow).values(
         market_id=market_id,
         period_interval=period_interval,
@@ -434,6 +451,12 @@ async def backfill_candles(
     Markets already covered are skipped unless `force`. Markets previously marked
     expired are skipped unless `skip_expired=False` — that data is gone, and
     re-requesting it only burns budget.
+
+    Unlike `refresh_recent_candles` this does not restrict itself to closed
+    markets, so a run may legitimately fetch the partial history of a market
+    still trading. `_record_cursor` clamps the recorded coverage to the fetch
+    time, which is what lets `refresh_recent_candles` come back and complete
+    that market's history once it closes.
     """
     if period_interval not in VALID_PERIOD_INTERVALS:
         raise ValueError(

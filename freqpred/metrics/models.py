@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     Float,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     Text,
@@ -149,6 +150,19 @@ class MarketCandleRow(Base):
     """
 
     __tablename__ = "market_candles"
+    __table_args__ = (
+        # Family-scoped scans ("every KXTRUMPSAY candle in this window").
+        # Declared here as well as in migration 0060 so a schema built by
+        # Base.metadata.create_all — which is how the integration-test database
+        # is provisioned — matches one built by Alembic. Without it, 0060's
+        # downgrade fails on the test DB with "index does not exist".
+        Index(
+            "ix_market_candles_series_ts",
+            "series_ticker",
+            "period_interval",
+            "end_period_ts",
+        ),
+    )
 
     market_id: Mapped[str] = mapped_column(VARCHAR(255), primary_key=True)
     period_interval: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
