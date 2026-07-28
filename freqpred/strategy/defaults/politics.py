@@ -3,9 +3,11 @@
 Uses 5-min candles (politics markets move slowly) with the same
 thesis-aware exit logic as AlgoExampleStrategy:
 
-  1. **Safe-zone displacement + choppiness** — outside thesis range + choppy
-     + near range top → exit at best available price.  Safe-zone margin is
-     ``config.min_edge`` (0.15 for this strategy).
+  1. **Safe-zone displacement + choppiness, on a liquid book** — outside thesis
+     range + choppy + spread within ``config.effective_max_spread`` → exit at
+     best available price.  Safe-zone margin is ``config.min_edge`` (0.15 for
+     this strategy).  The liquidity term keeps the exit reacting to real
+     two-sided repricing rather than to noise quoted across a hollow book.
   2. **Trailing stop** — framework-level (disabled by default for politics;
      these markets are sticky and reversals are often noise).
 """
@@ -99,11 +101,26 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         return df
 
     def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        """Exit when outside thesis range AND choppy for 3 consecutive candles (15 min).
+        """Exit when outside thesis range AND choppy in a liquid book, 3 candles running.
 
         Safe zone = [min(entry, p_est) - min_edge, max(entry, p_est) + min_edge].
-        Each candle must independently exceed the choppiness threshold — no rolling
-        average.  The 3-candle persistence window provides the smoothing.
+        Each candle must independently exceed the choppiness threshold *and* be
+        quoted on a tradeable book — no rolling average.  The 3-candle persistence
+        window provides the smoothing.
+
+        The liquidity term is what distinguishes the two things a wide intra-candle
+        range can mean.  When the book is tight, a 5c swing is genuine two-sided
+        repricing — a pocket of consensus moving against the thesis, which is the
+        signal this exit is built to catch.  When the book is hollow, the same
+        5c swing is one lot crossing a chasm between a stale bid and a stale ask;
+        the "price" never traded and nobody disagreed with us.  Acting on the
+        second case sells the bottom of a liquidity hole, which is exactly what
+        happened on KXTRUMPSAY-26AUG03-TIKT on 2026-07-28: the exit fired on a
+        0.38/0.57 book and the market was back at 0.88 within two hours.
+
+        Threshold is ``config.effective_max_spread`` — the same tightness the entry
+        gate demands.  A book too wide to open a position on is too wide to read a
+        thesis-invalidation out of.
         """
         entry = metadata["entry_price"]
         p_est = metadata["p_est"]
@@ -112,10 +129,16 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
         safe_high = min(1.0, max(entry, p_est) + self.config.min_edge)
         outside_safe = (df["close"] < safe_low) | (df["close"] > safe_high)
 
+        # Liquidity: spread is direction-invariant (ask - bid is the same width in
+        # YES or NO terms), so this needs no inversion for NO positions.
+        max_spread = self.config.effective_max_spread
+        liquid = df["spread"] <= max_spread
+
         # Choppiness: wide range but small body (oscillation, not trend).
         # Sustained for 3 consecutive candles (15 min) before firing.
         per_candle_choppy = (df["range_"] > _CHOPPINESS_THRESHOLD) & (df["body"] < df["range_"] * 0.5)
-        sustained_choppy = per_candle_choppy.rolling(3, min_periods=3).min() == 1
+        per_candle_actionable = per_candle_choppy & liquid
+        sustained_choppy = per_candle_actionable.rolling(3, min_periods=3).min() == 1
 
         df["exit_long"] = (outside_safe & sustained_choppy).fillna(False)
 
@@ -131,8 +154,11 @@ class PoliticsEdgeStrategy(IAlgoStrategy):
             range_=round(last["range_"], 4),
             body=round(last["body"], 4),
             chop_thresh=_CHOPPINESS_THRESHOLD,
+            spread=round(last["spread"], 4),
+            max_spread=max_spread,
             outside_safe=bool(outside_safe.iloc[-1]),
             per_candle_choppy=bool(per_candle_choppy.iloc[-1]),
+            liquid=bool(liquid.iloc[-1]),
             sustained_choppy=bool(sustained_choppy.iloc[-1]),
             exit=bool(df["exit_long"].iloc[-1]),
         )

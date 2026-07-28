@@ -9,12 +9,13 @@ Exit logic (last complete candle) — two PM-native signals:
      remaining upside is capped while downside remains fully binary.  Exit to
      shed that tail risk.
 
-  2. **Safe-zone displacement + choppiness** (thesis-aware): the *safe zone*
+  2. **Safe-zone displacement + choppiness on a liquid book** (thesis-aware): the *safe zone*
      spans from the entry price to the signal's estimated probability (plus a
      margin on each side).  While price stays inside this zone, the market is
      consistent with our thesis — hold and let the LLM re-evaluate on its
      schedule.  Once price moves *outside* the safe zone AND the market is
-     choppy (high intra-candle range), exit at the top of the recent range:
+     choppy (high intra-candle range) AND the book is tight enough to be
+     quoting a real price, exit at the top of the recent range:
 
      - **Below the safe zone**: the market is pricing in information we missed.
        Exit near the range top to minimize loss before it gets worse.
@@ -29,6 +30,11 @@ Exit logic (last complete candle) — two PM-native signals:
        ``safe_high = max(entry, p_est) + min_edge``
      Prices are bounded to [0, 1] so candle range is already in dollar terms —
      no normalization needed.
+
+     The liquidity term uses ``config.effective_max_spread`` (``max_spread``,
+     else ``min_edge / 2``) — a book too wide to open a position on is too wide
+     to read a thesis-invalidation out of.  It is applied per-candle, so one
+     hollow candle breaks the 3-candle run rather than being averaged away.
 
   3. **Trailing stop** (confirmation): handled by the framework
      (``config.trailing_stop``), not implemented here.
@@ -118,10 +124,28 @@ class AlgoExampleStrategy(IAlgoStrategy):
           Price above _PRICE_CEILING → limited upside, full binary downside.
           Fires immediately (no persistence required).
 
-        Signal 2 — Safe-zone displacement + choppiness:
+        Signal 2 — Safe-zone displacement + choppiness, on a liquid book:
           Safe zone = [min(entry, p_est) - min_edge, max(entry, p_est) + min_edge].
-          Each candle must independently exceed the choppiness threshold.
+          Each candle must independently exceed the choppiness threshold *and* be
+          quoted within ``config.effective_max_spread``.
           The 3-candle persistence window (not a rolling average) provides smoothing.
+
+          The liquidity term separates the two things a wide intra-candle range
+          can mean.  On a tight book a 5c swing is real two-sided repricing —
+          the consensus moving against the thesis, which is what this exit is
+          for.  On a hollow book the same swing is one lot crossing the gap
+          between a stale bid and a stale ask: the price never traded and nobody
+          disagreed with us.  Acting on the second case sells the bottom of a
+          liquidity hole.  The threshold is the same tightness the entry gate
+          demands, so a book too wide to open on is too wide to read a
+          thesis-invalidation out of.
+
+          The gate is deliberately *not* applied to Signal 1: the ceiling is a
+          structural statement about the price level, not a reaction to
+          fluctuation, so choppiness has no bearing on it.  The framework-level
+          guard in ``PositionMonitor._execute_exit`` still defers the resulting
+          order while the book is too wide to cross, so a ceiling exit cannot
+          dump into a hollow book either.
         """
         entry = metadata["entry_price"]
         p_est = metadata["p_est"]
@@ -134,10 +158,16 @@ class AlgoExampleStrategy(IAlgoStrategy):
         safe_high = max(entry, p_est) + self.config.min_edge
         outside_safe = (df["close"] < safe_low) | (df["close"] > safe_high)
 
+        # Liquidity: spread is direction-invariant (ask - bid is the same width
+        # in YES or NO terms), so this needs no inversion for NO positions.
+        max_spread = self.config.effective_max_spread
+        liquid = df["spread"] <= max_spread
+
         # Choppiness: wide range but small body (oscillation, not trend).
         # Sustained for 3 consecutive candles (3 min) before firing.
         per_candle_choppy = (df["range_"] > _CHOPPINESS_THRESHOLD) & (df["body"] < df["range_"] * 0.5)
-        sustained_choppy = per_candle_choppy.rolling(3, min_periods=3).min() == 1
+        per_candle_actionable = per_candle_choppy & liquid
+        sustained_choppy = per_candle_actionable.rolling(3, min_periods=3).min() == 1
 
         displacement_exit = outside_safe & sustained_choppy
 
@@ -152,13 +182,15 @@ class AlgoExampleStrategy(IAlgoStrategy):
             p_est=round(p_est, 4),
             safe_low=round(safe_low, 4),
             safe_high=round(safe_high, 4),
-            choppiness=round(last["choppiness"], 4),
             chop_thresh=_CHOPPINESS_THRESHOLD,
+            spread=round(last["spread"], 4),
+            max_spread=max_spread,
             near_ceiling=bool(near_ceiling.iloc[-1]),
             outside_safe=bool(outside_safe.iloc[-1]),
             range_=round(last["range_"], 4),
             body=round(last["body"], 4),
             per_candle_choppy=bool(per_candle_choppy.iloc[-1]),
+            liquid=bool(liquid.iloc[-1]),
             sustained_choppy=bool(sustained_choppy.iloc[-1]),
             exit=bool(df["exit_long"].iloc[-1]),
         )
