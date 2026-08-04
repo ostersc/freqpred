@@ -1,0 +1,322 @@
+================================================================================================
+WEEKLY PROFITABILITY REVIEW   2026-07-28 to 2026-08-04 (1w)
+generated 2026-08-04 00:00 UTC   scope: {'mode': 'live', 'signal_prompt_version': 'signal-v11', 'history_days': 90, 'strategy': 'PoliticsEdgeStrategy', 'exit_fee_per_contract': 0.006424401913875598, 'unevaluable_gates': ['min_volume_24h']}
+================================================================================================
+1. WINDOW LEDGER  (always all modes; the analysis sections below respect --mode)
+  live   entered=  27 closed=  18 open= 12 pnl=$    -5.55 win_rate= 33.3%
+  paper  entered=   0 closed=   0 open=  0 pnl=$    +0.00 win_rate=  0.0%
+  signals=469 over 46 markets   llm=$13.52 in 1087 calls
+
+2. EXIT EFFECTIVENESS  (actual minus hold-to-settlement; negative = the exit cost money)
+  exit_reason              dir     n     actual       held      saved  per-trade 95% CI
+  signal                   NO      4 $    +0.49 $    +1.68 $    -1.19  [-0.665, +0.082] helped=2/hurt=2
+  force_exit:algo_exit     NO      1 $    -0.27 $    -0.70 $    +0.42  [+0.423, +0.423] helped=1/hurt=0 *
+  reconcile_drift_manual   ALL     2 $    -0.27 $    -1.35 $    +1.07  [+0.520, +0.553] helped=2/hurt=0 *
+  reconcile_drift_manual   YES     2 $    -0.27 $    -1.35 $    +1.07  [+0.520, +0.553] helped=2/hurt=0 *
+  signal                   ALL    34 $   -16.50 $   -17.81 $    +1.30  [-0.114, +0.171] helped=28/hurt=6
+  signal                   YES    30 $   -16.99 $   -19.48 $    +2.49  [-0.078, +0.210] helped=26/hurt=4
+  force_exit:algo_exit     YES    16 $   -16.35 $   -24.02 $    +7.67  [-0.689, +1.467] helped=13/hurt=3
+  force_exit:algo_exit     ALL    17 $   -16.62 $   -24.72 $    +8.09  [-0.599, +1.367] helped=14/hurt=3
+  -- this window only --
+  force_exit:algo_exit     ALL     2 $    -2.71 $    +2.94 $    -5.65
+  signal                   ALL    10 $    -6.03 $    -6.77 $    +0.74
+
+3. STOPLOSS SWEEP  (MAE-based; -1.00 = no stoploss)
+   Assumes a clean fill at the threshold, so tight rows are the least believable —
+   a stop inside the typical spread churns on noise rather than capping the loss.
+   NEITHER arm below is unbiased, and they are biased in opposite directions:
+     * all positions — right population, but MAE stops updating at an early exit, so
+       wide thresholds under-count stops that would still have fired (`cens` = how many).
+     * uncensored only — full-life MAE, but the population is conditioned on NOT having
+       stopped out under the live rule, which flatters the no-stoploss arm by construction.
+   The clean read on the CURRENT threshold is section 2's stoploss row: for positions that
+   really did stop, actual-vs-held needs no MAE and no counterfactual population.
+  all positions (actual P&L over the same set: $-9.24)
+   threshold  stopped   cens    total P&L    vs actual
+       -0.05      108      1 $     -16.07 $      -6.83
+       -0.08      105      1 $     -20.42 $     -11.18
+       -0.10      104      1 $     -24.04 $     -14.80
+       -0.12      103      1 $     -27.79 $     -18.55
+       -0.15       99      4 $     -33.70 $     -24.47
+       -0.20       94      7 $     -43.11 $     -33.87
+       -0.25       85     14 $     -42.63 $     -33.39
+       -0.30       75     22 $     -59.37 $     -50.13
+       -0.40       57     36 $     -56.97 $     -47.73
+       -1.00        0     52 $     -19.15 $      -9.91
+  uncensored only — held to resolution, full-life MAE (actual: $+23.89)
+       -0.05       57      0 $      -7.01 $     -30.91
+       -0.08       54      0 $      -7.83 $     -31.72
+       -0.10       53      0 $      -9.09 $     -32.98
+       -0.12       52      0 $     -10.47 $     -34.37
+       -0.15       51      0 $     -12.41 $     -36.31
+       -0.20       49      0 $     -15.45 $     -39.34
+       -0.25       47      0 $     -16.17 $     -40.06
+       -0.30       45      0 $     -19.16 $     -43.06
+       -0.40       41      0 $     -20.07 $     -43.96
+       -1.00        0      0 $     +23.89 $      -0.00
+
+  CANDLE-BASED — real price paths, neither bias above applies.
+  The path continues past the actual exit (nothing censored) and every
+  covered position is included (no survivor conditioning). Prefer this row
+  set whenever coverage is good; the two above are the fallback.
+  coverage: 112/112 resolved positions   periods with no bid (excluded): 1293/13002
+  actual P&L over the covered set: $-9.51
+   threshold  stopped    total P&L    vs actual
+       -0.05      107 $     -17.52 $      -8.01
+       -0.08      104 $     -22.10 $     -12.59
+       -0.10      103 $     -25.70 $     -16.19
+       -0.12      100 $     -27.66 $     -18.15
+       -0.15       94 $     -28.07 $     -18.56
+       -0.20       86 $     -31.56 $     -22.05
+       -0.25       74 $     -28.33 $     -18.82
+       -0.30       63 $     -31.85 $     -22.35
+       -0.40       35 $     -13.35 $      -3.84
+       -1.00        0 $     -19.97 $     -10.47
+
+3b. TRAILING STOP SWEEP  (real price paths; profit-only trail)
+   Unlike a fixed take-profit, a trailing stop never caps a winner — it exits
+   only after a reversal from the peak. On the first leg it pre-empts the real
+   exit only if it fires earlier; otherwise the real exit stands.
+   READ THE 'with re-entry' COLUMN. A trail firing above its trigger always
+   exits in PROFIT, and risk.py's cooldown blocks only on a LOSING close — so
+   nothing stops the strategy re-entering the same market on its next signal.
+   Scoring the exit alone credits a saving the book never keeps: each re-entry
+   re-exposes capital to the same admitted-signal edge, so on a negative-edge
+   book the trail multiplies the losses it appears to prevent. 'no re-entry' is
+   an upper bound needing a block on re-entry after a PROFITABLE trailing exit,
+   which no current config option expresses.
+   Re-entry is modelled permissively (min_confidence + the real limit price
+   only — no exposure caps, mid-price band, max_edge or max_days_to_close), so
+   the re-entry count is an over-estimate. Offsets at or inside the typical
+   spread are not tradeable; check the spread before believing a tight row.
+  positions covered: 112   actual P&L: $-9.51
+   trigger  offset  fired  re-ent  no re-entry         CI (no re-ent)  with re-entry       CI (with re-ent)
+     +0.05    0.02     89     126        +8.53 [-0.083, +0.276]         -13.85 [-0.278, -0.030]*
+     +0.05    0.03     89     124        +6.66 [-0.106, +0.254]         -17.89 [-0.322, -0.074]*
+     +0.08    0.02     85      88       +13.60 [+0.010, +0.320]*         -6.68 [-0.185, +0.028] 
+     +0.08    0.03     85      87       +11.84 [-0.010, +0.299]          -9.73 [-0.221, -0.006]*
+     +0.08    0.05     85      86        +8.32 [-0.053, +0.260]         -14.71 [-0.282, -0.063]*
+     +0.10    0.02     78      67       +10.45 [-0.011, +0.301]          -2.47 [-0.118, +0.075] 
+     +0.10    0.03     78      67        +9.01 [-0.031, +0.280]          -4.46 [-0.141, +0.048] 
+     +0.10    0.05     77      67        +6.08 [-0.070, +0.246]          -9.13 [-0.200, -0.019]*
+     +0.15    0.02     67      45        +5.58 [-0.066, +0.249]          -0.64 [-0.089, +0.081] 
+     +0.15    0.03     67      45        +4.25 [-0.087, +0.230]          -2.47 [-0.115, +0.053] 
+     +0.15    0.05     66      45        +1.80 [-0.129, +0.202]          -5.73 [-0.163, +0.001] 
+
+4. ENTRY GATES  (marginal: every OTHER gate held at its configured value)
+   A profitable 'blocked' row means the gate is refusing trades that pay. * = CI excludes zero.
+  max_edge = 0.400
+  max_edge admitted          n=   58 mkts=  58 hit= 56.9% ask=0.593 edge= -0.024 [-0.148, +0.091]  
+  max_edge blocked           n=    4 mkts=   4 hit= 50.0% ask=0.297 edge= +0.203 [-0.260, +0.665]  
+  min_confidence = 0.60
+  min_confidence admitted    n=   58 mkts=  58 hit= 56.9% ask=0.593 edge= -0.024 [-0.148, +0.091]  
+  min_confidence blocked     n=    5 mkts=   5 hit= 40.0% ask=0.330 edge= +0.070 [-0.300, +0.516]  
+  max_spread = 0.075
+  max_spread admitted        n=   58 mkts=  58 hit= 56.9% ask=0.593 edge= -0.024 [-0.148, +0.091]  
+  max_spread blocked         n=    0 mkts=   0 hit=  0.0% ask=0.000 edge= +0.000 [+0.000, +0.000]  
+  days_to_close = [0.25, 7]
+  days_to_close admitted     n=   58 mkts=  58 hit= 56.9% ask=0.593 edge= -0.024 [-0.148, +0.091]  
+  days_to_close blocked      n=    0 mkts=   0 hit=  0.0% ask=0.000 edge= +0.000 [+0.000, +0.000]  
+  mid_price_band = [0.10, 0.95]
+  mid_price_band admitted    n=   58 mkts=  58 hit= 56.9% ask=0.593 edge= -0.024 [-0.148, +0.091]  
+  mid_price_band blocked     n=    0 mkts=   0 hit=  0.0% ask=0.000 edge= +0.000 [+0.000, +0.000]  
+  min_edge = 0.150
+  min_edge admitted          n=   58 mkts=  58 hit= 56.9% ask=0.593 edge= -0.024 [-0.148, +0.091]  
+  min_edge blocked           n=   41 mkts=  41 hit= 82.9% ask=0.838 edge= -0.008 [-0.119, +0.089]  
+  not evaluable point-in-time: min_volume_24h
+
+   REPLAYED through the real entry/exit rules over stored price paths.
+   The rows above buy at the ask and hold to settlement; these post the
+   strategy's actual limit entry, honour its timeout, and apply stoploss +
+   should_exit before settlement. Unfilled orders are counted at $0 — a gate
+   that blocks a signal whose limit would never have filled costs nothing.
+   Excludes force_exit (needs 5m candles; ~16% of real live exits).
+   gate                      n   fill  mkts  $/contract  95% CI
+  max_spread = 0.075
+   admitted                 58   100%    58      -0.112  [-0.224, -0.004] *
+     exits: {'resolution': 40, 'signal': 18}
+   blocked                   0     0%     0      +0.000  [+0.000, +0.000]
+  days_to_close = [0.25, 7]
+   admitted                 58   100%    58      -0.112  [-0.224, -0.004] *
+     exits: {'resolution': 40, 'signal': 18}
+   blocked                   0     0%     0      +0.000  [+0.000, +0.000]
+  mid_price_band = [0.10, 0.95]
+   admitted                 58   100%    58      -0.112  [-0.224, -0.004] *
+     exits: {'resolution': 40, 'signal': 18}
+   blocked                   0     0%     0      +0.000  [+0.000, +0.000]
+  min_edge = 0.150
+   admitted                 58   100%    58      -0.112  [-0.224, -0.004] *
+     exits: {'resolution': 40, 'signal': 18}
+   blocked                  41     5%    41      -0.005  [-0.026, +0.012]
+     exits: {'resolution': 2, 'unfilled': 39}
+  min_confidence = 0.60
+   admitted                 58   100%    58      -0.112  [-0.224, -0.004] *
+     exits: {'resolution': 40, 'signal': 18}
+   blocked                   5   100%     5      -0.072  [-0.260, +0.172]
+     exits: {'resolution': 2, 'signal': 3}
+  max_edge = 0.400
+   admitted                 58   100%    58      -0.112  [-0.224, -0.004] *
+     exits: {'resolution': 40, 'signal': 18}
+   blocked                   4   100%     4      -0.112  [-0.445, +0.220]
+     exits: {'resolution': 3, 'signal': 1}
+
+   THRESHOLD SWEEPS, replayed through the real rules. One gate moves at a
+   time with the others held at their configured values, so each row answers
+   'what if we changed only this'. It cannot find interactions. `total` is the
+   sum over admitted signals — what the setting earns at one contract each,
+   with unfilled orders correctly worth $0. Optimise `total`, not `$/sig`.
+   `defer` = entries that moved to a LATER signal because the tighter gate
+   excluded the market's earlier one. Those are priced off the candle path at
+   the later signal's own time, so a tightened gate that merely delays entry
+   is distinguishable from one that skips the market entirely.
+   `<` marks the value in production today.
+   min_edge:
+       value    n   fill  mkts  defer    $/sig     total
+        0.00   96    47%    96     11   -0.067     -6.45
+        0.05   79    58%    79     15   -0.078     -6.15
+        0.10   68    84%    68     22   -0.110     -7.51
+        0.15   58   100%    58     23   -0.112     -6.52  <
+        0.20   52   100%    52     25   -0.140     -7.27
+        0.25   42   100%    42     19   -0.173     -7.25
+        0.30   33   100%    33     20   -0.233     -7.68
+   max_edge:
+       value    n   fill  mkts  defer    $/sig     total
+        0.20   38   100%    38     15   -0.071     -2.68
+        0.30   52   100%    52     11   -0.111     -5.77
+        0.40   58   100%    58      7   -0.112     -6.52  <
+        0.50   61   100%    61      5   -0.120     -7.32
+        0.75   62   100%    62      0   -0.115     -7.15
+        1.00   62   100%    62      0   -0.115     -7.15
+   min_confidence:
+       value    n   fill  mkts  defer    $/sig     total
+        0.00   63   100%    63      0   -0.109     -6.84
+        0.50   63   100%    63      0   -0.109     -6.84
+        0.55   63   100%    63      0   -0.109     -6.84
+        0.60   58   100%    58      1   -0.112     -6.52  <
+        0.65   51   100%    51      6   -0.093     -4.76
+        0.70   34   100%    34      3   -0.087     -2.95
+        0.75   25   100%    25      1   -0.108     -2.70
+        0.80   18   100%    18      0   -0.118     -2.12
+   max_spread:
+       value    n   fill  mkts  defer    $/sig     total
+        0.02   52   100%    52     28   -0.133     -6.89
+        0.03   57   100%    57     26   -0.104     -5.93
+        0.05   58   100%    58      9   -0.106     -6.16
+        0.07   58   100%    58      2   -0.112     -6.52  <
+        0.10   58   100%    58      2   -0.112     -6.52
+        0.15   58   100%    58      0   -0.112     -6.52
+        1.00   58   100%    58      0   -0.112     -6.52
+   max_days_to_close:
+       value    n   fill  mkts  defer    $/sig     total
+        1.00    3   100%     3      3   -0.113     -0.34
+        2.00   16   100%    16      7   -0.095     -1.52
+        3.00   28   100%    28     14   -0.037     -1.05
+        5.00   51   100%    51     28   -0.117     -5.99
+        7.00   58   100%    58      0   -0.112     -6.52  <
+       14.00   58   100%    58      0   -0.112     -6.52
+   max_mid_price:
+       value    n   fill  mkts  defer    $/sig     total
+        0.80   58   100%    58      0   -0.112     -6.52
+        0.85   58   100%    58      0   -0.112     -6.52
+        0.90   58   100%    58      0   -0.112     -6.52
+        0.95   58   100%    58      0   -0.112     -6.52  <
+        1.00   58   100%    58      0   -0.112     -6.52
+   min_mid_price:
+       value    n   fill  mkts  defer    $/sig     total
+        0.00   58   100%    58      0   -0.112     -6.52
+        0.05   58   100%    58      0   -0.112     -6.52
+        0.10   58   100%    58      0   -0.112     -6.52  <
+        0.15   58   100%    58      1   -0.112     -6.52
+        0.20   58   100%    58      1   -0.112     -6.52
+
+   legacy sweeps (buy-at-ask, hold-to-settlement — superseded by the block above)
+   min_edge:
+       0.00  mkts=  96 hit= 66.7% edge= -0.039  total=   -3.72
+       0.05  mkts=  79 hit= 62.0% edge= -0.050  total=   -3.92
+       0.10  mkts=  68 hit= 61.8% edge= -0.015  total=   -0.99
+       0.15  mkts=  58 hit= 56.9% edge= -0.024  total=   -1.42
+       0.20  mkts=  52 hit= 53.8% edge= -0.022  total=   -1.15
+       0.25  mkts=  42 hit= 52.4% edge= -0.017  total=   -0.73
+       0.30  mkts=  33 hit= 42.4% edge= -0.071  total=   -2.33
+   min_confidence:
+       0.00  mkts=  63 hit= 55.6% edge= -0.017  total=   -1.06
+       0.50  mkts=  63 hit= 55.6% edge= -0.017  total=   -1.06
+       0.60  mkts=  58 hit= 56.9% edge= -0.024  total=   -1.42
+       0.65  mkts=  51 hit= 62.7% edge= +0.005  total=   +0.23
+       0.70  mkts=  34 hit= 67.6% edge= +0.014  total=   +0.47
+       0.75  mkts=  25 hit= 68.0% edge= +0.001  total=   +0.03
+       0.80  mkts=  18 hit= 66.7% edge= -0.035  total=   -0.63
+   max_spread:
+       0.02  mkts=  52 hit= 53.8% edge= -0.033  total=   -1.70
+       0.03  mkts=  57 hit= 56.1% edge= -0.013  total=   -0.72
+       0.05  mkts=  58 hit= 56.9% edge= -0.015  total=   -0.88
+       0.08  mkts=  58 hit= 56.9% edge= -0.024  total=   -1.42
+       0.12  mkts=  58 hit= 56.9% edge= -0.024  total=   -1.42
+       1.00  mkts=  58 hit= 56.9% edge= -0.022  total=   -1.28
+
+5. SIGNAL ACCURACY  (edge = per-contract expected profit vs the price paid)
+   The most recent weeks are incomplete: only markets that have already settled
+   appear, so short-dated markets are over-represented there. Read the trend from
+   the fully-resolved weeks, not the last row.
+   by week (current prompt cohort):
+  2026-W27                   n=   89 mkts=  12 hit= 48.3% ask=0.491 edge= -0.008 [-0.066, +0.053]  
+  2026-W28                   n=  442 mkts=  24 hit= 51.6% ask=0.634 edge= -0.119 [-0.158, -0.082] *
+  2026-W29                   n=  474 mkts=  25 hit= 69.2% ask=0.652 edge= +0.040 [+0.003, +0.077] *
+  2026-W30                   n=  436 mkts=  28 hit= 65.4% ask=0.668 edge= -0.015 [-0.059, +0.027]  
+  2026-W31                   n=  394 mkts=  22 hit= 65.2% ask=0.642 edge= +0.010 [-0.027, +0.046]  
+   by prompt version (all cohorts — this is where step changes show up):
+  signal-v10                 n=   98 mkts=  16 hit= 37.8% ask=0.578 edge= -0.200 [-0.261, -0.136] *
+  signal-v11                 n= 1836 mkts= 102 hit= 62.2% ask=0.642 edge= -0.020 [-0.039, -0.002] *
+  signal-v4                  n=  281 mkts=  25 hit= 37.0% ask=0.468 edge= -0.098 [-0.150, -0.046] *
+  signal-v6                  n=  619 mkts=  78 hit= 41.7% ask=0.507 edge= -0.090 [-0.122, -0.058] *
+  signal-v7                  n=  520 mkts=  40 hit= 48.3% ask=0.558 edge= -0.075 [-0.112, -0.039] *
+  signal-v8                  n=   60 mkts=  12 hit= 35.0% ask=0.348 edge= +0.002 [-0.044, +0.052]  
+  signal-v9                  n= 4343 mkts= 247 hit= 74.4% ask=0.687 edge= +0.056 [+0.045, +0.068] *
+   by direction:
+  NO                         n= 1017 mkts=  72 hit= 78.0% ask=0.738 edge= +0.042 [+0.020, +0.062] *
+  YES                        n=  819 mkts=  56 hit= 42.6% ask=0.522 edge= -0.096 [-0.129, -0.066] *
+   by edge_band:
+  0-15                       n=  627 mkts=  80 hit= 79.1% ask=0.800 edge= -0.009 [-0.039, +0.021]  
+  15-40                      n=  625 mkts=  62 hit= 52.2% ask=0.562 edge= -0.040 [-0.076, -0.006] *
+  <0                         n=  286 mkts=  52 hit= 86.7% ask=0.839 edge= +0.028 [-0.009, +0.065]  
+  >40                        n=  298 mkts=  39 hit= 24.2% ask=0.288 edge= -0.046 [-0.087, -0.001] *
+   by confidence:
+  conf 0.5+                  n=  103 mkts=  16 hit= 60.2% ask=0.539 edge= +0.063 [-0.013, +0.138]  
+  conf 0.6+                  n=  977 mkts=  66 hit= 60.7% ask=0.609 edge= -0.002 [-0.025, +0.021]  
+  conf 0.7+                  n=  478 mkts=  60 hit= 60.3% ask=0.702 edge= -0.099 [-0.136, -0.062] *
+  conf 0.8+                  n=  202 mkts=  26 hit= 68.8% ask=0.715 edge= -0.027 [-0.094, +0.040]  
+  conf 0.9+                  n=   76 mkts=  10 hit= 78.9% ask=0.627 edge= +0.163 [+0.045, +0.276] *
+   by days_to_close:
+  1-3d to close              n=  549 mkts=  75 hit= 65.8% ask=0.648 edge= +0.009 [-0.017, +0.035]  
+  3-7d to close              n= 1178 mkts=  71 hit= 60.0% ask=0.640 edge= -0.040 [-0.065, -0.014] *
+  <1d to close               n=  109 mkts=  24 hit= 67.9% ask=0.627 edge= +0.052 [+0.019, +0.087] *
+   by trigger:
+  price_moved                n=  782 mkts=  75 hit= 55.4% ask=0.603 edge= -0.049 [-0.079, -0.020] *
+  scheduled                  n= 1054 mkts= 102 hit= 67.3% ask=0.671 edge= +0.002 [-0.020, +0.026]  
+
+6. SIZING ASSESSOR  (capital tilt = mean multiplier on winners minus losers; ~0 = flat tax)
+  neutral-fallback rate (no LLM call behind the assessment): 11.0%
+  assessment-v4            n= 1123 tilt=+0.0127 [+0.008, +0.018] mean_mult=0.912 *
+    verdicts={'neutral': 52, 'size_down': 1035, 'size_up': 36}  realised sizing delta: $+0.39 over 51 positions
+  assessment-v6            n=  152 tilt=+0.0187 [+0.002, +0.035] mean_mult=0.776 *
+    verdicts={'neutral': 1, 'size_down': 151}  realised sizing delta: $-1.43 over 42 positions
+  assessment-v8            n=   48 tilt=+0.0284 [-0.001, +0.059] mean_mult=0.867
+    verdicts={'neutral': 2, 'size_down': 46}  realised sizing delta: $+0.50 over 18 positions
+  neutral-fallback         n=  166 tilt=+0.0202 [+0.004, +0.035] mean_mult=0.957 *
+    verdicts={'neutral': 66, 'size_down': 100}  realised sizing delta: no positions
+
+7. DOCUMENT SOURCES  (overlapping populations — presence, not contribution)
+  all signals with docs      n= 1054 mkts= 102 hit= 67.3% ask=0.671 edge= +0.002 [-0.020, +0.026]  
+  r/PoliticalDiscussion      n=   41 mkts=   6 hit= 92.7% ask=0.647 edge= +0.280 [+0.231, +0.333] *
+  r/moderatepolitics         n=   70 mkts=  10 hit= 87.1% ask=0.633 edge= +0.239 [+0.188, +0.288] *
+  Crypto Briefing            n=   44 mkts=   5 hit= 84.1% ask=0.662 edge= +0.178 [+0.114, +0.251] *
+  TVThirdEye                 n=  188 mkts=  26 hit= 75.0% ask=0.711 edge= +0.039 [-0.008, +0.080]  
+  The Guardian               n= 1029 mkts=  99 hit= 68.1% ask=0.673 edge= +0.009 [-0.015, +0.033]  
+  r/politics                 n=  815 mkts=  87 hit= 66.3% ask=0.660 edge= +0.002 [-0.024, +0.031]  
+  TVArchive                  n=  713 mkts=  88 hit= 63.8% ask=0.655 edge= -0.017 [-0.049, +0.014]  
+  Tavily                     n=  266 mkts=  37 hit= 56.0% ask=0.620 edge= -0.060 [-0.107, -0.012] *
+  r/Conservative             n=  134 mkts=  22 hit= 54.5% ask=0.679 edge= -0.134 [-0.200, -0.071] *
+
+================================================================================================
+
+wrote docs/weekly-review/reports/data/2026-08-04-live.json
