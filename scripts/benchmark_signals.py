@@ -73,7 +73,13 @@ from freqpred.bench import (
 from freqpred.bench.eval_cache import DEFAULT_CACHE_DIR, EvalCache
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
+from freqpred.llm.audit import register_model_pricing
 from freqpred.llm.client import LLMClient
+from freqpred.llm.provider import (
+    fetch_openrouter_pricing,
+    is_openrouter_model,
+    maybe_openrouter_client,
+)
 from freqpred.replay.fixtures import DEFAULT_FIXTURE_DIR
 from freqpred.signal.llm import PROMPT_VERSION
 from freqpred.strategy.loader import load_strategy
@@ -208,6 +214,28 @@ async def main(args: argparse.Namespace) -> None:
             f"sizing: {args.strategy}.position_size @ bankroll=${args.bankroll:,.0f}"
         )
 
+        # An OpenRouter candidate needs no Anthropic key, and vice versa, so
+        # require whichever transport the run will actually use. This has to
+        # happen before the estimate branch below, which returns early.
+        needs_openrouter = bool(args.candidate_model) and is_openrouter_model(args.candidate_model)
+        if needs_openrouter:
+            # Without this the estimate falls back to Sonnet's rates and
+            # overstates a cheap candidate by an order of magnitude. Real calls
+            # bill from what OpenRouter reports and are unaffected either way.
+            rates = fetch_openrouter_pricing(args.candidate_model)
+            if rates is None:
+                print(
+                    f"WARNING: no live OpenRouter pricing for {args.candidate_model!r}; "
+                    "cost estimates will use default rates and may be badly wrong. "
+                    "Check the slug against https://openrouter.ai/api/v1/models",
+                )
+            else:
+                register_model_pricing(args.candidate_model, *rates)
+                print(
+                    f"OpenRouter pricing for {args.candidate_model}: "
+                    f"${rates[0]:.3f}/M input, ${rates[1]:.3f}/M output"
+                )
+
         if args.estimate_only:
             estimate = estimate_run(
                 kept,
@@ -229,7 +257,12 @@ async def main(args: argparse.Namespace) -> None:
             )
             return
 
-        if not config.anthropic.api_key:
+        if needs_openrouter and not config.openrouter.api_key:
+            raise SystemExit(
+                f"ERROR: candidate {args.candidate_model!r} is an OpenRouter slug "
+                "but OPENROUTER_API_KEY is not configured."
+            )
+        if not needs_openrouter and not config.anthropic.api_key:
             raise SystemExit("ERROR: ANTHROPIC_API_KEY not configured.")
         llm_client = LLMClient(
             anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
@@ -238,6 +271,7 @@ async def main(args: argparse.Namespace) -> None:
             prompt_version=PROMPT_VERSION,
             daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
             max_consecutive_errors=config.risk.max_consecutive_llm_errors,
+            openrouter_client=maybe_openrouter_client(config.openrouter.api_key),
         )
 
         run = await run_benchmark(

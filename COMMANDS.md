@@ -295,6 +295,13 @@ uv run python scripts/benchmark_signals.py --prompt-mode --fixtures benchmarks/p
     --training-cutoff 2026-03-01 --limit 250
 ```
 
+`--candidate-model` (model mode) also accepts an **OpenRouter slug** (`vendor/model`), which routes the candidate through OpenRouter instead of the Anthropic API and requires `OPENROUTER_API_KEY`. Live OpenRouter rates are fetched before the run so `--estimate-only` prices the candidate correctly; without that a cheap model is projected at the Anthropic default rate and overstated by an order of magnitude.
+
+```bash
+uv run python scripts/benchmark_signals.py --candidate-model deepseek/deepseek-v3.2 \
+    --training-cutoff 2026-03-01 --limit 50 --estimate-only
+```
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--out-dir` | `benchmarks/prompt_bank` | Bank directory (gitignored) |
