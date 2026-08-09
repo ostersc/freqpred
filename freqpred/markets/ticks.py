@@ -5,14 +5,16 @@ The grid is published per market as the ``price_ranges`` array
 (``{start, end, step}`` bands in fixed-point dollars) and varies by the
 market's ``price_level_structure``: as of the July 2026 rollout there are
 ten structures, with center-band ticks of 1c, 0.5c or 0.2c and edge-band
-ticks down to 0.1c (edge bands are $0.00-$0.10 and $0.90-$1.00).
+ticks down to 0.1c (edge bands are $0.00-$0.10 and $0.90-$1.00), plus
+``center_centi_edge_centi_cent`` (August 2026) — a uniform 0.01c tick
+across the full range, used by multivariate (combo) markets.
 
 We deliberately snap to a **whole cent** rather than consuming
 ``price_ranges``.  A whole cent is a valid price under every structure
 Kalshi publishes, because every center and edge tick (1c, 0.5c, 0.2c,
-0.1c) divides evenly into 1c.  That makes whole-cent alignment correct
-without per-market grid data, at the cost of not exploiting sub-cent
-ticks on markets that offer them.
+0.1c, 0.01c) divides evenly into 1c.  That makes whole-cent alignment
+correct without per-market grid data, at the cost of not exploiting
+sub-cent ticks on markets that offer them.
 
 Only *computed* prices need this.  Prices taken from the order book
 (bids, asks) are already on that market's grid by construction, and
