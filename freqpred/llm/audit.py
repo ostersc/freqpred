@@ -156,6 +156,19 @@ _CACHE_WRITE_MULTIPLIER = 2.0
 _CACHE_READ_MULTIPLIER = 0.1
 
 
+def register_model_pricing(model: str, input_per_mtok: float, output_per_mtok: float) -> None:
+    """Add or replace a model's rates, in dollars per million tokens.
+
+    For models this file has no static rates for — OpenRouter slugs, whose
+    prices are published live and change without a release here. Live calls
+    through OpenRouter report their own cost and never consult this table; the
+    reason to register anyway is the *estimate* path, which has no response to
+    read a cost off and would otherwise fall back to Sonnet's rates and
+    overstate a cheap model by an order of magnitude.
+    """
+    _COST_PER_TOKEN[model] = (input_per_mtok / 1_000_000, output_per_mtok / 1_000_000)
+
+
 def calculate_cost(
     model: str,
     tokens_input: int,

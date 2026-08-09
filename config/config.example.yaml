@@ -34,6 +34,15 @@ anthropic:
   cheap_model: "claude-haiku-4-5-20251001"
   judgment_model: "claude-opus-5"
 
+openrouter:
+  # Overridden by OPENROUTER_API_KEY env var.
+  # Only needed to run a model that is not served by Anthropic directly. Any
+  # model id above written as an OpenRouter slug ("vendor/model", e.g.
+  # "deepseek/deepseek-v3") is routed through OpenRouter's Anthropic-compatible
+  # Messages API; plain Anthropic ids keep going direct. Cost for these calls is
+  # taken from what OpenRouter reports, not from the local price table.
+  api_key: ""
+
 tavily:
   # Overridden by TAVILY_API_KEY env var
   api_key: ""

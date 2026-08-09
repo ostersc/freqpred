@@ -215,6 +215,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
     from freqpred.ingestion.scheduler import run_scheduler
     from freqpred.llm.audit import LLMBudgetExceededError
     from freqpred.llm.client import LLMClient, LLMConsecutiveErrorsError
+    from freqpred.llm.provider import maybe_openrouter_client  # noqa: PLC0415
     from freqpred.markets.kalshi import KalshiClient
     from freqpred.markets.models import Market, MarketRow
     from freqpred.markets.watcher import MarketWatcher
@@ -250,6 +251,7 @@ async def _run_main(config: object, strategy_name: str, mode: str) -> None:
         prompt_version=PROMPT_VERSION,
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
         max_consecutive_errors=config.risk.max_consecutive_llm_errors,
+        openrouter_client=maybe_openrouter_client(config.openrouter.api_key),
     )
     _factbase_allowlist = frozenset(getattr(strategy.config, "factbase_series_allowlist", []))
     pipeline = SignalPipeline(
@@ -1382,6 +1384,7 @@ async def _signal_analyze(
     import freqpred.signal.models  # noqa: F401
     from freqpred.db import make_engine, make_session_factory
     from freqpred.llm.client import LLMClient
+    from freqpred.llm.provider import maybe_openrouter_client  # noqa: PLC0415
     from freqpred.markets.models import Market, MarketRow
     from freqpred.rag.embedder import make_embedder
     from freqpred.signal.pipeline import SignalPipeline
@@ -1441,6 +1444,7 @@ async def _signal_analyze(
             anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
             session_factory,
             prompt_version=PROMPT_VERSION,
+            openrouter_client=maybe_openrouter_client(config.openrouter.api_key),
         )
         from freqpred.strategy.loader import load_strategy as _load_strategy  # noqa: PLC0415
         _cli_strategy = _load_strategy(strategy_name)
@@ -2169,6 +2173,7 @@ async def _report_digest(config: object, *, send: bool, trading_mode: str = "pap
     import freqpred.signal.models  # noqa: F401
     from freqpred.db import make_engine, make_session_factory
     from freqpred.llm.client import LLMClient
+    from freqpred.llm.provider import maybe_openrouter_client  # noqa: PLC0415
     from freqpred.metrics.reporting import generate_daily_digest
 
     if not config.database.url:
@@ -2186,6 +2191,7 @@ async def _report_digest(config: object, *, send: bool, trading_mode: str = "pap
         session_factory,
         prompt_version="digest-v1",
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
+        openrouter_client=maybe_openrouter_client(config.openrouter.api_key),
     )
 
     from freqpred.runtime.telemetry import RuntimeTelemetry, build_freshness_specs

@@ -19,6 +19,7 @@ from freqpred.llm.audit import (
     log_llm_query,
 )
 from freqpred.llm.models import LLMResponse
+from freqpred.llm.provider import is_openrouter_model, openrouter_call_cost
 
 log = structlog.get_logger(__name__)
 
@@ -42,6 +43,12 @@ class LLMClient:
         default_strategy:  Strategy name written to audit rows when the
                            caller does not supply one (default: "system").
         prompt_version:    Versioned prompt template ID (default: "v1").
+        openrouter_client: Optional second ``anthropic.AsyncAnthropic`` pointed
+                           at OpenRouter. When supplied, any model whose id is
+                           an OpenRouter slug (``vendor/model``) is routed
+                           through it; everything else keeps going direct to
+                           Anthropic. Both transports speak the same Messages
+                           API, so the call path below is shared.
     """
 
     def __init__(
@@ -53,8 +60,10 @@ class LLMClient:
         prompt_version: str = "v1",
         daily_spend_cap_usd: float | None = None,
         max_consecutive_errors: int = 3,
+        openrouter_client: anthropic.AsyncAnthropic | None = None,
     ) -> None:
         self._client = anthropic_client
+        self._openrouter_client = openrouter_client
         self._session_factory = session_factory
         self._default_strategy = default_strategy
         self._prompt_version = prompt_version
@@ -156,7 +165,7 @@ class LLMClient:
             create_kwargs["thinking"] = thinking
 
         try:
-            message = await self._client.messages.create(**create_kwargs)
+            message = await self._transport_for(model).messages.create(**create_kwargs)
         except Exception as exc:
             latency_ms = int((time.monotonic() - start) * 1000)
             await self._write_audit(
@@ -185,12 +194,21 @@ class LLMClient:
         self._consecutive_errors = 0
         latency_ms = int((time.monotonic() - start) * 1000)
 
+        # A forced tool_choice is honored by Anthropic's own models but not by
+        # every model reachable through OpenRouter: some answer in prose and
+        # stop with end_turn, others spend the whole budget thinking and emit
+        # no tool block at all. Falling back to the text block there hands the
+        # caller prose (or "", when the only block is a thinking block) while
+        # the audit row still says success, so a model that cannot satisfy the
+        # contract reads as a working one producing unparseable signals.
+        tool_contract_violated = False
         if json_tool:
             tool_block = next((b for b in message.content if b.type == "tool_use"), None)
             if tool_block is not None:
                 content = json.dumps(tool_block.input)
             else:
                 content = next((b.text for b in message.content if hasattr(b, "text")), "")
+                tool_contract_violated = True
         else:
             content = message.content[0].text
 
@@ -204,7 +222,47 @@ class LLMClient:
         tokens_out = message.usage.output_tokens
         cache_read = getattr(message.usage, "cache_read_input_tokens", 0) or 0
         cache_created = getattr(message.usage, "cache_creation_input_tokens", 0) or 0
-        cost = calculate_cost(model, tokens_in, tokens_out, cache_created, cache_read)
+        # OpenRouter reports the actual dollar cost of the call; calculate_cost
+        # has no rates for those slugs and would quietly apply its default.
+        reported_cost = openrouter_call_cost(message.usage)
+        if reported_cost is None:
+            cost = calculate_cost(model, tokens_in, tokens_out, cache_created, cache_read)
+        else:
+            cost = reported_cost
+
+        if tool_contract_violated:
+            blocks = ", ".join(sorted({str(getattr(b, "type", "?")) for b in message.content})) or "none"
+            detail = (
+                f"Model {model!r} ignored the forced tool_choice for "
+                f"{json_tool['name']!r}: stop_reason={message.stop_reason}, "
+                f"content blocks=[{blocks}]"
+            )
+            # The call happened and cost money, so it is still audited — as a
+            # failure, since its output cannot be used.
+            await self._write_audit(
+                prompt_version=effective_prompt_version,
+                strategy=strategy_name,
+                query_type=query_type,
+                model_used=model,
+                prompt=prompt,
+                response=content,
+                tokens_input=tokens_in,
+                tokens_output=tokens_out,
+                cost_usd=cost,
+                latency_ms=latency_ms,
+                success=False,
+                market_id=market_id,
+                signal_id=signal_id,
+                error_message=detail,
+            )
+            log.warning(
+                "llm.tool_contract_violated",
+                model=model,
+                tool=json_tool["name"],
+                stop_reason=message.stop_reason,
+                content_blocks=blocks,
+            )
+            raise LLMError(detail)
 
         llm_query_id = await self._write_audit(
             prompt_version=effective_prompt_version,
@@ -248,6 +306,23 @@ class LLMClient:
             thinking=thinking_text,
             thinking_tokens=thinking_tokens,
         )
+
+    def _transport_for(self, model: str) -> anthropic.AsyncAnthropic:
+        """Pick the client that serves ``model``.
+
+        An OpenRouter slug with no OpenRouter client configured is a
+        misconfiguration, not something to paper over: sent to the Anthropic
+        endpoint it would fail as an unknown model, which reads as a model
+        problem rather than a missing key.
+        """
+        if not is_openrouter_model(model):
+            return self._client
+        if self._openrouter_client is None:
+            raise LLMError(
+                f"Model {model!r} is an OpenRouter slug but no OpenRouter client "
+                "is configured (set OPENROUTER_API_KEY)"
+            )
+        return self._openrouter_client
 
     async def _write_audit(self, prompt_version: str, **kwargs) -> int:
         """Open a short-lived session and write one llm_queries row."""

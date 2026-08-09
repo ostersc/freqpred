@@ -39,6 +39,17 @@ class AnthropicConfig(BaseModel):
     judgment_model: str = Field(default="claude-opus-5")
 
 
+class OpenRouterConfig(BaseModel):
+    """Credentials for OpenRouter's Anthropic-compatible Messages API.
+
+    No model fields of its own: a model is routed to OpenRouter when its id is
+    an OpenRouter slug (``vendor/model``), so setting ``anthropic.primary_model``
+    to one is all it takes to move the signal call across.
+    """
+
+    api_key: str = Field(default="")
+
+
 class TavilyConfig(BaseModel):
     api_key: str = Field(default="")
     daily_cap: int = Field(default=33, description="Max requests per day (1,000 credits/month ÷ 30).")
@@ -175,6 +186,7 @@ class Settings(BaseModel):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     kalshi: KalshiConfig = Field(default_factory=KalshiConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
+    openrouter: OpenRouterConfig = Field(default_factory=OpenRouterConfig)
     tavily: TavilyConfig = Field(default_factory=TavilyConfig)
     newsapi: NewsAPIConfig = Field(default_factory=NewsAPIConfig)
     guardian: GuardianConfig = Field(default_factory=GuardianConfig)
@@ -221,6 +233,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "ANTHROPIC_PRIMARY_MODEL": ("anthropic", "primary_model"),
     "ANTHROPIC_CHEAP_MODEL": ("anthropic", "cheap_model"),
     "ANTHROPIC_JUDGMENT_MODEL": ("anthropic", "judgment_model"),
+    "OPENROUTER_API_KEY": ("openrouter", "api_key"),
     "TAVILY_API_KEY": ("tavily", "api_key"),
     "NEWSAPI_KEY": ("newsapi", "api_key"),
     "GUARDIAN_API_KEY": ("guardian", "api_key"),

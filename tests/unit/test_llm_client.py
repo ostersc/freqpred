@@ -42,6 +42,9 @@ def _make_anthropic_response(
     msg.usage.output_tokens = output_tokens
     msg.usage.cache_read_input_tokens = cache_read_tokens
     msg.usage.cache_creation_input_tokens = cache_creation_tokens
+    # A real Anthropic-direct response carries no cost field; MagicMock would
+    # otherwise invent one and make this look like an OpenRouter response.
+    msg.usage.cost = None
     return msg
 
 
@@ -72,6 +75,53 @@ def _make_client(
         daily_spend_cap_usd=daily_spend_cap_usd,
     )
     return client, anth
+
+
+def _make_openrouter_response(
+    content: str = FAKE_CONTENT,
+    input_tokens: int = 100,
+    output_tokens: int = 30,
+    cost: float = 3.65e-06,
+) -> MagicMock:
+    """An OpenRouter response: Anthropic-shaped, plus a reported dollar cost."""
+    msg = _make_anthropic_response(content, input_tokens, output_tokens)
+    msg.usage.cost = cost
+    return msg
+
+
+def _make_routed_client(
+    anthropic_response=None,
+    openrouter_response=None,
+    with_openrouter: bool = True,
+) -> tuple[LLMClient, MagicMock, MagicMock | None]:
+    """Return (LLMClient, mock_anthropic_client, mock_openrouter_client)."""
+    anth = MagicMock()
+    anth.messages = MagicMock()
+    anth.messages.create = AsyncMock(
+        return_value=anthropic_response or _make_anthropic_response()
+    )
+
+    router = None
+    if with_openrouter:
+        router = MagicMock()
+        router.messages = MagicMock()
+        router.messages.create = AsyncMock(
+            return_value=openrouter_response or _make_openrouter_response()
+        )
+
+    session_factory = MagicMock()
+    session = AsyncMock()
+    session.commit = AsyncMock()
+    session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    client = LLMClient(
+        anth,
+        session_factory,
+        default_strategy="test_strategy",
+        openrouter_client=router,
+    )
+    return client, anth, router
 
 
 # ---------------------------------------------------------------------------
@@ -407,3 +457,196 @@ class TestConsecutiveErrorCircuitBreaker:
             with pytest.raises(LLMError):
                 await client.complete(PROMPT, MODEL, QUERY_TYPE)
             assert client._consecutive_errors == 1
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter transport routing
+# ---------------------------------------------------------------------------
+
+
+OPENROUTER_MODEL = "deepseek/deepseek-v3"
+
+
+class TestTransportRouting:
+    """Which client actually receives the call — the wiring, not the helper.
+
+    _transport_for() returning the right object proves nothing on its own;
+    these assert that complete() sends the request through it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_openrouter_slug_goes_to_openrouter_client(self) -> None:
+        client, anth, router = _make_routed_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+        router.messages.create.assert_awaited_once()
+        anth.messages.create.assert_not_awaited()
+        assert router.messages.create.await_args.kwargs["model"] == OPENROUTER_MODEL
+
+    @pytest.mark.asyncio
+    async def test_anthropic_id_stays_on_anthropic_client(self) -> None:
+        client, anth, router = _make_routed_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+        anth.messages.create.assert_awaited_once()
+        router.messages.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_slug_without_openrouter_client_raises(self) -> None:
+        """Better a named misconfiguration than an 'unknown model' from Anthropic."""
+        client, anth, _ = _make_routed_client(with_openrouter=False)
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):
+                await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+        anth.messages.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tool_forcing_survives_the_hop(self) -> None:
+        """The signal path depends on json_tool; it must reach OpenRouter intact."""
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {"probability": 0.5}
+        response = _make_openrouter_response()
+        response.content = [tool_block]
+        client, _, router = _make_routed_client(openrouter_response=response)
+        tool = {"name": "submit_analysis", "description": "d", "input_schema": {}}
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE, json_tool=tool)
+
+        kwargs = router.messages.create.await_args.kwargs
+        assert kwargs["tools"][0]["name"] == "submit_analysis"
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "submit_analysis"}
+
+
+class TestCostAccounting:
+    @pytest.mark.asyncio
+    async def test_openrouter_cost_is_the_reported_figure(self) -> None:
+        """Not calculate_cost, which has no rates for a non-Anthropic slug."""
+        client, _, _ = _make_routed_client(
+            openrouter_response=_make_openrouter_response(cost=0.00042)
+        )
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with patch("freqpred.llm.client.calculate_cost") as mock_calc:
+                result = await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+        assert result.cost_usd == pytest.approx(0.00042)
+        mock_calc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_anthropic_cost_still_uses_price_table(self) -> None:
+        client, _, _ = _make_routed_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with patch("freqpred.llm.client.calculate_cost", return_value=0.99) as mock_calc:
+                result = await client.complete(PROMPT, MODEL, QUERY_TYPE)
+
+        mock_calc.assert_called_once()
+        assert result.cost_usd == pytest.approx(0.99)
+
+    @pytest.mark.asyncio
+    async def test_reported_cost_reaches_the_audit_row(self) -> None:
+        """Spend tracking is only as good as what gets written to llm_queries."""
+        client, _, _ = _make_routed_client(
+            openrouter_response=_make_openrouter_response(cost=0.00123)
+        )
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1) as mock_log:
+            await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+        assert mock_log.await_args.kwargs["cost_usd"] == pytest.approx(0.00123)
+        assert mock_log.await_args.kwargs["model_used"] == OPENROUTER_MODEL
+
+
+class TestToolContract:
+    """A forced tool_choice that the model ignores must not read as success."""
+
+    @staticmethod
+    def _no_tool_response(blocks: list) -> MagicMock:
+        msg = _make_openrouter_response()
+        msg.content = blocks
+        msg.stop_reason = "end_turn"
+        return msg
+
+    @staticmethod
+    def _text_block(text: str) -> MagicMock:
+        block = MagicMock()
+        block.type = "text"
+        block.text = text
+        return block
+
+    @staticmethod
+    def _thinking_block() -> MagicMock:
+        block = MagicMock(spec=["type", "thinking"])
+        block.type = "thinking"
+        block.thinking = "pondering"
+        return block
+
+    @pytest.mark.asyncio
+    async def test_prose_instead_of_tool_call_raises(self) -> None:
+        """deepseek/deepseek-v3.2 answers in prose and stops with end_turn."""
+        client, _, _ = _make_routed_client(
+            openrouter_response=self._no_tool_response([self._text_block("I cannot know that.")])
+        )
+        tool = {"name": "submit_analysis", "description": "d", "input_schema": {}}
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with pytest.raises(LLMError, match="ignored the forced tool_choice"):
+                await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE, json_tool=tool)
+
+    @pytest.mark.asyncio
+    async def test_thinking_only_response_raises(self) -> None:
+        """tencent/hy3 spends the budget thinking and emits no tool block.
+
+        The old fallback produced "" here, which is the quietest possible
+        failure: an empty signal logged as a success.
+        """
+        client, _, _ = _make_routed_client(
+            openrouter_response=self._no_tool_response([self._thinking_block()])
+        )
+        tool = {"name": "submit_analysis", "description": "d", "input_schema": {}}
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE, json_tool=tool)
+
+    @pytest.mark.asyncio
+    async def test_violation_is_audited_as_failure_with_its_real_cost(self) -> None:
+        """The call still spent money; the row must say so, and say it failed."""
+        client, _, _ = _make_routed_client(
+            openrouter_response=self._no_tool_response([self._text_block("prose")])
+        )
+        tool = {"name": "submit_analysis", "description": "d", "input_schema": {}}
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1) as mock_log:
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE, json_tool=tool)
+
+        assert mock_log.await_count == 1
+        kwargs = mock_log.await_args.kwargs
+        assert kwargs["success"] is False
+        assert kwargs["cost_usd"] > 0
+        assert "forced tool_choice" in kwargs["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_honored_tool_call_still_succeeds(self) -> None:
+        client, _, router = _make_routed_client()
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {"probability": 0.5}
+        response = _make_openrouter_response()
+        response.content = [tool_block]
+        router.messages.create = AsyncMock(return_value=response)
+
+        tool = {"name": "submit_analysis", "description": "d", "input_schema": {}}
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1) as mock_log:
+            result = await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE, json_tool=tool)
+
+        assert result.content == '{"probability": 0.5}'
+        assert mock_log.await_args.kwargs["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_tool_requested_is_unaffected(self) -> None:
+        """Plain text completions must not be caught by the new guard."""
+        client, _, _ = _make_routed_client()
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            result = await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+        assert result.content == FAKE_CONTENT
