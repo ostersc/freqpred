@@ -433,10 +433,40 @@ class TestParseSignalResponse:
         assert result is not None
         assert result["direction"] == "YES"
 
-    def test_probability_clamped_above_one(self) -> None:
-        result = parse_signal_response(_valid_llm_json(probability=1.5))
+    def test_percentage_probability_rescaled_yes(self) -> None:
+        """A model answering in percentages meant 70%, not certainty.
+
+        Clamping alone made this p=1.0 — maximum edge at maximum conviction on
+        every signal. Observed from deepseek/deepseek-v3.2 via OpenRouter.
+        """
+        result = parse_signal_response(
+            _valid_llm_json(probability=70, confidence=80, direction="YES")
+        )
         assert result is not None
-        assert result["probability"] == 1.0
+        assert result["probability"] == pytest.approx(0.70)
+        assert result["confidence"] == pytest.approx(0.80)
+        assert result["direction"] == "YES"
+
+    def test_percentage_probability_rescaled_no(self) -> None:
+        result = parse_signal_response(
+            _valid_llm_json(probability=30, confidence=60, direction="NO")
+        )
+        assert result is not None
+        assert result["probability"] == pytest.approx(0.30)
+        assert result["confidence"] == pytest.approx(0.60)
+        assert result["direction"] == "NO"
+
+    def test_percentage_rescale_applies_to_prior_and_posterior(self) -> None:
+        result = parse_signal_response(
+            _valid_llm_json(probability=45, confidence=55, prior=20, posterior=45, direction="NO")
+        )
+        assert result is not None
+        assert result["prior"] == pytest.approx(0.20)
+        assert result["posterior"] == pytest.approx(0.45)
+
+    def test_rescaled_value_contradicting_direction_is_rejected(self) -> None:
+        """1.5 rescales to 0.015, which cannot be a YES — the mismatch guard wins."""
+        assert parse_signal_response(_valid_llm_json(probability=1.5, direction="YES")) is None
 
     def test_probability_clamped_below_zero(self) -> None:
         result = parse_signal_response(_valid_llm_json(probability=-0.1, direction="NO"))

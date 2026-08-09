@@ -532,6 +532,7 @@ def build_prompt(
     ``_now`` pins the clock for deterministic rendering (the prompt embeds the
     current date and window math) — used by the replay harness and time-
     sensitive tests. Defaults to the real wall-clock.
+
     """
     now = _now if _now is not None else datetime.now(tz=UTC)
     days_to_close = (market.close_time - now).total_seconds() / 86400
@@ -655,7 +656,31 @@ def parse_signal_response(content: str) -> dict | None:
         log.warning("signal.llm.invalid_numbers", error=str(exc))
         return None
 
-    # Clamp to [0, 1]
+    # A value above 1 is a percentage, so rescale it rather than clamp it.
+    # Clamping alone turned a unit mix-up into certainty: a model answering
+    # {"probability": 45, "confidence": 60} became p=1.0 at confidence 1.0 on
+    # every signal — maximum edge against any market price, at maximum
+    # conviction. Observed from deepseek/deepseek-v3.2 on 2026-08-08, which
+    # satisfies the tool schema (it types these as "number") while using the
+    # wrong unit. Rescaling recovers the intended 0.45/0.60.
+    def _as_unit_fraction(value: float, field: str) -> float:
+        if value > 1.0:
+            log.warning(
+                "signal.llm.percentage_rescaled",
+                field=field,
+                raw=value,
+                rescaled=value / 100.0,
+            )
+            return value / 100.0
+        return value
+
+    prior = _as_unit_fraction(prior, "prior")
+    posterior = _as_unit_fraction(posterior, "posterior")
+    probability = _as_unit_fraction(probability, "probability")
+    confidence = _as_unit_fraction(confidence, "confidence")
+
+    # Clamp to [0, 1] — still needed for negatives, and for a value so far out
+    # of range that rescaling does not bring it back (e.g. 150 -> 1.5).
     prior = max(0.0, min(1.0, prior))
     posterior = max(0.0, min(1.0, posterior))
     probability = max(0.0, min(1.0, probability))
