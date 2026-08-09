@@ -36,7 +36,11 @@ class AnthropicConfig(BaseModel):
     api_key: str = Field(default="")
     primary_model: str = Field(default="claude-sonnet-4-6")
     cheap_model: str = Field(default="claude-haiku-4-5-20251001")
-    judgment_model: str = Field(default="claude-opus-5")
+    # OpenRouter slug — routed off the Anthropic transport by the slash. Screened
+    # against claude-opus-5 on the frozen 76-signal set (2026-08-09) and adopted
+    # at ~4.4x lower cost per assessment; see freqpred/metrics/assessment.py for
+    # the max_tokens this model requires. Needs OPENROUTER_API_KEY.
+    judgment_model: str = Field(default="z-ai/glm-5.2")
 
 
 class OpenRouterConfig(BaseModel):

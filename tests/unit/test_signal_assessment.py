@@ -845,7 +845,13 @@ async def test_assess_signal_context_passes_sections_to_llm() -> None:
     assert "prompt" in captured
     assert "edge_band_calibration" in captured["prompt"]
     assert "market_reevaluation_history" in captured["prompt"]
-    # 1024 is the audited v8 budget. 768 was the v6 figure and is too tight for
-    # v8's profit-edge reasoning (2/9 calls truncated mid-sentence in the first
-    # draft); at 1024 only 1/76 reached the cap on the frozen eval set.
-    assert captured["max_tokens"] == 1024
+    # 6000 is the audited budget for the z-ai/glm-5.2 judgment model adopted
+    # 2026-08-09. This is a FLOOR, not a preference: GLM spends far more of its
+    # budget on reasoning tokens than the opus-5 it replaced, and at the previous
+    # 1024 it burned the whole cap and returned a tool_use block with input={} —
+    # no trust_score at all, which fails open to a neutral 1.0x while still
+    # paying for the call. Measured at 6000 on the frozen set: max 3072 output
+    # tokens, p95 1923, 0/76 at cap. Lowering this needs its own audit
+    # (freqpred/metrics/CLAUDE.md); changing the judgment model needs a fresh
+    # measurement rather than an assumption that the new one fits.
+    assert captured["max_tokens"] == 6000

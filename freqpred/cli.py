@@ -1172,10 +1172,16 @@ async def _ingestion_run(
 
     engine = make_engine(config.database.url)
     session_factory = make_session_factory(engine)
+    from freqpred.llm.provider import maybe_openrouter_client  # noqa: PLC0415
+
     llm_client = LLMClient(
         anthropic.AsyncAnthropic(api_key=anthropic_api_key),
         session_factory,
         prompt_version="catalyst-v1",
+        # cheap_model may name an OpenRouter slug like any other model setting;
+        # without this the transport lookup raises here while the same model
+        # works everywhere else.
+        openrouter_client=maybe_openrouter_client(config.openrouter.api_key),
     )
 
     embedder = make_embedder(config.embedding)

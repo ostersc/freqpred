@@ -26,6 +26,7 @@ import freqpred.rag.models  # noqa: F401
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.llm.client import LLMClient
+from freqpred.llm.provider import maybe_openrouter_client
 from freqpred.metrics.assessment import (
     _ASSESSMENT_TOOL,
     _PROMPT_VERSION,
@@ -84,6 +85,10 @@ async def main(eval_set: Path, out_path: Path, arms: set[str]) -> None:
         prompt_version="frozen-eval",
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
         max_consecutive_errors=config.risk.max_consecutive_llm_errors,
+        # Without this a challenger named as an OpenRouter slug ("vendor/model")
+        # raises instead of running, so no non-Anthropic judgment model could be
+        # screened at all.
+        openrouter_client=maybe_openrouter_client(config.openrouter.api_key),
     )
 
     # Fail loudly rather than sending system=None, which would silently score the
@@ -99,12 +104,18 @@ async def main(eval_set: Path, out_path: Path, arms: set[str]) -> None:
             "measure current-vs-current and bill for a guaranteed null result.)"
         )
 
+    # Per-arm max_tokens: a challenger model may need a different output budget
+    # than the incumbent to satisfy the same tool contract. GLM-5.2 spends far
+    # more of its budget on reasoning tokens than Opus and returns an EMPTY tool
+    # call at the incumbent's 1024, so screening every arm at one shared value
+    # would measure a truncated package rather than the model.
     arm_cfg = {
-        "current": (_SYSTEM_PROMPT, f"{_PROMPT_VERSION}-frozen-current", None),
+        "current": (_SYSTEM_PROMPT, f"{_PROMPT_VERSION}-frozen-current", None, MAX_TOKENS),
         "challenger": (
             audit.CHALLENGER_SYSTEM_PROMPT,
             f"{audit.CHALLENGER_VERSION}-frozen",
             audit.CHALLENGER_MODEL,
+            getattr(audit, "CHALLENGER_MAX_TOKENS", MAX_TOKENS),
         ),
     }
     sem = asyncio.Semaphore(CONCURRENCY)
@@ -139,7 +150,7 @@ async def main(eval_set: Path, out_path: Path, arms: set[str]) -> None:
                     continue
                 except Exception:  # noqa: BLE001 — stale cache, just re-score
                     pass
-            system, version, model = arm_cfg[arm]
+            system, version, model, arm_max_tokens = arm_cfg[arm]
             payload = e["payloads"][arm]["payload"]
             async with sem:
                 try:
@@ -152,7 +163,7 @@ async def main(eval_set: Path, out_path: Path, arms: set[str]) -> None:
                         signal_id=e["signal_id"],
                         strategy=f"frozen_{arm}",
                         prompt_version=version,
-                        max_tokens=MAX_TOKENS,
+                        max_tokens=arm_max_tokens,
                         json_tool=_ASSESSMENT_TOOL,
                     )
                     row.update(

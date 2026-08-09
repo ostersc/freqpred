@@ -54,7 +54,11 @@ signal, so it's dropped entirely rather than reconstructed.
 CURRENT-VS-CHALLENGER REVISION (v4): earlier revisions pinned each
 historical package (assessment-v4/v5/v6) as its own frozen arm to settle the
 T94/T95 adoption decisions (results: README → "Auditing the sizing
-assessor" reference runs; result CSVs remain in scripts/.audit_output/).
+assessor" reference runs). Result CSVs are written to scripts/.audit_output/
+but are NOT committed — *.csv is gitignored — so they exist only on the
+machine that paid for the run. The numbers that matter are transcribed into
+the README reference-run list and SPEC.md; treat those as the record and a
+local CSV as a bonus.
 Going forward the harness only ever needs to answer one question — does the
 proposed assessor beat the one in production? — so it now runs exactly the
 two arms above. --reuse-csv imports per-signal columns for arms NOT being
@@ -86,6 +90,7 @@ import freqpred.rag.models  # noqa: F401
 from freqpred.config import load_config
 from freqpred.db import make_engine, make_session_factory
 from freqpred.llm.client import LLMClient
+from freqpred.llm.provider import maybe_openrouter_client
 from freqpred.markets.models import Market, MarketRow
 from freqpred.metrics.assessment import (
     _ASSESSMENT_TOOL,
@@ -169,8 +174,45 @@ ARM_NAMES = ("current", "challenger")
 #     prompt-version cohort; production cannot do this yet (edge_calibration_scores
 #     has no prompt_version column), so it was omitted from the shipped prompt.
 #     It applied to only 38 of 76 audited signals in any case.
+# SCREENED 2026-08-09, NOT ADOPTED PENDING DECISION: single-axis judgment-model
+# swap, claude-opus-5 -> z-ai/glm-5.2 via OpenRouter. System prompt was production
+# _SYSTEM_PROMPT verbatim and the payload mirrored the current arm, so the only
+# difference between arms was the model. Disarmed again below per the usual rule.
+#
+# Motivation was cost: opus-5 measures $0.0479/assessment in production over 30d;
+# GLM-5.2 measured $0.0109 across the 76-call screen, ~4.4x cheaper, at comparable
+# latency (14.3s vs 15.7s on the same set).
+#
+# Result on the frozen 76-signal set (scripts/.audit_output/frozen_eval_glm.csv),
+# GLM as challenger vs the production v8/opus-5 package as current:
+#   * capital tilt +0.0908x vs +0.0724x, diff +0.0184x, 95% CI (-0.0164, +0.0525)
+#   * corr(trust, hit) +0.354 vs +0.338, diff +0.016, 95% CI (-0.102, +0.130)
+#   * AUC 0.712 vs 0.691; incremental over the free direction x band prior (0.685)
+#     +0.026 CI (-0.038,+0.094) vs +0.005 CI (-0.067,+0.080) — the best increment
+#     any package has posted, still indistinguishable from free
+#   * GLM issued 35 size_up at an 80.0% hit rate vs opus-5's 19 at 78.9%
+#     (base 53.9%) — nearly double the count at equal precision, so it is
+#     discriminating more, not just sizing up more
+#   * arms agree at r=0.856 on trust_score: same judge behaviour, not a new one
+#   * GLM does NOT fix v8's known defect — within-YES AUC 0.277 vs 0.296, both
+#     below random; it is better only within NO (0.693 vs 0.596)
+# Formal verdict was INCONCLUSIVE, but only because the correlation CI's lower
+# bound (-0.102) misses the -0.10 tolerance by 0.002, on the metric the harness
+# itself documents as ~2x less powered than AUC.
+#
+# The blocking operational finding: GLM-5.2 CANNOT run at the audited 1024
+# max_tokens. It spends far more of its budget on reasoning tokens than Opus, and
+# at 1024 it returned a tool_use block with input={} — no trust_score at all —
+# after burning the entire cap. Production fails safe to a neutral 1.0x there but
+# still pays for the call. Screened at 6000 (observed max 3072, p95 1923, 0/76 at
+# cap); adopting the model REQUIRES raising max_tokens in
+# freqpred/metrics/assessment.py with it.
 CHALLENGER_VERSION: str | None = None
 CHALLENGER_MODEL: str | None = None
+# Per-arm output budget: a challenger MODEL may need a different budget than the
+# incumbent to satisfy the same tool contract (see the GLM finding above). Only
+# the challenger arm can differ; the current arm stays at its audited 1024.
+CHALLENGER_MAX_TOKENS: int = 1024
 
 # Deliberately a BUNDLED change (prompt v7 + opus-5), at the user's direction:
 # staying on opus-4-7 indefinitely is not viable, so the two axes move together.
@@ -364,6 +406,10 @@ async def _challenger_payload(
 
     The v8 shape is preserved above as ADOPTED_V8_SYSTEM_PROMPT and _add_profit_edge
     if you need to diff a new proposal against what was actually screened.
+
+    The 2026-08-09 GLM-5.2 model swap used exactly the mirror form shown above
+    (payload byte-identical to the current arm); see the CHALLENGER block for its
+    result. Disarmed again after that screen.
     """
     raise NotImplementedError(
         "define the challenger package (CHALLENGER_VERSION, "
@@ -1009,6 +1055,9 @@ async def main(
         prompt_version="assessor-audit-pit-v3",
         daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
         max_consecutive_errors=config.risk.max_consecutive_llm_errors,
+        # A CHALLENGER_MODEL named as an OpenRouter slug ("vendor/model") raises
+        # without this, so no non-Anthropic judgment model could be screened.
+        openrouter_client=maybe_openrouter_client(config.openrouter.api_key),
     )
 
     out_rows = []
@@ -1068,6 +1117,7 @@ async def main(
                 system: str,
                 version: str,
                 model: str | None = None,
+                max_tokens: int = 1024,
                 _market=market,
                 _signal=signal,
                 _i=i,
@@ -1095,7 +1145,12 @@ async def main(
                         # the prompt itself is what keeps output short (see
                         # CHALLENGER_SYSTEM_PROMPT: trust_score first, <=2
                         # sentences, <=3 key_factors).
-                        max_tokens=1024,
+                        #
+                        # Per-arm since 2026-08-09: a challenger MODEL may need a
+                        # different budget to satisfy the same tool contract (see
+                        # CHALLENGER_MAX_TOKENS). Only the challenger arm can
+                        # differ, so the current arm stays at its audited 1024.
+                        max_tokens=max_tokens,
                         json_tool=_ASSESSMENT_TOOL,
                     )
                     parsed = _parse_assessment_response(resp.content)
@@ -1147,6 +1202,7 @@ async def main(
                     system=CHALLENGER_SYSTEM_PROMPT,
                     version=CHALLENGER_VERSION,
                     model=CHALLENGER_MODEL,
+                    max_tokens=CHALLENGER_MAX_TOKENS,
                 )
 
             row_out: dict = {

@@ -1017,14 +1017,23 @@ async def assess_signal_context(
             signal_id=signal.id,
             strategy=strategy.config.name,
             prompt_version=_PROMPT_VERSION,
-            # 1024 matches the audited v8 package. 768 was tuned for v6 and is
-            # too tight for v8's profit-edge reasoning: in the first v8 draft the
-            # challenger averaged 721 output tokens and truncated mid-sentence on
-            # 2/9 calls. At 1024 on the 76-signal frozen set only 1/76 reached the
-            # cap. trust_score is also emitted FIRST now, so a truncation costs
-            # transparency but never the sizing decision (previously it could
-            # drop trust_score entirely and fail open to neutral 1.0x).
-            max_tokens=1024,
+            # 6000 since the 2026-08-09 judgment-model swap to z-ai/glm-5.2.
+            # This is NOT a cosmetic bump: GLM spends far more of its budget on
+            # reasoning tokens than Opus did, and at the previously audited 1024
+            # it burned the entire cap and returned a tool_use block with
+            # input={} — no trust_score at all, which fails open to a neutral
+            # 1.0x while still paying for the call. Measured on the 76-signal
+            # frozen set at 6000: max 3072 output tokens, p95 1923, 0/76 at the
+            # cap. Any future judgment model must be re-measured here rather than
+            # assumed to fit; the value is a floor per freqpred/metrics/CLAUDE.md
+            # and lowering it needs its own audit.
+            #
+            # History: 768 was tuned for v6 and was too tight for v8's
+            # profit-edge reasoning (721 avg output tokens, truncating on 2/9
+            # calls); 1024 was the audited v8/opus-5 value, where only 1/76
+            # reached the cap. trust_score is emitted FIRST regardless, so a
+            # truncation costs transparency rather than the sizing decision.
+            max_tokens=6000,
             json_tool=_ASSESSMENT_TOOL,
         )
         llm_query_id = llm_response.llm_query_id
