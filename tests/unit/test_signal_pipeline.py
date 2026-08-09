@@ -918,3 +918,31 @@ class TestSignalPipelineAnalyze:
         assert abs(added_links[0].relevance_score - cosine_similarity) < 1e-9
         # confirm it's NOT the rank proxy (1/rank = 1.0 for rank=0)
         assert added_links[0].relevance_score != 1.0
+
+
+class TestPriceExcludedFromPrompt:
+    """SPEC.md: the signal prompt intentionally excludes market price data to
+    prevent anchoring on market consensus. Measured 2026-08-08: supplying it
+    improved Brier but cut EV/entry 86% — the model shades toward the price and
+    its disagreements, which are where the edge lives, get worse."""
+
+    @staticmethod
+    def _market():
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            question="Will X happen?", category="Politics",
+            close_time=datetime(2026, 9, 1, tzinfo=UTC),
+            open_time=datetime(2026, 8, 1, tzinfo=UTC),
+            yes_bid=0.56, yes_ask=0.57, mid_price=0.565,
+            volume_24h=1234, open_interest=5678,
+        )
+
+    def test_no_price_data_in_prompt(self) -> None:
+        from datetime import UTC, datetime
+
+        from freqpred.signal.llm import build_prompt
+        prompt = build_prompt(self._market(), [], _now=datetime(2026, 8, 8, tzinfo=UTC))
+        assert "MARKET PRICE" not in prompt
+        for value in ("0.56", "0.57", "0.565"):
+            assert value not in prompt, f"market price {value} leaked into the prompt"
