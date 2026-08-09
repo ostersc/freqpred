@@ -340,10 +340,13 @@ class TestVersionCohort:
 
 
 class TestChallengerIsDisarmedAfterAdoption:
-    """After an adoption the challenger MUST be undefined. v8 shipped to
-    production on 2026-07-25, so leaving CHALLENGER_* pointing at it would make a
-    re-run measure current-vs-current — a guaranteed null result billed at real
-    API rates (~$3.30 for the challenger arm on the 76-signal frozen set)."""
+    """After an adoption the challenger MUST be undefined. Leaving CHALLENGER_*
+    pointing at the just-adopted package makes a re-run measure
+    current-vs-current — a guaranteed null result billed at real API rates
+    (~$0.85 for a challenger arm on `z-ai/glm-5.2` over the 76-signal frozen
+    set; it was ~$3.30 when the incumbent was Opus). Most recently armed for
+    the 2026-08-09 opus-5 -> z-ai/glm-5.2 model swap, then disarmed on
+    adoption."""
 
     def test_challenger_hooks_are_unset(self) -> None:
         assert audit.CHALLENGER_VERSION is None
