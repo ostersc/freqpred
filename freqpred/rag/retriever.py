@@ -31,6 +31,20 @@ log = structlog.get_logger()
 
 _VECTOR_WEIGHT = 0.7  # weight for cosine similarity; (1 - this) goes to BM25
 
+# ts_rank normalization bitmask. 1 divides the rank by 1 + log(document length),
+# so a document cannot buy the top slot with sheer volume of text.
+#
+# Postgres defaults to 0 — no normalization at all — which ranks on raw term
+# frequency. Measured on 20 active markets (2026-08-11), the median rank-1
+# document was 42,147 chars under 0 and 3,947 under 1. Flag 2 (divide by raw
+# length) over-corrects hard: median 98 chars, i.e. it just picks the shortest
+# thing that matches.
+#
+# Isolating the components on those markets showed BM25 was the whole problem:
+# vector-only retrieval already picked a 1,098-char median at rank 1, while
+# BM25-only picked 42,147.
+_TS_RANK_NORMALIZATION = 1
+
 
 def _dot(a: list[float], b: list[float]) -> float:
     """Dot product ≈ cosine similarity for unit-norm embeddings."""
@@ -90,17 +104,25 @@ async def retrieve(
     )
 
     distance_col = embed_attr.cosine_distance(query_vector).label("cosine_distance")
-    # Use summary for BM25 when present — summaries are generated with market-question
-    # vocabulary so they score better against the market question than the raw body.
+    # Score BM25 over the body, never coalesce(summary, body). The coalesce made
+    # the comparison unfair rather than better: a summarised document competed
+    # with ~486 characters while an unsummarised one competed with its whole
+    # body, and which documents got summarised was decided by an ingestion-time
+    # gate against whichever market question happened to trigger the fetch. On
+    # 2026-08-11 that put a 42,147-char vaccine live blog ahead of a 4,518-char
+    # story about an arrest at Trump's golf course on a "will Trump say Golf"
+    # market — the live blog simply had more text in play.
+    #
     # Use only the first line of the question to avoid boilerplate resolution criteria
     # inflating the tsquery with irrelevant terms (e.g. "market resolv accord rule").
     question_first_line = func.split_part(question, "\n", 1)
     bm25_col = func.ts_rank(
         func.to_tsvector(
             text("'english'"),
-            DocumentRow.title + " " + func.coalesce(DocumentRow.summary, DocumentRow.body),
+            DocumentRow.title + " " + DocumentRow.body,
         ),
         func.plainto_tsquery(text("'english'"), question_first_line),
+        _TS_RANK_NORMALIZATION,
     ).label("bm25_score")
 
     stmt = (

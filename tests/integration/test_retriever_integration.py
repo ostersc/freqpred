@@ -299,3 +299,63 @@ async def test_retrieval_uses_configured_embedding_768_column(session):
     assert str(doc_stale.id) not in returned_ids
     assert set(returned_ids) == {str(doc_match.id), str(doc_other.id)}
     assert returned_ids[0] == str(doc_match.id)  # ranked by 768 cosine similarity
+
+
+@pytest.mark.asyncio
+async def test_bm25_scores_body_not_the_ingestion_summary(session):
+    """A document's own body must decide its BM25 rank, not its summary.
+
+    Regression for the 2026-08-11 fix. BM25 scored ``coalesce(summary, body)``,
+    so a summarised document competed on ~486 characters while an unsummarised
+    one competed on its entire body — and which documents got summarised was
+    decided by an ingestion-time gate against whichever market question
+    happened to trigger the fetch. A document could therefore be on topic in
+    its body and still score ~0, because the summary written for some *other*
+    market's question didn't carry the terms.
+
+    Live, that put a 42,147-char vaccine live blog ahead of a 4,518-char story
+    about an arrest at Trump's golf course on a "will Trump say Golf" market,
+    and left rank-1 documents judged unrelated to their own market question 45%
+    of the time (16/60 after the fix, sign test p=0.035).
+
+    Scored with ``vector_weight=0.0`` to isolate BM25 — the vector component
+    was never the problem, picking a 1,098-char median at rank 1 while BM25
+    picked 42,147.
+    """
+    market_id = "KXBM25-SUMMARY"
+    await _seed_market(session, market_id)
+
+    # On topic in its body, but its summary was written for a different
+    # question and carries neither query term.
+    on_topic = await _insert_doc(
+        session, market_id, _unit_vector(384, 0),
+        title="Man arrested at Trump golf course",
+    )
+    on_topic.body = "The Trump golf course arrest followed a dispute. " * 70
+    on_topic.summary = "A California arrest story involving the president."
+
+    # Off topic and far longer, with the terms present but heavily diluted.
+    diluted = await _insert_doc(
+        session, market_id, _unit_vector(384, 1),
+        title="Doctors condemn Trump order on childhood vaccines",
+    )
+    diluted.body = "Trump signed an order on vaccines today. " * 200 + "Trump golf. " * 3
+    diluted.summary = None
+    await session.flush()
+
+    results = await retrieve(
+        session,
+        _make_embedder_for_question(_unit_vector(384, 0)),
+        "Trump golf",
+        market_id,
+        top_k=2,
+        vector_weight=0.0,  # BM25 alone
+        now=NOW,            # pin the age cutoff — seeded docs are dated NOW
+    )
+
+    assert len(results) == 2
+    assert str(results[0][0].id) == str(on_topic.id), (
+        "the diluted off-topic document outranked the on-topic one — BM25 is "
+        "scoring the ingestion summary again, so a document's rank depends on "
+        "which market's question triggered its fetch"
+    )
