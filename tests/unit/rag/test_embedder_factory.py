@@ -55,3 +55,25 @@ def test_factory_default_config_uses_sentence_transformers() -> None:
     assert embedder.model_name == "all-MiniLM-L6-v2"
     assert embedder.max_embed_chars == 2000
     assert embedder.embedding_column == "embedding"
+
+
+def test_ollama_max_embed_chars_defaults_to_8000_when_config_unset() -> None:
+    """Unset max_embed_chars must resolve per backend, not fall back to MiniLM's 2000.
+
+    Before T100 the config default (2000) applied to every backend, so a config
+    selecting ollama without naming max_embed_chars silently truncated at 2K chars
+    despite nomic's 8K-token window.
+    """
+    cfg = EmbeddingConfig(backend="ollama", model="nomic-embed-text")
+    embedder = make_embedder(cfg)
+    assert isinstance(embedder, OllamaEmbedder)
+    assert embedder.max_embed_chars == 8000
+
+
+def test_ollama_embedder_default_max_embed_chars_is_8000() -> None:
+    assert OllamaEmbedder().max_embed_chars == 8000
+
+
+def test_explicit_max_embed_chars_overrides_backend_default() -> None:
+    cfg = EmbeddingConfig(backend="ollama", model="nomic-embed-text", max_embed_chars=3000)
+    assert make_embedder(cfg).max_embed_chars == 3000

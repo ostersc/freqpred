@@ -164,10 +164,12 @@ class EmbeddingConfig(BaseModel):
     backend: Literal["sentence_transformers", "ollama"] = "sentence_transformers"
     model: str = "all-MiniLM-L6-v2"
     ollama_base_url: str = "http://localhost:11434"
-    # Maximum characters sent to the embedder per document.
-    # all-MiniLM-L6-v2 has a 512-token limit (~2K chars); nomic-embed-text has
-    # an 8K-token limit (~6K chars). Raise to 6000 when switching to nomic.
-    max_embed_chars: int = 2000
+    # Maximum characters of document body sent to the embedder per document.
+    # Left unset, make_embedder() resolves a per-backend default: 2000 for
+    # sentence_transformers (all-MiniLM-L6-v2's 512-token limit is ~2K chars)
+    # and 8000 for ollama (~2000 tokens, well inside nomic's 8K window).
+    # Set explicitly only to override that.
+    max_embed_chars: int | None = None
 
 
 class AlertsConfig(BaseModel):

@@ -31,7 +31,12 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 _DEFAULT_MODEL = "all-MiniLM-L6-v2"
+
+# Per-backend truncation defaults, used when EmbeddingConfig.max_embed_chars is
+# left unset. all-MiniLM-L6-v2 has a 512-token limit (~2K chars); nomic-embed-text
+# has an 8K-token limit, and 8K chars is ~2K tokens — well inside it.
 _DEFAULT_MAX_EMBED_CHARS = 2_000
+_OLLAMA_MAX_EMBED_CHARS = 8_000
 
 # Single shared thread pool for CPU-bound inference — avoids spinning up a
 # new thread per call while still keeping the event loop unblocked.
@@ -112,15 +117,15 @@ class OllamaEmbedder:
     Args:
         model:           Ollama model name. Defaults to ``nomic-embed-text``.
         base_url:        Ollama server base URL. Defaults to localhost:11434.
-        max_embed_chars: Truncation limit before embedding. Defaults to 6000
-                         (~750 tokens headroom under the 8K limit).
+        max_embed_chars: Truncation limit before embedding. Defaults to 8000
+                         (~2000 tokens, still far inside nomic's 8K window).
     """
 
     def __init__(
         self,
         model: str = "nomic-embed-text",
         base_url: str = "http://localhost:11434",
-        max_embed_chars: int = 6_000,
+        max_embed_chars: int = _OLLAMA_MAX_EMBED_CHARS,
     ) -> None:
         self.model_name = model
         self.max_embed_chars = max_embed_chars
@@ -151,14 +156,18 @@ class OllamaEmbedder:
 
 
 def make_embedder(config: EmbeddingConfig) -> LocalEmbedder | OllamaEmbedder:
-    """Construct the configured embedder from EmbeddingConfig."""
+    """Construct the configured embedder from EmbeddingConfig.
+
+    ``max_embed_chars`` is resolved per backend when the config leaves it unset,
+    so switching to ollama does not silently keep MiniLM's 2K-char truncation.
+    """
     if config.backend == "ollama":
         return OllamaEmbedder(
             model=config.model,
             base_url=config.ollama_base_url,
-            max_embed_chars=config.max_embed_chars,
+            max_embed_chars=config.max_embed_chars or _OLLAMA_MAX_EMBED_CHARS,
         )
     return LocalEmbedder(
         model_name=config.model,
-        max_embed_chars=config.max_embed_chars,
+        max_embed_chars=config.max_embed_chars or _DEFAULT_MAX_EMBED_CHARS,
     )

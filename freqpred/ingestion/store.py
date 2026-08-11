@@ -5,7 +5,9 @@ Flow for upsert_document:
 2. Compute SHA-256 content_hash.
 3. SELECT existing row by source_url.
 4. If existing row has same content_hash → return as-is (no re-embed).
-5. Otherwise embed the cleaned body (new doc or content changed).
+5. Otherwise embed the cleaned body, truncated to embedder.max_embed_chars
+   (new doc or content changed). The summary is never embedded — see
+   derive_embed_text.
 6. INSERT … ON CONFLICT (source_url) DO UPDATE — atomic upsert.
 """
 from __future__ import annotations
@@ -121,6 +123,31 @@ def _strip_html(text: str) -> str:
 def _sanitize(text: str) -> str:
     """Strip null bytes that PostgreSQL's UTF-8 encoding rejects."""
     return text.replace("\x00", "")
+
+
+# ---------------------------------------------------------------------------
+# Embed text derivation
+# ---------------------------------------------------------------------------
+
+
+def derive_embed_text(body: str, max_chars: int) -> str:
+    """Return the text sent to the embedder for a document.
+
+    Always the body, never ``summary``. Summaries are written against whichever
+    market question triggered the fetch, so embedding one makes a document's
+    single vector representation topic-skewed by an accident of ingestion order
+    — a doc summarised for "will Trump say Melania" would then represent itself
+    to every future retrieval, including for unrelated markets (T100).
+
+    The ``max_chars`` cap remains because one vector over a very long document
+    averages unrelated topics into a point near none of them. Chunking with
+    max-pooling is the principled fix for that tail and is out of scope here.
+
+    This is the single source of truth for the derivation: ``upsert_document``
+    and ``scripts/reindex_embeddings.py`` both call it so the live index and a
+    reindex never disagree about what a document's vector represents.
+    """
+    return _sanitize(body)[:max_chars]
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +274,8 @@ async def upsert_document(
 
     is_update = existing is not None
 
-    # New doc or content changed — optionally summarize long bodies before embedding.
+    # New doc or content changed — optionally summarize long bodies. The summary is
+    # stored for display/evidence use only; it is NOT embedded (see derive_embed_text).
     # Summarization is gated on: body length > threshold AND BM25 score against the
     # market question's first line meets the minimum. The dedup check above ensures
     # we never call the LLM for content we've already processed.
@@ -292,17 +320,13 @@ async def upsert_document(
                 bm25_score=round(bm25_score, 4),
             )
 
-    # Use summary for embedding when present — aligns the embedding vector with
-    # the summarized content rather than an arbitrary body truncation.
-    max_chars = embedder.max_embed_chars
-    summary_clean = _sanitize(raw_doc.summary) if raw_doc.summary else None
-    embed_text = summary_clean[:max_chars] if summary_clean else body_clean[:max_chars]
+    embed_text = derive_embed_text(body_clean, embedder.max_embed_chars)
 
     log.debug(
         "store.upsert_document.embed",
         source_url=raw_doc.source_url,
         is_update=is_update,
-        embed_source="summary" if summary_clean else "body",
+        embed_chars=len(embed_text),
     )
     embedding = await embedder.embed_text(embed_text)
     embed_col = embedder.embedding_column  # "embedding" or "embedding_768"

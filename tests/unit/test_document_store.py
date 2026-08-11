@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from freqpred.ingestion.store import (
     UpsertStatus,
     _sha256,
     _strip_html,
+    derive_embed_text,
     upsert_document,
 )
 from freqpred.rag.models import DocumentRow
@@ -398,9 +400,16 @@ def _make_session_with_bm25(existing_row=None, bm25_score: float = 0.5, upserted
 
 
 @pytest.mark.asyncio
-async def test_upsert_uses_summary_for_embedding_when_present():
-    """When raw_doc.summary is pre-set, embed_text must use the summary."""
-    raw_doc = _make_raw_doc(summary="Pre-existing summary text.")
+async def test_embed_text_uses_body_when_summary_present():
+    """A summary must never become the vector representation (T100).
+
+    Summaries are written against whichever market question triggered the fetch,
+    so embedding one skews the document's representation by ingestion order.
+    """
+    raw_doc = _make_raw_doc(
+        body="The Federal Reserve held rates steady.",
+        summary="Pre-existing summary text.",
+    )
     body_clean = _strip_html(raw_doc.body)
     content_hash = _sha256(body_clean)
 
@@ -411,7 +420,93 @@ async def test_upsert_uses_summary_for_embedding_when_present():
 
     await upsert_document(session, embedder, raw_doc)
 
-    embedder.embed_text.assert_awaited_once_with("Pre-existing summary text.")
+    embedder.embed_text.assert_awaited_once_with("The Federal Reserve held rates steady.")
+
+
+@pytest.mark.asyncio
+async def test_embed_text_unchanged_when_no_summary():
+    """Regression guard for the common path: no summary → body is embedded."""
+    raw_doc = _make_raw_doc(body="Plain article body with no summary.")
+    body_clean = _strip_html(raw_doc.body)
+    content_hash = _sha256(body_clean)
+
+    upserted_row = _make_document_row(raw_doc.source_url, content_hash)
+    session = _make_session(existing_row=None, upserted_row=upserted_row)
+
+    embedder = _make_embedder_mock()
+
+    await upsert_document(session, embedder, raw_doc)
+
+    embedder.embed_text.assert_awaited_once_with("Plain article body with no summary.")
+
+
+@pytest.mark.asyncio
+async def test_embed_text_truncates_at_max_embed_chars():
+    """A body longer than the cap is cut to exactly max_embed_chars."""
+    long_body = "x" * 5_000
+    raw_doc = _make_raw_doc(body=long_body)
+    body_clean = _strip_html(raw_doc.body)
+    content_hash = _sha256(body_clean)
+
+    upserted_row = _make_document_row(raw_doc.source_url, content_hash)
+    session = _make_session(existing_row=None, upserted_row=upserted_row)
+
+    embedder = _make_embedder_mock()
+    embedder.max_embed_chars = 2000
+
+    await upsert_document(session, embedder, raw_doc)
+
+    embedded = embedder.embed_text.await_args.args[0]
+    assert len(embedded) == 2000
+    assert embedded == long_body[:2000]
+
+
+@pytest.mark.asyncio
+async def test_summary_is_still_persisted_when_not_embedded():
+    """T100 changes what is embedded, not what is stored — summary still lands in the row."""
+    raw_doc = _make_raw_doc(body="Body text.", summary="Summary text.")
+    body_clean = _strip_html(raw_doc.body)
+    content_hash = _sha256(body_clean)
+
+    upserted_row = _make_document_row(raw_doc.source_url, content_hash)
+    session = _make_session(existing_row=None, upserted_row=upserted_row)
+
+    embedder = _make_embedder_mock()
+
+    await upsert_document(session, embedder, raw_doc)
+
+    insert_stmt = session.execute.await_args_list[-1].args[0]
+    assert insert_stmt.compile().params["summary"] == "Summary text."
+
+
+# ---------------------------------------------------------------------------
+# derive_embed_text — shared by store.py and scripts/reindex_embeddings.py
+# ---------------------------------------------------------------------------
+
+
+def test_derive_embed_text_ignores_summary_and_truncates():
+    assert derive_embed_text("abcdefghij", 4) == "abcd"
+    assert derive_embed_text("short", 100) == "short"
+
+
+def test_derive_embed_text_strips_null_bytes():
+    """Null bytes reach the reindex path via already-stored bodies; Postgres rejects them."""
+    assert derive_embed_text("a\x00b", 100) == "ab"
+
+
+def test_reindex_uses_same_embed_text_as_store():
+    """The reindex script must not duplicate the summary-vs-body choice.
+
+    Guards the drift risk called out in T100: if the script re-derived embed text
+    itself, a reindex would silently rewrite the index under a different rule than
+    live ingestion writes it.
+    """
+    import scripts.reindex_embeddings as reindex
+
+    assert reindex.derive_embed_text is derive_embed_text
+
+    source = Path(reindex.__file__).read_text()
+    assert "row.summary" not in source, "reindex must not read summary for embed text"
 
 
 @pytest.mark.asyncio
@@ -439,7 +534,10 @@ async def test_upsert_long_body_with_llm_client_calls_summarizer():
             market_question=_MARKET_Q,
         )
 
-    embedder.embed_text.assert_awaited_once_with("Fed held rates steady in March 2026.")
+    # The summary is produced and stored, but the body is what gets embedded (T100).
+    embedder.embed_text.assert_awaited_once_with(body_clean[: embedder.max_embed_chars])
+    insert_stmt = session.execute.await_args_list[-1].args[0]
+    assert insert_stmt.compile().params["summary"] == "Fed held rates steady in March 2026."
     assert doc.source_url == raw_doc.source_url
 
 
