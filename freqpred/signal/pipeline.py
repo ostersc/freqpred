@@ -448,6 +448,18 @@ class SignalPipeline:
             current.direction, current.estimated_probability, market.yes_bid, market.yes_ask
         )
 
+        # No DocumentMarketLinkRows are written here, unlike _persist_signal: a
+        # reprice performs no retrieval, so it has no retrieval decision of its
+        # own to attribute. `sources` and `retrieval_hash` are inherited from the
+        # parent, which is where the documents are recorded.
+        #
+        # Consequence for analysis: every `price_moved` signal is invisible to any
+        # query that joins through document_market_links — 8,296 of 19,513 signals
+        # as of 2026-08-10, i.e. 43%. They are missing non-randomly, since a
+        # reprice happens precisely when the market moved after the analysis, so
+        # treating "has link rows" as a neutral sample will bias the result.
+        # Join on signals.sources instead when the population should be all
+        # signals rather than only those that ran retrieval.
         signal_row = SignalRow(
             id=new_id,
             market_id=market.id,
