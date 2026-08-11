@@ -36,6 +36,10 @@ def _make_anthropic_response(
 ) -> MagicMock:
     msg = MagicMock()
     block = MagicMock()
+    # Real SDK content blocks are a discriminated union and always carry `type`.
+    # Without this a bare MagicMock auto-invents the attribute, so a test double
+    # would satisfy checks that a genuine thinking block must fail.
+    block.type = "text"
     block.text = content
     msg.content = [block]
     msg.usage.input_tokens = input_tokens
@@ -650,3 +654,84 @@ class TestToolContract:
             result = await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
 
         assert result.content == FAKE_CONTENT
+
+
+class TestTextBlockExtraction:
+    """A reasoning model puts a thinking block before the text block.
+
+    `content[0].text` raised AttributeError on those responses — and it raised
+    it *before* the audit row was written, so the call cost money and left no
+    trace in llm_queries at all. Both halves are regressions worth pinning.
+    """
+
+    @staticmethod
+    def _response(blocks: list) -> MagicMock:
+        msg = _make_openrouter_response()
+        msg.content = blocks
+        msg.stop_reason = "end_turn"
+        return msg
+
+    @pytest.mark.asyncio
+    async def test_skips_leading_thinking_block(self) -> None:
+        """qwen/qwen3.7-flash emits [ThinkingBlock, TextBlock]."""
+        client, _, _ = _make_routed_client(
+            openrouter_response=self._response(
+                [TestToolContract._thinking_block(), TestToolContract._text_block("the answer")]
+            )
+        )
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1) as mock_log:
+            result = await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+        assert result.content == "the answer"
+        assert mock_log.await_args.kwargs["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_text_block_first_is_unchanged(self) -> None:
+        """Regression guard: the ordinary single-text-block path is untouched."""
+        client, _, _ = _make_routed_client(
+            openrouter_response=self._response([TestToolContract._text_block("plain")])
+        )
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            result = await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+        assert result.content == "plain"
+
+    @pytest.mark.asyncio
+    async def test_thinking_only_raises_llm_error_not_attribute_error(self) -> None:
+        client, _, _ = _make_routed_client(
+            openrouter_response=self._response([TestToolContract._thinking_block()])
+        )
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            with pytest.raises(LLMError, match="returned no text block"):
+                await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+    @pytest.mark.asyncio
+    async def test_thinking_only_is_still_audited_as_failure(self) -> None:
+        """Hard constraint #2: the call happened and cost money, so it is logged."""
+        client, _, _ = _make_routed_client(
+            openrouter_response=self._response([TestToolContract._thinking_block()])
+        )
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1) as mock_log:
+            with pytest.raises(LLMError):
+                await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE)
+
+        assert mock_log.await_count == 1
+        kwargs = mock_log.await_args.kwargs
+        assert kwargs["success"] is False
+        assert "no text block" in kwargs["error_message"]
+        assert kwargs["cost_usd"] > 0
+
+    @pytest.mark.asyncio
+    async def test_json_tool_skips_leading_thinking_block(self) -> None:
+        """The tool path already scanned for its block; pin that it stays that way."""
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.input = {"probability": 0.5}
+        client, _, _ = _make_routed_client(
+            openrouter_response=self._response([TestToolContract._thinking_block(), tool_block])
+        )
+        tool = {"name": "submit_analysis", "description": "d", "input_schema": {}}
+        with patch("freqpred.llm.client.log_llm_query", new_callable=AsyncMock, return_value=1):
+            result = await client.complete(PROMPT, OPENROUTER_MODEL, QUERY_TYPE, json_tool=tool)
+
+        assert result.content == '{"probability": 0.5}'

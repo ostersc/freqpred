@@ -202,6 +202,7 @@ class LLMClient:
         # the audit row still says success, so a model that cannot satisfy the
         # contract reads as a working one producing unparseable signals.
         tool_contract_violated = False
+        text_block_missing = False
         if json_tool:
             tool_block = next((b for b in message.content if b.type == "tool_use"), None)
             if tool_block is not None:
@@ -210,7 +211,17 @@ class LLMClient:
                 content = next((b.text for b in message.content if hasattr(b, "text")), "")
                 tool_contract_violated = True
         else:
-            content = message.content[0].text
+            # Not content[0]: a reasoning model puts a thinking block first, and
+            # indexing blindly raised AttributeError here — before the audit row
+            # was written, so the call cost money and left no trace at all.
+            text_block = next(
+                (b for b in message.content if getattr(b, "type", None) == "text"), None
+            )
+            if text_block is None:
+                content = ""
+                text_block_missing = True
+            else:
+                content = text_block.text
 
         thinking_text = "".join(
             b.thinking for b in message.content
@@ -230,13 +241,21 @@ class LLMClient:
         else:
             cost = reported_cost
 
-        if tool_contract_violated:
+        if tool_contract_violated or text_block_missing:
             blocks = ", ".join(sorted({str(getattr(b, "type", "?")) for b in message.content})) or "none"
-            detail = (
-                f"Model {model!r} ignored the forced tool_choice for "
-                f"{json_tool['name']!r}: stop_reason={message.stop_reason}, "
-                f"content blocks=[{blocks}]"
-            )
+            if tool_contract_violated:
+                detail = (
+                    f"Model {model!r} ignored the forced tool_choice for "
+                    f"{json_tool['name']!r}: stop_reason={message.stop_reason}, "
+                    f"content blocks=[{blocks}]"
+                )
+            else:
+                # Reached when a model spends its whole budget thinking and stops
+                # before emitting any text — an empty answer, not a usable one.
+                detail = (
+                    f"Model {model!r} returned no text block: "
+                    f"stop_reason={message.stop_reason}, content blocks=[{blocks}]"
+                )
             # The call happened and cost money, so it is still audited — as a
             # failure, since its output cannot be used.
             await self._write_audit(
@@ -255,13 +274,21 @@ class LLMClient:
                 signal_id=signal_id,
                 error_message=detail,
             )
-            log.warning(
-                "llm.tool_contract_violated",
-                model=model,
-                tool=json_tool["name"],
-                stop_reason=message.stop_reason,
-                content_blocks=blocks,
-            )
+            if tool_contract_violated:
+                log.warning(
+                    "llm.tool_contract_violated",
+                    model=model,
+                    tool=json_tool["name"],
+                    stop_reason=message.stop_reason,
+                    content_blocks=blocks,
+                )
+            else:
+                log.warning(
+                    "llm.no_text_block",
+                    model=model,
+                    stop_reason=message.stop_reason,
+                    content_blocks=blocks,
+                )
             raise LLMError(detail)
 
         llm_query_id = await self._write_audit(
