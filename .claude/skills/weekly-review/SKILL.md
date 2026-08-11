@@ -153,6 +153,49 @@ Two things the report cannot see, which you must not paper over:
 - **Sample size is `n_markets`, not `n_signals`.** Re-evaluation produces dozens
   of signals per market. Below ~30 markets a slice is a lead, not a result.
 
+### Retrieval quality — outside the report, and free
+
+`freqpred metrics weekly-review` says nothing about *which documents were
+retrieved*, only what the signals built from them did. Run this too:
+
+```bash
+uv run python scripts/judge_retrieval.py live --days 7
+```
+
+It reads `document_extracts` labels the signal pipeline already wrote — no API
+calls, no cost. The headline is the **rank-1 `none` rate**: the share of signals
+whose top-ranked evidence document was judged unrelated to that market's own
+question. A wasted top slot is never refilled, because retrieval returns ten and
+stops, so this is upstream of every prompt-side fix.
+
+Baselines: 60% before the 2026-08-11 BM25 fix; 33% on the judged before/after
+cohort immediately after it. Treat a sustained rise as a regression worth a
+recommendation in its own right.
+
+Four traps:
+
+- **`unjudged` rows are not relevant documents.** Extraction skips bodies at or
+  under 500 chars, so those have no label. They are excluded from the rate, not
+  counted as good. That biases the measured population *against* short documents
+  — mostly TV chyrons, often the most on-point evidence on mention markets — so
+  the true rate is unknown in a direction you cannot sign.
+- **Never count extraction fallbacks as judgments.** A fallback carries
+  `relevance="contextual"` with `fallback=True` and no model call behind it.
+  Counting them once turned "9 improved, 0 regressed" into "12 improved, 3
+  regressed". `judge_retrieval.py` excludes them; anything hand-rolled must too.
+- **The extractor is judging its own inputs.** Same model family that labels
+  documents in production, so this is an internal consistency measure, not an
+  independent oracle. Use it for trend and for A/B comparisons, never as ground
+  truth about relevance.
+- **T101 hides this from the signals.** Documents labelled `none` are dropped
+  from the prompt, so signal quality can look stable while retrieval quietly
+  degrades. That is exactly why it needs its own line here rather than being
+  inferred from §5.
+
+Labels are keyed on `(document_id, market_id, prompt_version)`, so an extraction
+prompt-version bump empties the population — expect a gap, and do not read it as
+improvement.
+
 ## 4. Rank the opportunities
 
 Order candidates by **expected dollars per week × probability the effect is
@@ -233,6 +276,10 @@ Report structure:
 
 ## This week
 - 3–5 lines: P&L, win rate, notable exits, anything anomalous.
+- One line for retrieval: rank-1 `none` rate over the window, with the judged
+  count and the prior week's figure (e.g. `rank-1 none: 34% (23/68), was 38%`).
+  Include it every week even when flat — the value is the trend, and it is the
+  only line in the report that sees retrieval rather than signals.
 
 ## Findings
 - Only what survived section 3's traps. State n_markets and the CI for each.
