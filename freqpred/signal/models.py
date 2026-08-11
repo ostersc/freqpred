@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import ARRAY, VARCHAR, Float, ForeignKey, Text
+from sqlalchemy import ARRAY, VARCHAR, Float, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,6 +63,56 @@ class SignalRow(Base):
     )
     document_links: Mapped[list[DocumentMarketLinkRow]] = relationship(  # type: ignore[name-defined]  # noqa: F821
         "DocumentMarketLinkRow", back_populates="signal"
+    )
+
+
+# ---------------------------------------------------------------------------
+class DocumentExtractRow(Base):
+    """ORM model for the ``document_extracts`` table (T101).
+
+    One row per (document, market, extraction prompt version): the
+    question-focused extract that ``build_prompt`` renders in place of the raw
+    500-char cut, plus how directly the document bears on that market.
+
+    Signal-pipeline-owned by design. Writing extracts back onto
+    ``documents.summary`` would have the signal path mutating ingestion-owned
+    rows, which §7's pipeline separation forbids — and would recreate the very
+    coupling T101 removes, since one market's extract would then represent the
+    document to every other market.
+
+    The unique triple is the cache key. ``prompt_version`` is part of it so a
+    change to the extraction prompt re-extracts rather than silently serving
+    text written under different instructions.
+    """
+
+    __tablename__ = "document_extracts"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "market_id",
+            "prompt_version",
+            name="uq_document_extracts_doc_market_version",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    market_id: Mapped[str] = mapped_column(
+        VARCHAR(255), ForeignKey("markets.id"), nullable=False
+    )
+
+    relevance: Mapped[str] = mapped_column(VARCHAR(20), nullable=False)
+    extract: Mapped[str] = mapped_column(Text, nullable=False)
+
+    model_used: Mapped[str] = mapped_column(VARCHAR(100), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(VARCHAR(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default="now()"
     )
 
 

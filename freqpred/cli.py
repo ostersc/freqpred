@@ -2505,6 +2505,13 @@ def fixtures_replay(paths: tuple[Path, ...], update: bool) -> None:
 )
 @click.option("--limit", type=int, default=None, help="Max markets (default: all).")
 @click.option(
+    "--series", "series_tickers", multiple=True,
+    help="Restrict the bank to these series tickers (repeatable). Use it to "
+         "match the bank to the universe a strategy actually trades — "
+         "PoliticsEdgeStrategy only touches its factbase_series_allowlist, so "
+         "a bank spanning every series benchmarks markets it will never see.",
+)
+@click.option(
     "--per-market", type=click.Choice(["all", "first", "last"]), default="all",
     show_default=True,
     help="Record every LLM-backed signal per market, only the first (earliest "
@@ -2514,7 +2521,7 @@ def fixtures_replay(paths: tuple[Path, ...], update: bool) -> None:
 @click.pass_context
 def fixtures_record_bank(
     ctx: click.Context, out_dir: Path, strategy_name: str, limit: int | None,
-    per_market: str,
+    series_tickers: tuple[str, ...], per_market: str,
 ) -> None:
     """Build the prompt-mode scenario bank from resolved markets.
 
@@ -2526,12 +2533,16 @@ def fixtures_record_bank(
     whose stored prompt still re-renders byte-exactly are recordable.
     """
     config = ctx.obj["config"]
-    asyncio.run(_fixtures_record_bank(config, out_dir, strategy_name, limit, per_market))
+    asyncio.run(
+        _fixtures_record_bank(
+            config, out_dir, strategy_name, limit, list(series_tickers), per_market
+        )
+    )
 
 
 async def _fixtures_record_bank(
     config: object, out_dir: Path, strategy_name: str, limit: int | None,
-    per_market: str,
+    series_tickers: list[str], per_market: str,
 ) -> None:
     from sqlalchemy import select  # noqa: PLC0415
     from sqlalchemy.orm import aliased  # noqa: PLC0415
@@ -2557,6 +2568,9 @@ async def _fixtures_record_bank(
                 MarketRow.status == "finalized",
                 MarketRow.result.in_(("yes", "no")),
             )
+            if series_tickers:
+                base_filter = (*base_filter, MarketRow.series_ticker.in_(series_tickers))
+                click.echo(f"Series filter: {', '.join(series_tickers)}")
             if limit:
                 market_ids = (
                     (
@@ -2609,6 +2623,8 @@ async def _fixtures_record_bank(
             )
 
             recorded = 0
+            docs_total = 0
+            docs_with_full_body = 0
             skip_reasons: dict[str, int] = {}
             for signal in signals:
                 name = (
@@ -2633,8 +2649,21 @@ async def _fixtures_record_bank(
                     continue
                 save_fixture(fixture, out_dir / f"{fixture.name}.json")
                 recorded += 1
+                docs_total += len(fixture.inputs.documents)
+                docs_with_full_body += sum(
+                    1 for d in fixture.inputs.documents if d.full_body
+                )
 
         click.echo(f"Recorded {recorded} fixture(s) -> {out_dir}")
+        if docs_total:
+            # Retrieval-time extraction (T101) can only act on documents whose
+            # full text survived; a low share here means a prompt-mode
+            # benchmark of that change is measuring mostly nothing.
+            pct = 100.0 * docs_with_full_body / docs_total
+            click.echo(
+                f"Full bodies carried for extraction: {docs_with_full_body}/"
+                f"{docs_total} document instances ({pct:.1f}%)"
+            )
         if skip_reasons:
             click.echo("Skipped:")
             for reason, count in sorted(skip_reasons.items(), key=lambda kv: -kv[1]):

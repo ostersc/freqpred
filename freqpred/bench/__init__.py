@@ -10,6 +10,7 @@ from freqpred.bench.runner import BenchmarkRun, ScenarioRun, estimate_run, run_b
 from freqpred.bench.scenarios import (
     ModelOutput,
     Scenario,
+    apply_extraction,
     build_db_scenarios,
     build_fixture_scenarios,
     filter_contaminated,
@@ -30,6 +31,7 @@ __all__ = [
     "aggregate",
     "build_artifact",
     "build_db_scenarios",
+    "apply_extraction",
     "build_fixture_scenarios",
     "cost_summary",
     "estimate_run",

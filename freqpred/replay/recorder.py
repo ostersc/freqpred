@@ -63,6 +63,41 @@ _CURRENT_DATE_RE = re.compile(r"Current Date \(UTC\): (\d{4}-\d{2}-\d{2} \d{2}:\
 _BODY_CAP_WITH_SUMMARY = 500
 _BODY_CAP_NO_SUMMARY = 4000
 
+# Ceiling on the full body carried for retrieval-time extraction (T101). Sized
+# to the extractor's own input cap — anything past it is never sent, so storing
+# it would only inflate the bank on disk.
+_FULL_BODY_CAP = 16_000
+
+
+def _render_excerpt(text: str) -> str:
+    """Reproduce ``build_prompt``'s excerpt rendering for a candidate source."""
+    return text[:_BODY_CAP_WITH_SUMMARY].replace("\n", " ").strip()
+
+
+def _verified_full_body(row: DocumentRow, frozen_excerpt: str) -> str | None:
+    """The live full body, but only when it still explains the frozen excerpt.
+
+    A frozen-context fixture's ``body`` is the excerpt the signal LLM was
+    actually shown; the live row is free to have drifted since (documents are
+    upserted on re-fetch, and a Guardian live blog rewrites itself hourly).
+    Requiring the live row to re-render that exact excerpt is what makes the
+    backfill safe: it proves the full text is a superset of what the model
+    saw, not a different article under the same id.
+
+    Both sources are checked because ``build_prompt`` preferred ``summary``
+    when one existed — a summary-derived excerpt still vouches for the row's
+    identity, and the body is what extraction will read.
+    """
+    body = row.body or ""
+    if len(body) <= _BODY_CAP_WITH_SUMMARY:
+        # Nothing beyond the excerpt to offer; extraction would skip it anyway.
+        return None
+    if _render_excerpt(body) == frozen_excerpt:
+        return body[:_FULL_BODY_CAP]
+    if row.summary and _render_excerpt(row.summary) == frozen_excerpt:
+        return body[:_FULL_BODY_CAP]
+    return None
+
 class RecordingError(Exception):
     """Raised when a signal cannot be turned into a replayable fixture."""
 
@@ -230,6 +265,7 @@ async def record_fixture(
                     # truncate/normalize is idempotent on it.
                     body=parsed["excerpt"],
                     summary=None,
+                    full_body=_verified_full_body(row, parsed["excerpt"]),
                     source_type=parsed["source_type"],
                     source_name=parsed["source_name"],
                     category=row.category,
@@ -251,6 +287,13 @@ async def record_fixture(
                     title=row.title,
                     body=row.body[:body_cap],
                     summary=row.summary,
+                    # Live-row path: the body needs no verification against a
+                    # frozen excerpt, it *is* the row.
+                    full_body=(
+                        row.body[:_FULL_BODY_CAP]
+                        if len(row.body or "") > _BODY_CAP_WITH_SUMMARY
+                        else None
+                    ),
                     source_type=row.source_type,
                     source_name=row.source_name,
                     category=row.category,

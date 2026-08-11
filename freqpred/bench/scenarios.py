@@ -43,6 +43,7 @@ from freqpred.markets.models import MarketRow
 from freqpred.replay.engine import render_prompt_from_inputs
 from freqpred.replay.fixtures import ReplayFixture, load_fixture
 from freqpred.replay.recorder import _reconstruct_prices
+from freqpred.signal.extractor import DocumentExtract, extract_for_documents
 from freqpred.signal.llm import parse_signal_response
 from freqpred.signal.models import SignalRow
 
@@ -316,6 +317,7 @@ def scenario_from_fixture(
     outcome: float,
     close_time: datetime,
     incumbent_model: str = "",
+    extracts: dict[str, DocumentExtract] | None = None,
 ) -> Scenario | None:
     """Prompt-mode scenario: fixture inputs re-rendered through the *current*
     prompt template; the fixture's stored LLM response is the incumbent.
@@ -334,7 +336,7 @@ def scenario_from_fixture(
         market_question=inputs.market.question,
         close_time=close_time,
         outcome=outcome,
-        prompt=render_prompt_from_inputs(inputs),
+        prompt=render_prompt_from_inputs(inputs, extracts),
         incumbent=ModelOutput(
             model=incumbent_model or "unknown",
             prior=parsed["prior"],
@@ -360,8 +362,13 @@ def scenario_from_fixture(
 async def build_fixture_scenarios(
     session,
     fixture_dir: Path,
-) -> tuple[list[Scenario], list[str]]:
-    """Prompt-mode bank from T66 fixtures. Returns (scenarios, skip_reasons).
+) -> tuple[list[Scenario], list[str], dict[str, ReplayFixture]]:
+    """Prompt-mode bank from T66 fixtures.
+
+    Returns ``(scenarios, skip_reasons, fixtures_by_scenario_id)``. The third
+    element exists so the caller can extract evidence (T101) *after* sampling —
+    see ``apply_extraction``. Building every scenario is free; extracting is
+    not, and the bank is ~6x larger than a typical ``--limit``.
 
     Outcomes come from the live markets table: only fixtures whose market has
     since finalized with a binary result are usable; the rest are reported in
@@ -418,6 +425,7 @@ async def build_fixture_scenarios(
         model_by_signal = {str(sid): model for sid, model in rows}
 
     scenarios: list[Scenario] = []
+    fixtures_by_id: dict[str, ReplayFixture] = {}
     for fixture in fixtures:
         market = market_rows.get(fixture.inputs.market.id)
         if market is None:
@@ -440,4 +448,50 @@ async def build_fixture_scenarios(
             skipped.append(f"{fixture.name}: stored llm_response failed to parse")
             continue
         scenarios.append(scenario)
-    return scenarios, skipped
+        fixtures_by_id[scenario.id] = fixture
+    return scenarios, skipped, fixtures_by_id
+
+
+async def apply_extraction(
+    session,
+    llm_client,  # noqa: ANN001 — LLMClient; typed loosely to avoid an import cycle
+    scenarios: list[Scenario],
+    fixtures_by_id: dict[str, ReplayFixture],
+    *,
+    model: str,
+) -> int:
+    """Re-render *scenarios* with T101 question-focused extracts, in place.
+
+    **Call this after sampling, never before.** Extraction costs an API call
+    per uncached (document, market) pair, and the bank holds several times more
+    scenarios than any ``--limit`` keeps — extracting during the scenario build
+    bills the whole bank to answer a question about 50 markets. That mistake
+    cost $3.82 before it was caught on 2026-08-11.
+
+    Extraction reads ``full_body``, not the frozen 500-char excerpt: a bank
+    whose bodies are capped at exactly the length T101 replaces would report a
+    null change however good the extractor is. Fixtures recorded before the
+    ``full_body`` backfill, and documents that drifted since their signal,
+    carry ``None`` there and fall back to the excerpt — contributing no
+    extraction signal rather than a wrong one.
+
+    Returns the number of scenarios whose prompt actually changed.
+    """
+    changed = 0
+    for scenario in scenarios:
+        fixture = fixtures_by_id.get(scenario.id)
+        if fixture is None:
+            continue
+        extracts = await extract_for_documents(
+            session,
+            llm_client,
+            fixture.inputs.market.to_market(fixture.inputs.now),
+            [fd.to_document(full=True) for fd in fixture.inputs.documents],
+            model=model,
+            strategy="benchmark",
+        )
+        rendered = render_prompt_from_inputs(fixture.inputs, extracts)
+        if rendered != scenario.prompt:
+            changed += 1
+        scenario.prompt = rendered
+    return changed

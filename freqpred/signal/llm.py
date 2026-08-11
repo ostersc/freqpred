@@ -13,10 +13,16 @@ from freqpred.rag.models import Document
 
 if TYPE_CHECKING:
     from freqpred.ingestion.fetchers.factbase import FactbasePhraseData
+    from freqpred.signal.extractor import DocumentExtract
 
 log = structlog.get_logger(__name__)
 
-PROMPT_VERSION = "signal-v11"
+# v12 (T101): evidence renders as a question-focused extract rather than a raw
+# 500-char prefix, and documents the extractor labels "none" are omitted — so
+# the block's composition changes, not only its text. Bumped for cohort
+# hygiene regardless of outcome: latest_signal_prompt_version(), record-bank
+# and calibration all segment on this string.
+PROMPT_VERSION = "signal-v12"
 
 SYSTEM_PROMPT = """You are a prediction market probability analyst. Estimate the probability
 that a market question resolves YES by combining your prior knowledge with
@@ -522,12 +528,21 @@ def build_prompt(
     docs: list[Document],
     series_history: dict | None = None,
     phrase_data: FactbasePhraseData | None = None,
+    extracts: dict[str, DocumentExtract] | None = None,
     _now: datetime | None = None,
 ) -> str:
     """Build the user prompt for signal analysis.
 
     Contains only per-market data: market context, optional historical base
     rate block, and retrieved evidence. All instructions live in SYSTEM_PROMPT.
+
+    ``extracts`` maps document id to its question-focused extract (T101). When
+    supplied, each document renders as its extract rather than a raw 500-char
+    prefix, and documents the extractor labelled ``none`` are omitted entirely
+    — that omission is the point of the label, and it means the evidence
+    block's *composition* changes, not merely its text. Omit the argument for
+    the pre-T101 rendering; the replay harness relies on that to reproduce
+    fixtures recorded under earlier prompt versions.
 
     ``_now`` pins the clock for deterministic rendering (the prompt embeds the
     current date and window math) — used by the replay harness and time-
@@ -580,21 +595,35 @@ def build_prompt(
     lines.append("=== EVIDENCE ===")
 
     _MAX_EVIDENCE_CHARS = 500
-    if docs:
-        for i, doc in enumerate(docs, start=1):
-            # Prefer summary when available; fall back to body excerpt. Both are
-            # capped at _MAX_EVIDENCE_CHARS so the prompt stays consistent.
+    rendered = 0
+    for doc in docs:
+        extract = extracts.get(str(doc.id)) if extracts else None
+        if extract is not None and extract.relevance == "none":
+            # Judged unconnected to this market's question. Omitted rather than
+            # rendered, so an off-topic document costs no evidence slot at all.
+            continue
+        if extract is not None:
+            excerpt = extract.extract
+        else:
+            # Pre-T101 rendering: prefer summary, fall back to a body prefix,
+            # both capped so the prompt stays consistent.
             excerpt = (doc.summary or doc.body)[:_MAX_EVIDENCE_CHARS]
-            excerpt = excerpt.replace("\n", " ").strip()
-            lines += [
-                f"[{i}] {doc.title}",
-                f"    Source: {doc.source_name} ({doc.source_type})",
-                f"    Published: {doc.published_at.isoformat() if doc.published_at else 'unknown'}",
-                f"    ID: {doc.id}",
-                f"    {excerpt}",
-                "",
-            ]
-    else:
+        excerpt = excerpt.replace("\n", " ").strip()
+        rendered += 1
+        lines += [
+            f"[{rendered}] {doc.title}",
+            f"    Source: {doc.source_name} ({doc.source_type})",
+            f"    Published: {doc.published_at.isoformat() if doc.published_at else 'unknown'}",
+            f"    ID: {doc.id}",
+            f"    {excerpt}",
+            "",
+        ]
+
+    if rendered == 0:
+        # Reachable two ways now: retrieval returned nothing, or everything it
+        # returned was judged unrelated to the question. Both mean the same
+        # thing to the analyst — there is no evidence — and saying so beats
+        # rendering ten documents about something else.
         lines.append("No evidence available.")
         lines.append("")
 

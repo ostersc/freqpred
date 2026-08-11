@@ -15,6 +15,7 @@ from freqpred.metrics.series_history import get_series_history_for_market
 from freqpred.rag.models import Document, DocumentMarketLinkRow
 from freqpred.rag.retriever import Embedder, compute_retrieval_hash, retrieve
 from freqpred.signal.cache import scheduled_cooldown_remaining, should_skip, should_skip_scheduled
+from freqpred.signal.extractor import extract_for_documents
 from freqpred.signal.llm import (
     PROMPT_VERSION,
     SIGNAL_ANALYSIS_TOOL,
@@ -27,6 +28,9 @@ from freqpred.signal.models import Signal, SignalRow
 log = structlog.get_logger(__name__)
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
+# Extraction is a read-and-condense task, not a judgment one, and it runs ~7x
+# per cold signal — a cheap model is the whole reason the economics work.
+_DEFAULT_EXTRACT_MODEL = "claude-haiku-4-5-20251001"
 _TOP_K = 10
 
 # Output budget for signal-analysis calls. Deliberately model-agnostic: the
@@ -92,6 +96,7 @@ class SignalPipeline:
         top_k: int = _TOP_K,
         factbase_series_allowlist: frozenset[str] = frozenset(),
         max_scheduled_interval_hours: float = 24.0,
+        extract_model: str = _DEFAULT_EXTRACT_MODEL,
     ) -> None:
         self._session_factory = session_factory
         self._embedder = embedder
@@ -100,6 +105,7 @@ class SignalPipeline:
         self._top_k = top_k
         self._factbase_series_allowlist = factbase_series_allowlist
         self._max_scheduled_interval_hours = max_scheduled_interval_hours
+        self._extract_model = extract_model
 
     async def analyze(
         self,
@@ -251,7 +257,24 @@ class SignalPipeline:
                 if fb_row is not None:
                     phrase_data = phrase_row_to_data(fb_row)
 
-            prompt = build_prompt(market, docs, series_history=series_history, phrase_data=phrase_data)
+            # Extract each retrieved document against THIS market's question
+            # (T101) before rendering. Runs after every skip gate above, so a
+            # signal that will not call the analysis model never pays for it.
+            extracts = await extract_for_documents(
+                session,
+                self._llm_client,
+                market,
+                docs,
+                model=self._extract_model,
+            )
+
+            prompt = build_prompt(
+                market,
+                docs,
+                series_history=series_history,
+                phrase_data=phrase_data,
+                extracts=extracts,
+            )
             try:
                 llm_response = await self._llm_client.complete(
                     prompt,

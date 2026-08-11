@@ -47,6 +47,17 @@ class FixtureDocument(BaseModel):
     title: str
     body: str
     summary: str | None = None
+    #: The document's full text, carried alongside the frozen excerpt so
+    #: retrieval-time extraction (T101) has something to extract from.
+    #:
+    #: ``body`` in a frozen-context fixture is the 500-char excerpt the model
+    #: actually saw, which is what makes the byte-exact re-render check work —
+    #: but it is also, by construction, the exact thing T101 replaces, so a
+    #: bank recorded with only ``body`` measures a null change. Populated by
+    #: the recorder only when the live row still reproduces that excerpt
+    #: exactly; ``None`` means the source drifted (or was summarised away) and
+    #: extraction must fall back to ``body``.
+    full_body: str | None = None
     source_type: str
     source_name: str
     category: str = ""
@@ -55,13 +66,21 @@ class FixtureDocument(BaseModel):
     fetched_at: datetime
     similarity_score: float = 0.0
 
-    def to_document(self) -> Document:
+    def to_document(self, *, full: bool = False) -> Document:
+        """Rebuild the domain ``Document``.
+
+        ``full=True`` substitutes ``full_body`` for ``body`` when it is
+        available — for the extraction pass only. Prompt rendering and the
+        expectations round-trip must keep the default, since they are verified
+        against the excerpt the model was actually shown.
+        """
+        body = self.full_body if (full and self.full_body) else self.body
         return Document(
             id=self.id,
             source_url=self.source_url,
             content_hash=self.content_hash,
             title=self.title,
-            body=self.body,
+            body=body,
             source_type=self.source_type,
             source_name=self.source_name,
             category=self.category,

@@ -41,6 +41,7 @@ from freqpred.replay.fixtures import (
     ReplayFixture,
 )
 from freqpred.signal.cache import cooldown_decision, scheduled_skip_decision
+from freqpred.signal.extractor import DocumentExtract
 from freqpred.signal.llm import (
     PROMPT_VERSION,
     SYSTEM_PROMPT,
@@ -196,12 +197,21 @@ def replay_entry_decision(
     return decision
 
 
-def render_prompt_from_inputs(inputs: FixtureInputs) -> str:
+def render_prompt_from_inputs(
+    inputs: FixtureInputs,
+    extracts: dict[str, DocumentExtract] | None = None,
+) -> str:
     """Render the signal-analysis prompt from a fixture's structured inputs.
 
     This is what makes fixtures reusable as benchmark scenarios (T93): a
     modified prompt template re-renders against the same frozen inputs,
     which verbatim ``raw_context`` replay cannot do.
+
+    ``extracts`` renders the T101 evidence block. It stays optional and
+    defaults off because the replay harness's whole job is byte-exact
+    reproduction of what the model was shown — feeding it extracts would make
+    every fixture recorded before T101 fail its round trip. Only the benchmark
+    passes it, and only in prompt mode.
     """
     return build_prompt(
         inputs.market.to_market(inputs.now),
@@ -210,6 +220,7 @@ def render_prompt_from_inputs(inputs: FixtureInputs) -> str:
             inputs.series_history.to_series_history() if inputs.series_history else None
         ),
         phrase_data=inputs.phrase_data.to_phrase_data() if inputs.phrase_data else None,
+        extracts=extracts,
         _now=inputs.now,
     )
 

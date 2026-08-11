@@ -60,6 +60,18 @@ def _make_market(
     )
 
 
+def _make_extract(doc_id: str, relevance: str, extract: str):
+    from freqpred.signal.extractor import DocumentExtract
+
+    return DocumentExtract(
+        document_id=doc_id,
+        relevance=relevance,
+        extract=extract,
+        model_used="claude-haiku-4-5-20251001",
+        prompt_version="extract-v1",
+    )
+
+
 def _make_document(doc_id: str | None = None) -> MagicMock:
     from freqpred.rag.models import Document
 
@@ -564,6 +576,87 @@ class TestBuildPrompt:
         assert "[2]" in prompt
         assert "[3]" in prompt
 
+    # -- T101: question-focused extracts ------------------------------------
+
+    def test_build_prompt_renders_extract_when_present(self) -> None:
+        market = _make_market()
+        doc = _make_document()
+        doc.body = "BOILERPLATE NAVIGATION CHROME THAT SHOULD NOT APPEAR"
+        prompt = build_prompt(
+            market, [doc], extracts={doc.id: _make_extract(doc.id, "direct", "THE EXTRACT")}
+        )
+        assert "THE EXTRACT" in prompt
+        assert "BOILERPLATE" not in prompt
+
+    def test_build_prompt_omits_none_relevance_documents(self) -> None:
+        market = _make_market()
+        keep, drop = _make_document(), _make_document()
+        prompt = build_prompt(
+            market,
+            [keep, drop],
+            extracts={
+                keep.id: _make_extract(keep.id, "contextual", "KEPT"),
+                drop.id: _make_extract(drop.id, "none", ""),
+            },
+        )
+        assert keep.id in prompt
+        assert drop.id not in prompt
+
+    def test_build_prompt_renumbers_after_omission(self) -> None:
+        """Dropping a document must not leave a gap in the citation numbering."""
+        market = _make_market()
+        first, dropped, last = (_make_document() for _ in range(3))
+        prompt = build_prompt(
+            market,
+            [first, dropped, last],
+            extracts={
+                first.id: _make_extract(first.id, "direct", "A"),
+                dropped.id: _make_extract(dropped.id, "none", ""),
+                last.id: _make_extract(last.id, "direct", "B"),
+            },
+        )
+        assert "[1]" in prompt
+        assert "[2]" in prompt
+        assert "[3]" not in prompt
+
+    def test_build_prompt_all_none_says_no_evidence(self) -> None:
+        """A market whose whole retrieval set is off-topic has no evidence.
+
+        Observed live: every document retrieved for a "will Trump say UFO"
+        market was judged unrelated. Saying so beats rendering ten documents
+        about something else.
+        """
+        market = _make_market()
+        docs = [_make_document() for _ in range(3)]
+        prompt = build_prompt(
+            market,
+            docs,
+            extracts={d.id: _make_extract(d.id, "none", "") for d in docs},
+        )
+        assert "No evidence available" in prompt
+
+    def test_build_prompt_falls_back_to_raw_excerpt_without_extract(self) -> None:
+        """No extracts argument → byte-identical pre-T101 rendering.
+
+        The replay harness depends on this to reproduce fixtures recorded
+        under earlier prompt versions.
+        """
+        market = _make_market()
+        doc = _make_document()
+        assert build_prompt(market, [doc]) == build_prompt(market, [doc], extracts=None)
+        assert doc.body[:40] in build_prompt(market, [doc])
+
+    def test_build_prompt_unextracted_doc_still_renders(self) -> None:
+        """A document missing from the map is rendered, never silently dropped."""
+        market = _make_market()
+        extracted, missing = _make_document(), _make_document()
+        prompt = build_prompt(
+            market,
+            [extracted, missing],
+            extracts={extracted.id: _make_extract(extracted.id, "direct", "X")},
+        )
+        assert missing.id in prompt
+
     def test_includes_current_date(self) -> None:
         """Prompt must include the current UTC date so LLM can reason about time-to-close."""
         market = _make_market()
@@ -636,9 +729,9 @@ class TestBuildPrompt:
         prompt = build_prompt(market, [], phrase_data=None)
         assert "PHRASE FREQUENCY DATA" not in prompt
 
-    def test_prompt_version_is_v11(self) -> None:
+    def test_prompt_version_is_v12(self) -> None:
         from freqpred.signal.llm import PROMPT_VERSION
-        assert PROMPT_VERSION == "signal-v11"
+        assert PROMPT_VERSION == "signal-v12"
 
 
 # ---------------------------------------------------------------------------
@@ -946,3 +1039,153 @@ class TestPriceExcludedFromPrompt:
         assert "MARKET PRICE" not in prompt
         for value in ("0.56", "0.57", "0.565"):
             assert value not in prompt, f"market price {value} leaked into the prompt"
+
+
+# ---------------------------------------------------------------------------
+# T101 wiring — the extractor must actually be reached from analyze()
+# ---------------------------------------------------------------------------
+
+
+class TestExtractionWiring:
+    """A correct extractor that nothing ever calls is the failure mode here.
+
+    These tests exercise the caller (``SignalPipeline.analyze``) and assert on
+    what the callee receives, per CLAUDE.md's wiring rule — testing
+    ``extract_for_documents`` in isolation proves nothing about production.
+    """
+
+    def _pipeline(self, docs: list) -> tuple[SignalPipeline, AsyncMock]:
+        session = AsyncMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        session.add = MagicMock()
+
+        catalyst_result = MagicMock()
+        catalyst_result.scalars.return_value.all.return_value = []
+        blank = MagicMock()
+        blank.scalar_one_or_none.return_value = None
+        blank.one_or_none.return_value = None
+        session.execute = AsyncMock(
+            side_effect=[catalyst_result, blank, blank, blank, blank, blank]
+        )
+
+        embedder = AsyncMock()
+        embedder.embed_text = AsyncMock(return_value=[0.1] * 384)
+
+        pipeline = SignalPipeline(
+            session_factory=_make_session_factory(session),
+            embedder=embedder,
+            llm_client=_make_llm_client(content=_valid_llm_json()),
+        )
+        return pipeline, session
+
+    @pytest.mark.asyncio
+    async def test_pipeline_extracts_before_build_prompt(self) -> None:
+        doc = _make_document()
+        pipeline, _ = self._pipeline([doc])
+        extract = _make_extract(doc.id, "direct", "THE EXTRACTED TEXT")
+        extractor = AsyncMock(return_value={doc.id: extract})
+
+        with (
+            patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])),
+            patch("freqpred.signal.pipeline.extract_for_documents", new=extractor),
+            patch("freqpred.signal.pipeline.build_prompt") as build,
+        ):
+            build.return_value = "PROMPT"
+            await pipeline.analyze(_make_market())
+
+        # The extractor saw the retrieved documents and the market itself —
+        # the market carries the question the extraction is keyed on.
+        extractor.assert_awaited_once()
+        args, kwargs = extractor.await_args
+        assert args[3] == [doc]
+        assert args[2].id == FAKE_MARKET_ID
+        assert args[2].question == _make_market().question
+
+        # …and build_prompt was handed that output, not left to the raw cut.
+        build.assert_called_once()
+        assert build.call_args.kwargs["extracts"] == {doc.id: extract}
+
+    @pytest.mark.asyncio
+    async def test_extraction_runs_after_the_skip_gate(self) -> None:
+        """A signal that will not call the analysis model must not pay to extract."""
+        from freqpred.rag.retriever import compute_retrieval_hash
+
+        doc = _make_document()
+        session = AsyncMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        session.add = MagicMock()
+        catalyst_result = MagicMock()
+        catalyst_result.scalars.return_value.all.return_value = []
+        hash_result = MagicMock()
+        hash_result.scalar_one_or_none.return_value = compute_retrieval_hash([doc.id])
+        hash_result.one_or_none.return_value = None
+        blank = MagicMock()
+        blank.scalar_one_or_none.return_value = None
+        blank.one_or_none.return_value = None
+        session.execute = AsyncMock(side_effect=[catalyst_result, hash_result, blank, blank])
+        embedder = AsyncMock()
+        embedder.embed_text = AsyncMock(return_value=[0.1] * 384)
+        pipeline = SignalPipeline(
+            session_factory=_make_session_factory(session),
+            embedder=embedder,
+            llm_client=_make_llm_client(content=_valid_llm_json()),
+        )
+        extractor = AsyncMock(return_value={})
+
+        with (
+            patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])),
+            patch("freqpred.signal.pipeline.extract_for_documents", new=extractor),
+        ):
+            result = await pipeline.analyze(
+                _make_market(current_signal_id=FAKE_SIGNAL_ID), trigger="manual"
+            )
+
+        assert result is None
+        extractor.assert_not_awaited()
+
+    @pytest.mark.parametrize("direction", ["YES", "NO"])
+    @pytest.mark.asyncio
+    async def test_pipeline_yes_and_no_directions_unaffected(self, direction: str) -> None:
+        """Both sides still produce signals once evidence renders as extracts.
+
+        Kalshi NO positions invert the payout math, so a change to what the
+        analyst reads gets checked on both directions, not just YES.
+        """
+        doc = _make_document()
+        session = AsyncMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        session.add = MagicMock()
+        catalyst_result = MagicMock()
+        catalyst_result.scalars.return_value.all.return_value = []
+        blank = MagicMock()
+        blank.scalar_one_or_none.return_value = None
+        blank.one_or_none.return_value = None
+        session.execute = AsyncMock(
+            side_effect=[catalyst_result, blank, blank, blank, blank, blank]
+        )
+        embedder = AsyncMock()
+        embedder.embed_text = AsyncMock(return_value=[0.1] * 384)
+        probability = 0.80 if direction == "YES" else 0.20
+        pipeline = SignalPipeline(
+            session_factory=_make_session_factory(session),
+            embedder=embedder,
+            llm_client=_make_llm_client(
+                content=_valid_llm_json(direction=direction, probability=probability)
+            ),
+        )
+        extractor = AsyncMock(
+            return_value={doc.id: _make_extract(doc.id, "direct", "EVIDENCE")}
+        )
+
+        with (
+            patch("freqpred.signal.pipeline.retrieve", new=AsyncMock(return_value=[(doc, 0.85)])),
+            patch("freqpred.signal.pipeline.extract_for_documents", new=extractor),
+        ):
+            result = await pipeline.analyze(_make_market())
+
+        assert isinstance(result, Signal)
+        assert result.direction == direction
+        extractor.assert_awaited_once()

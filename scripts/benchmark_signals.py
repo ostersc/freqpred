@@ -58,6 +58,7 @@ import freqpred.llm.models  # noqa: F401
 import freqpred.rag.models  # noqa: F401
 from freqpred.bench import (
     aggregate,
+    apply_extraction,
     build_artifact,
     build_db_scenarios,
     build_fixture_scenarios,
@@ -145,13 +146,38 @@ async def main(args: argparse.Namespace) -> None:
         async with session_factory() as session:
             if args.prompt_mode:
                 mode = "prompt"
-                scenarios, skipped = await build_fixture_scenarios(
+                extract_client = None
+                extract_model = "" if args.no_extract else args.extract_model
+                if extract_model and args.estimate_only:
+                    # Extraction is a real API call, so --estimate-only must not
+                    # make it. The scenarios then render the pre-T101 raw cut;
+                    # the projection below says so rather than pretending the
+                    # estimate covers an extracted run.
+                    print(
+                        "  note: --estimate-only skips extraction, so the projection "
+                        "below covers only the candidate calls. Add roughly "
+                        "(scenarios x uncached long docs) extraction calls on "
+                        f"{extract_model}."
+                    )
+                    extract_model = ""
+                if extract_model:
+                    extract_client = LLMClient(
+                        anthropic.AsyncAnthropic(api_key=config.anthropic.api_key),
+                        session_factory,
+                        default_strategy="benchmark",
+                        daily_spend_cap_usd=config.risk.max_daily_llm_spend_usd,
+                        openrouter_client=maybe_openrouter_client(
+                            config.openrouter.api_key
+                        ),
+                    )
+                scenarios, skipped, fixtures_by_id = await build_fixture_scenarios(
                     session, args.fixtures
                 )
                 for reason in skipped:
                     print(f"  skip: {reason}")
             else:
                 mode = "model"
+                extract_client, extract_model, fixtures_by_id = None, "", {}
                 if not args.candidate_model:
                     raise SystemExit(
                         "ERROR: --candidate-model is required in model mode "
@@ -197,6 +223,29 @@ async def main(args: argparse.Namespace) -> None:
             kept = sample_per_market(kept, args.per_market)
         except ValueError as exc:
             raise SystemExit(f"ERROR: {exc}") from exc
+
+        # T101 extraction happens HERE — after sampling, never during the
+        # scenario build. The bank is several times larger than any --limit
+        # keeps, so extracting first bills every market in it to answer a
+        # question about the sampled few.
+        if extract_client is not None and extract_model:
+            print(f"\nExtracting evidence for {len(kept)} sampled scenario(s) "
+                  f"with {extract_model} (T101)...")
+            async with session_factory() as extract_session:
+                changed = await apply_extraction(
+                    extract_session,
+                    extract_client,
+                    kept,
+                    fixtures_by_id,
+                    model=extract_model,
+                )
+            print(f"  {changed}/{len(kept)} scenario prompts changed by extraction")
+            if changed == 0:
+                raise SystemExit(
+                    "ERROR: extraction changed no prompts — the run would score "
+                    "the incumbent against itself. Check that the bank carries "
+                    "full_body (re-record it with `freqpred fixtures record-bank`)."
+                )
 
         thinking = (
             None
@@ -363,6 +412,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--include-contaminated", action="store_true",
         help="Keep scenarios inside the training cutoff, loudly flagged.",
+    )
+    parser.add_argument(
+        "--extract-model", default="claude-haiku-4-5-20251001",
+        help="Model used for T101 evidence extraction in --prompt-mode "
+             "(default: claude-haiku-4-5-20251001). Extraction is cached in "
+             "document_extracts, so a repeat run over the same scenarios is "
+             "nearly free.",
+    )
+    parser.add_argument(
+        "--no-extract", action="store_true",
+        help="Render the pre-T101 raw 500-char cut instead of extracts. This "
+             "is how you produce the CONTROL side of a T101 experiment — run "
+             "once with it and once without, same --seed and --limit.",
     )
     parser.add_argument(
         "--limit", type=int, default=50,

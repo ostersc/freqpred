@@ -8,6 +8,9 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 
 import freqpred.ingestion.models  # noqa: F401 — registers mappers
 import freqpred.llm.models  # noqa: F401
@@ -16,6 +19,8 @@ import freqpred.rag.models  # noqa: F401
 import freqpred.signal.models  # noqa: F401
 from freqpred.bench.scenarios import (
     Scenario,
+    apply_extraction,
+    build_fixture_scenarios,
     filter_contaminated,
     scenario_from_fixture,
     scenario_from_signal,
@@ -251,7 +256,6 @@ async def test_fixture_bank_collapses_same_clock_duplicates(tmp_path) -> None:
     from datetime import timedelta
     from unittest.mock import AsyncMock, MagicMock
 
-    from freqpred.bench.scenarios import build_fixture_scenarios
     from freqpred.replay import save_fixture
 
     older = _make_fixture()
@@ -273,7 +277,7 @@ async def test_fixture_bank_collapses_same_clock_duplicates(tmp_path) -> None:
     result.all.return_value = []
     session.execute = AsyncMock(return_value=result)
 
-    scenarios, skipped = await build_fixture_scenarios(session, tmp_path)
+    scenarios, skipped, _ = await build_fixture_scenarios(session, tmp_path)
     assert [s.id for s in scenarios] == ["newer"]
     assert any("duplicate of newer" in reason for reason in skipped)
 
@@ -358,3 +362,148 @@ def test_sample_markets_random_seeded() -> None:
     all_kept, n_all = sample_markets(scenarios, None)
     assert len(all_kept) == 60
     assert n_all == 20
+
+
+# ---------------------------------------------------------------------------
+# T101 — prompt mode must actually extract, or it benchmarks a null change
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prompt_mode_renders_extracts_when_a_client_is_supplied(tmp_path) -> None:
+    """The wiring that makes a T101 benchmark mean anything.
+
+    A bank that carries full bodies but a harness that never extracts renders
+    the raw cut and reports "no change" however good the extractor is — the
+    same trap as the 500-char frozen bodies, one layer up.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from freqpred.replay import save_fixture
+    from freqpred.signal.extractor import DocumentExtract
+
+    fixture = _make_fixture()
+    doc = fixture.inputs.documents[0]
+    doc.full_body = "A long body with the relevant passage buried well inside it."
+    save_fixture(fixture, tmp_path / "f.json")
+
+    market_row = SimpleNamespace(
+        id="FIX-MKT", status="finalized", result="yes",
+        close_time=FROZEN_NOW, question="q",
+    )
+    session = MagicMock()
+    result = MagicMock()
+    result.scalars.return_value = [market_row]
+    result.all.return_value = []
+    session.execute = AsyncMock(return_value=result)
+
+    extractor = AsyncMock(
+        return_value={
+            doc.id: DocumentExtract(
+                document_id=doc.id,
+                relevance="direct",
+                extract="THE BURIED PASSAGE",
+                model_used="claude-haiku-4-5-20251001",
+                prompt_version="extract-v1",
+            )
+        }
+    )
+
+    scenarios, _, fixtures_by_id = await build_fixture_scenarios(session, tmp_path)
+    # The build itself must never extract — it runs over the whole bank.
+    assert "Body about the fixture event" in scenarios[0].prompt
+
+    with patch("freqpred.bench.scenarios.extract_for_documents", new=extractor):
+        changed = await apply_extraction(
+            session, MagicMock(), scenarios, fixtures_by_id,
+            model="claude-haiku-4-5-20251001",
+        )
+
+    assert changed == 1
+    assert "THE BURIED PASSAGE" in scenarios[0].prompt
+    assert "Body about the fixture event" not in scenarios[0].prompt
+
+    # Extraction must read full_body, not the frozen excerpt — otherwise the
+    # extractor is handed exactly the text T101 replaces.
+    passed_docs = extractor.await_args.args[3]
+    assert passed_docs[0].body == doc.full_body
+
+
+@pytest.mark.asyncio
+async def test_prompt_mode_without_a_client_renders_the_raw_cut(tmp_path) -> None:
+    """The control side of the experiment, and the default for every other change."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from freqpred.replay import save_fixture
+
+    fixture = _make_fixture()
+    fixture.inputs.documents[0].full_body = "Never rendered without a client."
+    save_fixture(fixture, tmp_path / "f.json")
+
+    market_row = SimpleNamespace(
+        id="FIX-MKT", status="finalized", result="yes",
+        close_time=FROZEN_NOW, question="q",
+    )
+    session = MagicMock()
+    result = MagicMock()
+    result.scalars.return_value = [market_row]
+    result.all.return_value = []
+    session.execute = AsyncMock(return_value=result)
+
+    extractor = AsyncMock()
+    with patch("freqpred.bench.scenarios.extract_for_documents", new=extractor):
+        scenarios, _, _ = await build_fixture_scenarios(session, tmp_path)
+
+    extractor.assert_not_awaited()
+    assert "Body about the fixture event" in scenarios[0].prompt
+
+
+@pytest.mark.asyncio
+async def test_extraction_is_scoped_to_the_scenarios_it_is_given(tmp_path) -> None:
+    """Regression: extraction must bill the sample, not the bank.
+
+    The first cut extracted inside build_fixture_scenarios, before
+    sample_markets ran — so `--limit 50` still paid to extract all 311 markets
+    in the bank. It burned $3.82 on 2026-08-11 before being caught by watching
+    the row count outrun the limit. apply_extraction takes the already-sampled
+    list, so the only defence needed is that it touches nothing else.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from freqpred.replay import save_fixture
+
+    for i in range(5):
+        f = _make_fixture()
+        f.name = f"fixture_{i}"
+        f.inputs.now = FROZEN_NOW + timedelta(hours=i)
+        f.inputs.documents[0].full_body = "Long body " * 80
+        f.expectations = compute_expectations(f.inputs, strategy=None)
+        save_fixture(f, tmp_path / f"{i}.json")
+
+    market_row = SimpleNamespace(
+        id="FIX-MKT", status="finalized", result="yes",
+        close_time=FROZEN_NOW, question="q",
+    )
+    session = MagicMock()
+    result = MagicMock()
+    result.scalars.return_value = [market_row]
+    result.all.return_value = []
+    session.execute = AsyncMock(return_value=result)
+
+    scenarios, _, fixtures_by_id = await build_fixture_scenarios(session, tmp_path)
+    assert len(scenarios) == 5
+
+    # Sampling happens here in the real flow; extraction must follow it.
+    sampled = scenarios[:2]
+
+    extractor = AsyncMock(return_value={})
+    with patch("freqpred.bench.scenarios.extract_for_documents", new=extractor):
+        await apply_extraction(
+            session, MagicMock(), sampled, fixtures_by_id,
+            model="claude-haiku-4-5-20251001",
+        )
+
+    assert extractor.await_count == 2, (
+        f"extracted {extractor.await_count} scenarios for a sample of 2 — "
+        "extraction is escaping the sample and billing the whole bank"
+    )
