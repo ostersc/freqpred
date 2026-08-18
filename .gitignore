@@ -37,6 +37,28 @@ ENV/
 
 # Environment
 .env
+.env.*
+!.env.example
+
+# Secrets / keys — never commit these.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.ppk
+.pgpass
+.netrc
+.htpasswd
+credentials.json
+creds.json
+service-account*.json
+*-secrets.y*ml
 
 # IDE
 .vscode/

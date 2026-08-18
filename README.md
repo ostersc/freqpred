@@ -2,13 +2,37 @@
 
 **LLM-driven prediction market trading framework — freqtrade for prediction markets.**
 
-freqpred uses retrieval-augmented LLM analysis to estimate the "true" probability of prediction market outcomes, identifies edges against market-implied prices, and executes trades with assessment-aware sizing plus systematic risk controls.
+freqpred used retrieval-augmented LLM analysis to estimate the "true" probability of prediction market outcomes, identify edges against market-implied prices, and trade them with assessment-aware sizing plus systematic risk controls.
 
-**Status:** Phase 2 complete (paper trading + calibration running). Phase 3 (live trading) in progress.
+> ## ⚠️ Retired 2026-08-18 — it did not work
+>
+> **This project is archived. The core idea was tested and failed. Do not trade with this.**
+>
+> The premise was that an LLM reasoning over fresh news could estimate event
+> probabilities well enough to beat market prices. Measured directly over 61 markets,
+> point-in-time, the LLM's estimate scored a **Brier of 0.2407** — worse than a
+> **Poisson baseline (0.2093)** fit on the same data, and worse than a
+> **constant base rate (0.2349)**.
+>
+> Separately, the economics never worked: production inference ran **~$0.37/contract**
+> against a best-measured edge of **+$0.0107/contract** and **~$0.027/contract** of fee drag.
+>
+> Final live result: **−$18.32** over 164 closed positions (42.1% win rate) against
+> **$314.62** of LLM spend. 95% of that record is a single market series.
+>
+> **Read [docs/POSTMORTEM.md](docs/POSTMORTEM.md) before anything else here.** It covers
+> what was built, what it cost, why it failed, what the measurement apparatus got right,
+> and what would have to be true for the idea to be worth revisiting.
+>
+> The code is left public because the *infrastructure* is sound and reusable — the
+> Kalshi client, the LLM audit layer, and especially the counterfactual weekly-review
+> methodology in `freqpred/metrics/weekly_review.py`. The *thesis* is not.
+
+**Status:** Retired. Phases 1–3 complete (signal engine, paper trading, live trading + ops hardening); Phase 4 (Polymarket) specified but never built.
 
 ---
 
-## What it does
+## What it did
 
 1. **Monitors** active markets on Kalshi (Politics, Technology, Economics, ...)
 2. **Ingests** targeted news via Tavily, NewsAPI, The Guardian, Reddit, GDELT, TV transcripts + chyrons, and Truth Social (catalyst-driven RAG)

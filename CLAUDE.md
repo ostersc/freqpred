@@ -1,10 +1,27 @@
 # freqpred — Claude Code Guide
 
-## What this project is
+> ## ⚠️ RETIRED 2026-08-18 — read this before doing anything
+>
+> **This project is archived and is not being developed.** The core thesis was measured
+> and failed (the signal LLM's probability estimate lost to a Poisson baseline and to a
+> constant), and the per-signal inference cost exceeded the best measured edge by roughly
+> 35×. Full analysis: [docs/POSTMORTEM.md](docs/POSTMORTEM.md).
+>
+> **Do not** propose or implement trading changes, signal-prompt work, assessor tuning,
+> new strategies, or open T-numbers. **Do not** run the weekly review, the benchmark
+> suite, or `freqpred run` in any mode — `run` spends real money on metered APIs, and
+> `--mode live` places real orders.
+>
+> The operating instructions below are preserved as a record of how the system worked at
+> retirement. They describe a system that is no longer running. If you are here to read
+> or salvage code — the Kalshi client, the LLM audit layer, the weekly-review
+> counterfactual methodology — they are still accurate for that purpose.
 
-freqpred is a prediction market trading framework for Kalshi. It uses RAG + LLM sentiment analysis (Claude) to estimate event probabilities, compares them to market-implied prices, and trades the edge with assessment-aware sizing. Think freqtrade but for prediction markets.
+## What this project was
 
-Full architecture in [SPEC.md](SPEC.md). Read it before making structural decisions.
+freqpred was a prediction market trading framework for Kalshi. It used RAG + LLM sentiment analysis (Claude) to estimate event probabilities, compared them to market-implied prices, and traded the edge with assessment-aware sizing. Think freqtrade but for prediction markets.
+
+Full architecture in [SPEC.md](SPEC.md); outcome and analysis in [docs/POSTMORTEM.md](docs/POSTMORTEM.md).
 
 ---
 

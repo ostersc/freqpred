@@ -3,26 +3,45 @@
 > A framework for LLM-driven prediction market trading, modeled on freqtrade's architecture.
 
 **Version:** 0.1-draft
-**Last updated:** 2026-08-11 — BM25 retrieval scoring fixed: it now ranks on `title || ' ' || body` with `ts_rank` normalization `1`, replacing `coalesce(summary, body)` with no normalization. The coalesce made the comparison unfair — a summarised document competed on ~486 chars against an unsummarised one's full body — which handed rank 1 to sprawling live blogs; rank-1 documents judged unrelated to their own market question fell 53% → 33% over 45 judgeable markets (9 improved, 0 regressed, sign test p=0.0039; median rank-1 body 33,742 → 4,193 chars). Isolation showed BM25 was the whole problem: vector-only retrieval already picked a 1,098-char median at rank 1. Retires the BM25 half of T102 early. Also dropped `ix_documents_fts` (migration `0067`): 0 scans, 309 MB — `ts_rank` is a projected column, so no GIN index can ever serve it. Previously: T101 (**adopted 2026-08-11 as an explicit override of the benchmark gate**; the prompt-mode run was non-inferior and non-superior — paired Brier +0.0004, cluster bootstrap CI [-0.0046, +0.0052], sign test p=1.000 — so it went in on mechanism, with a rollout guard re-check ~2026-09-08): retrieved evidence now reaches the signal LLM as a question-focused extract instead of a `(summary or body)[:500]` prefix cut, and documents the extractor labels `none` are dropped from the prompt entirely, so the evidence block's composition changes and not just its text. New `freqpred/signal/extractor.py` (forced tool call, fails open to the old cut) and signal-owned `document_extracts` cache keyed `(document_id, market_id, prompt_version)`; `PROMPT_VERSION` is `signal-v12` and T96/T97 move to `signal-v13`. The skip gate keys on `body` alone — gating on `summary` would reinstate the ingestion-time gate the change exists to escape. Cold cost ~7 Haiku calls per signal, but only 15.6% of a market's retrieved documents are new between consecutive signals, so the cache absorbs most of it. The replay fixture schema gained `full_body`, carried from the live row only when it still re-renders the frozen excerpt byte-for-byte; without it the prompt bank froze bodies at exactly the 500 chars T101 replaces and would have benchmarked a null change. Part of the T99–T102 evidence-quality sequence. Previously: 2026-08-09 — the sizing assessor's judgment model moved from `claude-opus-5` to `z-ai/glm-5.2` via OpenRouter, a single-axis swap with the `assessment-v8` prompt unchanged. Screened on the frozen 76-signal set: non-inferior and ahead on every point estimate (capital tilt +0.0908x vs +0.0724x, AUC 0.712 vs 0.691, 35 `size_up` at an 80.0% hit rate vs 19 at 78.9%) at ~4.4× lower cost per assessment and comparable latency. `max_tokens` rose 1024 → 6000 as an inseparable part of the swap — GLM returns an empty tool call at 1024. Neither the within-YES defect nor the standing "does an LLM judge beat the free direction×band prior" question is closed by this; rollout guard is set for ~2026-09-06. Signal prompt is `signal-v11` on `claude-sonnet-4-6`; sizing assessor is `assessment-v8` on `z-ai/glm-5.2` — see §"Signal assessment" for its limitations and rollout guard, and git log for full history.
+**Last updated:** 2026-08-18 — **Project retired.** The §1 thesis was measured and did not hold: the signal LLM's probability estimate scored Brier **0.2407** against **0.2093** for a Poisson baseline fit on the same data and **0.2349** for a constant (n=61 markets, parsed point-in-time from stored prompts). Independently, production inference ran ~$0.37/contract against a best-measured edge of +$0.0107/contract and ~$0.027/contract of fee drag, so the unit economics never closed at any size actually traded. Final live result: **−$18.32** over 164 closed positions against **$314.62** of inference spend. Full analysis in [docs/POSTMORTEM.md](docs/POSTMORTEM.md). This document is a historical record from here on and is no longer maintained; the sections below describe the system as it stood at retirement.
 
 <details><summary>Earlier updates</summary>
+
+2026-08-11 — BM25 retrieval scoring fixed: it now ranks on `title || ' ' || body` with `ts_rank` normalization `1`, replacing `coalesce(summary, body)` with no normalization. The coalesce made the comparison unfair — a summarised document competed on ~486 chars against an unsummarised one's full body — which handed rank 1 to sprawling live blogs; rank-1 documents judged unrelated to their own market question fell 53% → 33% over 45 judgeable markets (9 improved, 0 regressed, sign test p=0.0039; median rank-1 body 33,742 → 4,193 chars). Isolation showed BM25 was the whole problem: vector-only retrieval already picked a 1,098-char median at rank 1. Retires the BM25 half of T102 early. Also dropped `ix_documents_fts` (migration `0067`): 0 scans, 309 MB — `ts_rank` is a projected column, so no GIN index can ever serve it. Previously: T101 (**adopted 2026-08-11 as an explicit override of the benchmark gate**; the prompt-mode run was non-inferior and non-superior — paired Brier +0.0004, cluster bootstrap CI [-0.0046, +0.0052], sign test p=1.000 — so it went in on mechanism, with a rollout guard re-check ~2026-09-08): retrieved evidence now reaches the signal LLM as a question-focused extract instead of a `(summary or body)[:500]` prefix cut, and documents the extractor labels `none` are dropped from the prompt entirely, so the evidence block's composition changes and not just its text. New `freqpred/signal/extractor.py` (forced tool call, fails open to the old cut) and signal-owned `document_extracts` cache keyed `(document_id, market_id, prompt_version)`; `PROMPT_VERSION` is `signal-v12` and T96/T97 move to `signal-v13`. The skip gate keys on `body` alone — gating on `summary` would reinstate the ingestion-time gate the change exists to escape. Cold cost ~7 Haiku calls per signal, but only 15.6% of a market's retrieved documents are new between consecutive signals, so the cache absorbs most of it. The replay fixture schema gained `full_body`, carried from the live row only when it still re-renders the frozen excerpt byte-for-byte; without it the prompt bank froze bodies at exactly the 500 chars T101 replaces and would have benchmarked a null change. Part of the T99–T102 evidence-quality sequence. Previously: 2026-08-09 — the sizing assessor's judgment model moved from `claude-opus-5` to `z-ai/glm-5.2` via OpenRouter, a single-axis swap with the `assessment-v8` prompt unchanged. Screened on the frozen 76-signal set: non-inferior and ahead on every point estimate (capital tilt +0.0908x vs +0.0724x, AUC 0.712 vs 0.691, 35 `size_up` at an 80.0% hit rate vs 19 at 78.9%) at ~4.4× lower cost per assessment and comparable latency. `max_tokens` rose 1024 → 6000 as an inseparable part of the swap — GLM returns an empty tool call at 1024. Neither the within-YES defect nor the standing "does an LLM judge beat the free direction×band prior" question is closed by this; rollout guard is set for ~2026-09-06. Signal prompt is `signal-v11` on `claude-sonnet-4-6`; sizing assessor is `assessment-v8` on `z-ai/glm-5.2` — see §"Signal assessment" for its limitations and rollout guard, and git log for full history.
 
 2026-07-28 — Exits no longer dump into hollow books. Live exit orders are now IOC rather than FOK (an all-or-nothing sell priced at the bid buys no price protection and only costs fills), discretionary exits (`force_exit:*`, `custom_exit:*`, `signal`) are deferred while the spread exceeds `StrategyConfig.effective_max_spread` while risk exits are never deferred, and the choppiness exits in `PoliticsEdgeStrategy` and `AlgoExampleStrategy` now require each candle to be quoted on a book within that same threshold (the ceiling signal is exempt — it is structural, not a reaction to fluctuation). `AlgoExampleStrategy` also had a stale `choppiness` logger reference that raised on every call and was swallowed by `force_exit`, so its exit had never once fired; fixed, and the strategy now has test coverage. `StrategyConfig` gains the `effective_max_spread` property (`max_spread`, else `min_edge / 2`). Also fixed: a partial IOC fill is no longer mistaken for a close, and `candle_fetch_cursors` can no longer claim coverage into the future (migration 0062 repairs 54 poisoned rows). Previously: computed limit entry prices are snapped to a whole cent via `freqpred/markets/ticks.py:round_to_tick()` (rounded down, and rejected if they fall to zero), so they land on Kalshi's tick grid ahead of the July 2026 `price_level_structure` rollout; book-sourced prices are left untouched. Before that: added the weekly review's trailing-stop sweep (§3b), which scores a profit-only trail over real candle paths both with and without re-entry; the gap between those columns (+$7.92 vs −$10.85 on the 90-day live book) is the measurement, since a profitable trailing exit does not trip the loss cooldown and each re-entry re-exposes capital to the same negative admitted edge. Also added the decided-position analysis gate: `StrategyConfig.min_analysis_price`/`max_analysis_price` (0.03/0.97) and the `IPredictionStrategy.should_analyze_position()` hook stop the signal loop paying for LLM re-analysis of open positions whose own side has priced to a near-certain outcome — ~12% of signal spend, no effect on deterministic exits. Also added historical price paths and the weekly profitability review that consumes them: migration 0060 adds `market_candles` + `candle_fetch_cursors`, populated by `freqpred candles backfill` and a daily `candle_refresh` task, with Kalshi's candle history a rolling ~67-day window so uncaptured history is lost permanently. Sizing assessor remains at `assessment-v8` on `claude-opus-5` — see §"Signal assessment" for its limitations and rollout guard, and git log for full history.
 
 </details>
 
-**Status:** Phase 2 complete — paper trading running; Phase 3 (live trading + ops hardening) in progress
+**Status:** **Retired 2026-08-18.** Phases 1–3 were complete and running at retirement (signal engine, paper trading, live trading + ops hardening); Phase 4 (Polymarket cross-platform intelligence) was specified but never built. See [docs/POSTMORTEM.md](docs/POSTMORTEM.md).
 
 ---
 
 ## 1. Vision
+
+> **Outcome (2026-08-18): the core thesis stated below was tested and did not hold.**
+> The signal LLM's probability estimate was measured against baselines computed from
+> the same data it was handed, point-in-time, over 61 markets:
+>
+> | Estimator | Brier |
+> |---|---|
+> | Poisson, 30d rate | **0.2093** |
+> | Constant base rate | 0.2349 |
+> | **The model** | **0.2407** |
+> | Poisson, 365d rate | 0.2517 |
+>
+> The estimate lost to a Poisson process and to a constant. The failure was asymmetric —
+> where the model said YES (n=34) it estimated 0.859 against a 52.9% truth, scoring worse
+> than the base rate. The vision text below is preserved unedited as the record of what the
+> project set out to do, not as a description of what was found to be true.
+> See [docs/POSTMORTEM.md](docs/POSTMORTEM.md).
 
 freqpred is an extensible, strategy-driven framework for trading prediction markets using LLM sentiment analysis. The core thesis: LLMs can estimate the "true" probability of future events by reasoning over current news and context. Where that estimate diverges meaningfully from a market's implied probability, there is a tradeable edge.
 
 The framework is:
 - **Personal first** — optimized for a single operator running their own strategies
 - **Open source ready** — architecturally clean enough to publish and extend
-- **Honest about signal quality** — paper trading and calibration tracking before live capital
+- **Honest about signal quality** — paper trading and calibration tracking before live capital *(this one held: the measurement apparatus is what produced the retirement decision — see §13 Phase 3 and the weekly reviews in `docs/weekly-review/reports/`)*
 
 freqpred is to prediction markets what [freqtrade](https://github.com/freqtrade/freqtrade) is to crypto trading.
 
@@ -35,8 +54,10 @@ freqpred is to prediction markets what [freqtrade](https://github.com/freqtrade/
 - [x] Track paper trades and measure real-world calibration over time
 - [x] Execute live trades on Kalshi with hard risk controls
 - [x] Provide a web dashboard and Telegram/Discord alerts
-- [ ] Run continuously on AWS as an always-on service
-- [ ] Enrich signals and entry/exit decisions with cross-platform intelligence from Polymarket (price comparison, order-book depth, on-chain whale tracking)
+- [ ] Run continuously on AWS as an always-on service — **not pursued;** the system ran locally under Docker Compose for its whole life
+- [ ] Enrich signals and entry/exit decisions with cross-platform intelligence from Polymarket (price comparison, order-book depth, on-chain whale tracking) — **not pursued;** T78–T82 were fully specified (§13 Phase 4) but never built
+
+**Outcome.** The first five goals were met — the system fetched markets, scored them, ran a plugin strategy interface, tracked paper and live trades with calibration, executed live against hard risk controls, and shipped a dashboard with alerting. Meeting them is what made the thesis testable, and the test came back negative (§1). Final live result: **−$18.32** over 164 closed positions, 42.1% win rate, against **$314.62** of inference spend across 40,400 logged calls.
 
 ## 3. Non-Goals (v1)
 
@@ -1770,15 +1791,51 @@ Command replies use Telegram HTML parse mode (bold headers, `<pre>` tables, cent
 
 **Done when:** 100+ markets resolved or exited with logged signals. Calibration score measured. Exit behavior observable from ledger. Decision made: is the signal real?
 
+> **Answered 2026-08-18: no.** This criterion was met on volume long before it was met on substance — 561 paper positions and 19,924 logged signals accumulated while the calibration question stayed open. When it was finally measured directly (§1), the signal was not real: the model's probability estimate lost to a Poisson baseline and to a constant, and adds nothing beyond the market price. Phase 3 was entered before this question had actually been answered — the single most consequential process failure in the project, since everything built afterward assumed a positive answer.
+
 **Go/no-go criteria for Phase 3:**
 - Brier score < `market_brier_score` (beat the market's own calibration)
 - Positive calibration: 60-70% estimated → 60-70% resolution rate (measured per-signal across all analyzed markets, not just traded ones)
 - Positive simulated ROI over 100+ trades
 
+> **Retrospective note (2026-08-18): these three criteria were correct, and none of them
+> were met when Phase 3 began in earnest.** This gate was specified in advance, names
+> exactly the right tests, and is the strongest piece of process design in the document.
+> It was not enforced.
+>
+> The paper book by month:
+>
+> | Month | Paper positions | Paper P&L | Live positions |
+> |---|---|---|---|
+> | 2026-03 | 68 | −$70.40 | 8 |
+> | 2026-04 | 196 | −$599.83 | — |
+> | 2026-05 | 178 | −$424.10 | — |
+> | 2026-06 | 119 | **+$49.54** | 18 |
+> | 2026-07 | — | — | 97 |
+> | 2026-08 | — | — | 44 |
+>
+> Live scaled from June 2026 onward. At that point the cumulative paper record was
+> **−$1,044.79 over 561 trades** — a decisive failure of the third criterion. The only
+> positive month in the entire paper series was the month the scale-up happened. The first
+> criterion (Brier vs. the market) was not measured at all until 2026-07-21, thirteen months
+> of calendar work later, and when measured it failed too (§1).
+>
+> Whether the go decision was consciously made on the trailing month is not recorded. What
+> the data shows is that the cumulative record failed the stated bar and the trailing month
+> passed it, and the scale-up followed the trailing month. The eight March live positions
+> (−$2.07) predate this and read as order-plumbing verification rather than a trading program.
+>
+> The lesson is not that the criteria were wrong. They were right, written down, and
+> unambiguous. See [docs/POSTMORTEM.md](docs/POSTMORTEM.md) §6.
+
 ---
 
-### Phase 3: Live Trading
+### Phase 3: Live Trading ✅ complete — retired 2026-08-18
 *Goal: real capital, controlled risk*
+
+> **Delivered and then retired.** Live trading ran 2026-03-22 → 2026-08-15: 167 positions (164 closed), **−$18.32**, 42.1% win rate, 1.73 contracts average, $129.49 gross deployed, $7.70 in fees. Risk controls held — no cap was ever breached, and the one circuit-breaker false positive (T90, an unscoped drawdown baseline) was caught and fixed. 95% of the live record (156 of 164 closed positions) is the single `KXTRUMPSAY` series, so nothing here generalizes.
+>
+> The goal above was met exactly as written — real capital, controlled risk. It was the wrong goal to have been pursuing, because Phase 2's question had not actually been answered when this phase began. See [docs/POSTMORTEM.md](docs/POSTMORTEM.md) §6.
 
 Each task has a linked GitHub issue (same number) with full implementation scope, test plan, and acceptance criteria.
 
@@ -1861,8 +1918,10 @@ Applied only to *computed* prices — the `entry="limit"` price (`estimated_prob
 
 ---
 
-### Phase 4: Cross-Platform Intelligence — Polymarket
+### Phase 4: Cross-Platform Intelligence — Polymarket ❌ never built
 *Goal: enrich signals and entry/exit decisions with Polymarket pricing and smart-money flow data*
+
+> **Not built — the project was retired before this phase started.** T78–T82 below are preserved as written, with their GitHub issues, because the design work is intact and reusable. Note that this phase would have enriched the *sizing assessor*, not the signal estimate — so it could not have addressed either of the two findings that ended the project (§1 and [docs/POSTMORTEM.md](docs/POSTMORTEM.md)).
 
 Each task has a linked GitHub issue with full implementation scope, test plan, and acceptance criteria.
 
