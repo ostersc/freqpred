@@ -29,6 +29,15 @@ weekly profitability review.
 
 None of it was abandoned half-finished. The system ran.
 
+![Signal detail](screenshots/signal-detail.png)
+
+*One signal, fully expanded: model probability vs market mid, the model's
+reasoning, the sizing assessor's trust score and verdict, key factors, and
+per-source quality attribution. The assessor's verdict on this trade reads
+"Strategy win rate 39.4% and negative mean PnL — this is a net-losing
+strategy." The instrumentation stayed honest even where the strategy did not
+work — see §5.*
+
 ## 2. The ledger
 
 ### Trading
@@ -57,6 +66,10 @@ Weekly live P&L across the tracked series: −4.18, +4.43, +0.27, −5.55, +1.47
 | 2026-06 | 119 | **+$49.54** | 18 | +$0.57 |
 | 2026-07 | — | — | 97 | −$10.08 |
 | 2026-08 | — | — | 44 | −$6.74 |
+
+![Positions](screenshots/positions.png)
+
+*The closed-position ledger at retirement, 728 rows across paper and live.*
 
 ### Inference
 
@@ -103,6 +116,14 @@ The LLM lost to a Poisson process fit on the same data it was handed, and lost
 to a constant. The failure was asymmetric: where it said YES (n=34) it estimated
 0.859 against a 52.9% truth — scoring worse than the base rate.
 
+![Calibration over time](screenshots/calibration-over-time.png)
+
+*The same finding measured daily instead of pooled: model Brier (blue bars) vs
+market Brier (orange), with all twelve signal-prompt versions marked as vertical
+boundaries. Five months of prompt iteration, and the model's EMA never durably
+separates from the market's. The red regions — model worse than the price it is
+trying to beat — persist to the end.*
+
 Everything downstream — RAG, catalyst generation, question-focused extraction
 (T101), the sizing assessor — was refinement on an estimator that never cleared
 a free baseline. This is recorded independently in project memory: the signal
@@ -126,6 +147,12 @@ traded.
 The paper book *did* run at 53.7 contracts per position. It lost $0.0347 per
 contract over 30,108 contracts. The edge did not survive the size that would
 have justified the cost.
+
+![P&L history](screenshots/pnl-history.png)
+
+*Cumulative P&L against cumulative inference spend on one axis. The gap is the
+project: −$18.32 realized, $314.62 spent to realize it, bankroll $180.00 →
+$161.68.*
 
 ```mermaid
 flowchart LR
@@ -188,6 +215,13 @@ part worth keeping.
   benchmark validation. When T101 was adopted on mechanism despite a
   non-superior benchmark, that override was recorded *as an override*, with a
   rollout guard date attached.
+
+![Calibration distribution](screenshots/calibration-distribution.png)
+
+![System health](screenshots/system-health.png)
+
+*The calibration and health surfaces. The apparatus that produced the retirement
+decision was better built than the strategy it was measuring — see §8.*
 
 Most builds of this system would have shipped a NO-only filter in week two and
 told themselves a story about it. This one didn't.

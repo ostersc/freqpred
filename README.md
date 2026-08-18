@@ -47,6 +47,55 @@ For full architecture, data models, strategy interface, and roadmap, see **[SPEC
 
 ---
 
+## What it looked like
+
+The dashboard, served read-only against the final database at retirement. Every
+footer reads `git b7c4412` — the retirement commit — so these are the system's
+last state, not a staged demo.
+
+### Calibration over time — the whole story in one chart
+
+![Calibration over time](docs/screenshots/calibration-over-time.png)
+
+Daily Brier score for the model (blue bars) against the market (orange line),
+with each signal-prompt version marked as a vertical boundary. Twelve prompt
+versions between March and August. The model's EMA never durably separates from
+the market's, and the red regions — where the model is worse than the price it
+is trying to beat — never stop appearing. This is what "the thesis failed"
+looks like measured daily rather than argued.
+
+### P&L against inference spend
+
+![P&L history](docs/screenshots/pnl-history.png)
+
+Cumulative P&L and cumulative LLM spend on the same axes: −$18.32 realized
+against $314.62 spent to produce it. Bankroll $180.00 → $161.68.
+
+### Signal detail
+
+![Signal detail](docs/screenshots/signal-detail.png)
+
+One signal expanded: the model's probability against the market mid, its
+reasoning, the sizing assessor's trust score and verdict, key factors, and
+per-source quality. Note the assessor's own conclusion on this trade —
+*"Strategy win rate 39.4% and negative mean PnL — this is a net-losing
+strategy."* The instrumentation was honest even when the strategy was not
+working.
+
+### Signal feed and positions
+
+![Signal feed](docs/screenshots/signal-feed.png)
+
+![Positions](docs/screenshots/positions.png)
+
+### Calibration distribution and system health
+
+![Calibration distribution](docs/screenshots/calibration-distribution.png)
+
+![System health](docs/screenshots/system-health.png)
+
+---
+
 ## Setup
 
 **Prerequisites:** Python 3.12+, Docker (for Postgres), `uv`
