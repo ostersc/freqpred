@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from freqpred.bench.baselines import score_all_baselines
 from freqpred.bench.runner import BenchmarkRun
 from freqpred.bench.scoring import PairScore, aggregate, score_pair
 from freqpred.signal.llm import PROMPT_VERSION
@@ -12,7 +13,7 @@ from freqpred.signal.llm import PROMPT_VERSION
 if TYPE_CHECKING:
     from freqpred.strategy.base import IPredictionStrategy
 
-ARTIFACT_SCHEMA_VERSION = 2  # v2: stake-weighted trade metrics (TradeDecision.stake/pnl)
+ARTIFACT_SCHEMA_VERSION = 3  # v2: stake-weighted trade metrics (TradeDecision.stake/pnl)
 
 
 def score_run(
@@ -107,6 +108,31 @@ def cost_summary(run: BenchmarkRun) -> dict:
     }
 
 
+def baseline_summary(run: BenchmarkRun) -> dict:
+    """Score both models against the estimators that cost nothing.
+
+    The adopt/reject gate above is candidate-vs-incumbent, which cannot say
+    whether *either* clears a free baseline. Twelve signal-prompt versions were
+    screened without this comparison; when it was finally run the model lost to
+    a Poisson fit on the data it had been handed (``docs/POSTMORTEM.md`` §3.1).
+    """
+    scenarios = [
+        sr.scenario for sr in run.scenario_runs if sr.point_estimate is not None
+    ]
+    if not scenarios:
+        return {}
+
+    candidate_by_id = {
+        sr.scenario.id: sr.point_estimate.posterior
+        for sr in run.scenario_runs
+        if sr.point_estimate is not None
+    }
+    return {
+        "incumbent": score_all_baselines(scenarios, lambda s: s.incumbent.posterior),
+        "candidate": score_all_baselines(scenarios, lambda s: candidate_by_id[s.id]),
+    }
+
+
 def build_artifact(
     run: BenchmarkRun,
     scores: list[PairScore],
@@ -121,6 +147,7 @@ def build_artifact(
     """Schema-versioned JSON artifact so runs stay comparable over time."""
     summary = aggregate(scores)
     summary["cost"] = cost_summary(run)
+    summary["baselines"] = baseline_summary(run)
     scores_by_id = {s.scenario_id: s for s in scores}
 
     scenario_records = []
@@ -285,6 +312,47 @@ def format_summary(summary: dict, *, candidate_label: str) -> str:
             )
     else:
         lines.append("    disagreements : none — both sides enter the same markets")
+
+    baselines = summary.get("baselines")
+    if baselines:
+        lines += [
+            "",
+            "  Free baselines (Brier; the bar neither model is allowed to skip —",
+            "  delta is model minus baseline, so negative = the model earns its cost):",
+        ]
+        for arm in ("incumbent", "candidate"):
+            arm_scores = baselines.get(arm) or {}
+            if not arm_scores:
+                continue
+            label = arm if arm == "incumbent" else f"candidate ({candidate_label})"
+            lines.append(f"    {label}:")
+            for name, result in sorted(
+                arm_scores.items(), key=lambda kv: kv[1]["baseline_mean_brier"]
+            ):
+                lo, hi = result["brier_delta_ci95"]
+                verdict = (
+                    "model better" if hi < 0
+                    else "BASELINE BETTER" if lo > 0
+                    else "tie (CI spans zero)"
+                )
+                skipped = (
+                    f", {result['n_skipped']} n/a" if result["n_skipped"] else ""
+                )
+                lines.append(
+                    f"      {name:<13} {result['baseline_mean_brier']:.4f}  vs model "
+                    f"{result['model_mean_brier']:.4f}  delta="
+                    f"{result['brier_delta_mean']:+.4f} "
+                    f"CI[{lo:+.4f},{hi:+.4f}]  {verdict}"
+                    f"  (n={result['n_markets']} markets{skipped})"
+                )
+            warnings = [
+                w for r in arm_scores.values() for w in r.get("parse_warnings", [])
+            ]
+            if warnings:
+                lines.append(
+                    f"      WARNING: {len(warnings)} prompt(s) disagree with their own "
+                    f"printed Poisson figures, e.g. {warnings[0]}"
+                )
 
     cost = summary.get("cost")
     if cost:
