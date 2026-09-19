@@ -20,6 +20,14 @@ from freqpred.llm.audit import (
 )
 from freqpred.llm.models import LLMResponse
 from freqpred.llm.provider import is_openrouter_model, openrouter_call_cost
+from freqpred.llm.typesafe import (
+    JEV_MODEL,
+    SystemOneResponse,
+    TypeSafeError,
+    TypeSafeTransport,
+    audit_prompt,
+    register_jev_pricing,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -61,9 +69,16 @@ class LLMClient:
         daily_spend_cap_usd: float | None = None,
         max_consecutive_errors: int = 3,
         openrouter_client: anthropic.AsyncAnthropic | None = None,
+        typesafe_transport: TypeSafeTransport | None = None,
     ) -> None:
         self._client = anthropic_client
         self._openrouter_client = openrouter_client
+        self._typesafe_transport = typesafe_transport
+        if typesafe_transport is not None:
+            # Must happen before the first call: calculate_cost silently falls
+            # back to Sonnet's rates for models it has no entry for, which would
+            # overstate Jev by ~70x in exactly the comparison it exists to serve.
+            register_jev_pricing()
         self._session_factory = session_factory
         self._default_strategy = default_strategy
         self._prompt_version = prompt_version
@@ -333,6 +348,104 @@ class LLMClient:
             thinking=thinking_text,
             thinking_tokens=thinking_tokens,
         )
+
+    async def system_one(
+        self,
+        *,
+        state: dict | list | str,
+        questions: dict[str, dict],
+        query_type: str,
+        model: str = JEV_MODEL,
+        market_id: str | None = None,
+        signal_id: str | None = None,
+        strategy: str | None = None,
+        prompt_version: str | None = None,
+    ) -> tuple[SystemOneResponse, int]:
+        """Call TypeSafe System One and audit it exactly like a Messages call.
+
+        Returns ``(response, llm_query_id)``. Every call writes one
+        ``llm_queries`` row before returning, success or failure, and the daily
+        spend cap applies — System One is cheap, not free, and a benchmark that
+        escapes the cap can starve the pipeline that shares it.
+
+        Raises ``LLMError`` when no transport is configured, and ``TypeSafeError``
+        (after auditing) when the call itself fails.
+        """
+        if self._typesafe_transport is None:
+            raise LLMError(
+                f"Model {model!r} needs a TypeSafe transport but none is configured "
+                "(set TYPESAFE_API_KEY)"
+            )
+
+        strategy_name = strategy or self._default_strategy
+        effective_prompt_version = prompt_version or self._prompt_version
+
+        if self._daily_spend_cap_usd is not None:
+            async with self._session_factory() as session:
+                daily_spend = await get_daily_spend_usd(session)
+            if daily_spend >= self._daily_spend_cap_usd:
+                log.warning(
+                    "llm_budget_exceeded",
+                    daily_spend_usd=round(daily_spend, 4),
+                    cap_usd=self._daily_spend_cap_usd,
+                )
+                raise LLMBudgetExceededError(
+                    f"Daily LLM spend cap of ${self._daily_spend_cap_usd:.2f} reached "
+                    f"(spent ${daily_spend:.4f} today)"
+                )
+
+        prompt = audit_prompt(state, questions)
+        start = time.monotonic()
+        try:
+            response = await self._typesafe_transport.system_one(
+                state=state, questions=questions, model=model
+            )
+        except (TypeSafeError, ValueError) as exc:
+            # The call may well have cost money; it always costs an audit row.
+            await self._write_audit(
+                prompt_version=effective_prompt_version,
+                strategy=strategy_name,
+                query_type=query_type,
+                model_used=model,
+                prompt=prompt,
+                response="",
+                tokens_input=0,
+                tokens_output=0,
+                cost_usd=0.0,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                success=False,
+                market_id=market_id,
+                signal_id=signal_id,
+                error_message=str(exc)[:1000],
+            )
+            raise
+
+        cost = calculate_cost(model, response.tokens_input, response.tokens_output)
+        llm_query_id = await self._write_audit(
+            prompt_version=effective_prompt_version,
+            strategy=strategy_name,
+            query_type=query_type,
+            model_used=response.model,
+            prompt=prompt,
+            response=json.dumps(response.raw, sort_keys=True),
+            tokens_input=response.tokens_input,
+            tokens_output=response.tokens_output,
+            cost_usd=cost,
+            latency_ms=response.latency_ms,
+            success=True,
+            market_id=market_id,
+            signal_id=signal_id,
+        )
+        log.debug(
+            "llm.system_one",
+            model=response.model,
+            query_type=query_type,
+            questions=len(questions),
+            tokens_input=response.tokens_input,
+            cost_usd=round(cost, 8),
+            latency_ms=response.latency_ms,
+        )
+        return response, llm_query_id
 
     def _transport_for(self, model: str) -> anthropic.AsyncAnthropic:
         """Pick the client that serves ``model``.
